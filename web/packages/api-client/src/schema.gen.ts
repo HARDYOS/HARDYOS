@@ -315,6 +315,446 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/hardware": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Detected hardware, disks and the capability profile (admin) */
+        get: operations["getHardware"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/hardware/disks/{name}/smart": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Kernel disk name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        /** Live SMART report for one disk (admin) */
+        get: operations["getDiskSmart"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/hardware/disk-health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Last scheduled SMART verdict per disk (admin) */
+        get: operations["listDiskHealth"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/pools": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Imported pools (admin) */
+        get: operations["listPools"];
+        put?: never;
+        /** Create a pool (admin; runs as a job, erases the disks) */
+        post: operations["createPool"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/recommendation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Suggested layout for a new pool from unused disks (admin) */
+        get: operations["getPoolRecommendation"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/importable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Pools found on disks that aren't imported (admin) */
+        get: operations["listImportablePools"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Import a pool by name or numeric ID (admin) */
+        post: operations["importPool"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/pools/{pool}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pool: string;
+            };
+            cookie?: never;
+        };
+        /** Pool status with the device tree (admin) */
+        get: operations["getPoolStatus"];
+        put?: never;
+        post?: never;
+        /** Destroy a pool and everything on it (admin) */
+        delete: operations["destroyPool"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/pools/{pool}/vdevs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pool: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Add data, special, log, cache or spare devices (admin; job) */
+        post: operations["addVdevs"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/pools/{pool}/attach": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pool: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Widen a RAIDZ vdev (expansion) or a mirror with a new disk (admin; job) */
+        post: operations["attachDisk"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/pools/{pool}/replace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pool: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Replace a failed or old disk and resilver (admin; job) */
+        post: operations["replaceDisk"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/pools/{pool}/device": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pool: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Bring a device online or offline, or remove a cache/log/spare device (admin) */
+        post: operations["poolDeviceAction"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/pools/{pool}/scrub": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pool: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start, pause or stop a scrub (admin) */
+        post: operations["scrubPool"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/pools/{pool}/clear": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pool: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Clear device error counters (admin) */
+        post: operations["clearPoolErrors"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/pools/{pool}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pool: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Export a pool so its disks can be moved (admin) */
+        post: operations["exportPool"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/datasets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Filesystems and volumes (admin) */
+        get: operations["listDatasets"];
+        put?: never;
+        /** Create a filesystem, or a volume when volSize is set (admin) */
+        post: operations["createDataset"];
+        /** Destroy a dataset (admin) */
+        delete: operations["destroyDataset"];
+        options?: never;
+        head?: never;
+        /** Change dataset properties (admin) */
+        patch: operations["updateDataset"];
+        trace?: never;
+    };
+    "/storage/snapshots": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Snapshots, oldest first (admin) */
+        get: operations["listSnapshots"];
+        put?: never;
+        /** Take a snapshot (admin) */
+        post: operations["createSnapshot"];
+        /** Delete a snapshot (admin) */
+        delete: operations["destroySnapshot"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/snapshots/rollback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Roll a dataset back to a snapshot (admin) */
+        post: operations["rollbackSnapshot"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/snapshot-policies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Automatic snapshot schedules (admin) */
+        get: operations["listSnapshotPolicies"];
+        put?: never;
+        /** Create (id 0) or update a snapshot schedule (admin) */
+        post: operations["saveSnapshotPolicy"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/snapshot-policies/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Remove a snapshot schedule; existing snapshots stay (admin) */
+        delete: operations["deleteSnapshotPolicy"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/scrub-policies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Scrub schedules (admin) */
+        get: operations["listScrubPolicies"];
+        put?: never;
+        /** Create or update a pool's scrub schedule (admin) */
+        post: operations["saveScrubPolicy"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/notifications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Your notification center, newest first */
+        get: operations["listNotifications"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/notifications/{id}/read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Mark one notification read */
+        post: operations["markNotificationRead"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/notifications/read-all": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Mark all your notifications read */
+        post: operations["markAllNotificationsRead"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -442,6 +882,264 @@ export interface components {
             /** @description Payload; a Job for job.updated */
             data?: unknown;
         };
+        Disk: {
+            /** @example sda */
+            name: string;
+            path: string;
+            /** @description Stable /dev/disk/by-id path used for pools */
+            byId: string;
+            model: string;
+            serial: string;
+            wwn: string;
+            transport: string;
+            /** @enum {string} */
+            kind: "hdd" | "ssd" | "nvme";
+            sizeBytes: number;
+            physSector: number;
+            removable: boolean;
+            /** @enum {string} */
+            usage: "free" | "has-data" | "pool" | "boot" | "mounted";
+            pool: string;
+            usageDetail: string;
+            partitions: {
+                name: string;
+                sizeBytes: number;
+                fsType: string;
+                label: string;
+                mountpoints: string[] | null;
+            }[];
+            powerLossProt: boolean | null;
+        };
+        Hardware: {
+            system: {
+                cpu: {
+                    model: string;
+                    vendor: string;
+                    threads: number;
+                    /** @enum {string} */
+                    virtualization: "vt-x" | "amd-v" | "";
+                };
+                memory: {
+                    totalBytes: number;
+                    ecc: boolean | null;
+                };
+                gpus: {
+                    address: string;
+                    class: string;
+                    vendorId: string;
+                    deviceId: string;
+                    /** @enum {string} */
+                    vendor: "intel" | "amd" | "nvidia" | "other";
+                    driver: string;
+                    iommuGroup: number | null;
+                }[];
+                nics: {
+                    name: string;
+                    mac: string;
+                    speedMbps: number;
+                    up: boolean;
+                    driver: string;
+                }[];
+                iommuEnabled: boolean;
+                iommuGroups: number;
+                virtual: boolean;
+            };
+            disks: components["schemas"]["Disk"][];
+            capabilities: {
+                virtualization: boolean;
+                pciePassthrough: boolean;
+                hardwareTranscode: boolean;
+                specialVdev: boolean;
+                slog: boolean;
+                l2arc: boolean;
+                eccMemory: boolean | null;
+                arcMaxBytes: number;
+                advisories: string[];
+            };
+        };
+        SMART: {
+            device: string;
+            model: string;
+            serial: string;
+            capacityBytes: number;
+            rotationRpm: number;
+            passed?: boolean | null;
+            temperatureC?: number | null;
+            powerOnHours?: number | null;
+            reallocated?: number | null;
+            pending?: number | null;
+            uncorrectable?: number | null;
+            crcErrors?: number | null;
+            percentUsed?: number | null;
+            mediaErrors?: number | null;
+            criticalWarning?: number | null;
+            /** @enum {string} */
+            health: "good" | "warning" | "failing" | "unknown";
+            reasons: string[];
+        };
+        DiskHealth: {
+            byId: string;
+            /** @enum {string} */
+            health: "good" | "warning" | "failing" | "unknown";
+            reasons: string[];
+            temperatureC: number | null;
+            /** Format: date-time */
+            checkedAt: string;
+        };
+        Pool: {
+            name: string;
+            sizeBytes: number;
+            allocBytes: number;
+            freeBytes: number;
+            fragmentation: number | null;
+            capacityPct: number;
+            /**
+             * @example ONLINE
+             * @example DEGRADED
+             */
+            health: string;
+            guid: string;
+        };
+        Vdev: {
+            name: string;
+            /** @enum {string} */
+            type: "root" | "mirror" | "raidz1" | "raidz2" | "raidz3" | "draid" | "replacing" | "spare" | "disk" | "file";
+            /** @enum {string} */
+            class: "data" | "special" | "dedup" | "log" | "cache" | "spare";
+            state: string;
+            read: number;
+            write: number;
+            checksum: number;
+            /** @description Whole-disk by-id path for leaf devices */
+            disk: string;
+            note: string;
+            children: components["schemas"]["Vdev"][];
+        };
+        Scan: {
+            /** @enum {string} */
+            kind: "scrub" | "resilver" | "expand" | "none";
+            /** @enum {string} */
+            state: "running" | "paused" | "finished" | "cancelled" | "none";
+            percent: number | null;
+            errors: number | null;
+            /** Format: date-time */
+            finishedAt: string | null;
+            remaining: string;
+            text: string;
+        };
+        PoolStatus: {
+            name: string;
+            state: string;
+            status: string;
+            action: string;
+            scan: components["schemas"]["Scan"];
+            expand: components["schemas"]["Scan"] | null;
+            errors: string;
+            root: components["schemas"]["Vdev"];
+            groups: components["schemas"]["Vdev"][];
+        };
+        VdevSpec: {
+            /** @enum {string} */
+            type: "stripe" | "mirror" | "raidz1" | "raidz2" | "raidz3";
+            disks: string[];
+        };
+        PoolSpec: {
+            name: string;
+            data: components["schemas"]["VdevSpec"][];
+            special?: components["schemas"]["VdevSpec"];
+            log?: components["schemas"]["VdevSpec"];
+            cache?: string[];
+            spares?: string[];
+            encrypt: boolean;
+            /** @example 32K */
+            specialSmallBlocks?: string;
+        };
+        Recommendation: {
+            spec: components["schemas"]["PoolSpec"];
+            usableBytes: number;
+            survives: number;
+            explanation: string[];
+            warnings: string[];
+            unused: string[];
+        };
+        ImportablePool: {
+            name: string;
+            id: string;
+            state: string;
+            status: string;
+        };
+        Dataset: {
+            name: string;
+            /** @enum {string} */
+            type: "filesystem" | "volume";
+            usedBytes: number;
+            availBytes: number;
+            referBytes: number;
+            mountpoint: string;
+            compression: string;
+            compressRatio: string;
+            encryption: string;
+            keyStatus: string;
+            quotaBytes: number;
+            recordSize: string;
+            volSizeBytes: number;
+            mounted: boolean;
+        };
+        /**
+         * @description Allowed: compression, atime, readonly, relatime, sync, recordsize, special_small_blocks,
+         *     quota, refquota, reservation, refreservation, copies, xattr, mountpoint (under /mnt),
+         *     and hardyos:* user properties.
+         */
+        DatasetProps: {
+            [key: string]: string;
+        };
+        Snapshot: {
+            name: string;
+            dataset: string;
+            label: string;
+            usedBytes: number;
+            referBytes: number;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        SnapshotPolicy: {
+            /**
+             * Format: int64
+             * @description 0 or absent to create
+             */
+            id?: number;
+            dataset: string;
+            /** @enum {string} */
+            frequency: "hourly" | "daily" | "weekly" | "monthly";
+            keep: number;
+            recursive?: boolean;
+            enabled?: boolean;
+            /** Format: date-time */
+            readonly lastRunAt?: string | null;
+            readonly lastError?: string;
+        };
+        ScrubPolicy: {
+            pool: string;
+            intervalDays: number;
+            enabled?: boolean;
+            /** Format: date-time */
+            readonly lastStartedAt?: string | null;
+            readonly lastError?: string;
+        };
+        Notification: {
+            /** Format: int64 */
+            id: number;
+            /** Format: date-time */
+            at: string;
+            /** @enum {string} */
+            level: "info" | "success" | "warning" | "error";
+            title: string;
+            body: string;
+            source: string;
+            adminOnly: boolean;
+            /** Format: date-time */
+            readAt: string | null;
+        };
         /** @description Body of every non-2xx response */
         Error: {
             /** @description Stable machine-readable error code */
@@ -451,6 +1149,36 @@ export interface components {
         };
     };
     responses: {
+        /** @description Queued as a background job; follow it on /jobs/{id} or the event stream */
+        JobAccepted: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": {
+                    job: components["schemas"]["Job"];
+                    warnings: string[];
+                };
+            };
+        };
+        /** @description The root helper isn't running */
+        Unavailable: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /** @description The operation ran and failed (message from zpool/zfs) */
+        Failed: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
         /** @description Not signed in or session expired */
         Unauthorized: {
             headers: {
@@ -967,6 +1695,809 @@ export interface operations {
                 };
             };
             403: components["responses"]["Forbidden"];
+        };
+    };
+    getHardware: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Hardware */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Hardware"];
+                };
+            };
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getDiskSmart: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Kernel disk name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description SMART report */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SMART"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listDiskHealth: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Disk health */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiskHealth"][];
+                };
+            };
+        };
+    };
+    listPools: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Pools */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Pool"][];
+                };
+            };
+        };
+    };
+    createPool: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    spec: components["schemas"]["PoolSpec"];
+                    /** @constant */
+                    confirmWipe: true;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+        };
+    };
+    getPoolRecommendation: {
+        parameters: {
+            query?: {
+                name?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Recommendation */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Recommendation"];
+                };
+            };
+            /** @description No usable disks */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    listImportablePools: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Importable pools */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportablePool"][];
+                };
+            };
+        };
+    };
+    importPool: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    pool: string;
+                    /** @description Import a pool last used by another system */
+                    force?: boolean;
+                };
+            };
+        };
+        responses: {
+            /** @description Pools after import */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Pool"][];
+                };
+            };
+            422: components["responses"]["Failed"];
+        };
+    };
+    getPoolStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pool: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PoolStatus"];
+                };
+            };
+            422: components["responses"]["Failed"];
+        };
+    };
+    destroyPool: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pool: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description Must repeat the pool name exactly */
+                    confirmName: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Destroyed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["Invalid"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    addVdevs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pool: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    spec: components["schemas"]["PoolSpec"];
+                    /** @constant */
+                    confirmWipe: true;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+        };
+    };
+    attachDisk: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pool: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @example raidz2-0 */
+                    target: string;
+                    /** @description /dev/disk/by-id path */
+                    disk: string;
+                    /** @constant */
+                    confirmWipe: true;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+        };
+    };
+    replaceDisk: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pool: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description Device path or GUID being replaced */
+                    old: string;
+                    /** @description New disk's /dev/disk/by-id path */
+                    disk: string;
+                    /** @constant */
+                    confirmWipe: true;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+        };
+    };
+    poolDeviceAction: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pool: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @enum {string} */
+                    action: "online" | "offline" | "remove";
+                    device: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Status after the change */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PoolStatus"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+        };
+    };
+    scrubPool: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pool: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /**
+                     * @default start
+                     * @enum {string}
+                     */
+                    action?: "start" | "pause" | "stop";
+                };
+            };
+        };
+        responses: {
+            /** @description Status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PoolStatus"];
+                };
+            };
+            409: components["responses"]["Conflict"];
+        };
+    };
+    clearPoolErrors: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pool: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PoolStatus"];
+                };
+            };
+        };
+    };
+    exportPool: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pool: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Exported */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    listDatasets: {
+        parameters: {
+            query?: {
+                /** @description Only this dataset and its children */
+                root?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Datasets */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Dataset"][];
+                };
+            };
+        };
+    };
+    createDataset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @example tank/family */
+                    name: string;
+                    /** @example 128G */
+                    volSize?: string;
+                    props?: components["schemas"]["DatasetProps"];
+                };
+            };
+        };
+        responses: {
+            /** @description Created dataset */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Dataset"][];
+                };
+            };
+            400: components["responses"]["Invalid"];
+        };
+    };
+    destroyDataset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    name: string;
+                    recursive?: boolean;
+                    /** @description Must repeat the dataset name exactly */
+                    confirmName: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Destroyed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["Invalid"];
+        };
+    };
+    updateDataset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    name: string;
+                    props: components["schemas"]["DatasetProps"];
+                };
+            };
+        };
+        responses: {
+            /** @description Updated dataset */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Dataset"][];
+                };
+            };
+            400: components["responses"]["Invalid"];
+        };
+    };
+    listSnapshots: {
+        parameters: {
+            query?: {
+                root?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Snapshots */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Snapshot"][];
+                };
+            };
+        };
+    };
+    createSnapshot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    dataset: string;
+                    label: string;
+                    recursive?: boolean;
+                };
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["Invalid"];
+        };
+    };
+    destroySnapshot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @example tank/family@before-update */
+                    name: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    rollbackSnapshot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    name: string;
+                    /** @description Also destroy snapshots newer than this one */
+                    destroyNewer?: boolean;
+                    /** @constant */
+                    confirm: true;
+                };
+            };
+        };
+        responses: {
+            /** @description Rolled back */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["Invalid"];
+        };
+    };
+    listSnapshotPolicies: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Policies */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SnapshotPolicy"][];
+                };
+            };
+        };
+    };
+    saveSnapshotPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SnapshotPolicy"];
+            };
+        };
+        responses: {
+            /** @description Saved policy */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SnapshotPolicy"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+        };
+    };
+    deleteSnapshotPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listScrubPolicies: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Policies */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScrubPolicy"][];
+                };
+            };
+        };
+    };
+    saveScrubPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ScrubPolicy"];
+            };
+        };
+        responses: {
+            /** @description Saved policy */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScrubPolicy"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+        };
+    };
+    listNotifications: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Notifications */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Notification"][];
+                };
+            };
+        };
+    };
+    markNotificationRead: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Marked read */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    markAllNotificationsRead: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Marked read */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
 }

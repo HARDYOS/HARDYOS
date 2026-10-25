@@ -15,7 +15,9 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/notify"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
+	"github.com/hardyos/hardyos/daemon/internal/storage"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 )
 
@@ -27,6 +29,8 @@ type Config struct {
 	Events   *events.Broker
 	Priv     *priv.Client
 	Limiter  *auth.LoginLimiter
+	Storage  *storage.Service // nil disables storage endpoints
+	Notify   *notify.Center   // nil disables notification endpoints
 	Logger   *slog.Logger
 	WebRoot  string // directory with the built web desktop; empty disables static serving
 	Insecure bool   // allow session cookies over plain HTTP (true until TLS lands)
@@ -93,6 +97,8 @@ func (s *Server) routes() {
 		m.Handle("POST /api/v1/users/{id}/password", s.admin(s.handleResetPassword))
 		m.Handle("GET /api/v1/audit", s.admin(s.handleListAudit))
 		m.Handle("POST /api/v1/system/self-test", s.admin(s.handleSelfTest))
+		s.storageRoutes()
+		s.notifyRoutes()
 	}
 
 	m.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {

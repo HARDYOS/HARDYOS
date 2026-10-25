@@ -54,6 +54,29 @@ pool, cancellable, and serialized per resource when needed (for example one
 operation per pool at a time). Progress streams to the browser over the
 `/api/v1/events` WebSocket. Jobs interrupted by a restart are marked failed.
 
+## Storage
+
+- `hardyd-priv` owns every disk and ZFS command. Operations that consume
+  disks (create, add, attach, replace) re-scan disks themselves and refuse
+  anything that is the boot disk, mounted, removable, or in another pool,
+  then clear old signatures. They also require `confirmWipe: true`.
+  Destroying a pool or dataset requires repeating its exact name.
+  The boot pool (`rpool`) can be read but never changed through the API.
+- Pools are built from stable `/dev/disk/by-id` paths and mount under `/mnt/<pool>`.
+  Defaults: ashift 12, autotrim, lz4, atime off, xattr=sa, POSIX ACLs.
+  Optional native encryption uses a per-pool key file in `/var/lib/hardyos/keys`
+  so pools unlock at boot (protects disks removed from the server).
+- New pools get standard datasets (`system`, `apps`, `users`, `shares`, `vms`),
+  a monthly scrub, and daily (keep 14) + weekly (keep 8) snapshots of `users`
+  and `shares`. The ARC limit is set once from the hardware profile.
+- hardyd checks every minute: due snapshots (with retention), due scrubs,
+  pool health changes, and every 6 hours each disk's SMART health.
+  Changes raise notifications.
+- Layout recommendations follow the plan: 1 disk stripe, 2-3 mirror, 4-5
+  RAIDZ1, 6-11 RAIDZ2, 12+ several RAIDZ2 vdevs (leftovers become spares);
+  spare SSDs become a special mirror, then an SLOG (only with power-loss
+  protection), then L2ARC (only with 32 GB+ RAM).
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly

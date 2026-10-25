@@ -21,7 +21,9 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/notify"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
+	"github.com/hardyos/hardyos/daemon/internal/storage"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 	"github.com/hardyos/hardyos/daemon/internal/tlscert"
 	"github.com/hardyos/hardyos/daemon/internal/version"
@@ -75,7 +77,10 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 
 	jobCtx, cancelJobs := context.WithCancel(context.Background())
 	manager := &jobs.Manager{DB: db, Events: broker, Logger: log, Workers: 4}
+	notifications := &notify.Center{DB: db, Events: broker}
+	stor := &storage.Service{Priv: pc, Jobs: manager, DB: db, Notify: notifications, Log: log}
 	api.RegisterJobKinds(manager, pc)
+	stor.RegisterJobs(manager)
 	if err := manager.Start(jobCtx); err != nil {
 		cancelJobs()
 		return fmt.Errorf("start jobs: %w", err)
@@ -84,10 +89,12 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 
 	handler := api.New(api.Config{
 		DB: db, Jobs: manager, Events: broker, Priv: pc, Logger: log,
+		Storage: stor, Notify: notifications,
 		WebRoot: webRoot, Insecure: httpsAddr == "",
 	})
 
 	go housekeeping(ctx, log, &auth.Sessions{DB: db})
+	go stor.Run(ctx) // snapshot, scrub and SMART schedules
 
 	var servers []*http.Server
 	errCh := make(chan error, 2)

@@ -22,3 +22,6 @@ Settled choices, newest last. Change one by adding a row that supersedes it.
 | 16 | 2026-10-24 | HTTPS by default with a self-signed certificate; HTTP redirects | Session cookies are Secure; ACME and uploaded certs come later |
 | 17 | 2026-10-24 | Argon2id passwords, hashed session tokens, SameSite=Strict cookies plus an X-HardyOS-Request header for CSRF | Standard, simple, no tokens in JavaScript |
 | 18 | 2026-10-24 | First admin is a break-glass local account; `hardyctl reset-password` / `create-admin` work on the database directly as root | Recovery never depends on the web UI or directory services |
+| 19 | 2026-10-24 | Parse `zpool`/`zfs` text output (-H/-p) rather than JSON output | Works on every OpenZFS 2.x; verified against real ZFS in CI |
+| 20 | 2026-10-24 | Pool encryption via per-pool key files (auto-unlock at boot) | Protects removed disks without a passphrase prompt at every boot; passphrase mode can come later |
+| 21 | 2026-10-24 | Special-vdev parity lower than the data vdevs is a warning, not an error | 2-way special mirrors are common and reasonable; the user decides |

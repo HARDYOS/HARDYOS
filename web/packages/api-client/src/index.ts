@@ -12,6 +12,23 @@ export type Job = S["Job"];
 export type JobState = S["JobState"];
 export type AuditEntry = S["AuditEntry"];
 export type SetupStatus = S["SetupStatus"];
+export type Hardware = S["Hardware"];
+export type Disk = S["Disk"];
+export type SMART = S["SMART"];
+export type DiskHealth = S["DiskHealth"];
+export type Pool = S["Pool"];
+export type PoolStatus = S["PoolStatus"];
+export type Vdev = S["Vdev"];
+export type Scan = S["Scan"];
+export type PoolSpec = S["PoolSpec"];
+export type VdevSpec = S["VdevSpec"];
+export type Recommendation = S["Recommendation"];
+export type ImportablePool = S["ImportablePool"];
+export type Dataset = S["Dataset"];
+export type Snapshot = S["Snapshot"];
+export type SnapshotPolicy = S["SnapshotPolicy"];
+export type ScrubPolicy = S["ScrubPolicy"];
+export type Notification = S["Notification"];
 
 /** Header every state-changing request must carry (hardyd's CSRF check). */
 export const CSRF_HEADER = "X-HardyOS-Request";

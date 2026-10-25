@@ -36,6 +36,27 @@ jobs:
       - name: build
         run: make build-daemon
 
+  zfs:
+    name: ZFS integration
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache: false
+      - name: install ZFS
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zfsutils-linux
+          sudo modprobe zfs
+          zfs version
+      - name: build test binary
+        working-directory: daemon
+        run: go test -c -o "$RUNNER_TEMP/priv.test" ./internal/priv
+      - name: run against real ZFS
+        run: sudo HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/priv.test" -test.run TestZFSIntegration -test.v
+
   web:
     name: Web (desktop)
     runs-on: ubuntu-latest
