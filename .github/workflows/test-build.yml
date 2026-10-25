@@ -1,0 +1,64 @@
+# Builds a test ISO plus signed test updates for VM testing. Runs when a
+# branch named test-build/... is pushed. Everything is signed with a key made
+# for this run only: its public key is built into this ISO and nothing else,
+# so these builds can never update a real HardyOS server.
+name: Test build
+
+on:
+  push:
+    branches: ["test-build/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  iso:
+    name: Test ISO and updates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache: false
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: version
+        run: echo "VERSION=0.1.0~ci${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+      - name: test signing key (this run only)
+        working-directory: daemon
+        run: go run ./cmd/hardyrelease keygen -key "$RUNNER_TEMP/test.key" -pub internal/update/keys/zz-ci-test.pub -comment "ci-test-run-${GITHUB_RUN_ID}"
+      - name: build .deb
+        run: make deb VERSION="$VERSION"
+      - name: build ISO
+        run: os/build-iso.sh
+      - name: test updates
+        run: |
+          sudo apt-get install -y -qq squashfs-tools >/dev/null
+          sudo env "PATH=$PATH" HOME="$HOME" GOPATH="$(go env GOPATH)" GOCACHE="$(go env GOCACHE)" \
+            os/test-updates.sh "dist/hardyos-$VERSION-amd64.squashfs" "$VERSION" "$RUNNER_TEMP/test.key" dist/updates
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hardyos-test-iso
+          path: dist/hardyos-*-amd64.iso
+          compression-level: 0
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hardyos-test-updates
+          path: dist/updates/*.hupd
+          compression-level: 0
+          retention-days: 7
