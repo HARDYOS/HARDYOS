@@ -7,12 +7,12 @@
 # Usage: os/test-updates.sh <rootfs.squashfs> <version> <signing key> <outdir>
 # Needs root (unsquashfs keeps ownership), squashfs-tools and Go.
 set -euo pipefail
-SQ=$1 VERSION=$2 KEY=$3 OUT=$4
+SQ=$(realpath "$1") VERSION=$2 KEY=$(realpath "$3")
+mkdir -p "$4" && OUT=$(cd "$4" && pwd)
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-mkdir -p "$OUT"
 unsquashfs -q -d "$WORK/root" "$SQ"
 
 build() {
