@@ -50,7 +50,7 @@ func TestPublishCode(t *testing.T) {
 		t.Fatalf("code file = %q", b)
 	}
 	issue, _ := os.ReadFile(filepath.Join(root, "etc/issue.d/50-hardyos-installer.issue"))
-	if !strings.Contains(string(issue), "K7QM-4TXP") || !strings.Contains(string(issue), `https://\4`) {
+	if !strings.Contains(string(issue), "K7QM-4TXP") || strings.Contains(string(issue), `\4`) {
 		t.Fatalf("issue = %s", issue)
 	}
 	if IsLive(root) {
