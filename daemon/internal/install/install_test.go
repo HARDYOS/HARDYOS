@@ -153,6 +153,7 @@ func host(t *testing.T) (*Installer, *sysexec.Fake, string) {
 		write(d+"-part3", "")
 	}
 	write("/sys/class/net/eno1/device/vendor", "0x8086")
+	write("/sys/firmware/efi/fw_platform_size", "64")
 	write("/sys/class/net/lo/address", "00:00:00:00:00:00")
 	// Unpacked image: modules, passwd, a live marker and SSH keys to clean up.
 	write("/target/lib/modules/6.12.10-amd64/modules.dep", "")
@@ -166,6 +167,7 @@ func host(t *testing.T) (*Installer, *sysexec.Fake, string) {
 	f.OnResult("zpool list -H rpool", sysexec.Result{ExitCode: 1, Stderr: []byte("cannot open 'rpool': no such pool")})
 	f.On("chroot /target dpkg-query -W -f=${Package} ${db:Status-Status}\\n live-boot live-boot-initramfs-tools live-config live-config-systemd live-tools",
 		"live-boot installed\nlive-config installed\nlive-tools not-installed\n")
+	f.On("efibootmgr", "BootCurrent: 0001\nBootOrder: 0004,0001\nBoot0001* UEFI QEMU DVD-ROM\tPciRoot(0x0)\nBoot0004* HardyOS (disk 1)\tHD(2,GPT,old)\n")
 	f.On("blkid -s PARTUUID -o value "+diskA+"-part2", "aaaaaaaa-0000-0000-0000-000000000001\n")
 	f.On("blkid -s PARTUUID -o value "+diskB+"-part2", "aaaaaaaa-0000-0000-0000-000000000002\n")
 	f.On("zfs list -H -p -o name,creation,org.hardyos:version -d 1 -r rpool/ROOT",
@@ -256,11 +258,19 @@ func TestFullInstall(t *testing.T) {
 		"grub-install --target=",
 		"blkid -l -o device -t PARTUUID=aaaaaaaa-0000-0000-0000-000000000002",
 		"mount -t vfat -o umask=0077 /dev/disk/by-partuuid/aaaaaaaa-0000-0000-0000-000000000002",
+		"efibootmgr -q -b 0004 -B",
+		`efibootmgr -q -c -d ` + diskB + ` -p 2 -L HardyOS (disk 2) -l \EFI\BOOT\BOOTX64.EFI`,
 		"zpool export rpool",
 	} {
 		if !strings.Contains(lines, want) {
 			t.Errorf("missing %q", want)
 		}
+	}
+	if strings.Index(lines, "-L HardyOS (disk 2)") > strings.Index(lines, "-L HardyOS (disk 1)") {
+		t.Error("disk 1 must be registered last so it is first in the boot order")
+	}
+	if strings.Contains(lines, "efibootmgr -q -b 0001") {
+		t.Error("removed a boot entry HardyOS didn't create")
 	}
 	if strings.Contains(lines, "usb-Live") {
 		t.Error("touched the live medium")

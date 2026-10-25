@@ -557,11 +557,59 @@ func (in *Installer) InstallBootloader(ctx context.Context, p Plan) error {
 		return err
 	}
 	env := boot.Env{Runner: in.Runner, Root: in.Root}
-	_, err := boot.Sync(ctx, env, cfg, boot.SyncOptions{
+	if _, err := boot.Sync(ctx, env, cfg, boot.SyncOptions{
 		InstallGRUB: true,
 		Mounted:     map[string]string{in.BEDataset(): in.target()},
-	})
-	return err
+	}); err != nil {
+		return err
+	}
+	in.addFirmwareEntries(ctx, p.Disks)
+	return nil
+}
+
+// firmwareLabel prefixes the UEFI boot entries the installer creates.
+const firmwareLabel = "HardyOS"
+
+// addFirmwareEntries registers each boot disk with the UEFI firmware, first
+// disk first. GRUB already sits at the removable path that firmware falls
+// back to, so this is best effort: some firmware only boots listed entries.
+// Entries from earlier installs are replaced.
+func (in *Installer) addFirmwareEntries(ctx context.Context, disks []string) {
+	if _, err := os.Stat(in.path("/sys/firmware/efi")); err != nil {
+		return // booted in BIOS mode: there is no boot entry list
+	}
+	out, err := in.run(ctx, "efibootmgr")
+	if err != nil {
+		return
+	}
+	for _, num := range staleEntries(string(out)) {
+		in.try(ctx, "efibootmgr", "-q", "-b", num, "-B")
+	}
+	// efibootmgr -c puts the new entry first in BootOrder, so add the
+	// last disk first and the first disk ends up on top.
+	for i := len(disks) - 1; i >= 0; i-- {
+		label := firmwareLabel
+		if len(disks) > 1 {
+			label = fmt.Sprintf("%s (disk %d)", firmwareLabel, i+1)
+		}
+		in.try(ctx, "efibootmgr", "-q", "-c", "-d", disks[i], "-p", "2", "-L", label, "-l", `\EFI\BOOT\BOOTX64.EFI`)
+	}
+}
+
+// staleEntries returns the boot entry numbers labeled HardyOS in efibootmgr output.
+func staleEntries(out string) []string {
+	var nums []string
+	for _, line := range strings.Split(out, "\n") {
+		// "Boot0003* HardyOS (disk 1)\tHD(...)"
+		if !strings.HasPrefix(line, "Boot") || len(line) < 10 {
+			continue
+		}
+		num, rest := line[4:8], strings.TrimLeft(line[8:], "* ")
+		if strings.HasPrefix(rest, firmwareLabel) {
+			nums = append(nums, num)
+		}
+	}
+	return nums
 }
 
 // Finish unmounts the target and exports the pool so the new system imports
