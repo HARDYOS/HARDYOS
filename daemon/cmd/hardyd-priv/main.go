@@ -15,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/hardyos/hardyos/daemon/internal/priv"
+	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 	"github.com/hardyos/hardyos/daemon/internal/version"
 )
 
@@ -50,6 +51,7 @@ func main() {
 		log.Warn("allowed user not found; only root may connect", "user", *allowUser)
 	}
 	priv.RegisterBuiltins(s)
+	priv.RegisterStorage(s, priv.StorageEnv{Runner: sysexec.Exec{}, Root: os.DirFS("/")})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

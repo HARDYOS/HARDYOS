@@ -21,6 +21,9 @@ tags:
   - name: users
   - name: jobs
   - name: audit
+  - name: hardware
+  - name: storage
+  - name: notifications
 paths:
   /health:
     get:
@@ -308,6 +311,551 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Job" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /hardware:
+    get:
+      operationId: getHardware
+      summary: Detected hardware, disks and the capability profile (admin)
+      tags: [hardware]
+      responses:
+        "200":
+          description: Hardware
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Hardware" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /hardware/disks/{name}/smart:
+    parameters:
+      - { name: name, in: path, required: true, description: Kernel disk name, e.g. sda, schema: { type: string } }
+    get:
+      operationId: getDiskSmart
+      summary: Live SMART report for one disk (admin)
+      tags: [hardware]
+      responses:
+        "200":
+          description: SMART report
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SMART" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /hardware/disk-health:
+    get:
+      operationId: listDiskHealth
+      summary: Last scheduled SMART verdict per disk (admin)
+      tags: [hardware]
+      responses:
+        "200":
+          description: Disk health
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/DiskHealth" }
+  /storage/pools:
+    get:
+      operationId: listPools
+      summary: Imported pools (admin)
+      tags: [storage]
+      responses:
+        "200":
+          description: Pools
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Pool" }
+    post:
+      operationId: createPool
+      summary: Create a pool (admin; runs as a job, erases the disks)
+      tags: [storage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [spec, confirmWipe]
+              additionalProperties: false
+              properties:
+                spec: { $ref: "#/components/schemas/PoolSpec" }
+                confirmWipe: { type: boolean, const: true }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+  /storage/recommendation:
+    get:
+      operationId: getPoolRecommendation
+      summary: Suggested layout for a new pool from unused disks (admin)
+      tags: [storage]
+      parameters:
+        - { name: name, in: query, schema: { type: string, default: tank } }
+      responses:
+        "200":
+          description: Recommendation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Recommendation" }
+        "422":
+          description: No usable disks
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /storage/importable:
+    get:
+      operationId: listImportablePools
+      summary: Pools found on disks that aren't imported (admin)
+      tags: [storage]
+      responses:
+        "200":
+          description: Importable pools
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ImportablePool" }
+  /storage/import:
+    post:
+      operationId: importPool
+      summary: Import a pool by name or numeric ID (admin)
+      tags: [storage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pool]
+              additionalProperties: false
+              properties:
+                pool: { type: string }
+                force: { type: boolean, description: Import a pool last used by another system }
+      responses:
+        "200":
+          description: Pools after import
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Pool" }
+        "422": { $ref: "#/components/responses/Failed" }
+  /storage/pools/{pool}:
+    parameters:
+      - { name: pool, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getPoolStatus
+      summary: Pool status with the device tree (admin)
+      tags: [storage]
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PoolStatus" }
+        "422": { $ref: "#/components/responses/Failed" }
+    delete:
+      operationId: destroyPool
+      summary: Destroy a pool and everything on it (admin)
+      tags: [storage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirmName]
+              additionalProperties: false
+              properties:
+                confirmName: { type: string, description: Must repeat the pool name exactly }
+      responses:
+        "204": { description: Destroyed }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /storage/pools/{pool}/vdevs:
+    parameters:
+      - { name: pool, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: addVdevs
+      summary: Add data, special, log, cache or spare devices (admin; job)
+      tags: [storage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [spec, confirmWipe]
+              additionalProperties: false
+              properties:
+                spec: { $ref: "#/components/schemas/PoolSpec" }
+                confirmWipe: { type: boolean, const: true }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+  /storage/pools/{pool}/attach:
+    parameters:
+      - { name: pool, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: attachDisk
+      summary: Widen a RAIDZ vdev (expansion) or a mirror with a new disk (admin; job)
+      tags: [storage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target, disk, confirmWipe]
+              additionalProperties: false
+              properties:
+                target: { type: string, examples: ["raidz2-0"] }
+                disk: { type: string, description: /dev/disk/by-id path }
+                confirmWipe: { type: boolean, const: true }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+  /storage/pools/{pool}/replace:
+    parameters:
+      - { name: pool, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: replaceDisk
+      summary: Replace a failed or old disk and resilver (admin; job)
+      tags: [storage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [old, disk, confirmWipe]
+              additionalProperties: false
+              properties:
+                old: { type: string, description: Device path or GUID being replaced }
+                disk: { type: string, description: New disk's /dev/disk/by-id path }
+                confirmWipe: { type: boolean, const: true }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+  /storage/pools/{pool}/device:
+    parameters:
+      - { name: pool, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: poolDeviceAction
+      summary: Bring a device online or offline, or remove a cache/log/spare device (admin)
+      tags: [storage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, device]
+              additionalProperties: false
+              properties:
+                action: { type: string, enum: [online, offline, remove] }
+                device: { type: string }
+      responses:
+        "200":
+          description: Status after the change
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PoolStatus" }
+        "400": { $ref: "#/components/responses/Invalid" }
+  /storage/pools/{pool}/scrub:
+    parameters:
+      - { name: pool, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: scrubPool
+      summary: Start, pause or stop a scrub (admin)
+      tags: [storage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                action: { type: string, enum: [start, pause, stop], default: start }
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PoolStatus" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /storage/pools/{pool}/clear:
+    parameters:
+      - { name: pool, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: clearPoolErrors
+      summary: Clear device error counters (admin)
+      tags: [storage]
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PoolStatus" }
+  /storage/pools/{pool}/export:
+    parameters:
+      - { name: pool, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: exportPool
+      summary: Export a pool so its disks can be moved (admin)
+      tags: [storage]
+      responses:
+        "204": { description: Exported }
+  /storage/datasets:
+    get:
+      operationId: listDatasets
+      summary: Filesystems and volumes (admin)
+      tags: [storage]
+      parameters:
+        - { name: root, in: query, description: Only this dataset and its children, schema: { type: string } }
+      responses:
+        "200":
+          description: Datasets
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Dataset" }
+    post:
+      operationId: createDataset
+      summary: Create a filesystem, or a volume when volSize is set (admin)
+      tags: [storage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              additionalProperties: false
+              properties:
+                name: { type: string, examples: ["tank/family"] }
+                volSize: { type: string, examples: ["128G"] }
+                props: { $ref: "#/components/schemas/DatasetProps" }
+      responses:
+        "201":
+          description: Created dataset
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Dataset" }
+        "400": { $ref: "#/components/responses/Invalid" }
+    patch:
+      operationId: updateDataset
+      summary: Change dataset properties (admin)
+      tags: [storage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, props]
+              additionalProperties: false
+              properties:
+                name: { type: string }
+                props: { $ref: "#/components/schemas/DatasetProps" }
+      responses:
+        "200":
+          description: Updated dataset
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Dataset" }
+        "400": { $ref: "#/components/responses/Invalid" }
+    delete:
+      operationId: destroyDataset
+      summary: Destroy a dataset (admin)
+      tags: [storage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, confirmName]
+              additionalProperties: false
+              properties:
+                name: { type: string }
+                recursive: { type: boolean }
+                confirmName: { type: string, description: Must repeat the dataset name exactly }
+      responses:
+        "204": { description: Destroyed }
+        "400": { $ref: "#/components/responses/Invalid" }
+  /storage/snapshots:
+    get:
+      operationId: listSnapshots
+      summary: Snapshots, oldest first (admin)
+      tags: [storage]
+      parameters:
+        - { name: root, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Snapshots
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Snapshot" }
+    post:
+      operationId: createSnapshot
+      summary: Take a snapshot (admin)
+      tags: [storage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [dataset, label]
+              additionalProperties: false
+              properties:
+                dataset: { type: string }
+                label: { type: string }
+                recursive: { type: boolean }
+      responses:
+        "201": { description: Created }
+        "400": { $ref: "#/components/responses/Invalid" }
+    delete:
+      operationId: destroySnapshot
+      summary: Delete a snapshot (admin)
+      tags: [storage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              additionalProperties: false
+              properties:
+                name: { type: string, examples: ["tank/family@before-update"] }
+      responses:
+        "204": { description: Deleted }
+  /storage/snapshots/rollback:
+    post:
+      operationId: rollbackSnapshot
+      summary: Roll a dataset back to a snapshot (admin)
+      tags: [storage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, confirm]
+              additionalProperties: false
+              properties:
+                name: { type: string }
+                destroyNewer: { type: boolean, description: Also destroy snapshots newer than this one }
+                confirm: { type: boolean, const: true }
+      responses:
+        "204": { description: Rolled back }
+        "400": { $ref: "#/components/responses/Invalid" }
+  /storage/snapshot-policies:
+    get:
+      operationId: listSnapshotPolicies
+      summary: Automatic snapshot schedules (admin)
+      tags: [storage]
+      responses:
+        "200":
+          description: Policies
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SnapshotPolicy" }
+    post:
+      operationId: saveSnapshotPolicy
+      summary: Create (id 0) or update a snapshot schedule (admin)
+      tags: [storage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SnapshotPolicy" }
+      responses:
+        "200":
+          description: Saved policy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SnapshotPolicy" }
+        "400": { $ref: "#/components/responses/Invalid" }
+  /storage/snapshot-policies/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+    delete:
+      operationId: deleteSnapshotPolicy
+      summary: Remove a snapshot schedule; existing snapshots stay (admin)
+      tags: [storage]
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /storage/scrub-policies:
+    get:
+      operationId: listScrubPolicies
+      summary: Scrub schedules (admin)
+      tags: [storage]
+      responses:
+        "200":
+          description: Policies
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ScrubPolicy" }
+    post:
+      operationId: saveScrubPolicy
+      summary: Create or update a pool's scrub schedule (admin)
+      tags: [storage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ScrubPolicy" }
+      responses:
+        "200":
+          description: Saved policy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScrubPolicy" }
+        "400": { $ref: "#/components/responses/Invalid" }
+  /notifications:
+    get:
+      operationId: listNotifications
+      summary: Your notification center, newest first
+      tags: [notifications]
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200 } }
+      responses:
+        "200":
+          description: Notifications
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Notification" }
+  /notifications/{id}/read:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+    post:
+      operationId: markNotificationRead
+      summary: Mark one notification read
+      tags: [notifications]
+      responses:
+        "204": { description: Marked read }
+  /notifications/read-all:
+    post:
+      operationId: markAllNotificationsRead
+      summary: Mark all your notifications read
+      tags: [notifications]
+      responses:
+        "204": { description: Marked read }
 components:
   securitySchemes:
     session:
@@ -315,6 +863,26 @@ components:
       in: cookie
       name: hardyos_session
   responses:
+    JobAccepted:
+      description: Queued as a background job; follow it on /jobs/{id} or the event stream
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [job, warnings]
+            properties:
+              job: { $ref: "#/components/schemas/Job" }
+              warnings: { type: array, items: { type: string } }
+    Unavailable:
+      description: The root helper isn't running
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Failed:
+      description: The operation ran and failed (message from zpool/zfs)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     Unauthorized:
       description: Not signed in or session expired
       content:
@@ -467,6 +1035,292 @@ components:
         type: { type: string, examples: ["job.updated", "notification", "audit.created"] }
         time: { type: string, format: date-time }
         data: { description: Payload; a Job for job.updated, an AuditEntry for audit.created }
+    Disk:
+      type: object
+      required: [name, path, byId, model, serial, wwn, transport, kind, sizeBytes, physSector, removable, usage, pool, usageDetail, partitions, powerLossProt]
+      properties:
+        name: { type: string, examples: ["sda"] }
+        path: { type: string }
+        byId: { type: string, description: Stable /dev/disk/by-id path used for pools }
+        model: { type: string }
+        serial: { type: string }
+        wwn: { type: string }
+        transport: { type: string }
+        kind: { type: string, enum: [hdd, ssd, nvme] }
+        sizeBytes: { type: integer }
+        physSector: { type: integer }
+        removable: { type: boolean }
+        usage: { type: string, enum: [free, has-data, pool, boot, mounted] }
+        pool: { type: string }
+        usageDetail: { type: string }
+        partitions:
+          type: array
+          items:
+            type: object
+            required: [name, sizeBytes, fsType, label, mountpoints]
+            properties:
+              name: { type: string }
+              sizeBytes: { type: integer }
+              fsType: { type: string }
+              label: { type: string }
+              mountpoints: { type: [array, "null"], items: { type: string } }
+        powerLossProt: { type: [boolean, "null"] }
+    Hardware:
+      type: object
+      required: [system, disks, capabilities]
+      properties:
+        system:
+          type: object
+          required: [cpu, memory, gpus, nics, iommuEnabled, iommuGroups, virtual]
+          properties:
+            cpu:
+              type: object
+              required: [model, vendor, threads, virtualization]
+              properties:
+                model: { type: string }
+                vendor: { type: string }
+                threads: { type: integer }
+                virtualization: { type: string, enum: ["vt-x", "amd-v", ""] }
+            memory:
+              type: object
+              required: [totalBytes, ecc]
+              properties:
+                totalBytes: { type: integer }
+                ecc: { type: [boolean, "null"] }
+            gpus:
+              type: array
+              items:
+                type: object
+                required: [address, class, vendorId, deviceId, vendor, driver, iommuGroup]
+                properties:
+                  address: { type: string }
+                  class: { type: string }
+                  vendorId: { type: string }
+                  deviceId: { type: string }
+                  vendor: { type: string, enum: [intel, amd, nvidia, other] }
+                  driver: { type: string }
+                  iommuGroup: { type: [integer, "null"] }
+            nics:
+              type: array
+              items:
+                type: object
+                required: [name, mac, speedMbps, up, driver]
+                properties:
+                  name: { type: string }
+                  mac: { type: string }
+                  speedMbps: { type: integer }
+                  up: { type: boolean }
+                  driver: { type: string }
+            iommuEnabled: { type: boolean }
+            iommuGroups: { type: integer }
+            virtual: { type: boolean }
+        disks:
+          type: array
+          items: { $ref: "#/components/schemas/Disk" }
+        capabilities:
+          type: object
+          required: [virtualization, pciePassthrough, hardwareTranscode, specialVdev, slog, l2arc, eccMemory, arcMaxBytes, advisories]
+          properties:
+            virtualization: { type: boolean }
+            pciePassthrough: { type: boolean }
+            hardwareTranscode: { type: boolean }
+            specialVdev: { type: boolean }
+            slog: { type: boolean }
+            l2arc: { type: boolean }
+            eccMemory: { type: [boolean, "null"] }
+            arcMaxBytes: { type: integer }
+            advisories: { type: array, items: { type: string } }
+    SMART:
+      type: object
+      required: [device, model, serial, capacityBytes, rotationRpm, health, reasons]
+      properties:
+        device: { type: string }
+        model: { type: string }
+        serial: { type: string }
+        capacityBytes: { type: integer }
+        rotationRpm: { type: integer }
+        passed: { type: [boolean, "null"] }
+        temperatureC: { type: [integer, "null"] }
+        powerOnHours: { type: [integer, "null"] }
+        reallocated: { type: [integer, "null"] }
+        pending: { type: [integer, "null"] }
+        uncorrectable: { type: [integer, "null"] }
+        crcErrors: { type: [integer, "null"] }
+        percentUsed: { type: [integer, "null"] }
+        mediaErrors: { type: [integer, "null"] }
+        criticalWarning: { type: [integer, "null"] }
+        health: { type: string, enum: [good, warning, failing, unknown] }
+        reasons: { type: array, items: { type: string } }
+    DiskHealth:
+      type: object
+      required: [byId, health, reasons, temperatureC, checkedAt]
+      properties:
+        byId: { type: string }
+        health: { type: string, enum: [good, warning, failing, unknown] }
+        reasons: { type: array, items: { type: string } }
+        temperatureC: { type: [integer, "null"] }
+        checkedAt: { type: string, format: date-time }
+    Pool:
+      type: object
+      required: [name, sizeBytes, allocBytes, freeBytes, fragmentation, capacityPct, health, guid]
+      properties:
+        name: { type: string }
+        sizeBytes: { type: integer }
+        allocBytes: { type: integer }
+        freeBytes: { type: integer }
+        fragmentation: { type: [integer, "null"] }
+        capacityPct: { type: integer }
+        health: { type: string, examples: ["ONLINE", "DEGRADED"] }
+        guid: { type: string }
+    Vdev:
+      type: object
+      required: [name, type, class, state, read, write, checksum, disk, note, children]
+      properties:
+        name: { type: string }
+        type: { type: string, enum: [root, mirror, raidz1, raidz2, raidz3, draid, replacing, spare, disk, file] }
+        class: { type: string, enum: [data, special, dedup, log, cache, spare] }
+        state: { type: string }
+        read: { type: integer }
+        write: { type: integer }
+        checksum: { type: integer }
+        disk: { type: string, description: Whole-disk by-id path for leaf devices }
+        note: { type: string }
+        children:
+          type: array
+          items: { $ref: "#/components/schemas/Vdev" }
+    Scan:
+      type: object
+      required: [kind, state, percent, errors, finishedAt, remaining, text]
+      properties:
+        kind: { type: string, enum: [scrub, resilver, expand, none] }
+        state: { type: string, enum: [running, paused, finished, cancelled, none] }
+        percent: { type: [number, "null"] }
+        errors: { type: [integer, "null"] }
+        finishedAt: { type: [string, "null"], format: date-time }
+        remaining: { type: string }
+        text: { type: string }
+    PoolStatus:
+      type: object
+      required: [name, state, status, action, scan, expand, errors, root, groups]
+      properties:
+        name: { type: string }
+        state: { type: string }
+        status: { type: string }
+        action: { type: string }
+        scan: { $ref: "#/components/schemas/Scan" }
+        expand:
+          oneOf:
+            - { $ref: "#/components/schemas/Scan" }
+            - { type: "null" }
+        errors: { type: string }
+        root: { $ref: "#/components/schemas/Vdev" }
+        groups:
+          type: array
+          items: { $ref: "#/components/schemas/Vdev" }
+    VdevSpec:
+      type: object
+      required: [type, disks]
+      properties:
+        type: { type: string, enum: [stripe, mirror, raidz1, raidz2, raidz3] }
+        disks: { type: array, items: { type: string } }
+    PoolSpec:
+      type: object
+      required: [name, data, encrypt]
+      properties:
+        name: { type: string }
+        data: { type: array, items: { $ref: "#/components/schemas/VdevSpec" } }
+        special: { $ref: "#/components/schemas/VdevSpec" }
+        log: { $ref: "#/components/schemas/VdevSpec" }
+        cache: { type: array, items: { type: string } }
+        spares: { type: array, items: { type: string } }
+        encrypt: { type: boolean }
+        specialSmallBlocks: { type: string, examples: ["32K"] }
+    Recommendation:
+      type: object
+      required: [spec, usableBytes, survives, explanation, warnings, unused]
+      properties:
+        spec: { $ref: "#/components/schemas/PoolSpec" }
+        usableBytes: { type: integer }
+        survives: { type: integer }
+        explanation: { type: array, items: { type: string } }
+        warnings: { type: array, items: { type: string } }
+        unused: { type: array, items: { type: string } }
+    ImportablePool:
+      type: object
+      required: [name, id, state, status]
+      properties:
+        name: { type: string }
+        id: { type: string }
+        state: { type: string }
+        status: { type: string }
+    Dataset:
+      type: object
+      required: [name, type, usedBytes, availBytes, referBytes, mountpoint, compression, compressRatio, encryption, keyStatus, quotaBytes, recordSize, volSizeBytes, mounted]
+      properties:
+        name: { type: string }
+        type: { type: string, enum: [filesystem, volume] }
+        usedBytes: { type: integer }
+        availBytes: { type: integer }
+        referBytes: { type: integer }
+        mountpoint: { type: string }
+        compression: { type: string }
+        compressRatio: { type: string }
+        encryption: { type: string }
+        keyStatus: { type: string }
+        quotaBytes: { type: integer }
+        recordSize: { type: string }
+        volSizeBytes: { type: integer }
+        mounted: { type: boolean }
+    DatasetProps:
+      type: object
+      description: |
+        Allowed: compression, atime, readonly, relatime, sync, recordsize, special_small_blocks,
+        quota, refquota, reservation, refreservation, copies, xattr, mountpoint (under /mnt),
+        and hardyos:* user properties.
+      additionalProperties: { type: string }
+    Snapshot:
+      type: object
+      required: [name, dataset, label, usedBytes, referBytes, createdAt]
+      properties:
+        name: { type: string }
+        dataset: { type: string }
+        label: { type: string }
+        usedBytes: { type: integer }
+        referBytes: { type: integer }
+        createdAt: { type: string, format: date-time }
+    SnapshotPolicy:
+      type: object
+      required: [dataset, frequency, keep]
+      properties:
+        id: { type: integer, format: int64, description: 0 or absent to create }
+        dataset: { type: string }
+        frequency: { type: string, enum: [hourly, daily, weekly, monthly] }
+        keep: { type: integer, minimum: 1, maximum: 1000 }
+        recursive: { type: boolean }
+        enabled: { type: boolean }
+        lastRunAt: { type: [string, "null"], format: date-time, readOnly: true }
+        lastError: { type: string, readOnly: true }
+    ScrubPolicy:
+      type: object
+      required: [pool, intervalDays]
+      properties:
+        pool: { type: string }
+        intervalDays: { type: integer, minimum: 1, maximum: 365 }
+        enabled: { type: boolean }
+        lastStartedAt: { type: [string, "null"], format: date-time, readOnly: true }
+        lastError: { type: string, readOnly: true }
+    Notification:
+      type: object
+      required: [id, at, level, title, body, source, adminOnly, readAt]
+      properties:
+        id: { type: integer, format: int64 }
+        at: { type: string, format: date-time }
+        level: { type: string, enum: [info, success, warning, error] }
+        title: { type: string }
+        body: { type: string }
+        source: { type: string }
+        adminOnly: { type: boolean }
+        readAt: { type: [string, "null"], format: date-time }
     Error:
       type: object
       description: Body of every non-2xx response
