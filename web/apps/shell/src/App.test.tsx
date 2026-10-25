@@ -34,7 +34,12 @@ const admin = {
 const desktopRoutes: Record<string, Handler> = {
   "GET /system/info": () => ({ body: { hostname: "nas-01", os: "Debian GNU/Linux 13 (trixie)", kernel: "6.12", version: "0.1.0", uptimeSecs: 7200 } }),
   "GET /system/metrics": () => ({ body: { current: { time: "2026-10-24T00:00:00Z", cpuPercent: 12, memUsed: 4e9, memTotal: 16e9, arcBytes: 2e9, netRxBps: 1e6, netTxBps: 1e5, load1: 0.3, uptimeSecs: 7200 }, history: [], cpus: 8 } }),
-  "GET /storage/pools": () => ({ body: [{ name: "tank", sizeBytes: 48e12, allocBytes: 21.4e12, freeBytes: 26.6e12, fragmentation: 2, capacityPct: 45, health: "ONLINE", guid: "1" }] }),
+  "GET /storage/pools": () => ({
+    body: [
+      { name: "rpool", sizeBytes: 250e9, allocBytes: 3e9, freeBytes: 247e9, fragmentation: 0, capacityPct: 1, health: "ONLINE", guid: "0" },
+      { name: "tank", sizeBytes: 48e12, allocBytes: 21.4e12, freeBytes: 26.6e12, fragmentation: 2, capacityPct: 45, health: "ONLINE", guid: "1" },
+    ],
+  }),
   "GET /notifications": () => ({ body: [] }),
 };
 
@@ -97,6 +102,8 @@ describe("App", () => {
     const dock = await screen.findByRole("navigation", { name: "Dock" });
     expect(dock.textContent).toContain("Storage Manager");
     expect(await screen.findByText("tank")).toBeTruthy();
+    // The boot pool is the system, not storage: no desktop widget for it.
+    expect(screen.queryByText("rpool")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Resource Monitor" }));
     await waitFor(() => expect(useWM.getState().windows).toHaveLength(1));
