@@ -45,11 +45,15 @@ func (c *Client) Call(ctx context.Context, op string, args any, out any) error {
 		_ = conn.SetDeadline(time.Now().Add(15 * time.Minute))
 	}
 
-	if err := json.NewEncoder(conn).Encode(Request{Op: op, Args: raw}); err != nil {
-		return fmt.Errorf("send request: %w", err)
-	}
+	// The helper may answer and close before reading everything (it rejects
+	// unauthorized callers immediately), so a failed write isn't final:
+	// read the reply first and only report the write error if there is none.
+	writeErr := json.NewEncoder(conn).Encode(Request{Op: op, Args: raw})
 	var res Response
 	if err := json.NewDecoder(io.LimitReader(conn, 64<<20)).Decode(&res); err != nil {
+		if writeErr != nil {
+			return fmt.Errorf("send request: %w", writeErr)
+		}
 		return fmt.Errorf("read response: %w", err)
 	}
 	if !res.OK {
