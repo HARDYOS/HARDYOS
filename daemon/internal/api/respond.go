@@ -9,6 +9,8 @@ import (
 	"strconv"
 )
 
+func parseFloat(s string) (float64, error) { return strconv.ParseFloat(s, 64) }
+
 // ErrorResponse is the body of every non-2xx API response.
 type ErrorResponse struct {
 	Code    string `json:"code"`

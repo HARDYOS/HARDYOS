@@ -22,12 +22,18 @@ importers:
       '@hardy/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
+      '@tanstack/react-query':
+        specifier: ^5
+        version: 5.104.5(@types/react@18.3.31)(react@18.3.1)
       react:
         specifier: ^18.3.1
         version: 18.3.1
       react-dom:
         specifier: ^18.3.1
         version: 18.3.1(react@18.3.1)
+      zustand:
+        specifier: ^5
+        version: 5.0.16(@types/react@18.3.31)(react@18.3.1)
     devDependencies:
       '@testing-library/react':
         specifier: ^16.0.0
@@ -505,6 +511,18 @@ packages:
     resolution: {integrity: sha512-wPWi++K4Bs1VR4XihOhfGi4IGX6Cub7FlerTf8X2v+2BtDHddgSqWCXwGD+h2yAe4/niIhNDwAltioOC+wEogQ==}
     cpu: [x64]
     os: [win32]
+
+  '@tanstack/query-core@5.104.5':
+    resolution: {integrity: sha512-Q94gI8Opd+CbdVNOdj8ZCyV8WqLYitrDq1t96Xc8WZT6lY0r5iRnJLXYDxMex7EEf2v+mXvn4FcjaBKSxXZQ9A==}
+
+  '@tanstack/react-query@5.104.5':
+    resolution: {integrity: sha512-RORgFe052U+93weaNuqg7qHq7vNVNzXN/VrXqD4bbAuQCWUqOl2lV5Ui9flWk5CVvMyL/Bh27QWhzwH0aaOx9g==}
+    peerDependencies:
+      '@types/react': ^18 || ^19
+      react: ^18 || ^19
+    peerDependenciesMeta:
+      '@types/react':
+        optional: true
 
   '@testing-library/dom@10.4.2':
     resolution: {integrity: sha512-yzr2S9HyAIdhz2/6qHgbs665Q7PKVcDF05vsOlHPxG1mo36gKVesdYVeDLnXgfjJ03CrKRk08knc6+E/9m8v2Q==}
@@ -1183,6 +1201,24 @@ packages:
     resolution: {integrity: sha512-tVpsJW7DdjecAiFpbIB1e3qxIQsE6NoPc5/eTdrbbIC4h0LVsWhnoa3g+m2HclBIujHzsxZ4VJVA+GUuc2/LBw==}
     engines: {node: '>=12'}
 
+  zustand@5.0.16:
+    resolution: {integrity: sha512-Uv7e327ihlCfayfja3hDc0M64Upev1LWBKpRobdK4NyovDDPeeX4imWXc/wzC1yc6fkYPoAY/ncKVPAs2jrtQw==}
+    engines: {node: '>=12.20.0'}
+    peerDependencies:
+      '@types/react': '>=18.0.0'
+      immer: '>=9.0.6'
+      react: '>=18.0.0'
+      use-sync-external-store: '>=1.2.0'
+    peerDependenciesMeta:
+      '@types/react':
+        optional: true
+      immer:
+        optional: true
+      react:
+        optional: true
+      use-sync-external-store:
+        optional: true
+
 snapshots:
 
   '@asamuzakjp/css-color@3.2.0':
@@ -1521,6 +1557,15 @@ snapshots:
 
   '@rollup/rollup-win32-x64-msvc@4.65.0':
     optional: true
+
+  '@tanstack/query-core@5.104.5': {}
+
+  '@tanstack/react-query@5.104.5(@types/react@18.3.31)(react@18.3.1)':
+    dependencies:
+      '@tanstack/query-core': 5.104.5
+      react: 18.3.1
+    optionalDependencies:
+      '@types/react': 18.3.31
 
   '@testing-library/dom@10.4.2':
     dependencies:
@@ -2198,3 +2243,8 @@ snapshots:
   yaml-ast-parser@0.0.43: {}
 
   yargs-parser@21.1.1: {}
+
+  zustand@5.0.16(@types/react@18.3.31)(react@18.3.1):
+    optionalDependencies:
+      '@types/react': 18.3.31
+      react: 18.3.1

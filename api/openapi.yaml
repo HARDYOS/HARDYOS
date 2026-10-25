@@ -299,6 +299,29 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/AuditEntry" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /system/info:
+    get:
+      operationId: getSystemInfo
+      summary: Hostname, OS, kernel and uptime
+      tags: [system]
+      responses:
+        "200":
+          description: System info
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SystemInfo" }
+  /system/metrics:
+    get:
+      operationId: getMetrics
+      summary: Current CPU, memory and network use with ~5 minutes of history
+      tags: [system]
+      responses:
+        "200":
+          description: Metrics
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Metrics" }
+        "503": { $ref: "#/components/responses/Unavailable" }
   /system/self-test:
     post:
       operationId: runSelfTest
@@ -1321,6 +1344,35 @@ components:
         source: { type: string }
         adminOnly: { type: boolean }
         readAt: { type: [string, "null"], format: date-time }
+    SystemInfo:
+      type: object
+      required: [hostname, os, kernel, version, uptimeSecs]
+      properties:
+        hostname: { type: string }
+        os: { type: string }
+        kernel: { type: string }
+        version: { type: string }
+        uptimeSecs: { type: number }
+    MetricSample:
+      type: object
+      required: [time, cpuPercent, memUsed, memTotal, arcBytes, netRxBps, netTxBps, load1, uptimeSecs]
+      properties:
+        time: { type: string, format: date-time }
+        cpuPercent: { type: number }
+        memUsed: { type: integer, description: Bytes used by programs (excludes the reclaimable ZFS cache) }
+        memTotal: { type: integer }
+        arcBytes: { type: integer, description: ZFS ARC (read cache) size }
+        netRxBps: { type: number }
+        netTxBps: { type: number }
+        load1: { type: number }
+        uptimeSecs: { type: number }
+    Metrics:
+      type: object
+      required: [current, history, cpus]
+      properties:
+        current: { $ref: "#/components/schemas/MetricSample" }
+        history: { type: array, items: { $ref: "#/components/schemas/MetricSample" } }
+        cpus: { type: integer }
     Error:
       type: object
       description: Body of every non-2xx response

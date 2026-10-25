@@ -35,6 +35,10 @@ func TestHealth(t *testing.T) {
 			t.Errorf("missing security header %s", h)
 		}
 	}
+	// The bundled fonts can be inlined as data: URIs by the web build.
+	if csp := res.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "font-src 'self' data:") {
+		t.Errorf("CSP %q does not allow bundled fonts", csp)
+	}
 }
 
 func TestVersion(t *testing.T) {

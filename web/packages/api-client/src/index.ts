@@ -29,6 +29,9 @@ export type Snapshot = S["Snapshot"];
 export type SnapshotPolicy = S["SnapshotPolicy"];
 export type ScrubPolicy = S["ScrubPolicy"];
 export type Notification = S["Notification"];
+export type SystemInfo = S["SystemInfo"];
+export type Metrics = S["Metrics"];
+export type MetricSample = S["MetricSample"];
 
 /** Header every state-changing request must carry (hardyd's CSRF check). */
 export const CSRF_HEADER = "X-HardyOS-Request";

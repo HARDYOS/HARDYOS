@@ -298,6 +298,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/system/info": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Hostname, OS, kernel and uptime */
+        get: operations["getSystemInfo"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system/metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Current CPU, memory and network use with ~5 minutes of history */
+        get: operations["getMetrics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/system/self-test": {
         parameters: {
             query?: never;
@@ -1140,6 +1174,32 @@ export interface components {
             /** Format: date-time */
             readAt: string | null;
         };
+        SystemInfo: {
+            hostname: string;
+            os: string;
+            kernel: string;
+            version: string;
+            uptimeSecs: number;
+        };
+        MetricSample: {
+            /** Format: date-time */
+            time: string;
+            cpuPercent: number;
+            /** @description Bytes used by programs (excludes the reclaimable ZFS cache) */
+            memUsed: number;
+            memTotal: number;
+            /** @description ZFS ARC (read cache) size */
+            arcBytes: number;
+            netRxBps: number;
+            netTxBps: number;
+            load1: number;
+            uptimeSecs: number;
+        };
+        Metrics: {
+            current: components["schemas"]["MetricSample"];
+            history: components["schemas"]["MetricSample"][];
+            cpus: number;
+        };
         /** @description Body of every non-2xx response */
         Error: {
             /** @description Stable machine-readable error code */
@@ -1674,6 +1734,47 @@ export interface operations {
                 };
             };
             403: components["responses"]["Forbidden"];
+        };
+    };
+    getSystemInfo: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description System info */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SystemInfo"];
+                };
+            };
+        };
+    };
+    getMetrics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Metrics */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Metrics"];
+                };
+            };
+            503: components["responses"]["Unavailable"];
         };
     };
     runSelfTest: {

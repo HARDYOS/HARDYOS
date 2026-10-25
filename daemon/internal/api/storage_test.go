@@ -14,6 +14,7 @@ import (
 
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/metrics"
 	"github.com/hardyos/hardyos/daemon/internal/notify"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/storage"
@@ -206,5 +207,42 @@ func TestStorageAPI(t *testing.T) {
 	admin.do("GET", "/api/v1/audit?action=storage.", nil, &entries)
 	if len(entries) < 3 {
 		t.Fatalf("audit entries = %d", len(entries))
+	}
+}
+
+func TestSystemInfoAndMetrics(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	root := fstest.MapFS{
+		"etc/os-release":            {Data: []byte("NAME=\"Debian GNU/Linux\"\nPRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\"\n")},
+		"proc/sys/kernel/osrelease": {Data: []byte("6.12.48-amd64\n")},
+		"proc/uptime":               {Data: []byte("3600.25 10\n")},
+		"proc/meminfo":              {Data: []byte("MemTotal: 8000000 kB\nMemAvailable: 4000000 kB\n")},
+	}
+	col := &metrics.Collector{Root: root}
+	srv := httptest.NewServer(New(Config{DB: db, Root: root, Metrics: col, Insecure: true}))
+	defer srv.Close()
+	env := &testEnv{srv: srv, db: db}
+	c := env.client(t)
+	c.do("POST", "/api/v1/setup/admin", map[string]string{"username": "cade", "password": "supersecret1"}, nil)
+
+	var info SystemInfo
+	if code := c.do("GET", "/api/v1/system/info", nil, &info); code != 200 {
+		t.Fatalf("info = %d", code)
+	}
+	if info.OS != "Debian GNU/Linux 13 (trixie)" || info.Kernel != "6.12.48-amd64" || info.UptimeSecs != 3600.25 {
+		t.Fatalf("info = %+v", info)
+	}
+	var snap metrics.Snapshot
+	if code := c.do("GET", "/api/v1/system/metrics", nil, &snap); code != 200 {
+		t.Fatalf("metrics = %d", code)
+	}
+	anon := env.client(t)
+	if code := anon.do("GET", "/api/v1/system/metrics", nil, nil); code != 401 {
+		t.Fatalf("anonymous metrics = %d", code)
 	}
 }
