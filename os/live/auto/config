@@ -13,8 +13,8 @@ lb config noauto \
   --apt-recommends false \
   --security true \
   --updates true \
-  --firmware-binary true \
-  --firmware-chroot true \
+  --firmware-binary false \
+  --firmware-chroot false \
   --memtest none \
   --linux-packages "linux-image linux-headers" \
   --iso-application "HardyOS" \
