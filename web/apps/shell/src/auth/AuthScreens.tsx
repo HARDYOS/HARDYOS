@@ -1,7 +1,8 @@
 import { type FormEvent, useEffect, useState } from "react";
 import { errorMessage } from "../api";
 import { useCreateFirstAdmin, useLogin } from "../hooks/session";
-import { LogoIcon, PowerIcon, RestartIcon } from "../icons";
+import { BrandIcon, BrandMark } from "../brand";
+import { PowerIcon, RestartIcon } from "../icons";
 import { Alert, Button, Field, TextInput } from "../ui";
 
 function useClock() {
@@ -29,7 +30,7 @@ function Footer({ hostname }: { hostname?: string }) {
   return (
     <>
       <div className="lock-footer">
-        <LogoIcon size={18} />
+        <BrandMark size={20} />
         <span>HardyOS{hostname ? ` · ${hostname}` : ""}</span>
       </div>
       <div className="lock-power" aria-label="Power options (available after sign-in)">
@@ -59,8 +60,8 @@ export function LoginScreen() {
     <div className="lock-screen wallpaper">
       <LockClock />
       <form className="lock-card glass" onSubmit={submit} aria-label="Sign in">
-        <div className="lock-card__avatar" aria-hidden="true">
-          <LogoIcon size={30} />
+        <div className="lock-card__brand">
+          <BrandIcon size={72} />
         </div>
         <div className="lock-card__heading">
           <h1>Sign in</h1>
@@ -104,7 +105,7 @@ export function SetupScreen() {
   return (
     <div className="lock-screen wallpaper">
       <div className="setup-intro">
-        <LogoIcon size={40} />
+        <BrandIcon size={72} />
         <h1>Welcome to HardyOS</h1>
         <p>Create the administrator account. It stays a local account, so you can always sign in even if other sign-in methods fail.</p>
       </div>

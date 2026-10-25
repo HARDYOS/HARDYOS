@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 512" width="1100" height="512">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#00F0FF"/>
+      <stop offset="1" stop-color="#8B5CFF"/>
+    </linearGradient>
+    <linearGradient id="tg" gradientUnits="userSpaceOnUse" x1="500" y1="0" x2="1060" y2="0">
+      <stop offset="0" stop-color="#00F0FF"/>
+      <stop offset="1" stop-color="#8B5CFF"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="1100" height="512" fill="#05070F"/>
+
+  <g transform="translate(20,0)">
+    <polygon points="256,62 424,159 424,353 256,450 88,353 88,159"
+             fill="#080C1A" stroke="url(#g)" stroke-width="8" stroke-linejoin="round" filter="url(#glow)"/>
+    <g filter="url(#glow)">
+      <rect x="178" y="184" width="32" height="150" rx="6" fill="url(#g)"/>
+      <rect x="302" y="184" width="32" height="150" rx="6" fill="url(#g)"/>
+      <rect x="218" y="228" width="76" height="9" rx="4.5" fill="#00F0FF"/>
+      <rect x="218" y="251" width="76" height="9" rx="4.5" fill="#FFFFFF"/>
+      <rect x="218" y="274" width="76" height="9" rx="4.5" fill="#8B5CFF"/>
+    </g>
+    <g stroke="url(#g)" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M194 184 V164"/><path d="M318 184 V164"/>
+      <path d="M194 334 V356 L214 376 H256"/><path d="M318 334 V356 L298 376 H256"/>
+    </g>
+    <g fill="#05070F" stroke="url(#g)" stroke-width="4">
+      <circle cx="194" cy="156" r="8"/><circle cx="318" cy="156" r="8"/><circle cx="256" cy="376" r="8"/>
+    </g>
+  </g>
+
+  <text x="500" y="292" font-family="'JetBrains Mono','SF Mono',Consolas,'Courier New',monospace"
+        font-size="118" font-weight="800" textLength="560" lengthAdjust="spacingAndGlyphs"
+        fill="#FFFFFF">HARDY<tspan fill="url(#tg)">OS</tspan></text>
+  <text x="504" y="346" font-family="'JetBrains Mono','SF Mono',Consolas,'Courier New',monospace"
+        font-size="22" textLength="550" lengthAdjust="spacing"
+        fill="#6F7BA8">YOUR DATA. YOUR CLOUD.</text>
+</svg>

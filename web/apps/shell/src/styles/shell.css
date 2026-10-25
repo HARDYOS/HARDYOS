@@ -538,3 +538,29 @@ button {
   justify-content: center;
   color: var(--hos-text-2);
 }
+
+/* ---------- Brand ---------- */
+.brand-mark,
+.brand-icon {
+  display: block;
+  flex: none;
+  user-select: none;
+}
+.brand-icon {
+  filter: drop-shadow(0 12px 32px rgba(0, 240, 255, 0.18));
+}
+.wordmark {
+  font-family: var(--hos-font-mono);
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: #fff;
+}
+.wordmark__os {
+  background: linear-gradient(90deg, #00f0ff, #8b5cff);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.lock-card__brand {
+  align-self: center;
+}

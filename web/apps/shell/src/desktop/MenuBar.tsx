@@ -5,7 +5,8 @@ import { api, errorMessage, unwrap } from "../api";
 import { dateTime, initials, relativeTime } from "../format";
 import { useNotifications } from "../hooks/queries";
 import { useLogout } from "../hooks/session";
-import { BellIcon, KeyIcon, LogoIcon, LogoutIcon } from "../icons";
+import { BrandMark } from "../brand";
+import { BellIcon, KeyIcon, LogoutIcon } from "../icons";
 import { appById } from "../shell";
 import { Alert, Button, Field, TextInput } from "../ui";
 import { Dialog } from "../ui/Dialog";
@@ -178,7 +179,7 @@ export function MenuBar({ user, connection }: { user: User; connection: string }
   });
   return (
     <header className="menubar glass">
-      <LogoIcon size={16} aria-label="HardyOS" />
+      <BrandMark size={18} label="HardyOS" />
       <span className="menubar__app">{focusedApp ?? "HardyOS"}</span>
       <span className="menubar__spacer" />
       {connection === "closed" && (

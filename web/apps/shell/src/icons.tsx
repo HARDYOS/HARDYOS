@@ -24,13 +24,6 @@ function svg(paths: React.ReactNode, defaultStroke = 1.8) {
   };
 }
 
-export const LogoIcon = svg(
-  <>
-    <rect x="3" y="3" width="18" height="18" rx="5" />
-    <path d="M8 8v8M16 8v8M8 12h8" />
-  </>,
-  2,
-);
 export const FolderIcon = svg(<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />);
 export const StorageIcon = svg(
   <>

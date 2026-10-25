@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#00F0FF"/>
+      <stop offset="1" stop-color="#8B5CFF"/>
+    </linearGradient>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0E1530"/>
+      <stop offset="1" stop-color="#05070F"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#00F0FF" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#00F0FF" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <rect x="3" y="3" width="506" height="506" rx="109" fill="none" stroke="#1B2547" stroke-width="2"/>
+  <circle cx="256" cy="256" r="230" fill="url(#halo)"/>
+
+  <!-- hexagon -->
+  <polygon points="256,62 424,159 424,353 256,450 88,353 88,159"
+           fill="#080C1A" fill-opacity="0.7" stroke="url(#g)" stroke-width="8" stroke-linejoin="round" filter="url(#glow)"/>
+  <polygon points="256,92 398,174 398,338 256,420 114,338 114,174"
+           fill="none" stroke="url(#g)" stroke-opacity="0.25" stroke-width="2"/>
+
+  <!-- H: two pillars + three storage-layer crossbars -->
+  <g filter="url(#glow)">
+    <rect x="178" y="184" width="32" height="150" rx="6" fill="url(#g)"/>
+    <rect x="302" y="184" width="32" height="150" rx="6" fill="url(#g)"/>
+    <rect x="218" y="228" width="76" height="9" rx="4.5" fill="#00F0FF"/>
+    <rect x="218" y="251" width="76" height="9" rx="4.5" fill="#FFFFFF"/>
+    <rect x="218" y="274" width="76" height="9" rx="4.5" fill="#8B5CFF"/>
+  </g>
+
+  <!-- circuit nodes and traces -->
+  <g stroke="url(#g)" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M194 184 V164"/>
+    <path d="M318 184 V164"/>
+    <path d="M194 334 V356 L214 376 H256"/>
+    <path d="M318 334 V356 L298 376 H256"/>
+  </g>
+  <g fill="#05070F" stroke="url(#g)" stroke-width="4">
+    <circle cx="194" cy="156" r="8"/>
+    <circle cx="318" cy="156" r="8"/>
+    <circle cx="256" cy="376" r="8"/>
+  </g>
+</svg>

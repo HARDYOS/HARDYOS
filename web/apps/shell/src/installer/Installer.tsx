@@ -3,7 +3,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from "react";
 import { api, errorMessage, unwrap } from "../api";
 import { bytes } from "../format";
-import { AlertIcon, CheckIcon, CpuIcon, DiskIcon, LockIcon, LogoIcon, NetworkIcon, RestartIcon } from "../icons";
+import { BrandIcon, BrandMark, Wordmark } from "../brand";
+import { AlertIcon, CheckIcon, CpuIcon, DiskIcon, LockIcon, NetworkIcon, RestartIcon } from "../icons";
 import { Alert, Badge, Button, Field, Loading, Progress, Select, Spinner, TextInput } from "../ui";
 import {
   INSTALL_STEPS,
@@ -62,7 +63,7 @@ function UnlockScreen() {
   return (
     <div className="lock-screen wallpaper">
       <div className="setup-intro">
-        <LogoIcon size={40} />
+        <BrandIcon size={72} />
         <h1>Install HardyOS</h1>
         <p>To make sure it's you, enter the code shown on the server's screen. Connect a monitor if you don't see one.</p>
       </div>
@@ -168,9 +169,9 @@ function Wizard({ version, lastFailure }: { version: string; lastFailure?: Job }
       <div className="inst__panel glass">
         <aside className="inst__rail">
           <div className="inst__brand">
-            <LogoIcon size={26} />
+            <BrandMark size={34} />
             <div>
-              <strong>HardyOS</strong>
+              <Wordmark className="inst__wordmark" />
               <span>{version ? `Installer · ${version}` : "Installer"}</span>
             </div>
           </div>
@@ -572,7 +573,7 @@ function Installing({ job }: { job: Job }) {
   return (
     <div className="lock-screen wallpaper">
       <div className="inst__progress glass" aria-live="polite">
-        <LogoIcon size={36} />
+        <BrandMark size={52} />
         <h1>Installing HardyOS</h1>
         <p className="muted">Keep the server on. This takes about 5–15 minutes.</p>
         <Progress value={job.progress ?? 0} label="Install progress" />
