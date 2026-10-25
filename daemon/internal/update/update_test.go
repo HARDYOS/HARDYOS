@@ -333,12 +333,23 @@ func TestStageConfirm(t *testing.T) {
 		t.Fatalf("second stage: %v", err)
 	}
 
-	// Restart: snapshot first.
+	// Restart: snapshot first, without the pending marker inside it.
+	markerInSnapshot := true
+	w.runner.hooks["zfs snapshot rpool/hardyos@pre-"] = func([]string) {
+		_, err := os.Stat(filepath.Join(w.root, "var/lib/hardyos/update-pending.json"))
+		markerInSnapshot = err == nil
+	}
 	if err := w.u.BeforeReboot(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if !w.has("zfs snapshot rpool/hardyos@pre-hardyos-0.2.0-20261025-120000") {
 		t.Error("no state snapshot before restarting")
+	}
+	if markerInSnapshot {
+		t.Error("the settings snapshot contains the pending marker")
+	}
+	if p, _ := w.u.PendingUpdate(); p == nil || p.Snapshot == "" {
+		t.Fatalf("pending marker after restart prep: %+v", p)
 	}
 	// Not booted into it yet: confirm does nothing.
 	if r, _ := w.u.Confirm(ctx); r.Confirmed {
@@ -452,6 +463,7 @@ func TestActivateDeleteCleanup(t *testing.T) {
 	w.runner.Fake.On("zfs list -H -t snapshot -o name -s creation rpool/hardyos",
 		"rpool/hardyos@pre-hardyos-0.5.0-20261020-100000\nrpool/hardyos@pre-hardyos-0.1.0-20260101-000000\n")
 
+	w.runner.Fake.On("zfs get -H -o value org.hardyos:version rpool/ROOT/hardyos-0.4.0", "0.4.0\n")
 	if err := w.u.Activate(ctx, "hardyos-0.5.0", false); err == nil {
 		t.Error("activated the running version")
 	}
@@ -468,11 +480,23 @@ func TestActivateDeleteCleanup(t *testing.T) {
 	if !st.RestoreOnBoot {
 		t.Error("settings restore not scheduled")
 	}
+	// The snapshot was taken right before restarting into 0.5.0, so rolling
+	// back brings 0.5.0's old pending marker with it (found on a real VM).
+	w.runner.hooks["zfs rollback -r rpool/hardyos@pre-hardyos-0.5.0-"] = func([]string) {
+		w.write("/var/lib/hardyos/update-pending.json", `{"bootEnvironment":"hardyos-0.5.0","dataset":"rpool/ROOT/hardyos-0.5.0","version":"0.5.0","fromBootEnvironment":"hardyos-0.4.0","fromVersion":"0.4.0","stagedAt":"2026-10-20T10:00:00Z","snapshot":"rpool/hardyos@pre-hardyos-0.5.0-20261020-100000"}`)
+	}
 	// The next boot restores settings before hardyd starts.
 	w.setBooted("rpool/ROOT/hardyos-0.4.0")
 	w.u.OnBoot(ctx)
 	if !w.has("zfs rollback -r rpool/hardyos@pre-hardyos-0.5.0-20261020-100000") {
 		t.Error("settings not restored on boot")
+	}
+	if w.has("zfs destroy -r rpool/ROOT/hardyos-0.5.0") {
+		t.Fatal("going back by hand destroyed the newer version")
+	}
+	st, _ = w.u.Status(ctx)
+	if st.Pending != nil || st.Last == nil || !st.Last.OK || !strings.Contains(st.Last.Message, "Switched to HardyOS 0.4.0 and restored settings") {
+		t.Fatalf("after restore: pending=%+v last=%+v", st.Pending, st.Last)
 	}
 
 	if err := w.u.Delete(ctx, "hardyos-0.4.0"); err == nil {

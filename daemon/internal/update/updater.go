@@ -84,6 +84,7 @@ type Result struct {
 type restoreMarker struct {
 	Snapshot string `json:"snapshot"`
 	Reason   string `json:"reason"`
+	Version  string `json:"version"` // the version switched to
 }
 
 func (u *Updater) path(p string) string { return filepath.Join(u.Root, p) }
@@ -423,18 +424,21 @@ func (u *Updater) BeforeReboot(ctx context.Context) error {
 		return err
 	}
 	snap := fmt.Sprintf("%s/hardyos@pre-%s-%s", cfg.Pool, p.BE, u.now().Format("20060102-150405"))
-	p.Snapshot = snap
-	// Record the snapshot name first: the marker is part of the snapshot, so
-	// after a rollback it still knows which snapshot it came from.
+	// Take the snapshot without the pending marker in it: restoring this
+	// snapshot later (going back to this version by hand) must never bring
+	// back a marker for an update that was long confirmed, whichever
+	// version's code does the restoring.
+	if err := os.Remove(u.pendingFile()); err != nil {
+		return err
+	}
+	_, snapErr := u.run(ctx, "zfs", "snapshot", snap)
+	if snapErr == nil {
+		p.Snapshot = snap
+	}
 	if err := writeJSON(u.pendingFile(), p); err != nil {
 		return err
 	}
-	if _, err := u.run(ctx, "zfs", "snapshot", snap); err != nil {
-		p.Snapshot = ""
-		_ = writeJSON(u.pendingFile(), p)
-		return err
-	}
-	return nil
+	return snapErr
 }
 
 // Confirm and boot-time checks ------------------------------------------------
@@ -492,12 +496,18 @@ func (u *Updater) OnBoot(ctx context.Context) {
 		_ = os.Remove(u.restoreFile())
 		if rm.Snapshot != "" {
 			if _, err := u.run(ctx, "zfs", "rollback", "-r", rm.Snapshot); err != nil {
-				u.setResult(false, "", "Couldn't restore settings from before the update: "+err.Error())
+				u.setResult(false, rm.Version, "Couldn't restore settings from before the update: "+err.Error())
 			} else {
+				// The snapshot was taken just before restarting into an update,
+				// so it holds that update's pending marker. The update was
+				// confirmed back then; the marker is stale and must not make
+				// this boot look like a failed update.
+				_ = os.Remove(u.pendingFile())
 				_ = os.Remove(u.restoreFile())
-				u.setResult(true, "", "Settings were restored from before the update.")
+				u.setResult(true, rm.Version, fmt.Sprintf("Switched to HardyOS %s and restored settings from before the update.", rm.Version))
 			}
 		}
+		return
 	}
 
 	p, err := u.PendingUpdate()
@@ -590,7 +600,13 @@ func (u *Updater) Activate(ctx context.Context, name string, restoreSettings boo
 	_ = boot.ClearNextBoot(ctx, u.env(), cfg)
 	_ = os.Remove(u.restoreFile())
 	if snap != "" {
-		return writeJSON(u.restoreFile(), restoreMarker{Snapshot: snap, Reason: "switch to " + name})
+		version := name
+		if out, err := u.run(ctx, "zfs", "get", "-H", "-o", "value", boot.VersionProp, ds); err == nil {
+			if v := strings.TrimSpace(string(out)); v != "" && v != "-" {
+				version = v
+			}
+		}
+		return writeJSON(u.restoreFile(), restoreMarker{Snapshot: snap, Reason: "switch to " + name, Version: version})
 	}
 	return nil
 }
