@@ -1,0 +1,24 @@
+#!/bin/sh
+# HardyOS boot menu on the ISO: our name on the entries, no generic title
+# over the splash, and a timeout so headless servers start the installer
+# without anyone pressing Enter. Runs inside the binary/ directory.
+set -e
+
+if [ -f boot/grub/live-theme/theme.txt ]; then
+  sed -i 's|^title-text:.*|title-text: ""|' boot/grub/live-theme/theme.txt
+fi
+
+for f in boot/grub/grub.cfg isolinux/live.cfg; do
+  [ -f "$f" ] || continue
+  sed -i \
+    -e 's/Live system (\([a-z0-9]*\) fail-safe mode)/Install HardyOS (safe mode)/' \
+    -e 's/Live system (\([a-z0-9]*\))/Install HardyOS/' \
+    "$f"
+done
+
+if [ -f boot/grub/config.cfg ] && ! grep -q '^set timeout=' boot/grub/config.cfg; then
+  echo 'set timeout=5' >> boot/grub/config.cfg
+fi
+if [ -f isolinux/isolinux.cfg ]; then
+  sed -i 's/^timeout 0$/timeout 50/' isolinux/isolinux.cfg
+fi
