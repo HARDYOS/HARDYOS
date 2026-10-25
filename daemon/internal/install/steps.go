@@ -181,9 +181,7 @@ func (in *Installer) squashfs() (string, error) {
 
 // Reset undoes a previous, interrupted attempt so a new one can start.
 func (in *Installer) Reset(ctx context.Context) {
-	for _, m := range []string{"run", "sys", "proc", "dev"} {
-		in.try(ctx, "umount", "-R", "-l", in.T(m))
-	}
+	unbindSystemDirs(ctx, in.Runner, in.target())
 	if res, err := in.Runner.Run(ctx, nil, "zpool", "list", "-H", in.pool()); err == nil && res.ExitCode == 0 {
 		in.try(ctx, "zpool", "export", "-f", in.pool())
 	}
@@ -392,9 +390,6 @@ func (in *Installer) Configure(ctx context.Context, p Plan, seed Seed) error {
 	if err := os.Symlink(filepath.Join("/usr/share/zoneinfo", p.Timezone), localtime); err != nil {
 		return err
 	}
-	for _, rel := range []string{"etc/hardyos/live-installer", "var/lib/dbus/machine-id"} {
-		_ = os.Remove(in.path(in.T(rel)))
-	}
 	if keys, _ := filepath.Glob(in.path(in.T("etc/ssh/ssh_host_*"))); len(keys) > 0 {
 		for _, k := range keys {
 			_ = os.Remove(k)
@@ -404,77 +399,7 @@ func (in *Installer) Configure(ctx context.Context, p Plan, seed Seed) error {
 		return err
 	}
 
-	if err := in.bindSystemDirs(ctx); err != nil {
-		return err
-	}
-	defer in.unbindSystemDirs(context.WithoutCancel(ctx))
-
-	if live := in.installedLivePackages(ctx); len(live) > 0 {
-		args := append([]string{in.target(), "env", "DEBIAN_FRONTEND=noninteractive", "dpkg", "--purge"}, live...)
-		if _, err := in.run(ctx, "chroot", args...); err != nil {
-			return fmt.Errorf("remove live-system packages: %w", err)
-		}
-	}
-	if _, err := in.run(ctx, "chroot", in.target(), "ssh-keygen", "-A"); err != nil {
-		return err
-	}
-	kernels, err := os.ReadDir(in.path(in.T("lib/modules")))
-	if err != nil {
-		return err
-	}
-	for _, k := range kernels {
-		if _, err := os.Stat(in.path(in.T("boot/vmlinuz-" + k.Name()))); err != nil {
-			continue
-		}
-		_ = os.Remove(in.path(in.T("boot/initrd.img-" + k.Name())))
-		if _, err := in.run(ctx, "chroot", in.target(), "update-initramfs", "-c", "-k", k.Name()); err != nil {
-			return fmt.Errorf("build initramfs for %s: %w", k.Name(), err)
-		}
-	}
-	return nil
-}
-
-// livePackages are only for the live ISO and are removed from installs.
-var livePackages = []string{"live-boot", "live-boot-initramfs-tools", "live-config", "live-config-systemd", "live-tools"}
-
-func (in *Installer) installedLivePackages(ctx context.Context) []string {
-	args := append([]string{in.target(), "dpkg-query", "-W", "-f=${Package} ${db:Status-Status}\\n"}, livePackages...)
-	res, err := in.Runner.Run(ctx, nil, "chroot", args...)
-	if err != nil {
-		return nil
-	}
-	var out []string
-	for _, line := range strings.Split(string(res.Stdout), "\n") {
-		if f := strings.Fields(line); len(f) == 2 && f[1] == "installed" {
-			out = append(out, f[0])
-		}
-	}
-	return out
-}
-
-func (in *Installer) bindSystemDirs(ctx context.Context) error {
-	mounts := [][]string{
-		{"--rbind", "/dev", in.T("dev")},
-		{"-t", "proc", "proc", in.T("proc")},
-		{"-t", "sysfs", "sysfs", in.T("sys")},
-		{"-t", "tmpfs", "tmpfs", in.T("run")},
-	}
-	for _, m := range mounts {
-		if err := os.MkdirAll(in.path(m[len(m)-1]), 0o755); err != nil {
-			return err
-		}
-		if _, err := in.run(ctx, "mount", m...); err != nil {
-			in.unbindSystemDirs(ctx)
-			return err
-		}
-	}
-	return nil
-}
-
-func (in *Installer) unbindSystemDirs(ctx context.Context) {
-	for _, m := range []string{"run", "sys", "proc", "dev"} {
-		in.try(ctx, "umount", "-R", "-l", in.T(m))
-	}
+	return FinishRoot(ctx, in.Runner, in.Root, in.target())
 }
 
 func (in *Installer) nics() []string {
@@ -615,7 +540,7 @@ func staleEntries(out string) []string {
 // Finish unmounts the target and exports the pool so the new system imports
 // it cleanly on first boot.
 func (in *Installer) Finish(ctx context.Context) error {
-	in.unbindSystemDirs(ctx)
+	unbindSystemDirs(ctx, in.Runner, in.target())
 	_, err := in.run(ctx, "zpool", "export", in.pool())
 	return err
 }

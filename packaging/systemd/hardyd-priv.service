@@ -5,7 +5,11 @@ After=local-fs.target zfs-mount.service
 Before=hardyd.service
 
 [Service]
-Type=simple
+# Ready once the socket is up, after any rollback of a failed update has
+# finished, so hardyd never opens a database that is about to be rolled back.
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=10min
 # Root user, hardyd group: the socket directory /run/hardyos becomes root:hardyd 0750.
 Group=hardyd
 ExecStart=/usr/bin/hardyd-priv -socket /run/hardyos/priv.sock -allow-user hardyd

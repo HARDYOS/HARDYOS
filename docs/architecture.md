@@ -110,6 +110,38 @@ operation per pool at a time). Progress streams to the browser over the
   the account on first boot (only if no accounts exist) and deletes the file.
 - Secure Boot is not supported yet (GRUB is unsigned).
 
+## Updates and rollback
+
+- A release is a signed update file (`.hupd`): a tar of `manifest.json`
+  (version, architecture, the system image's size and SHA-256),
+  `manifest.sig` (ed25519 over the manifest) and `rootfs.squashfs` (the same
+  image the ISO boots). `make release` builds the ISO and signs the image
+  with the release key, which lives only on the release computer
+  (`~/.config/hardyos/release.key`). Servers trust the public keys compiled
+  in from `daemon/internal/update/keys/` plus `/etc/hardyos/trusted-keys.d/`.
+- Installing (Control Panel > Updates: upload or https download) runs as a
+  job: hardyd-priv checks the signature before reading the image and the
+  hash while extracting, creates `rpool/ROOT/hardyos-<version>`, unpacks the
+  image, carries this server's identity and settings over (hostname, host ID,
+  network, SSH host keys, machine ID, time zone, pool cache), runs the same
+  finishing steps as the installer, adds it to the boot menu and sets GRUB's
+  one-time `next_entry`. Nothing changes for the running version.
+- Restarting snapshots `rpool/hardyos` first (`@pre-<be>-<time>`).
+- First boot of the new version: hardyd-priv starts a 15-minute watchdog;
+  hardyd confirms after a minute of being healthy (root helper and database
+  answer). Confirming makes the version the pool's `bootfs` (the default),
+  clears the one-time choice and keeps the newest three versions.
+- If the new version never confirms (kernel panic, hardyd failing, hang),
+  the watchdog or a power cycle brings the server back: the one-time choice
+  is already used up, so GRUB starts the previous default. hardyd-priv
+  (`Type=notify`, ready only after this) then rolls `rpool/hardyos` back to
+  the snapshot, removes the failed version and records the result, before
+  hardyd opens the database.
+- Going back by hand: "Use this version" makes an older version the default
+  for the next restart, optionally restoring the settings snapshot taken
+  before the running version was installed (applied at boot, before hardyd
+  starts).
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly

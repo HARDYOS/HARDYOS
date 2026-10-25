@@ -19,6 +19,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/install"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
+	"github.com/hardyos/hardyos/daemon/internal/update"
 	"github.com/hardyos/hardyos/daemon/internal/version"
 )
 
@@ -55,9 +56,30 @@ func main() {
 	}
 	priv.RegisterBuiltins(s)
 	priv.RegisterStorage(s, priv.StorageEnv{Runner: sysexec.Exec{}, Root: os.DirFS("/")})
-	priv.RegisterSystem(s, sysexec.Exec{})
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	if install.IsLive("/") {
+	reboot := func() { _, _ = sysexec.Exec{}.Run(context.Background(), nil, "systemctl", "reboot") }
+	updater := &update.Updater{
+		Runner: sysexec.Exec{}, Root: "/",
+		Keys:   func() []update.PublicKey { return update.TrustedKeys("/") },
+		Reboot: reboot,
+	}
+	live := install.IsLive("/")
+	if live {
+		priv.RegisterSystem(s, sysexec.Exec{}, nil)
+	} else {
+		// Before hardyd touches the state dataset: finish a settings restore,
+		// undo a failed update, or start the new version's confirm watchdog.
+		updater.OnBoot(ctx)
+		priv.RegisterSystem(s, sysexec.Exec{}, updater.BeforeReboot)
+		priv.RegisterUpdates(s, updater)
+		if len(updater.Keys()) == 0 {
+			log.Warn("no trusted release key: updates can't be installed until one is added")
+		}
+	}
+
+	if live {
 		// Live installer: publish the one-time code on the console and offer
 		// the install steps. Installed systems never get these operations.
 		code, err := install.NewCode()
@@ -82,9 +104,7 @@ func main() {
 		log.Info("live installer mode: install code published on the console")
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
+	s.OnListen = priv.NotifyReady
 	log.Info("hardyd-priv listening", "socket", *socket, "ops", s.Ops())
 	if err := s.ListenAndServe(ctx, *socket, 0o660, gid); err != nil {
 		log.Error("serve failed", "err", err)

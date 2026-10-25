@@ -74,6 +74,20 @@ deb: build ## Build the hardyos-core Debian package into dist/
 iso: deb ## Build the live/installer ISO into dist/ (needs Docker)
 	VERSION=$(VERSION) os/build-iso.sh
 
+.PHONY: release-key
+release-key: ## Create the release signing key (once, on the computer that builds releases)
+	cd daemon && go run ./cmd/hardyrelease keygen -pub internal/update/keys/release.pub
+	@echo "Now commit daemon/internal/update/keys/release.pub"
+
+.PHONY: release
+release: ## Build the ISO plus a signed update file (.hupd) into dist/
+	@case "$(VERSION)" in *dirty*) echo "Commit your changes first: releases are built from a clean tree" >&2; exit 1;; esac
+	@ls daemon/internal/update/keys/*.pub >/dev/null 2>&1 || { echo "No release key yet: run 'make release-key' first" >&2; exit 1; }
+	$(MAKE) iso
+	cd daemon && go run ./cmd/hardyrelease bundle -version "$(VERSION)" -arch $(ARCH) \
+		-rootfs $(DIST)/hardyos-$(VERSION)-$(ARCH).squashfs -out $(DIST)/hardyos-$(VERSION)-$(ARCH).hupd
+	cd $(DIST) && sha256sum hardyos-$(VERSION)-$(ARCH).hupd > hardyos-$(VERSION)-$(ARCH).hupd.sha256
+
 .PHONY: clean
 clean: ## Remove build output
 	rm -rf $(DIST) web/apps/shell/dist

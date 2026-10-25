@@ -36,4 +36,6 @@ iso=${isos[0]:?no ISO produced}
 out="$SRC/dist/hardyos-${VERSION}-amd64.iso"
 mv "$iso" "$out"
 sha256sum "$out" > "$out.sha256"
+# The system image doubles as the payload of signed update files (make release).
+cp "$WORK/binary/live/filesystem.squashfs" "$SRC/dist/hardyos-${VERSION}-amd64.squashfs"
 echo "Built $out"

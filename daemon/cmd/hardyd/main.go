@@ -29,6 +29,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/storage"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 	"github.com/hardyos/hardyos/daemon/internal/tlscert"
+	"github.com/hardyos/hardyos/daemon/internal/updates"
 	"github.com/hardyos/hardyos/daemon/internal/version"
 )
 
@@ -94,6 +95,11 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 	stor := &storage.Service{Priv: pc, Jobs: manager, DB: db, Notify: notifications, Log: log}
 	api.RegisterJobKinds(manager, pc)
 	stor.RegisterJobs(manager)
+	var upd *updates.Service
+	if !live {
+		upd = &updates.Service{Priv: pc, Jobs: manager, Notify: notifications, DB: db, Log: log}
+		upd.RegisterJobs(manager)
+	}
 	var inst *installer.Service
 	if live {
 		inst = &installer.Service{Priv: pc, Jobs: manager, Limiter: auth.NewLoginLimiter()}
@@ -109,13 +115,16 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 	handler := api.New(api.Config{
 		DB: db, Jobs: manager, Events: broker, Priv: pc, Logger: log,
 		Storage: stor, Notify: notifications, Metrics: collector,
-		WebRoot: webRoot, Insecure: httpsAddr == "", Installer: inst,
+		WebRoot: webRoot, Insecure: httpsAddr == "", Installer: inst, Updates: upd,
 	})
 
 	go housekeeping(ctx, log, &auth.Sessions{DB: db})
 	go collector.Run(ctx) // CPU, memory and network history
 	if !live {
 		go stor.Run(ctx) // snapshot, scrub and SMART schedules
+		// After an update, confirm the new version once it has stayed up for
+		// a minute and report the result.
+		go upd.ConfirmWhenHealthy(ctx, time.Minute)
 	}
 
 	var servers []*http.Server

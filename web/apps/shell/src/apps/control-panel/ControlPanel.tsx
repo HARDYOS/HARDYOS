@@ -1,17 +1,19 @@
 import { useState } from "react";
 import { initials } from "../../format";
-import { CpuIcon, GridIcon, ShieldIcon, UsersIcon } from "../../icons";
+import { CpuIcon, GridIcon, RefreshIcon, ShieldIcon, UsersIcon } from "../../icons";
 import { type AppProps, useShell } from "../../shell";
 import { AppLayout, PageHeader, SideNav } from "../../ui";
 import { AuditLog } from "../shared";
 import { Hardware } from "./Hardware";
 import { Overview } from "./Overview";
+import { Updates } from "./Updates";
 import { Users } from "./Users";
 
 const SECTIONS = [
   { id: "overview", label: "Overview", icon: <GridIcon size={16} /> },
   { id: "users", label: "Users & Groups", icon: <UsersIcon size={16} /> },
   { id: "hardware", label: "Hardware", icon: <CpuIcon size={16} /> },
+  { id: "updates", label: "Updates", icon: <RefreshIcon size={16} /> },
   { id: "security", label: "Security", icon: <ShieldIcon size={16} /> },
 ];
 
@@ -43,6 +45,7 @@ export default function ControlPanel({ args }: AppProps) {
       {section === "overview" && <Overview onNavigate={setSection} />}
       {section === "users" && <Users />}
       {section === "hardware" && <Hardware />}
+      {section === "updates" && <Updates />}
       {section === "security" && (
         <>
           <PageHeader title="Security" subtitle="Every sign-in and every change to the system, newest first." />

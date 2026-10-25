@@ -82,9 +82,16 @@ func done(err error) (any, error) {
 	return map[string]bool{"ok": true}, nil
 }
 
-// RegisterSystem adds power operations.
-func RegisterSystem(s *Server, r sysexec.Runner) {
+// RegisterSystem adds power operations. beforeReboot, if set, runs first
+// (it snapshots settings when an update is waiting); an error cancels the
+// restart.
+func RegisterSystem(s *Server, r sysexec.Runner, beforeReboot func(context.Context) error) {
 	s.Handle(OpSystemReboot, func(ctx context.Context, _ json.RawMessage) (any, error) {
+		if beforeReboot != nil {
+			if err := beforeReboot(ctx); err != nil {
+				return nil, Errorf(CodeFailed, "not restarting: %v", err)
+			}
+		}
 		// Answer first; the reboot starts a moment later.
 		go func() {
 			time.Sleep(time.Second)
