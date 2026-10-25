@@ -789,6 +789,113 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/installer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Whether this server is the live installer, and the install's progress
+         * @description On an installed system this returns `active: false`. On the live ISO
+         *     the whole API is replaced by the /installer endpoints, which are
+         *     unlocked with the one-time code shown on the server's console.
+         */
+        get: operations["getInstallerStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/installer/unlock": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Enter the code shown on the server's console */
+        post: operations["unlockInstaller"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/installer/hardware": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Disks and network interfaces to choose from */
+        get: operations["getInstallerHardware"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/installer/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Validate an install plan against the hardware without changing anything */
+        post: operations["checkInstallPlan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/installer/install": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Erase the boot disks and install HardyOS */
+        post: operations["startInstall"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/installer/reboot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Restart the server (into the new system once installed) */
+        post: operations["rebootInstaller"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1199,6 +1306,67 @@ export interface components {
             current: components["schemas"]["MetricSample"];
             history: components["schemas"]["MetricSample"][];
             cpus: number;
+        };
+        InstallerStatus: {
+            /** @description This server is running the live installer */
+            active: boolean;
+            /** @description This browser entered the console code */
+            unlocked: boolean;
+            /** @description The HardyOS version that will be installed */
+            version?: string;
+            job?: components["schemas"]["Job"];
+        };
+        InstallerNIC: {
+            name: string;
+            mac: string;
+            speedMbps: number;
+            up: boolean;
+            driver: string;
+            /** @description Current addresses in CIDR form */
+            addresses: string[];
+        };
+        InstallerHardware: {
+            disks: components["schemas"]["Disk"][];
+            nics: components["schemas"]["InstallerNIC"][];
+            memBytes: number;
+            cpu: string;
+            virtual: boolean;
+            hostname: string;
+        };
+        InstallNetwork: {
+            /** @enum {string} */
+            mode: "dhcp" | "static";
+            interface?: string;
+            /** @description CIDR */
+            address?: string;
+            gateway?: string;
+            dns?: string[];
+        };
+        InstallPlan: {
+            /** @description Boot disks (by-id paths); two or more are mirrored */
+            disks: string[];
+            hostname: string;
+            /** @example America/Chicago */
+            timezone: string;
+            network: components["schemas"]["InstallNetwork"];
+        };
+        InstallCheck: {
+            version: string;
+            bootEnvironment: string;
+            disks: {
+                disk: components["schemas"]["Disk"];
+                warnings: string[];
+            }[];
+        };
+        InstallRequest: {
+            plan: components["schemas"]["InstallPlan"];
+            admin: {
+                username: string;
+                displayName?: string;
+                password: string;
+            };
+            /** @description Must be true; the boot disks are erased */
+            confirmWipe: boolean;
         };
         /** @description Body of every non-2xx response */
         Error: {
@@ -2599,6 +2767,159 @@ export interface operations {
                 };
                 content?: never;
             };
+        };
+    };
+    getInstallerStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Installer state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstallerStatus"];
+                };
+            };
+        };
+    };
+    unlockInstaller: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @example K7QM-4TXP */
+                    code: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Unlocked; sets the `hardyos_installer` cookie */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstallerStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description Too many wrong codes */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getInstallerHardware: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Hardware */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstallerHardware"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    checkInstallPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    plan: components["schemas"]["InstallPlan"];
+                };
+            };
+        };
+        responses: {
+            /** @description The plan is valid; per-disk warnings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstallCheck"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    startInstall: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InstallRequest"];
+            };
+        };
+        responses: {
+            /** @description Install started; follow it on GET /installer */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    rebootInstaller: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Restarting */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
         };
     };
 }

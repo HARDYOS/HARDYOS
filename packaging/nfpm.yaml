@@ -34,6 +34,19 @@ contents:
     dst: /lib/systemd/system/hardyd.service
   - src: ./systemd/hardyd-priv.service
     dst: /lib/systemd/system/hardyd-priv.service
+  # Keep the boot disks in sync with kernel and initramfs updates.
+  - src: ./boot/zz-hardyos-boot
+    dst: /etc/kernel/postinst.d/zz-hardyos-boot
+    type: config
+    file_info: { mode: 0755 }
+  - src: ./boot/zz-hardyos-boot
+    dst: /etc/kernel/postrm.d/zz-hardyos-boot
+    type: config
+    file_info: { mode: 0755 }
+  - src: ./boot/zz-hardyos-boot
+    dst: /etc/initramfs/post-update.d/zz-hardyos-boot
+    type: config
+    file_info: { mode: 0755 }
 scripts:
   postinstall: ./scripts/postinstall.sh
   preremove: ./scripts/preremove.sh

@@ -77,6 +77,39 @@ operation per pool at a time). Progress streams to the browser over the
   spare SSDs become a special mirror, then an SLOG (only with power-loss
   protection), then L2ARC (only with 32 GB+ RAM).
 
+## Install and boot
+
+- The ISO is a live system with the marker `/etc/hardyos/live-installer`.
+  When it is present, hardyd-priv prints a one-time code on the console
+  (`/etc/issue.d`) and registers the `install.*` operations, and hardyd serves
+  only the installer API. Installed systems have neither. The code unlocks
+  the browser with an in-memory session (cookie `hardyos_installer`); wrong
+  codes are rate limited.
+- The install runs as a job of fixed steps, each a privileged operation:
+  check, partition, pool, copy system, configure, boot loader, finish. A
+  failure resets the target so the person can retry.
+- Boot disk layout (GPT): 1 MiB BIOS boot, 1 GiB EFI system partition (FAT32),
+  the rest a ZFS partition. Two or more disks form a mirrored `rpool`.
+- Datasets: `rpool/ROOT/hardyos-<version>` is one boot environment per
+  version (mounted at `/`, `org.hardyos:version` property);
+  `rpool/hardyos` is `/var/lib/hardyos`, shared by every boot environment
+  (database, TLS, `boot.json`).
+- The system is copied from the live image (`unsquashfs`), so installing
+  needs no network. Live-only packages are purged, the initramfs is rebuilt
+  with ZFS support, and the host ID is copied so the pool imports cleanly.
+- GRUB never reads ZFS. `internal/boot` copies each boot environment's
+  kernel and initramfs to every ESP (`/hardyos/<be>/`) and writes one
+  `grub.cfg` with an entry per boot environment (newest five, the pool's
+  `bootfs` first, kernel argument `root=ZFS=<dataset>`). GRUB is installed at
+  the removable path (`EFI/BOOT/BOOTX64.EFI`, no NVRAM entry needed) and for
+  BIOS on x86. `hardyctl boot-sync` runs this after every kernel or
+  initramfs update (hooks in `/etc/kernel/*.d` and
+  `/etc/initramfs/post-update.d`).
+- The first administrator is created in the installer, but only its argon2id
+  hash travels to root. It is written as `install-seed.json`; hardyd creates
+  the account on first boot (only if no accounts exist) and deletes the file.
+- Secure Boot is not supported yet (GRUB is unsigned).
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly

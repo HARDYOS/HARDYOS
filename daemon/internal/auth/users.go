@@ -126,6 +126,26 @@ func (s *Users) Create(ctx context.Context, nu NewUser) (*User, error) {
 	if err != nil {
 		return nil, err
 	}
+	return s.insert(ctx, name, nu, hash)
+}
+
+// CreateHashed adds an account whose password was hashed elsewhere (the
+// installer hashes it before the system exists). nu.Password is ignored.
+func (s *Users) CreateHashed(ctx context.Context, nu NewUser, hash string) (*User, error) {
+	name, err := NormalizeUsername(nu.Username)
+	if err != nil {
+		return nil, err
+	}
+	if !nu.Role.Valid() {
+		return nil, ErrInvalidRole
+	}
+	if !strings.HasPrefix(hash, "$argon2id$") {
+		return nil, errors.New("unsupported password hash")
+	}
+	return s.insert(ctx, name, nu, hash)
+}
+
+func (s *Users) insert(ctx context.Context, name string, nu NewUser, hash string) (*User, error) {
 	now := store.Now()
 	res, err := s.DB.ExecContext(ctx, `INSERT INTO users
 		(username, display_name, email, role, password_hash, break_glass, created_at, updated_at)

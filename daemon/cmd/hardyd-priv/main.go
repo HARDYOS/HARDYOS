@@ -13,7 +13,10 @@ import (
 	"os/user"
 	"strconv"
 	"syscall"
+	"time"
 
+	"github.com/hardyos/hardyos/daemon/internal/hw"
+	"github.com/hardyos/hardyos/daemon/internal/install"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 	"github.com/hardyos/hardyos/daemon/internal/version"
@@ -52,6 +55,32 @@ func main() {
 	}
 	priv.RegisterBuiltins(s)
 	priv.RegisterStorage(s, priv.StorageEnv{Runner: sysexec.Exec{}, Root: os.DirFS("/")})
+	priv.RegisterSystem(s, sysexec.Exec{})
+
+	if install.IsLive("/") {
+		// Live installer: publish the one-time code on the console and offer
+		// the install steps. Installed systems never get these operations.
+		code, err := install.NewCode()
+		if err == nil {
+			err = install.PublishCode("/", code, gid)
+		}
+		if err != nil {
+			log.Error("could not create the install code", "err", err)
+			os.Exit(1)
+		}
+		// Refresh the login banners that are already on screen.
+		_, _ = sysexec.Exec{}.Run(context.Background(), nil, "agetty", "--reload")
+		priv.RegisterInstaller(s, &install.Installer{
+			Runner:  sysexec.Exec{},
+			Root:    "/",
+			Version: version.Version,
+			ListDisks: func(ctx context.Context) ([]hw.Disk, error) {
+				return hw.ListDisks(ctx, sysexec.Exec{}, os.DirFS("/"))
+			},
+		})
+		s.OpTimeout = 45 * time.Minute // copying the system from a slow USB stick
+		log.Info("live installer mode: install code published on the console")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

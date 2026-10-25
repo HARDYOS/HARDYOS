@@ -14,6 +14,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/events"
+	"github.com/hardyos/hardyos/daemon/internal/installer"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/metrics"
 	"github.com/hardyos/hardyos/daemon/internal/notify"
@@ -25,18 +26,21 @@ import (
 // Config controls the API server. Every dependency except DB is optional in
 // tests; New fills in defaults.
 type Config struct {
-	DB       *store.DB
-	Jobs     *jobs.Manager
-	Events   *events.Broker
-	Priv     *priv.Client
-	Limiter  *auth.LoginLimiter
-	Storage  *storage.Service // nil disables storage endpoints
-	Notify   *notify.Center   // nil disables notification endpoints
-	Metrics  *metrics.Collector
-	Root     fs.FS // filesystem rooted at "/" for system info; nil uses the real one
-	Logger   *slog.Logger
-	WebRoot  string // directory with the built web desktop; empty disables static serving
-	Insecure bool   // allow session cookies over plain HTTP (true until TLS lands)
+	DB      *store.DB
+	Jobs    *jobs.Manager
+	Events  *events.Broker
+	Priv    *priv.Client
+	Limiter *auth.LoginLimiter
+	Storage *storage.Service // nil disables storage endpoints
+	Notify  *notify.Center   // nil disables notification endpoints
+	Metrics *metrics.Collector
+	// Installer, when set, turns hardyd into the live ISO's web installer:
+	// only the installer API is served.
+	Installer *installer.Service
+	Root      fs.FS // filesystem rooted at "/" for system info; nil uses the real one
+	Logger    *slog.Logger
+	WebRoot   string // directory with the built web desktop; empty disables static serving
+	Insecure  bool   // allow session cookies over plain HTTP (true until TLS lands)
 }
 
 // Server is hardyd's HTTP handler.
@@ -80,7 +84,10 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/v1/health", s.handleHealth)
 	m.HandleFunc("GET /api/v1/version", s.handleVersion)
 
-	if s.cfg.DB != nil {
+	if s.cfg.Installer != nil {
+		s.installerRoutes()
+	} else if s.cfg.DB != nil {
+		m.HandleFunc("GET /api/v1/installer", s.handleInstallerStatus)
 		m.HandleFunc("GET /api/v1/setup", s.handleSetupStatus)
 		m.HandleFunc("POST /api/v1/setup/admin", s.handleSetupAdmin)
 		m.HandleFunc("POST /api/v1/auth/login", s.handleLogin)

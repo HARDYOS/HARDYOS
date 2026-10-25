@@ -4,8 +4,9 @@ import { ApiFailure, api, unwrap } from "../api";
 import { useWM } from "../wm/store";
 
 /** The signed-in user, or null when signed out. */
-export function useMe() {
+export function useMe(enabled = true) {
   return useQuery({
+    enabled,
     queryKey: ["me"],
     queryFn: async (): Promise<User | null> => {
       try {
@@ -20,8 +21,8 @@ export function useMe() {
   });
 }
 
-export function useSetupStatus() {
-  return useQuery({ queryKey: ["setup"], queryFn: () => unwrap(api.GET("/setup")), staleTime: Infinity });
+export function useSetupStatus(enabled = true) {
+  return useQuery({ enabled, queryKey: ["setup"], queryFn: () => unwrap(api.GET("/setup")), staleTime: Infinity });
 }
 
 export function useLogin() {
