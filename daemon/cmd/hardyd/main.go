@@ -4,23 +4,36 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/api"
+	"github.com/hardyos/hardyos/daemon/internal/auth"
+	"github.com/hardyos/hardyos/daemon/internal/events"
+	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/priv"
+	"github.com/hardyos/hardyos/daemon/internal/store"
+	"github.com/hardyos/hardyos/daemon/internal/tlscert"
 	"github.com/hardyos/hardyos/daemon/internal/version"
 )
 
 func main() {
 	var (
-		listen      = flag.String("listen", ":8080", "address to serve the API and web desktop on")
+		httpsAddr   = flag.String("https", ":443", "HTTPS address (empty disables HTTPS and serves the app over -http)")
+		httpAddr    = flag.String("http", ":80", "HTTP address; redirects to HTTPS when HTTPS is enabled (empty disables)")
+		tlsDir      = flag.String("tls-dir", "/var/lib/hardyos/tls", "directory for the HTTPS certificate")
+		dbPath      = flag.String("db", store.DefaultPath, "SQLite database path")
+		privSocket  = flag.String("priv-socket", priv.DefaultSocket, "hardyd-priv socket")
 		webRoot     = flag.String("web-root", "/usr/share/hardyos/web", "directory holding the built web desktop (empty to disable)")
 		logLevel    = flag.String("log-level", "info", "debug, info, warn or error")
 		showVersion = flag.Bool("version", false, "print version and exit")
@@ -32,45 +45,146 @@ func main() {
 		fmt.Printf("hardyd %s (%s) %s %s/%s\n", v.Version, v.Commit, v.GoVersion, v.OS, v.Arch)
 		return
 	}
-
 	log := newLogger(*logLevel)
 	slog.SetDefault(log)
-
-	if *webRoot != "" {
-		if _, err := os.Stat(*webRoot); err != nil {
-			log.Warn("web root not found, serving API only", "web_root", *webRoot)
-			*webRoot = ""
-		}
+	if err := run(log, *httpsAddr, *httpAddr, *tlsDir, *dbPath, *privSocket, *webRoot); err != nil {
+		log.Error("hardyd failed", "err", err)
+		os.Exit(1)
 	}
+}
 
-	srv := &http.Server{
-		Addr:              *listen,
-		Handler:           api.New(api.Config{WebRoot: *webRoot, Logger: log}),
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       120 * time.Second,
-	}
-
+func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webRoot string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	errCh := make(chan error, 1)
-	go func() {
-		log.Info("hardyd listening", "addr", *listen, "version", version.Version)
-		errCh <- srv.ListenAndServe()
-	}()
+	if webRoot != "" {
+		if _, err := os.Stat(webRoot); err != nil {
+			log.Warn("web root not found, serving API only", "web_root", webRoot)
+			webRoot = ""
+		}
+	}
+
+	db, err := store.Open(ctx, dbPath)
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer db.Close()
+
+	broker := events.NewBroker()
+	pc := priv.NewClient(privSocket)
+
+	jobCtx, cancelJobs := context.WithCancel(context.Background())
+	manager := &jobs.Manager{DB: db, Events: broker, Logger: log, Workers: 4}
+	api.RegisterJobKinds(manager, pc)
+	if err := manager.Start(jobCtx); err != nil {
+		cancelJobs()
+		return fmt.Errorf("start jobs: %w", err)
+	}
+	defer func() { cancelJobs(); manager.Wait() }()
+
+	handler := api.New(api.Config{
+		DB: db, Jobs: manager, Events: broker, Priv: pc, Logger: log,
+		WebRoot: webRoot, Insecure: httpsAddr == "",
+	})
+
+	go housekeeping(ctx, log, &auth.Sessions{DB: db})
+
+	var servers []*http.Server
+	errCh := make(chan error, 2)
+	serve := func(srv *http.Server, tlsOn bool) {
+		servers = append(servers, srv)
+		go func() {
+			var err error
+			if tlsOn {
+				log.Info("hardyd listening (https)", "addr", srv.Addr, "version", version.Version)
+				err = srv.ListenAndServeTLS("", "")
+			} else {
+				log.Info("hardyd listening (http)", "addr", srv.Addr, "version", version.Version)
+				err = srv.ListenAndServe()
+			}
+			if !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+		}()
+	}
+
+	if httpsAddr != "" {
+		cert, err := tlscert.LoadOrCreate(tlsDir)
+		if err != nil {
+			return fmt.Errorf("tls certificate: %w", err)
+		}
+		serve(&http.Server{
+			Addr:              httpsAddr,
+			Handler:           handler,
+			TLSConfig:         &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       120 * time.Second,
+		}, true)
+		if httpAddr != "" {
+			serve(&http.Server{Addr: httpAddr, Handler: redirectToHTTPS(httpsAddr), ReadHeaderTimeout: 10 * time.Second}, false)
+		}
+	} else if httpAddr != "" {
+		log.Warn("HTTPS disabled: serving over plain HTTP (development only)")
+		serve(&http.Server{Addr: httpAddr, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}, false)
+	} else {
+		return errors.New("both -https and -http are empty; nothing to serve")
+	}
 
 	select {
 	case err := <-errCh:
-		if !errors.Is(err, http.ErrServerClosed) {
-			log.Error("server failed", "err", err)
-			os.Exit(1)
-		}
+		return err
 	case <-ctx.Done():
-		log.Info("shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			log.Error("shutdown failed", "err", err)
+	}
+	log.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	for _, srv := range servers {
+		wg.Add(1)
+		go func(s *http.Server) {
+			defer wg.Done()
+			_ = s.Shutdown(shutdownCtx)
+		}(srv)
+	}
+	wg.Wait()
+	return nil
+}
+
+// redirectToHTTPS sends every plain-HTTP request to the HTTPS port, except the
+// health check, which monitoring may poll over HTTP.
+func redirectToHTTPS(httpsAddr string) http.Handler {
+	_, port, _ := net.SplitHostPort(httpsAddr)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/health" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+			return
+		}
+		host, _, err := net.SplitHostPort(r.Host)
+		if err != nil {
+			host = r.Host
+		}
+		target := "https://" + host
+		if port != "" && port != "443" {
+			target += ":" + port
+		}
+		http.Redirect(w, r, target+r.URL.RequestURI(), http.StatusMovedPermanently)
+	})
+}
+
+func housekeeping(ctx context.Context, log *slog.Logger, sessions *auth.Sessions) {
+	t := time.NewTicker(time.Hour)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if n, err := sessions.PurgeExpired(ctx); err != nil {
+				log.Warn("purge sessions", "err", err)
+			} else if n > 0 {
+				log.Info("purged expired sessions", "count", n)
+			}
 		}
 	}
 }

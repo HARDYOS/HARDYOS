@@ -35,6 +35,25 @@ unknown operations are rejected. Operations validate their own arguments and
 never accept raw shell commands. The socket is mode `0660`, owned by
 `root:hardyd`.
 
+## Sign-in and sessions
+
+- Passwords are hashed with Argon2id. Five failed sign-ins in 15 minutes lock
+  that IP and that username for 15 minutes.
+- Sessions are random 256-bit tokens in an HttpOnly, Secure, SameSite=Strict
+  cookie; only a SHA-256 hash is stored. They expire after 24 hours idle and
+  30 days at most. Password changes and disabling an account end its sessions.
+- State-changing requests must carry `X-HardyOS-Request: 1` (CSRF defense).
+- Every state-changing action is written to the audit log.
+- hardyd serves HTTPS on 443 with a self-signed certificate created on first
+  start; port 80 redirects to it.
+
+## Jobs and events
+
+Long operations run as jobs: queued, persisted in SQLite, run by a worker
+pool, cancellable, and serialized per resource when needed (for example one
+operation per pool at a time). Progress streams to the browser over the
+`/api/v1/events` WebSocket. Jobs interrupted by a restart are marked failed.
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly

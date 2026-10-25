@@ -3,7 +3,9 @@
 
   Open this address in a browser on another computer:
 
-      http://\4:8080
+      https://\4
 
-  No address shown? Check the network cable and DHCP.
+  Your browser will warn about the certificate the first time;
+  that is expected for a new server. No address shown? Check the
+  network cable and DHCP.
 

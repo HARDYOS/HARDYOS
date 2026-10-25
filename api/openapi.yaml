@@ -6,68 +6,471 @@ info:
     The hardyd control-plane API. The web desktop, hardyctl and apps all use it.
     This file is the source of truth: regenerate the TypeScript client with
     `make gen` after changing it.
+
+    Authentication: a session cookie (`hardyos_session`) set by `POST /auth/login`
+    or `POST /setup/admin`. State-changing requests (POST, PATCH, PUT, DELETE)
+    must send the header `X-HardyOS-Request: 1`; requests without it are
+    rejected with 403 `csrf`.
 servers:
   - url: /api/v1
+security:
+  - session: []
+tags:
+  - name: system
+  - name: auth
+  - name: users
+  - name: jobs
+  - name: audit
 paths:
   /health:
     get:
       operationId: getHealth
       summary: Liveness check
       tags: [system]
+      security: []
       responses:
         "200":
           description: hardyd is running
           content:
             application/json:
-              schema:
-                $ref: "#/components/schemas/Health"
+              schema: { $ref: "#/components/schemas/Health" }
   /version:
     get:
       operationId: getVersion
       summary: Build information
       tags: [system]
+      security: []
       responses:
         "200":
           description: Version and build details
           content:
             application/json:
+              schema: { $ref: "#/components/schemas/VersionInfo" }
+  /setup:
+    get:
+      operationId: getSetupStatus
+      summary: Whether first-time setup is still needed
+      tags: [auth]
+      security: []
+      responses:
+        "200":
+          description: Setup state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SetupStatus" }
+  /setup/admin:
+    post:
+      operationId: createFirstAdmin
+      summary: Create the first administrator (only while no accounts exist)
+      description: The new account is flagged break-glass and is signed in.
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SetupAdminRequest" }
+      responses:
+        "201":
+          description: Administrator created and signed in
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /auth/login:
+    post:
+      operationId: login
+      summary: Sign in
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: Signed in; session cookie set
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429":
+          description: Too many failed sign-ins; see Retry-After
+          headers:
+            Retry-After:
+              schema: { type: integer }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /auth/logout:
+    post:
+      operationId: logout
+      summary: Sign out this browser
+      tags: [auth]
+      security: []
+      responses:
+        "204": { description: Signed out }
+  /auth/me:
+    get:
+      operationId: getMe
+      summary: The signed-in user
+      tags: [auth]
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /auth/password:
+    post:
+      operationId: changePassword
+      summary: Change your own password (signs out your other sessions)
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChangePasswordRequest" }
+      responses:
+        "204": { description: Password changed }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /users:
+    get:
+      operationId: listUsers
+      summary: List accounts (admin)
+      tags: [users]
+      responses:
+        "200":
+          description: All accounts
+          content:
+            application/json:
               schema:
-                $ref: "#/components/schemas/VersionInfo"
+                type: array
+                items: { $ref: "#/components/schemas/User" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: createUser
+      summary: Create an account (admin)
+      tags: [users]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateUserRequest" }
+      responses:
+        "201":
+          description: Account created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /users/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+    get:
+      operationId: getUser
+      summary: Get an account (admin)
+      tags: [users]
+      responses:
+        "200":
+          description: The account
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      operationId: updateUser
+      summary: Update an account (admin)
+      description: Disabling an account signs out its sessions. The last active admin can't be demoted or disabled.
+      tags: [users]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateUserRequest" }
+      responses:
+        "200":
+          description: Updated account
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      operationId: deleteUser
+      summary: Delete an account (admin)
+      tags: [users]
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /users/{id}/password:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+    post:
+      operationId: resetUserPassword
+      summary: Set another user's password (admin; signs them out)
+      tags: [users]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResetPasswordRequest" }
+      responses:
+        "204": { description: Password set }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /jobs:
+    get:
+      operationId: listJobs
+      summary: Recent jobs (admins see all, users their own)
+      tags: [jobs]
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500 } }
+      responses:
+        "200":
+          description: Jobs, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Job" }
+  /jobs/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getJob
+      summary: One job
+      tags: [jobs]
+      responses:
+        "200":
+          description: The job
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /jobs/{id}/cancel:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: cancelJob
+      summary: Ask a queued or running job to stop
+      tags: [jobs]
+      responses:
+        "202": { description: Cancellation requested }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /events:
+    get:
+      operationId: streamEvents
+      summary: WebSocket stream of events you may see
+      description: |
+        Upgrade to a WebSocket. The server sends JSON messages: first
+        `{"type":"hello","user":"..."}`, then `Event` objects (job updates,
+        notifications, and for admins audit entries).
+      tags: [system]
+      responses:
+        "101": { description: Switching to WebSocket }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /audit:
+    get:
+      operationId: listAudit
+      summary: Audit log, newest first (admin)
+      tags: [audit]
+      parameters:
+        - { name: action, in: query, description: Action prefix, e.g. "user.", schema: { type: string } }
+        - { name: actorId, in: query, schema: { type: integer, format: int64 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500 } }
+        - { name: before, in: query, description: Return entries with id lower than this (paging), schema: { type: integer, format: int64 } }
+      responses:
+        "200":
+          description: Audit entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AuditEntry" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /system/self-test:
+    post:
+      operationId: runSelfTest
+      summary: Start a job that checks the job system and root helper (admin)
+      tags: [system]
+      responses:
+        "202":
+          description: Job queued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 components:
+  securitySchemes:
+    session:
+      type: apiKey
+      in: cookie
+      name: hardyos_session
+  responses:
+    Unauthorized:
+      description: Not signed in or session expired
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Not allowed
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such resource
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Invalid:
+      description: Request failed validation
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Conflicts with current state
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
   schemas:
     Health:
       type: object
       required: [status, uptimeSeconds]
       properties:
-        status:
-          type: string
-          enum: [ok]
-        uptimeSeconds:
-          type: number
-          description: Seconds since hardyd started
+        status: { type: string, enum: [ok] }
+        uptimeSeconds: { type: number, description: Seconds since hardyd started }
     VersionInfo:
       type: object
       required: [version, commit, goVersion, os, arch]
       properties:
-        version:
-          type: string
-          examples: ["0.1.0"]
-        commit:
-          type: string
-        goVersion:
-          type: string
-        os:
-          type: string
-        arch:
-          type: string
+        version: { type: string, examples: ["0.1.0"] }
+        commit: { type: string }
+        goVersion: { type: string }
+        os: { type: string }
+        arch: { type: string }
+    SetupStatus:
+      type: object
+      required: [needsAdmin]
+      properties:
+        needsAdmin: { type: boolean, description: True until the first administrator exists }
+    SetupAdminRequest:
+      type: object
+      required: [username, password]
+      additionalProperties: false
+      properties:
+        username: { type: string }
+        password: { type: string, minLength: 10 }
+        displayName: { type: string }
+        email: { type: string }
+    LoginRequest:
+      type: object
+      required: [username, password]
+      additionalProperties: false
+      properties:
+        username: { type: string }
+        password: { type: string }
+    ChangePasswordRequest:
+      type: object
+      required: [currentPassword, newPassword]
+      additionalProperties: false
+      properties:
+        currentPassword: { type: string }
+        newPassword: { type: string, minLength: 10 }
+    Role:
+      type: string
+      enum: [admin, user]
+    User:
+      type: object
+      required: [id, username, displayName, email, role, disabled, breakGlass, createdAt, lastLoginAt]
+      properties:
+        id: { type: integer, format: int64 }
+        username: { type: string }
+        displayName: { type: string }
+        email: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        disabled: { type: boolean }
+        breakGlass:
+          type: boolean
+          description: A local recovery account that keeps working even after directory sign-in is enabled
+        createdAt: { type: string, format: date-time }
+        lastLoginAt: { type: [string, "null"], format: date-time }
+    CreateUserRequest:
+      type: object
+      required: [username, password]
+      additionalProperties: false
+      properties:
+        username: { type: string }
+        password: { type: string, minLength: 10 }
+        displayName: { type: string }
+        email: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+    UpdateUserRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        displayName: { type: string }
+        email: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        disabled: { type: boolean }
+    ResetPasswordRequest:
+      type: object
+      required: [password]
+      additionalProperties: false
+      properties:
+        password: { type: string, minLength: 10 }
+    JobState:
+      type: string
+      enum: [queued, running, succeeded, failed, cancelled]
+    Job:
+      type: object
+      required: [id, kind, title, state, progress, message, error, params, result, createdBy, createdAt, startedAt, finishedAt]
+      properties:
+        id: { type: string }
+        kind: { type: string, examples: ["system.selftest"] }
+        title: { type: string }
+        state: { $ref: "#/components/schemas/JobState" }
+        progress: { type: number, minimum: 0, maximum: 100 }
+        message: { type: string }
+        error: { type: string }
+        params: { type: object, additionalProperties: true }
+        result: { type: object, additionalProperties: true }
+        createdBy: { type: [integer, "null"], format: int64 }
+        createdAt: { type: string, format: date-time }
+        startedAt: { type: [string, "null"], format: date-time }
+        finishedAt: { type: [string, "null"], format: date-time }
+    AuditEntry:
+      type: object
+      required: [id, at, actorId, actor, action, target, outcome, detail, ip]
+      properties:
+        id: { type: integer, format: int64 }
+        at: { type: string, format: date-time }
+        actorId: { type: [integer, "null"], format: int64 }
+        actor: { type: string }
+        action: { type: string, examples: ["auth.login", "user.create"] }
+        target: { type: string }
+        outcome: { type: string, enum: [success, failure, denied] }
+        detail: { type: string }
+        ip: { type: string }
+    Event:
+      type: object
+      required: [id, type, time]
+      properties:
+        id: { type: integer }
+        type: { type: string, examples: ["job.updated", "notification", "audit.created"] }
+        time: { type: string, format: date-time }
+        data: { description: Payload; a Job for job.updated, an AuditEntry for audit.created }
     Error:
       type: object
       description: Body of every non-2xx response
       required: [code, message]
       properties:
-        code:
-          type: string
-          description: Stable machine-readable error code
-        message:
-          type: string
-          description: Human-readable explanation
+        code: { type: string, description: Stable machine-readable error code }
+        message: { type: string, description: Human-readable explanation }

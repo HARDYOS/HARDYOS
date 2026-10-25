@@ -12,8 +12,8 @@ This is how to build HardyOS and test it in a VM on the laptop.
 
    ```sh
    sudo apt update && sudo apt install -y make git curl
-   # Go 1.24+
-   curl -fsSL https://go.dev/dl/go1.24.7.linux-amd64.tar.gz | sudo tar -C /usr/local -xz
+   # Go 1.26+
+   curl -fsSL https://go.dev/dl/go1.26.0.linux-amd64.tar.gz | sudo tar -C /usr/local -xz
    echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> ~/.bashrc
    # Node 22 + pnpm
    curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt install -y nodejs
@@ -52,8 +52,12 @@ Create a new VM ("Custom" wizard):
 | Disks 6-7 | optional: 2 × 8 GB NVMe to test special vdev / SLOG |
 | CD/DVD | the HardyOS ISO |
 
-Boot the VM. The console shows an address like `http://192.168.1.57:8080`.
-Open it in a browser on the laptop to reach the web desktop.
+Boot the VM. The console shows an address like `https://192.168.1.57`.
+Open it in a browser on the laptop. The browser warns about the certificate
+the first time (HardyOS makes its own); accept it to reach the web desktop.
+
+Locked out? On the VM console (or over SSH) as root:
+`hardyctl reset-password <username>` or `hardyctl create-admin <username>`.
 
 Tip: take a VMware snapshot right after creating the VM (before first boot)
 so you can reset it between installer test runs.
@@ -63,6 +67,7 @@ so you can reset it between installer test runs.
 For desktop and API work you don't need a VM:
 
 ```sh
-make dev-daemon   # terminal 1: hardyd on :8080
-make dev-web      # terminal 2: desktop on http://localhost:5173 with hot reload
+make dev-priv     # terminal 1: root helper (as you; privileged ops need root)
+make dev-daemon   # terminal 2: hardyd on :8080, state in .dev/
+make dev-web      # terminal 3: desktop on http://localhost:5173 with hot reload
 ```

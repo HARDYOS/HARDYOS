@@ -19,11 +19,12 @@ macOS-style web desktop, Docker apps, VMs, and one login for everything.
 
 ## Quick start (development)
 
-Requirements: Go 1.24+, Node 22+, pnpm 9+.
+Requirements: Go 1.26+ (fetched automatically by newer Go toolchains), Node 22+, pnpm 9+.
 
 ```sh
+make dev-priv     # root helper on .dev/priv.sock (privileged ops need root)
+make dev-daemon   # hardyd on http://localhost:8080 (plain HTTP in dev only)
 make dev-web      # web desktop on http://localhost:5173, proxied to hardyd
-make dev-daemon   # hardyd on http://localhost:8080
 make test         # Go and web tests
 ```
 
