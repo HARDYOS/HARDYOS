@@ -136,7 +136,8 @@ func TestInstallIntegration(t *testing.T) {
 	if got := strings.TrimSpace(run("zfs", "get", "-H", "-o", "value", boot.VersionProp, be)); got != "0.0.0-test" {
 		t.Errorf("version property = %q", got)
 	}
-	if got := strings.TrimSpace(run("zfs", "get", "-H", "-o", "value", "mountpoint", pool+"/hardyos")); got != "/var/lib/hardyos" {
+	// While imported with an altroot (-R target), ZFS shows mountpoints under it.
+	if got := strings.TrimSpace(run("zfs", "get", "-H", "-o", "value", "mountpoint", pool+"/hardyos")); got != filepath.Join(target, "var/lib/hardyos") {
 		t.Errorf("state dataset mountpoint = %q", got)
 	}
 	if st := run("zpool", "status", pool); !strings.Contains(st, "mirror-0") {
