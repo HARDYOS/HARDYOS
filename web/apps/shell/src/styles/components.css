@@ -205,11 +205,17 @@
   width: 100%;
 }
 .btn--primary {
-  background: var(--hos-accent);
-  color: #fff;
+  background: var(--hos-accent-gradient);
+  color: var(--hos-on-accent);
+  font-weight: 650;
+  box-shadow: 0 6px 20px rgba(0, 229, 255, 0.16);
 }
 .btn--primary:hover:not(:disabled) {
-  background: var(--hos-accent-hover);
+  background: var(--hos-accent-gradient-hover);
+}
+.btn--primary .spinner {
+  border-color: rgba(5, 7, 15, 0.25);
+  border-top-color: currentColor;
 }
 .btn--secondary {
   background: var(--hos-surface-2);
@@ -476,7 +482,7 @@
 }
 .progress__bar--accent,
 .progress__bar--info {
-  background: var(--hos-accent);
+  background: var(--hos-accent-gradient);
 }
 .progress__bar--good {
   background: #2fbf71;

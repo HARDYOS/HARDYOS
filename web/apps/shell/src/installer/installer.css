@@ -91,9 +91,9 @@
   border: 1px solid var(--hos-surface-border);
 }
 .inst__step.is-current .inst__step-num {
-  background: var(--hos-accent);
-  border-color: var(--hos-accent);
-  color: #fff;
+  background: var(--hos-accent-gradient);
+  border-color: transparent;
+  color: var(--hos-on-accent);
 }
 .inst__step.is-done .inst__step-num {
   background: var(--hos-good-soft);

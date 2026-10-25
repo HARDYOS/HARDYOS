@@ -52,9 +52,9 @@ button {
 .wallpaper {
   background-color: var(--hos-bg);
   background-image:
-    radial-gradient(900px 620px at 16% 88%, rgba(56, 99, 255, 0.42), transparent 62%),
-    radial-gradient(760px 520px at 88% 12%, rgba(139, 92, 246, 0.32), transparent 60%),
-    radial-gradient(620px 420px at 58% 108%, rgba(20, 184, 166, 0.22), transparent 60%);
+    radial-gradient(900px 620px at 16% 88%, rgba(0, 170, 255, 0.3), transparent 62%),
+    radial-gradient(760px 520px at 88% 12%, rgba(139, 92, 255, 0.34), transparent 60%),
+    radial-gradient(620px 420px at 58% 108%, rgba(0, 240, 255, 0.14), transparent 60%);
 }
 
 /* ---------- Desktop ---------- */
