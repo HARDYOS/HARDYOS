@@ -15,6 +15,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/metrics"
 	"github.com/hardyos/hardyos/daemon/internal/notify"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/storage"
@@ -31,6 +32,8 @@ type Config struct {
 	Limiter  *auth.LoginLimiter
 	Storage  *storage.Service // nil disables storage endpoints
 	Notify   *notify.Center   // nil disables notification endpoints
+	Metrics  *metrics.Collector
+	Root     fs.FS // filesystem rooted at "/" for system info; nil uses the real one
 	Logger   *slog.Logger
 	WebRoot  string // directory with the built web desktop; empty disables static serving
 	Insecure bool   // allow session cookies over plain HTTP (true until TLS lands)
@@ -57,6 +60,9 @@ func New(cfg Config) *Server {
 	}
 	if cfg.Limiter == nil {
 		cfg.Limiter = auth.NewLoginLimiter()
+	}
+	if cfg.Root == nil {
+		cfg.Root = os.DirFS("/")
 	}
 	s := &Server{cfg: cfg, mux: http.NewServeMux(), started: time.Now(), log: cfg.Logger}
 	if cfg.DB != nil {
@@ -87,6 +93,8 @@ func (s *Server) routes() {
 		m.Handle("GET /api/v1/jobs/{id}", s.authed(s.handleGetJob))
 		m.Handle("POST /api/v1/jobs/{id}/cancel", s.authed(s.handleCancelJob))
 		m.Handle("GET /api/v1/events", s.authed(s.handleEvents))
+		m.Handle("GET /api/v1/system/info", s.authed(s.handleSystemInfo))
+		m.Handle("GET /api/v1/system/metrics", s.authed(s.handleMetrics))
 
 		// Admin
 		m.Handle("GET /api/v1/users", s.admin(s.handleListUsers))
@@ -117,7 +125,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Frame-Options", "SAMEORIGIN")
 	h.Set("Referrer-Policy", "same-origin")
-	h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; frame-ancestors 'self'")
+	h.Set("Content-Security-Policy", "default-src 'self'; font-src 'self' data:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; frame-ancestors 'self'")
 
 	rw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 	if strings.HasPrefix(r.URL.Path, "/api/") && !csrfSafe(r) {

@@ -2,7 +2,10 @@ package api
 
 import (
 	"context"
+	"io/fs"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
@@ -64,4 +67,42 @@ func (s *Server) handleSelfTest(w http.ResponseWriter, r *http.Request, u *auth.
 	}
 	s.record(r, u, "system.selftest", j.ID, audit.Success, "")
 	writeJSON(w, http.StatusAccepted, j)
+}
+
+// SystemInfo describes the machine for the desktop's overview.
+type SystemInfo struct {
+	Hostname   string  `json:"hostname"`
+	OS         string  `json:"os"`     // PRETTY_NAME from /etc/os-release
+	Kernel     string  `json:"kernel"` // kernel release
+	Version    string  `json:"version"`
+	UptimeSecs float64 `json:"uptimeSecs"`
+}
+
+func (s *Server) handleSystemInfo(w http.ResponseWriter, r *http.Request, _ *auth.User) {
+	info := SystemInfo{Version: version.Version}
+	info.Hostname, _ = os.Hostname()
+	if b, err := fs.ReadFile(s.cfg.Root, "proc/sys/kernel/osrelease"); err == nil {
+		info.Kernel = strings.TrimSpace(string(b))
+	}
+	if b, err := fs.ReadFile(s.cfg.Root, "etc/os-release"); err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			if v, ok := strings.CutPrefix(line, "PRETTY_NAME="); ok {
+				info.OS = strings.Trim(v, `"`)
+			}
+		}
+	}
+	if b, err := fs.ReadFile(s.cfg.Root, "proc/uptime"); err == nil {
+		if f := strings.Fields(string(b)); len(f) > 0 {
+			info.UptimeSecs, _ = parseFloat(f[0])
+		}
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request, _ *auth.User) {
+	if s.cfg.Metrics == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "metrics not running")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.cfg.Metrics.Snapshot())
 }

@@ -1,15 +1,18 @@
 /* HardyOS design tokens. Matches the desktop mockups: dark glass, one blue accent. */
 :root {
+  color-scheme: dark;
   --hos-font-sans: "Plus Jakarta Sans", system-ui, sans-serif;
   --hos-font-mono: "JetBrains Mono", ui-monospace, monospace;
 
   --hos-bg: #05070d;
-  --hos-glass: rgba(17, 21, 32, 0.68);
-  --hos-glass-strong: rgba(17, 21, 32, 0.82);
+  --hos-glass: rgba(17, 21, 32, 0.7);
+  --hos-glass-strong: rgba(17, 21, 32, 0.86);
   --hos-glass-border: rgba(255, 255, 255, 0.08);
   --hos-surface: rgba(255, 255, 255, 0.04);
-  --hos-surface-hover: rgba(255, 255, 255, 0.07);
-  --hos-surface-border: rgba(255, 255, 255, 0.07);
+  --hos-surface-2: rgba(255, 255, 255, 0.07);
+  --hos-surface-border: rgba(255, 255, 255, 0.08);
+  --hos-input: rgba(255, 255, 255, 0.06);
+  --hos-input-border: rgba(255, 255, 255, 0.12);
 
   --hos-text: #eef1f7;
   --hos-text-2: #c7cdd9;
@@ -17,18 +20,27 @@
   --hos-text-faint: #8f98aa;
 
   --hos-accent: #3b7bff;
+  --hos-accent-hover: #5b91ff;
   --hos-accent-soft: rgba(76, 141, 255, 0.18);
-  --hos-accent-text: #7fb0ff;
+  --hos-accent-text: #8fb8ff;
   --hos-good: #34d399;
+  --hos-good-soft: rgba(52, 211, 153, 0.14);
   --hos-good-text: #6ee7b7;
   --hos-warn: #fbbf24;
+  --hos-warn-soft: rgba(251, 191, 36, 0.12);
+  --hos-warn-text: #fcd34d;
   --hos-bad: #f87171;
+  --hos-bad-strong: #dc2626;
+  --hos-bad-soft: rgba(248, 113, 113, 0.14);
+  --hos-bad-text: #fca5a5;
+  --hos-violet: #a78bfa;
 
   --hos-radius-sm: 9px;
   --hos-radius: 14px;
   --hos-radius-lg: 18px;
   --hos-blur: blur(28px) saturate(140%);
   --hos-shadow-window: 0 30px 80px rgba(0, 0, 0, 0.5);
+  --hos-shadow-pop: 0 18px 48px rgba(0, 0, 0, 0.5);
 
   --hos-menubar-h: 32px;
 }

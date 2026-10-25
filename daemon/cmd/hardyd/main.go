@@ -21,6 +21,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/metrics"
 	"github.com/hardyos/hardyos/daemon/internal/notify"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/storage"
@@ -78,6 +79,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 	jobCtx, cancelJobs := context.WithCancel(context.Background())
 	manager := &jobs.Manager{DB: db, Events: broker, Logger: log, Workers: 4}
 	notifications := &notify.Center{DB: db, Events: broker}
+	collector := &metrics.Collector{Root: os.DirFS("/")}
 	stor := &storage.Service{Priv: pc, Jobs: manager, DB: db, Notify: notifications, Log: log}
 	api.RegisterJobKinds(manager, pc)
 	stor.RegisterJobs(manager)
@@ -89,12 +91,13 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 
 	handler := api.New(api.Config{
 		DB: db, Jobs: manager, Events: broker, Priv: pc, Logger: log,
-		Storage: stor, Notify: notifications,
+		Storage: stor, Notify: notifications, Metrics: collector,
 		WebRoot: webRoot, Insecure: httpsAddr == "",
 	})
 
 	go housekeeping(ctx, log, &auth.Sessions{DB: db})
-	go stor.Run(ctx) // snapshot, scrub and SMART schedules
+	go stor.Run(ctx)      // snapshot, scrub and SMART schedules
+	go collector.Run(ctx) // CPU, memory and network history
 
 	var servers []*http.Server
 	errCh := make(chan error, 2)
