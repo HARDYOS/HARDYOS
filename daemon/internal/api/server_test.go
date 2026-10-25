@@ -30,8 +30,10 @@ func TestHealth(t *testing.T) {
 	if body.Status != "ok" {
 		t.Fatalf("status field = %q, want ok", body.Status)
 	}
-	if got := res.Header.Get("X-Content-Type-Options"); got != "nosniff" {
-		t.Fatalf("missing security header, got %q", got)
+	for _, h := range []string{"X-Content-Type-Options", "Content-Security-Policy", "X-Frame-Options"} {
+		if res.Header.Get(h) == "" {
+			t.Errorf("missing security header %s", h)
+		}
 	}
 }
 

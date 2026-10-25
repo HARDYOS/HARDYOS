@@ -18,3 +18,7 @@ Settled choices, newest last. Change one by adding a row that supersedes it.
 | 12 | 2026-10-24 | Pull requests for every change, CI must pass | Reviewable history |
 | 13 | 2026-10-24 | Proprietary license, all rights reserved | Family use; can open source later |
 | 14 | 2026-10-24 | Fonts bundled with the web desktop (no Google Fonts at runtime) | The NAS must work fully offline |
+| 15 | 2026-10-24 | SQLite (pure-Go driver) for control-plane state, at /var/lib/hardyos until a pool exists | No cgo, builds for any arch; moves to tank/system later |
+| 16 | 2026-10-24 | HTTPS by default with a self-signed certificate; HTTP redirects | Session cookies are Secure; ACME and uploaded certs come later |
+| 17 | 2026-10-24 | Argon2id passwords, hashed session tokens, SameSite=Strict cookies plus an X-HardyOS-Request header for CSRF | Standard, simple, no tokens in JavaScript |
+| 18 | 2026-10-24 | First admin is a break-glass local account; `hardyctl reset-password` / `create-admin` work on the database directly as root | Recovery never depends on the web UI or directory services |

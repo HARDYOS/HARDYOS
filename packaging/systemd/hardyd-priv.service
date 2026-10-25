@@ -6,6 +6,8 @@ Before=hardyd.service
 
 [Service]
 Type=simple
+# Root user, hardyd group: the socket directory /run/hardyos becomes root:hardyd 0750.
+Group=hardyd
 ExecStart=/usr/bin/hardyd-priv -socket /run/hardyos/priv.sock -allow-user hardyd
 RuntimeDirectory=hardyos
 RuntimeDirectoryMode=0750

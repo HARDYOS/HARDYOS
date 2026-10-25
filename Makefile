@@ -47,9 +47,18 @@ test-web: web/node_modules
 gen: web/node_modules ## Regenerate the TypeScript API client from api/openapi.yaml
 	cd web && pnpm gen:api
 
+DEV := $(CURDIR)/.dev
+
 .PHONY: dev-daemon
-dev-daemon: ## Run hardyd locally on :8080 serving the built web desktop
-	cd daemon && go run ./cmd/hardyd -listen 127.0.0.1:8080 -web-root ../web/apps/shell/dist -log-level debug
+dev-daemon: ## Run hardyd locally over plain HTTP on :8080 (state in .dev/)
+	@mkdir -p $(DEV)
+	cd daemon && go run ./cmd/hardyd -https "" -http 127.0.0.1:8080 -db $(DEV)/hardyd.db \
+		-priv-socket $(DEV)/priv.sock -web-root ../web/apps/shell/dist -log-level debug
+
+.PHONY: dev-priv
+dev-priv: ## Run hardyd-priv as you on .dev/priv.sock (privileged ops will fail without root)
+	@mkdir -p $(DEV)
+	cd daemon && go run ./cmd/hardyd-priv -socket $(DEV)/priv.sock -allow-user $$(id -un)
 
 .PHONY: dev-web
 dev-web: web/node_modules ## Run the web desktop dev server on :5173 (proxies /api to :8080)

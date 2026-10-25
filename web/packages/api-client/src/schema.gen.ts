@@ -38,6 +38,283 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/setup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Whether first-time setup is still needed */
+        get: operations["getSetupStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/setup/admin": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create the first administrator (only while no accounts exist)
+         * @description The new account is flagged break-glass and is signed in.
+         */
+        post: operations["createFirstAdmin"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Sign in */
+        post: operations["login"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Sign out this browser */
+        post: operations["logout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The signed-in user */
+        get: operations["getMe"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Change your own password (signs out your other sessions) */
+        post: operations["changePassword"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List accounts (admin) */
+        get: operations["listUsers"];
+        put?: never;
+        /** Create an account (admin) */
+        post: operations["createUser"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/users/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        /** Get an account (admin) */
+        get: operations["getUser"];
+        put?: never;
+        post?: never;
+        /** Delete an account (admin) */
+        delete: operations["deleteUser"];
+        options?: never;
+        head?: never;
+        /**
+         * Update an account (admin)
+         * @description Disabling an account signs out its sessions. The last active admin can't be demoted or disabled.
+         */
+        patch: operations["updateUser"];
+        trace?: never;
+    };
+    "/users/{id}/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Set another user's password (admin; signs them out) */
+        post: operations["resetUserPassword"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Recent jobs (admins see all, users their own) */
+        get: operations["listJobs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/jobs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** One job */
+        get: operations["getJob"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/jobs/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Ask a queued or running job to stop */
+        post: operations["cancelJob"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * WebSocket stream of events you may see
+         * @description Upgrade to a WebSocket. The server sends JSON messages: first
+         *     `{"type":"hello","user":"..."}`, then `Event` objects (job updates,
+         *     notifications, and for admins audit entries).
+         */
+        get: operations["streamEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Audit log, newest first (admin) */
+        get: operations["listAudit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system/self-test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start a job that checks the job system and root helper (admin) */
+        post: operations["runSelfTest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -56,6 +333,115 @@ export interface components {
             os: string;
             arch: string;
         };
+        SetupStatus: {
+            /** @description True until the first administrator exists */
+            needsAdmin: boolean;
+        };
+        SetupAdminRequest: {
+            username: string;
+            password: string;
+            displayName?: string;
+            email?: string;
+        };
+        LoginRequest: {
+            username: string;
+            password: string;
+        };
+        ChangePasswordRequest: {
+            currentPassword: string;
+            newPassword: string;
+        };
+        /** @enum {string} */
+        Role: "admin" | "user";
+        User: {
+            /** Format: int64 */
+            id: number;
+            username: string;
+            displayName: string;
+            email: string;
+            role: components["schemas"]["Role"];
+            disabled: boolean;
+            /** @description A local recovery account that keeps working even after directory sign-in is enabled */
+            breakGlass: boolean;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            lastLoginAt: string | null;
+        };
+        CreateUserRequest: {
+            username: string;
+            password: string;
+            displayName?: string;
+            email?: string;
+            role?: components["schemas"]["Role"];
+        };
+        UpdateUserRequest: {
+            displayName?: string;
+            email?: string;
+            role?: components["schemas"]["Role"];
+            disabled?: boolean;
+        };
+        ResetPasswordRequest: {
+            password: string;
+        };
+        /** @enum {string} */
+        JobState: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+        Job: {
+            id: string;
+            /** @example system.selftest */
+            kind: string;
+            title: string;
+            state: components["schemas"]["JobState"];
+            progress: number;
+            message: string;
+            error: string;
+            params: {
+                [key: string]: unknown;
+            };
+            result: {
+                [key: string]: unknown;
+            };
+            /** Format: int64 */
+            createdBy: number | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            startedAt: string | null;
+            /** Format: date-time */
+            finishedAt: string | null;
+        };
+        AuditEntry: {
+            /** Format: int64 */
+            id: number;
+            /** Format: date-time */
+            at: string;
+            /** Format: int64 */
+            actorId: number | null;
+            actor: string;
+            /**
+             * @example auth.login
+             * @example user.create
+             */
+            action: string;
+            target: string;
+            /** @enum {string} */
+            outcome: "success" | "failure" | "denied";
+            detail: string;
+            ip: string;
+        };
+        Event: {
+            id: number;
+            /**
+             * @example job.updated
+             * @example notification
+             * @example audit.created
+             */
+            type: string;
+            /** Format: date-time */
+            time: string;
+            /** @description Payload; a Job for job.updated */
+            data?: unknown;
+        };
         /** @description Body of every non-2xx response */
         Error: {
             /** @description Stable machine-readable error code */
@@ -64,7 +450,53 @@ export interface components {
             message: string;
         };
     };
-    responses: never;
+    responses: {
+        /** @description Not signed in or session expired */
+        Unauthorized: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /** @description Not allowed */
+        Forbidden: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /** @description No such resource */
+        NotFound: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /** @description Request failed validation */
+        Invalid: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /** @description Conflicts with current state */
+        Conflict: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+    };
     parameters: never;
     requestBodies: never;
     headers: never;
@@ -110,6 +542,431 @@ export interface operations {
                     "application/json": components["schemas"]["VersionInfo"];
                 };
             };
+        };
+    };
+    getSetupStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Setup state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SetupStatus"];
+                };
+            };
+        };
+    };
+    createFirstAdmin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetupAdminRequest"];
+            };
+        };
+        responses: {
+            /** @description Administrator created and signed in */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    login: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LoginRequest"];
+            };
+        };
+        responses: {
+            /** @description Signed in; session cookie set */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description Too many failed sign-ins; see Retry-After */
+            429: {
+                headers: {
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    logout: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Signed out */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getMe: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current user */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    changePassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChangePasswordRequest"];
+            };
+        };
+        responses: {
+            /** @description Password changed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["Invalid"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    listUsers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description All accounts */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"][];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    createUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateUserRequest"];
+            };
+        };
+        responses: {
+            /** @description Account created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    getUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The account */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    updateUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateUserRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated account */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    resetUserPassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResetPasswordRequest"];
+            };
+        };
+        responses: {
+            /** @description Password set */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["Invalid"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listJobs: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Jobs, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"][];
+                };
+            };
+        };
+    };
+    getJob: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The job */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+        };
+    };
+    cancelJob: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Cancellation requested */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    streamEvents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Switching to WebSocket */
+            101: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    listAudit: {
+        parameters: {
+            query?: {
+                /** @description Action prefix */
+                action?: string;
+                actorId?: number;
+                limit?: number;
+                /** @description Return entries with id lower than this (paging) */
+                before?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Audit entries */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditEntry"][];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    runSelfTest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Job queued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
         };
     };
 }
