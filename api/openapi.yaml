@@ -1,0 +1,73 @@
+openapi: 3.1.0
+info:
+  title: HardyOS API
+  version: 0.1.0
+  description: |
+    The hardyd control-plane API. The web desktop, hardyctl and apps all use it.
+    This file is the source of truth: regenerate the TypeScript client with
+    `make gen` after changing it.
+servers:
+  - url: /api/v1
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Liveness check
+      tags: [system]
+      responses:
+        "200":
+          description: hardyd is running
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /version:
+    get:
+      operationId: getVersion
+      summary: Build information
+      tags: [system]
+      responses:
+        "200":
+          description: Version and build details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionInfo"
+components:
+  schemas:
+    Health:
+      type: object
+      required: [status, uptimeSeconds]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        uptimeSeconds:
+          type: number
+          description: Seconds since hardyd started
+    VersionInfo:
+      type: object
+      required: [version, commit, goVersion, os, arch]
+      properties:
+        version:
+          type: string
+          examples: ["0.1.0"]
+        commit:
+          type: string
+        goVersion:
+          type: string
+        os:
+          type: string
+        arch:
+          type: string
+    Error:
+      type: object
+      description: Body of every non-2xx response
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Stable machine-readable error code
+        message:
+          type: string
+          description: Human-readable explanation

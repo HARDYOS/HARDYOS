@@ -1,0 +1,25 @@
+#!/bin/sh
+# live-build configuration for the HardyOS live/installer ISO.
+set -e
+
+lb config noauto \
+  --mode debian \
+  --distribution trixie \
+  --architectures amd64 \
+  --archive-areas "main contrib non-free-firmware" \
+  --binary-images iso-hybrid \
+  --bootloaders "grub-efi,syslinux" \
+  --debian-installer none \
+  --apt-recommends false \
+  --security true \
+  --updates true \
+  --firmware-binary true \
+  --firmware-chroot true \
+  --memtest none \
+  --linux-packages "linux-image linux-headers" \
+  --iso-application "HardyOS" \
+  --iso-publisher "HardyOS" \
+  --iso-volume "HARDYOS" \
+  --image-name "hardyos" \
+  --bootappend-live "boot=live components hostname=hardyos username=hardy quiet" \
+  "${@}"

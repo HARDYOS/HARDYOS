@@ -1,0 +1,6 @@
+
+HardyOS live system. Useful commands:
+  hardyctl status      control plane health
+  zpool status         pool health
+  journalctl -u hardyd logs
+

@@ -1,0 +1,39 @@
+# Debian package for the HardyOS control plane and web desktop.
+# Built by `make deb`; VERSION and ARCH come from the environment.
+name: hardyos-core
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: admin
+priority: optional
+maintainer: HardyOS <noreply@hardyos.local>
+description: |
+  HardyOS control plane: hardyd (API and web desktop), hardyd-priv
+  (privileged helper) and hardyctl (CLI).
+license: Proprietary
+depends:
+  - adduser
+  - systemd
+recommends:
+  - zfsutils-linux
+  - smartmontools
+contents:
+  - src: ../dist/bin/hardyd
+    dst: /usr/bin/hardyd
+    file_info: { mode: 0755 }
+  - src: ../dist/bin/hardyd-priv
+    dst: /usr/bin/hardyd-priv
+    file_info: { mode: 0755 }
+  - src: ../dist/bin/hardyctl
+    dst: /usr/bin/hardyctl
+    file_info: { mode: 0755 }
+  - src: ../web/apps/shell/dist/
+    dst: /usr/share/hardyos/web/
+    type: tree
+  - src: ./systemd/hardyd.service
+    dst: /lib/systemd/system/hardyd.service
+  - src: ./systemd/hardyd-priv.service
+    dst: /lib/systemd/system/hardyd-priv.service
+scripts:
+  postinstall: ./scripts/postinstall.sh
+  preremove: ./scripts/preremove.sh

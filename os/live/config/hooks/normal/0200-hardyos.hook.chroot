@@ -1,0 +1,13 @@
+#!/bin/sh
+# HardyOS defaults for the live system.
+set -e
+
+systemctl enable hardyd-priv.service hardyd.service
+systemctl enable ssh.service || true
+systemctl enable zfs-zed.service || true
+
+# Load the zfs module at boot so pools can be imported right away.
+echo zfs > /etc/modules-load.d/zfs.conf
+
+# Keep the hostname consistent with the boot parameter.
+echo hardyos > /etc/hostname
