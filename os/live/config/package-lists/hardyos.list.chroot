@@ -1,0 +1,47 @@
+# Core system
+systemd-sysv
+dbus
+sudo
+ca-certificates
+curl
+jq
+less
+nano
+openssh-server
+chrony
+locales
+console-setup
+
+# Storage: OpenZFS (built with DKMS against the image's kernel) and disk tools
+dkms
+zfs-dkms
+zfsutils-linux
+zfs-zed
+smartmontools
+nvme-cli
+hdparm
+lsscsi
+gdisk
+parted
+dosfstools
+
+# Boot and install
+efibootmgr
+grub-efi-amd64-bin
+grub-pc-bin
+mmdebstrap
+qrencode
+
+# Hardware and network
+pciutils
+usbutils
+ethtool
+iproute2
+nftables
+ifupdown
+isc-dhcp-client
+
+# Live system
+live-boot
+live-config
+live-config-systemd

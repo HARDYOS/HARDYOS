@@ -1,0 +1,9 @@
+Copyright (c) 2026 Cade Hardy. All rights reserved.
+
+This software and its source code are proprietary and confidential.
+No part of it may be copied, modified, distributed, sublicensed, or used
+in any form without prior written permission from the copyright holder.
+
+Third-party components included in HardyOS builds (such as the Linux
+kernel, Debian packages, OpenZFS, Samba, Authentik, and RustFS) remain
+under their own licenses.

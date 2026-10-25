@@ -1,0 +1,33 @@
+[Unit]
+Description=HardyOS control plane (API and web desktop)
+Documentation=https://github.com/HARDYOS/HARDYOS
+After=network-online.target hardyd-priv.service
+Wants=network-online.target hardyd-priv.service
+
+[Service]
+Type=simple
+User=hardyd
+Group=hardyd
+ExecStart=/usr/bin/hardyd -listen :8080 -web-root /usr/share/hardyos/web
+StateDirectory=hardyos
+StateDirectoryMode=0750
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+ReadWritePaths=/run/hardyos
+
+[Install]
+WantedBy=multi-user.target

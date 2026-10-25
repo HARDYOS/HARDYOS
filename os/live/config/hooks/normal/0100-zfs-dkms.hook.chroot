@@ -1,0 +1,20 @@
+#!/bin/sh
+# Make sure the ZFS kernel module is built for every kernel in the image.
+# zfs-dkms may be configured before the headers are present, so build again here.
+set -e
+
+for kdir in /lib/modules/*; do
+  kver=$(basename "$kdir")
+  if [ -d "/usr/src/linux-headers-$kver" ]; then
+    dkms autoinstall -k "$kver"
+  fi
+done
+
+for kdir in /lib/modules/*; do
+  kver=$(basename "$kdir")
+  if ! modinfo -k "$kver" zfs >/dev/null 2>&1; then
+    echo "ERROR: zfs module missing for kernel $kver" >&2
+    exit 1
+  fi
+  echo "zfs module ready for $kver"
+done

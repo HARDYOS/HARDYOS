@@ -1,0 +1,23 @@
+[Unit]
+Description=HardyOS privileged helper
+Documentation=https://github.com/HARDYOS/HARDYOS
+After=local-fs.target
+Before=hardyd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/hardyd-priv -socket /run/hardyos/priv.sock -allow-user hardyd
+RuntimeDirectory=hardyos
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+Restart=on-failure
+RestartSec=2s
+# Root is needed for zfs, disks and network changes; limit everything else.
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=no
+LockPersonality=yes
+RestrictRealtime=yes
+
+[Install]
+WantedBy=multi-user.target

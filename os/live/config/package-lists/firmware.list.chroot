@@ -1,0 +1,10 @@
+# Firmware for common NICs, storage controllers and GPUs.
+firmware-linux-free
+firmware-misc-nonfree
+firmware-realtek
+firmware-bnx2
+firmware-bnx2x
+firmware-intel-misc
+firmware-amd-graphics
+intel-microcode
+amd64-microcode

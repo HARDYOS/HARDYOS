@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go (daemon)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache: false
+      - name: gofmt
+        working-directory: daemon
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then echo "$unformatted"; exit 1; fi
+      - name: vet
+        working-directory: daemon
+        run: go vet ./...
+      - name: test
+        working-directory: daemon
+        run: go test -race ./...
+      - name: build
+        run: make build-daemon
+
+  web:
+    name: Web (desktop)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: install
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+      - name: API client is up to date
+        working-directory: web
+        run: |
+          pnpm gen:api
+          git diff --exit-code -- packages/api-client/src/schema.gen.ts
+      - name: typecheck
+        working-directory: web
+        run: pnpm typecheck
+      - name: test
+        working-directory: web
+        run: pnpm test
+      - name: build
+        working-directory: web
+        run: pnpm build
+
+  package:
+    name: Debian package
+    runs-on: ubuntu-latest
+    needs: [go, web]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache: false
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: build .deb
+        run: make deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hardyos-core-deb
+          path: dist/*.deb
+          retention-days: 14
+
+  scripts:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          shellcheck os/*.sh scripts/*.sh packaging/scripts/*.sh \
+            os/live/auto/* os/live/config/hooks/normal/*
