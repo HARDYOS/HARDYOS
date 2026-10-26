@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/hardyos/hardyos/daemon/internal/rootfile"
 	"io/fs"
 	"log/slog"
 	"net/netip"
@@ -162,7 +163,7 @@ func (m *Manager) readFile(rel string) string {
 func (m *Manager) Current() Config {
 	ports := m.PortNames()
 	var c Config
-	if b, err := os.ReadFile(m.settingsFile()); err == nil && json.Unmarshal(b, &c) == nil {
+	if b, err := rootfile.ReadFile(m.settingsFile()); err == nil && json.Unmarshal(b, &c) == nil {
 		// Ports added since (a new card) show up as off; removed ones drop out.
 		known := map[string]bool{}
 		for _, it := range c.Interfaces {
@@ -197,8 +198,10 @@ func (m *Manager) Current() Config {
 	return Import(host, m.readFile(InterfacesPath), m.readFile(ResolvPath), ports)
 }
 
+// loadPending reads the waiting change. Its saved files are written back as
+// root on undo, so only a file root wrote is trusted.
 func (m *Manager) loadPending() (*Pending, error) {
-	b, err := os.ReadFile(m.pendingFile())
+	b, err := rootfile.ReadFile(m.pendingFile())
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
@@ -480,6 +483,29 @@ func sortedKeys(f Files) []string {
 	return keys
 }
 
+// WriteNow saves c and writes its files without restarting the network or
+// waiting for confirmation. It's for restoring a backup at start-up: hardyd-priv
+// runs before networking.service, which then brings these settings up.
+func (m *Manager) WriteNow(c Config) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c.Normalize()
+	if err := c.Validate(m.PortNames()); err != nil {
+		return err
+	}
+	_ = os.Remove(m.pendingFile())
+	files := Render(c)
+	for _, rel := range sortedKeys(files) {
+		if err := writeOrRemove(m.path(rel), files[rel]); err != nil {
+			return err
+		}
+	}
+	if err := m.run(context.Background(), "hostname", c.Hostname); err != nil {
+		m.log().Warn("setting the running host name failed", "err", err)
+	}
+	return writeJSON(m.settingsFile(), c)
+}
+
 // Confirm keeps the waiting change.
 func (m *Manager) Confirm() (*Config, error) {
 	m.mu.Lock()
@@ -518,9 +544,12 @@ func (m *Manager) revertLocked(ctx context.Context, reason string) error {
 		return ErrNothingPending
 	}
 	m.stopTimer()
+	// Only ever the network files Render owns.
 	files := Files{}
-	for rel, content := range p.Previous {
-		files[rel] = content
+	for _, rel := range NetworkPaths {
+		if content, ok := p.Previous[rel]; ok {
+			files[rel] = content
+		}
 	}
 	err = m.switchTo(ctx, files, p.PrevHost)
 	// The old settings are back on disk either way; the change is over.
@@ -582,7 +611,7 @@ func (m *Manager) OnStart(ctx context.Context) {
 // --- Date and time ---
 
 func (m *Manager) loadTime() (*TimeConfig, error) {
-	b, err := os.ReadFile(m.timeFile())
+	b, err := rootfile.ReadFile(m.timeFile())
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}

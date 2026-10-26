@@ -35,6 +35,14 @@ unknown operations are rejected. Operations validate their own arguments and
 never accept raw shell commands. The socket is mode `0660`, owned by
 `root:hardyd`.
 
+`/var/lib/hardyos` belongs to the `hardyd` account, so `hardyd` could replace
+any file in it. hardyd-priv keeps some of its own state there (the boot
+configuration, a waiting update, a waiting network change, a staged restore).
+It only acts on such a file when root wrote it (root-owned, a regular file,
+not writable by group or others: `internal/rootfile`), and it still checks
+what's inside (an update may only remove its own boot environment; a network
+undo only writes the network files).
+
 ## Sign-in and sessions
 
 - Passwords are hashed with Argon2id. Five failed sign-ins in 15 minutes lock
@@ -186,6 +194,27 @@ chosen servers, or a clock set by hand. Clock changes can't cut the server
 off, so they apply at once. Both files carry over to new versions with
 updates; the automatic-time on/off choice is re-applied when hardyd-priv
 starts.
+
+## Settings backups
+
+A settings backup (`.hbak`) holds the hardyd database (users, schedules,
+settings), network and time settings and the HTTPS certificate. Backups can
+also hold secrets (encryption keys for storage, SSH host keys); those are
+always password-protected (argon2id and AES-256-GCM) and never kept on a pool.
+
+- **Nightly**: hardyd snapshots its database (`VACUUM INTO`), hardyd-priv adds
+  the root-owned files, and the backup is kept on a data pool in
+  `<pool>/hardyos-backups` (14 by default), so it survives a reinstall.
+- **Download**: a password-protected file, made on request. Downloads and
+  restores don't run as jobs, because job parameters are kept and these carry
+  a password.
+- **Restore**: hardyd checks the file (password, checksums, a database this
+  version understands, at least one account), then hardyd-priv unpacks it
+  again as root into a root-only staging folder. It's applied at the next
+  start, by hardyd-priv before hardyd opens the database and before
+  networking starts. Archives can only restore a fixed list of paths; network
+  settings that don't work on the machine (different ports) are skipped, so
+  restoring onto new hardware can't leave the server unreachable.
 
 ## Data and state
 

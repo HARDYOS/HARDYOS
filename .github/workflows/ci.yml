@@ -56,10 +56,13 @@ jobs:
         run: |
           go test -c -o "$RUNNER_TEMP/priv.test" ./internal/priv
           go test -c -o "$RUNNER_TEMP/install.test" ./internal/install
+          go test -c -o "$RUNNER_TEMP/backup.test" ./internal/backup
       - name: storage operations against real ZFS
         run: sudo HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/priv.test" -test.run TestZFSIntegration -test.v
       - name: installer on loop devices
         run: sudo HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/install.test" -test.run TestInstallIntegration -test.v
+      - name: settings backups on a pool
+        run: sudo HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/backup.test" -test.run TestZFSBackupIntegration -test.v
 
   web:
     name: Web (desktop)

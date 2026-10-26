@@ -13,6 +13,7 @@ import (
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
+	"github.com/hardyos/hardyos/daemon/internal/backups"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/installer"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
@@ -39,7 +40,9 @@ type Config struct {
 	// only the installer API is served.
 	Installer *installer.Service
 	// Updates enables the update and version endpoints (nil disables them).
-	Updates  *updates.Service
+	Updates *updates.Service
+	// Backups enables settings backups (nil disables them).
+	Backups  *backups.Service
 	Root     fs.FS // filesystem rooted at "/" for system info; nil uses the real one
 	Logger   *slog.Logger
 	WebRoot  string // directory with the built web desktop; empty disables static serving
@@ -121,6 +124,9 @@ func (s *Server) routes() {
 			// Installed systems only, like updates (the live installer has neither).
 			s.updateRoutes()
 			s.networkRoutes()
+		}
+		if s.cfg.Backups != nil {
+			s.backupRoutes()
 		}
 	}
 

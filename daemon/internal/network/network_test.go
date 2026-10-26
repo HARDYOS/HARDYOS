@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hardyos/hardyos/daemon/internal/rootfile"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 )
 
@@ -442,4 +443,58 @@ func mustJSON(t *testing.T, v any) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+func TestForgedPendingIsNotTrusted(t *testing.T) {
+	m, _, root := newManager(t)
+	ctx := context.Background()
+	c := m.Current()
+	c.Interfaces[1].Mode = ModeDHCP
+	if _, err := m.Apply(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	m.stopTimer()
+	// hardyd (which owns the directory) edits the undo record to make root
+	// write somewhere else, and to run a command from the interfaces file.
+	var p Pending
+	b, _ := os.ReadFile(m.pendingFile())
+	_ = json.Unmarshal(b, &p)
+	evil := "root:x:0:0::/root:/bin/sh\n"
+	cmd := "auto lo\niface lo inet loopback\n\tpre-up touch /tmp/pwned\n"
+	p.Previous["etc/shadow"] = &evil
+	p.Previous[InterfacesPath] = &cmd
+	b, _ = json.Marshal(p)
+	_ = os.WriteFile(m.pendingFile(), b, 0o644)
+
+	// The whitelist alone keeps root to the network files.
+	if err := m.Revert(ctx, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "etc/shadow")); err == nil {
+		t.Fatal("undo wrote a file outside the network files")
+	}
+
+	// With ownership checks on (as in hardyd-priv), a file root didn't
+	// write isn't used at all.
+	if os.Geteuid() != 0 {
+		t.Skip("ownership checks need root")
+	}
+	if _, err := m.Apply(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	m.stopTimer()
+	b, _ = os.ReadFile(m.pendingFile())
+	_ = json.Unmarshal(b, &p)
+	p.Previous[InterfacesPath] = &cmd
+	b, _ = json.Marshal(p)
+	_ = os.WriteFile(m.pendingFile(), b, 0o644)
+	_ = os.Chown(m.pendingFile(), 1000, 1000)
+	rootfile.Enforce = true
+	defer func() { rootfile.Enforce = false }()
+	if err := m.Revert(ctx, "test"); err == nil {
+		t.Fatal("a pending file owned by hardyd was trusted")
+	}
+	if got, _ := os.ReadFile(filepath.Join(root, InterfacesPath)); strings.Contains(string(got), "pwned") {
+		t.Fatal("forged interfaces written")
+	}
 }

@@ -27,6 +27,7 @@ tags:
   - name: installer
   - name: updates
   - name: network
+  - name: backups
 paths:
   /health:
     get:
@@ -1156,6 +1157,149 @@ paths:
         "400": { $ref: "#/components/responses/Invalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /system/backups:
+    get:
+      operationId: getBackups
+      summary: Nightly backup settings, backups kept on pools, and restore state
+      tags: [backups]
+      responses:
+        "200":
+          description: Backup state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackupStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /system/backups/settings:
+    put:
+      operationId: setBackupSettings
+      summary: Change the nightly backup settings
+      tags: [backups]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BackupSettings" }
+      responses:
+        "200":
+          description: Saved settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackupSettings" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /system/backups/run:
+    post:
+      operationId: runBackup
+      summary: Back up settings onto a pool now
+      tags: [backups]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                pool: { type: string, description: Empty for the configured or first data pool }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /system/backups/download:
+    post:
+      operationId: prepareBackupDownload
+      summary: Make a password-protected backup to download
+      description: Not a job, so the password is never kept. Fetch the file from /system/backups/files/{name} within an hour.
+      tags: [backups]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password, secrets]
+              properties:
+                password: { type: string, minLength: 8 }
+                secrets: { type: boolean, description: Also include storage encryption keys and SSH host keys }
+      responses:
+        "200":
+          description: The prepared file
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackupDownload" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /system/backups/files/{name}:
+    get:
+      operationId: getBackupFile
+      summary: Download a prepared backup file
+      tags: [backups]
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+        - { name: as, in: query, required: false, schema: { type: string }, description: File name to save as }
+      responses:
+        "200":
+          description: The backup file
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /system/backups/upload:
+    post:
+      operationId: uploadBackup
+      summary: Upload a backup file to restore
+      tags: [backups]
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: The upload's name, for /system/backups/restore
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [upload]
+                properties:
+                  upload: { type: string }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /system/backups/restore:
+    post:
+      operationId: restoreBackup
+      summary: Check a backup and restore it at the next restart
+      description: Not a job, so the password is never kept.
+      tags: [backups]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RestoreSource" }
+      responses:
+        "200":
+          description: The restore waiting for a restart
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackupStaged" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /system/backups/restore/cancel:
+    post:
+      operationId: cancelRestore
+      summary: Cancel a restore waiting for a restart
+      tags: [backups]
+      responses:
+        "204": { description: Cancelled }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /installer:
     get:
       operationId: getInstallerStatus
@@ -2017,3 +2161,84 @@ components:
         available:
           nullable: true
           allOf: [{ $ref: "#/components/schemas/AvailableUpdate" }]
+    BackupSettings:
+      type: object
+      required: [nightly, pool, keep, time]
+      properties:
+        nightly: { type: boolean }
+        pool: { type: string, description: Empty for the first data pool }
+        keep: { type: integer, minimum: 1, maximum: 365 }
+        time: { type: string, description: "HH:MM in the server's time zone" }
+    BackupManifest:
+      type: object
+      required: [format, createdAt, version, hostname, schema, secrets, entries, users]
+      properties:
+        format: { type: integer }
+        createdAt: { type: string, format: date-time }
+        version: { type: string }
+        hostname: { type: string }
+        schema: { type: integer }
+        secrets: { type: boolean }
+        users: { type: integer }
+        note: { type: string }
+        entries:
+          type: array
+          items:
+            type: object
+            required: [path, size, sha256]
+            properties:
+              path: { type: string }
+              size: { type: integer, format: int64 }
+              sha256: { type: string }
+    PoolBackup:
+      type: object
+      required: [pool, name, size, manifest]
+      properties:
+        pool: { type: string }
+        name: { type: string }
+        size: { type: integer, format: int64 }
+        manifest: { $ref: "#/components/schemas/BackupManifest" }
+    BackupStaged:
+      type: object
+      required: [manifest, stagedAt]
+      properties:
+        manifest: { $ref: "#/components/schemas/BackupManifest" }
+        stagedAt: { type: string, format: date-time }
+    RestoreResult:
+      type: object
+      required: [ok, at, message, notes, from]
+      properties:
+        ok: { type: boolean }
+        at: { type: string, format: date-time }
+        message: { type: string }
+        notes: { type: array, items: { type: string } }
+        from: { type: string, format: date-time }
+    BackupStatus:
+      type: object
+      required: [settings, pools, backups, lastRun, lastError, pending, lastResult]
+      properties:
+        settings: { $ref: "#/components/schemas/BackupSettings" }
+        pools: { type: array, items: { type: string } }
+        backups: { type: array, items: { $ref: "#/components/schemas/PoolBackup" } }
+        lastRun: { type: string, format: date-time, nullable: true }
+        lastError: { type: string }
+        pending:
+          nullable: true
+          allOf: [{ $ref: "#/components/schemas/BackupStaged" }]
+        lastResult:
+          nullable: true
+          allOf: [{ $ref: "#/components/schemas/RestoreResult" }]
+    BackupDownload:
+      type: object
+      required: [name, file, size]
+      properties:
+        name: { type: string }
+        file: { type: string }
+        size: { type: integer, format: int64 }
+    RestoreSource:
+      type: object
+      properties:
+        upload: { type: string, description: From /system/backups/upload }
+        pool: { type: string }
+        name: { type: string }
+        password: { type: string }

@@ -7,6 +7,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/hardyos/hardyos/daemon/internal/rootfile"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -15,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hardyos/hardyos/daemon/internal/backup"
 	"github.com/hardyos/hardyos/daemon/internal/hw"
 	"github.com/hardyos/hardyos/daemon/internal/install"
 	"github.com/hardyos/hardyos/daemon/internal/network"
@@ -42,13 +44,17 @@ func main() {
 
 	if os.Geteuid() != 0 {
 		log.Warn("hardyd-priv is not running as root; privileged operations will fail")
+	} else {
+		// State files in hardyd's directory are only acted on if root wrote them.
+		rootfile.Enforce = true
 	}
 
 	s := &priv.Server{Logger: log}
-	gid := -1
+	gid, hardydUID := -1, -1
 	if u, err := user.Lookup(*allowUser); err == nil {
 		uid, _ := strconv.ParseUint(u.Uid, 10, 32)
 		s.AllowedUIDs = append(s.AllowedUIDs, uint32(uid))
+		hardydUID = int(uid)
 		if g, err := strconv.Atoi(u.Gid); err == nil {
 			gid = g
 		}
@@ -75,10 +81,17 @@ func main() {
 		updater.OnBoot(ctx)
 		priv.RegisterSystem(s, sysexec.Exec{}, updater.BeforeReboot)
 		priv.RegisterUpdates(s, updater)
-		// Undo a network change that wasn't confirmed before a restart.
 		netm := &network.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log}
+		// A settings restore chosen before the restart is applied now,
+		// before hardyd opens its database and before networking starts.
+		bk := &backup.Root{Runner: sysexec.Exec{}, Root: "/", UID: hardydUID, GID: gid, Network: netm}
+		if res := bk.ApplyPending(ctx); res != nil {
+			log.Info("settings restore", "ok", res.OK, "message", res.Message, "notes", res.Notes)
+		}
+		// Undo a network change that wasn't confirmed before a restart.
 		netm.OnStart(ctx)
 		priv.RegisterNetwork(s, netm)
+		priv.RegisterBackup(s, bk)
 		if len(updater.Keys()) == 0 {
 			log.Warn("no trusted release key: updates can't be installed until one is added")
 		}

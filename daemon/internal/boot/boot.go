@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/hardyos/hardyos/daemon/internal/rootfile"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -50,7 +51,7 @@ type Config struct {
 
 // LoadConfig reads the boot configuration. A missing file returns ErrNoConfig.
 func LoadConfig(path string) (*Config, error) {
-	b, err := os.ReadFile(path)
+	b, err := rootfile.ReadFile(path) // root acts on it: it must be root's
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrNoConfig
 	}

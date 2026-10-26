@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { initials } from "../../format";
-import { CalendarIcon, CpuIcon, GridIcon, NetworkIcon, RefreshIcon, ShieldIcon, UsersIcon } from "../../icons";
+import { CalendarIcon, CpuIcon, GridIcon, LayersIcon, NetworkIcon, RefreshIcon, ShieldIcon, UsersIcon } from "../../icons";
 import { type AppProps, useShell } from "../../shell";
 import { AppLayout, PageHeader, SideNav } from "../../ui";
 import { AuditLog } from "../shared";
+import { Backup } from "./Backup";
 import { DateTime } from "./DateTime";
 import { Hardware } from "./Hardware";
 import { Network } from "./Network";
@@ -18,6 +19,7 @@ const SECTIONS = [
   { id: "time", label: "Date & Time", icon: <CalendarIcon size={16} /> },
   { id: "hardware", label: "Hardware", icon: <CpuIcon size={16} /> },
   { id: "updates", label: "Updates", icon: <RefreshIcon size={16} /> },
+  { id: "backup", label: "Backup & Restore", icon: <LayersIcon size={16} /> },
   { id: "security", label: "Security", icon: <ShieldIcon size={16} /> },
 ];
 
@@ -52,6 +54,7 @@ export default function ControlPanel({ args }: AppProps) {
       {section === "time" && <DateTime />}
       {section === "hardware" && <Hardware />}
       {section === "updates" && <Updates />}
+      {section === "backup" && <Backup />}
       {section === "security" && (
         <>
           <PageHeader title="Security" subtitle="Every sign-in and every change to the system, newest first." />
