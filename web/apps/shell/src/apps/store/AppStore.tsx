@@ -3,7 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { type ChangeEvent, useRef, useState } from "react";
 import { ApiFailure, api, errorMessage, unwrap } from "../../api";
 import { relativeTime } from "../../format";
-import { AlertIcon, BagIcon, EditIcon, ExternalIcon, GridIcon, LayersIcon, PlayIcon, PlusIcon, RestartIcon, StopIcon, TrashIcon, UploadIcon } from "../../icons";
+import { AlertIcon, BagIcon, EditIcon, ExternalIcon, GridIcon, LayersIcon, PlayIcon, PlusIcon, StopIcon, TrashIcon, UploadIcon } from "../../icons";
 import { type AppProps, useShell } from "../../shell";
 import { Alert, AppLayout, Badge, Button, EmptyState, ErrorBox, Field, Loading, type NavItem, PageHeader, SideNav, TextInput, Toggle, type Tone } from "../../ui";
 import { Dialog } from "../../ui/Dialog";
@@ -188,7 +188,7 @@ function AppCard({ app, update, isAdmin, onSelect, onOpen }: { app: InstalledApp
   const st = STATE[app.state] ?? { tone: "neutral" as Tone, label: app.state };
   const running = isRunning(app);
 
-  async function act(action: "start" | "stop" | "restart") {
+  async function act(action: "start" | "stop") {
     setBusy(action);
     try {
       await unwrap(api.POST("/apps/{id}/{action}", { params: { path: { id: app.id, action } } }));
@@ -302,15 +302,10 @@ function AppCard({ app, update, isAdmin, onSelect, onOpen }: { app: InstalledApp
                 <PlayIcon size={13} /> Start
               </Button>
             )}
-            {running && (
-              <Button size="sm" variant="ghost" onClick={() => act("restart")} busy={busy === "restart"} disabled={!!job} aria-label={`Restart ${app.name}`} title="Restart">
-                <RestartIcon size={14} />
-              </Button>
-            )}
-            <Button size="sm" variant="ghost" onClick={() => setDialog("logs")}>
-              <LayersIcon size={14} /> Logs
-            </Button>
             <span className="app-card__spacer" />
+            <Button size="sm" variant="ghost" onClick={() => setDialog("logs")} aria-label={`${app.name} logs`} title="Logs">
+              <LayersIcon size={14} />
+            </Button>
             <Button size="sm" variant="ghost" onClick={onSelect} aria-label={`${app.name} settings`}>
               <EditIcon size={14} />
             </Button>

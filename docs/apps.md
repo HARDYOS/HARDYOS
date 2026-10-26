@@ -127,9 +127,13 @@ Installing it again picks the data and passwords back up.
 ## How installing works
 
 1. `POST /apps/plan`: hardyd reads the package and asks `hardyd-priv` for
-   free ports.
-2. `POST /apps/install` starts an `apps.install` job. Password settings go
-   to the job through an in-memory reference, not its parameters.
+   free ports (host-network apps keep their own: `fixed`).
+2. `POST /apps/install` starts an `apps.install` job. The request carries
+   the package's source, settings, ports, the shared folder for each of the
+   app's shares, the extra permissions an administrator ticked (`grants`,
+   only for apps not from HardyOS's catalog), resource limits and who may
+   use it. Password settings go to the job through an in-memory reference,
+   not its parameters. Each grant is audited on its own (`apps.grant`).
 3. The job calls `hardyd-priv` to prepare the app (dataset, files, compose
    check), pull each image (retrying; if a registry is unreachable and the
    image is already on the server, that copy is used), and start it.
@@ -138,7 +142,106 @@ Every step is a named operation in `hardyd-priv` (`apps.prepare`,
 `apps.pull`, `apps.up`, ...) with checked arguments. There is no way to run
 an arbitrary compose file or command.
 
+## The App Store
+
+**My apps** lists the installed apps. Everyone sees the apps they may use
+and can open them; administrators also start, stop, update and remove them,
+and open an app's page for its settings:
+
+- **Overview**: Open (in a desktop window) or Open in new tab, start, stop,
+  restart, the shared folders, permissions and limits it has. **Update**
+  appears when the catalog it came from has a newer version. A snapshot of
+  the app is taken first; if the update fails, the App Store offers to roll
+  back to it. If the new version asks for a permission the app doesn't
+  have (apps not from HardyOS's catalog), it asks you to allow it first.
+- **Settings**: ports, settings (passwords stay as they are unless you type
+  a new one), shared folders, extra permissions and resource limits. Saving
+  restarts the app.
+- **Who can use it**: everyone signed in, or chosen HardyOS accounts, domain
+  users (`HOME\alice`) and domain groups (`HOME\Family`). Administrators can
+  always use every app.
+- **Snapshots**: the snapshots taken before updates (the newest three), each
+  with the version it holds, and Roll back (type the app's name).
+- **Logs**: the last 500 lines from every container.
+
+**Install** walks through steps: settings (ports, settings and, the first
+time, the pool), shared folders (one per folder the app asks for; apps get
+whole shared folders, read-only if you like), permissions, and who can use
+it with resource limits under Advanced. Permissions of apps from HardyOS's
+catalog are listed in plain words. For uploaded, imported and custom apps
+every extra permission is an unticked box under a red warning, and the app
+can't be installed until each is ticked.
+
+**Discover** shows HardyOS's catalog and, under each imported catalog's
+name, its apps labelled **Third-party**.
+
+**Catalogs** imports someone else's catalog from an https address,
+refreshes it and removes it. A catalog is an `index.json`:
+
+```json
+{
+  "name": "Hardy Labs",
+  "apps": [
+    { "id": "notebook", "name": "Notebook", "version": "3.2.0", "summary": "Shared notes.",
+      "url": "packages/notebook-3.2.0.hardyapp",
+      "sha256": "9f2c…64 hex digits…", "icon": "data:image/svg+xml;base64,…" }
+  ]
+}
+```
+
+`url` may be relative to the index and must be https. hardyd downloads a
+package when it's first planned and uses it only if its SHA-256 matches and
+it is the app and version the index names. Apps with problems in the index
+are left out (the Catalogs page says which). Icons are only taken as data:
+URLs. Removing a catalog keeps its apps running; they just get no more
+updates from it.
+
+**Create an app** turns a pasted Compose file into a custom app: a name,
+an id, the ports it publishes (one may be its web page) and data folders.
+The Compose file publishes each port as `${HARDY_PORT_<NAME>}` and keeps
+its data under `${HARDY_APP_DATA}`; the same sandbox as uploaded packages
+applies. hardyd builds a `.hardyapp` (source `custom`) and the normal
+install follows. To change it later, create it again with a higher version
+and update the app with that package.
+
+**Upload a package** installs a `.hardyapp` file (source `upload`).
+
+## App windows
+
+Apps open as desktop windows. The desktop is served over HTTPS, so hardyd
+runs a small HTTPS proxy for each app with a web page on its own port
+(44300, 44301, …, remembered per app) with the desktop's certificate. Each
+Open asks hardyd for a one-minute, single-use link; the proxy swaps it for
+a cookie for that app only, and the session ends when you sign out of the
+desktop or lose access to the app. The proxy passes WebSockets, lets the
+desktop frame the app, and never forwards HardyOS's own cookies. **Open in
+new tab** uses the same proxy.
+
+## API
+
+| Call | Who | What |
+| --- | --- | --- |
+| `GET /apps` | signed in | Installed apps (only those you may use, for non-admins) |
+| `GET /apps/catalog` | admin | HardyOS's catalog |
+| `GET/POST/DELETE /apps/catalogs` | admin | Imported catalogs: list, import or refresh (`{url}`), remove (`{id}`) |
+| `POST /apps/packages` | admin | Upload a package |
+| `POST /apps/custom` | admin | Build a custom app; answers with an install plan |
+| `POST /apps/plan`, `POST /apps/install` | admin | Plan and install (job `apps.install`) |
+| `GET/PATCH /apps/{id}/config` | admin | Current configuration; change it (job `apps.reconfigure`) |
+| `GET/PUT /apps/{id}/access` | admin | Who may use the app |
+| `POST /apps/{id}/update` | admin | Update (job `apps.update`, snapshot first); `grants_required` when new permissions need allowing |
+| `GET /apps/{id}/snapshots`, `POST /apps/{id}/rollback` | admin | Snapshots and roll back (job, confirm = the app's name) |
+| `POST /apps/{id}/open` | who may use it | A link to open the app (through its window proxy) |
+| `POST /apps/{id}/start\|stop\|restart`, `GET /apps/{id}/logs`, `DELETE /apps/{id}` | admin | As before |
+
+Who may use each app, imported catalogs and window ports are kept in
+hardyd's database, so settings backups include them; each app's own
+configuration is on its dataset.
+
 ## Screens
 
 ![My apps](images/app-store/my-apps.png)
-![Installing an app](images/app-store/install.png)
+![Installing a third-party app: shared folders](images/app-store/install-folders.png)
+![Installing a third-party app: permissions](images/app-store/install-permissions.png)
+![An app's page](images/app-store/app-details.png)
+![An app in a desktop window](images/app-store/app-window.png)

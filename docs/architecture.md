@@ -347,6 +347,60 @@ One-click Docker apps install from `.hardyapp` packages (format in
   and Discover (the catalog and the install dialog: permissions in plain
   words, ports, settings, and the pool the first time).
 
+### App Store API, catalogs and app windows (App Store v2)
+
+hardyd's side of the App Store v2 (plan: `docs/plans/app-store-v2.md`
+section 3; decisions 65-69):
+
+- **Records in hardyd's database** (migration `0005_apps_web.sql`, so
+  settings backups carry them): `app_access` (who may use each app; no rows
+  = everyone), `app_catalogs` (imported catalogs with their last good
+  index) and `app_proxy_ports` (each app's window port). `internal/appstore`
+  owns them next to the package store.
+- **Access.** `GET /apps` shows non-admins only the apps they may use;
+  `POST /apps/{id}/open` and the window proxy check the same list.
+  Principals are HardyOS users, `NETBIOS\user`, `NETBIOS\group` and
+  everyone; a signed-in person's principal and groups come from
+  `api.AppPrincipals` / the account's `auth.Identity` methods (domain
+  sign-in), else the HardyOS username.
+- **Jobs.** `apps.install` and `apps.update` call `apps.prepare` with the
+  package's source (catalog, upload, imported + catalog name, custom),
+  shares, grants and limits; `apps.update` takes `apps.snapshot
+  reason=update` first and, if a later step fails, ends with
+  `result.snapshot`. `apps.reconfigure` runs `apps.reconfigure` then
+  `apps.up`; `apps.rollback` runs `apps.rollback`. Passwords reach jobs
+  through the in-memory secret box. Grants come only from an admin's
+  request, are checked against what the package asks for, and are audited
+  one by one (`apps.grant`, `apps.grant.remove`).
+- **Imported catalogs.** hardyd fetches `index.json` (https only, 30 s, at
+  most 1 MB, redirects only to https) and packages (at most 512 KB) itself;
+  a package is used only if its SHA-256 matches the index and it is the app
+  and version the index names. Packages are cached in
+  `/var/lib/hardyos/app-imports`. hardyd-priv never touches the network for
+  them.
+- **Custom apps.** `POST /apps/custom` packs a manifest, the pasted
+  Compose file and a generated icon into a `.hardyapp` (source `custom`,
+  stored like an upload) and answers with an install plan.
+- **Window proxy** (`api/appproxy.go`). For every installed app with a web
+  page hardyd listens on its own port (44300 + n, kept in the database) with
+  the desktop's certificate and reverse-proxies to `127.0.0.1:<web port>`,
+  WebSockets included. `X-Frame-Options` and `frame-ancestors` from the app
+  are removed and replaced with `frame-ancestors` for the desktop's origin;
+  the desktop's own CSP allows `frame-src` on its host's ports. Sign-in:
+  `POST /apps/{id}/open` mints a single-use token (one minute) bound to the
+  person, the app and their desktop session; the proxy swaps it for an
+  HttpOnly, SameSite=Lax cookie named for that app. Every 30 seconds the
+  proxy checks that the desktop session still exists and the person may
+  still use the app. HardyOS's own cookies (the desktop session and every
+  app's proxy cookie) are stripped from requests before they reach the app.
+  A reconcile loop starts proxies for new apps and stops them for removed
+  ones. To be replaced by per-app subdomains when the reverse proxy lands.
+- **Web.** `apps/store/`: the stepped install dialog (settings, shared
+  folders, permissions, who can use it, limits under Advanced), the app
+  details view (overview, settings, access, snapshots, logs), Catalogs,
+  Create an app, and `AppFrame` (an installed app as a desktop window, id
+  `os.hardy.appwindow:<app id>`).
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly
