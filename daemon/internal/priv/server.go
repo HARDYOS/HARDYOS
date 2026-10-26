@@ -28,6 +28,9 @@ type Server struct {
 
 	mu  sync.RWMutex
 	ops map[string]HandlerFunc
+
+	relMu     sync.Mutex
+	releasers []func(ctx context.Context, dataset string) error
 }
 
 // Handle registers an operation. Registering the same name twice panics.

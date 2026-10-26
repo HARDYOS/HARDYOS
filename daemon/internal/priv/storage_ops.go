@@ -186,7 +186,7 @@ func RegisterStorage(s *Server, env StorageEnv) {
 	if env.ARCParam == "" {
 		env.ARCParam = "/sys/module/zfs/parameters/zfs_arc_max"
 	}
-	st := &storageOps{env: env}
+	st := &storageOps{env: env, srv: s}
 
 	s.Handle(OpHWDisks, func(ctx context.Context, _ json.RawMessage) (any, error) {
 		return hw.ListDisks(ctx, env.Runner, env.Root)
@@ -240,6 +240,7 @@ func RegisterStorage(s *Server, env StorageEnv) {
 		if err := dataPool(a.Pool); err != nil {
 			return nil, err
 		}
+		st.srv.releaseDataset(ctx, a.Pool)
 		_, err := st.zpool(ctx, "export", a.Pool)
 		return map[string]string{"exported": a.Pool}, err
 	}))
@@ -270,7 +271,10 @@ func typed[A any](fn func(ctx context.Context, a A) (any, error)) HandlerFunc {
 	}
 }
 
-type storageOps struct{ env StorageEnv }
+type storageOps struct {
+	env StorageEnv
+	srv *Server
+}
 
 func (st *storageOps) zpool(ctx context.Context, args ...string) ([]byte, error) {
 	out, err := sysexec.Output(ctx, st.env.Runner, "zpool", args...)
@@ -529,6 +533,7 @@ func (st *storageOps) destroyPool(ctx context.Context, a PoolDestroyArgs) (any, 
 	if a.ConfirmName != a.Pool {
 		return nil, Errorf(CodeBadArgs, "confirmName must repeat the pool name exactly")
 	}
+	st.srv.releaseDataset(ctx, a.Pool)
 	if _, err := st.zpool(ctx, "destroy", a.Pool); err != nil {
 		return nil, err
 	}
@@ -624,6 +629,7 @@ func (st *storageOps) destroyDataset(ctx context.Context, a DatasetDestroyArgs) 
 	if a.ConfirmName != a.Name {
 		return nil, Errorf(CodeBadArgs, "confirmName must repeat the dataset name exactly")
 	}
+	st.srv.releaseDataset(ctx, a.Name)
 	args := []string{"destroy"}
 	if a.Recursive {
 		args = append(args, "-r")

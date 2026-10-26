@@ -105,6 +105,7 @@ func (m *Manager) Release(ctx context.Context, id string) error {
 			j.cancel()
 			<-j.done
 		}
+		m.releaseSFTP(sh.Dataset)
 		if m.released == nil {
 			m.released = map[string]bool{}
 		}
@@ -129,6 +130,7 @@ func (m *Manager) apply(ctx context.Context, forceHomes bool) ([]ShareStatus, er
 		if _, err := os.Stat(m.avahiPath()); err == nil {
 			_ = os.Remove(m.avahiPath())
 		}
+		m.applySFTP(ctx, false, Settings{}, nil, nil, "", false)
 		return nil, nil
 	}
 	set := m.loadSettings()
@@ -151,7 +153,8 @@ func (m *Manager) apply(ctx context.Context, forceHomes bool) ([]ShareStatus, er
 	)
 	for _, sh := range list {
 		ss := ShareStatus{ID: sh.ID, Name: sh.Name, SMB: sh.Services.SMB.Enabled, TimeMachine: sh.Services.SMB.TimeMachine,
-			PreviousVersions: sh.Services.SMB.PreviousVersions, Recycle: sh.Recycle, Guest: sh.Guest, Skipped: []string{}}
+			PreviousVersions: sh.Services.SMB.PreviousVersions, Recycle: sh.Recycle, Guest: sh.Guest, Skipped: []string{},
+			SFTP: sh.Services.SFTP, WebDAV: sh.Services.WebDAV}
 		if m.released[sh.ID] {
 			continue
 		}
@@ -187,6 +190,7 @@ func (m *Manager) apply(ctx context.Context, forceHomes bool) ([]ShareStatus, er
 			}
 		}
 	}
+	m.applySFTP(ctx, true, set, dom, list, homes, forceHomes)
 	conf := m.render(dom, st.ServerName, confs, homes)
 	changed, global, err := m.installConfChanged(ctx, conf)
 	if err != nil {
@@ -401,6 +405,12 @@ func (m *Manager) SetSettings(ctx context.Context, a SettingsArgs) (*Status, err
 	if a.SMBEnabled != nil {
 		s.SMBEnabled = *a.SMBEnabled
 	}
+	if a.SFTPEnabled != nil {
+		s.SFTPEnabled = *a.SFTPEnabled
+	}
+	if a.WebDAVEnabled != nil {
+		s.WebDAVEnabled = *a.WebDAVEnabled
+	}
 	if a.Homes != nil {
 		h := *a.Homes
 		h.Pool = strings.TrimSpace(h.Pool)
@@ -439,6 +449,7 @@ func (m *Manager) Status(ctx context.Context) (*Status, error) {
 func (m *Manager) status(ctx context.Context) (*Status, error) {
 	st := m.loadState()
 	out := &Status{Available: m.installed(), Joined: st.Joined, Settings: m.loadSettings(), Shares: []ShareStatus{}, Addresses: []string{}}
+	out.SFTP = m.sftpStatus(ctx, out.Settings)
 	if m.LocalDomain != nil {
 		if l := m.LocalDomain(); l != nil {
 			out.LocalDomain = l.Domain
@@ -476,6 +487,7 @@ func (m *Manager) status(ctx context.Context) (*Status, error) {
 				out.Shares = append(out.Shares, ShareStatus{
 					ID: sh.ID, Name: sh.Name, SMB: sh.Services.SMB.Enabled, TimeMachine: sh.Services.SMB.TimeMachine,
 					PreviousVersions: sh.Services.SMB.PreviousVersions, Recycle: sh.Recycle, Guest: sh.Guest,
+					SFTP: sh.Services.SFTP, WebDAV: sh.Services.WebDAV,
 					Available: out.Settings.SMBEnabled && sh.Services.SMB.Enabled && sh.Mounted,
 					Skipped:   append([]string{}, l.Skipped...),
 				})

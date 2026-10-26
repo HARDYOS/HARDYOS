@@ -20,6 +20,21 @@ systemctl unmask smbd.service winbind.service >/dev/null 2>&1 || true
 systemctl disable smbd.service winbind.service >/dev/null 2>&1 || true
 systemctl mask nmbd.service >/dev/null 2>&1 || true
 pam-auth-update --package --remove winbind >/dev/null 2>&1 || true
+# Keep it that way: divert libpam-winbind's pam-auth-update profile, so no
+# later pam-auth-update run (a package upgrade) can put winbind back into
+# every PAM service. SFTP (hardyd-priv) adds pam_winbind to /etc/pam.d/sshd
+# only, for domain user IDs only.
+dpkg-divert --local --rename --divert /usr/share/pam-configs/winbind.hardyos-disabled --add /usr/share/pam-configs/winbind >/dev/null
+pam-auth-update --package >/dev/null 2>&1 || true
+
+# SFTP lets domain accounts run processes (internal-sftp) on this server:
+# only a process's parent may ptrace it (a file worker briefly runs as the
+# person before it hardens itself).
+mkdir -p /etc/sysctl.d
+cat > /etc/sysctl.d/60-hardyos-ptrace.conf <<'SYSCTL'
+# HardyOS: only a parent process may ptrace its children.
+kernel.yama.ptrace_scope = 1
+SYSCTL
 
 # Docker stays off at boot: its data lives on a pool (not the boot
 # environment), so hardyd-priv starts it once that pool is mounted.

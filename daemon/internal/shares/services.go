@@ -15,6 +15,11 @@ type Services struct {
 	SMB       SMB       `json:"smb"`
 	NFS       NFS       `json:"nfs"`
 	Snapshots Snapshots `json:"snapshots"`
+	// SFTP and WebDAV offer the folder to domain accounts over SFTP and at
+	// https://<server>/dav/ (when File Services has them on too). Off for
+	// new folders.
+	SFTP   bool `json:"sftp"`
+	WebDAV bool `json:"webdav"`
 }
 
 // SMB: Windows/macOS file sharing.

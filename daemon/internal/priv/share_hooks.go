@@ -36,3 +36,27 @@ func runBeforeDelete(ctx context.Context, hooks []ShareHook, id string) {
 		}
 	}
 }
+
+// OnRelease adds a function that lets go of a dataset (a pool, or a
+// dataset and everything below it) before the storage operations export
+// or destroy it: file services holding mounts of it (SFTP's bind mounts)
+// would keep it busy.
+func (s *Server) OnRelease(fn func(ctx context.Context, dataset string) error) {
+	s.relMu.Lock()
+	defer s.relMu.Unlock()
+	s.releasers = append(s.releasers, fn)
+}
+
+func (s *Server) releaseDataset(ctx context.Context, ds string) {
+	if s == nil {
+		return
+	}
+	s.relMu.Lock()
+	fns := append([]func(context.Context, string) error(nil), s.releasers...)
+	s.relMu.Unlock()
+	for _, fn := range fns {
+		if err := fn(ctx, ds); err != nil {
+			s.logger().Warn("a file service couldn't let go of a dataset", "dataset", ds, "err", err)
+		}
+	}
+}

@@ -897,6 +897,105 @@ The web desktop's File Manager and web share links (part D of
   it's nil, links can't be made and existing ones say they don't work any
   more. The dev server proxies `/s/` to hardyd too.
 
+## SFTP and WebDAV
+
+File sharing part E ([plans/file-sharing.md](plans/file-sharing.md)
+section 5; user guide in [file-sharing.md](file-sharing.md#sftp-and-webdav-from-anywhere)).
+Both are for domain accounts only; both off until File Services turns
+them on (`settings.json`: `sftpEnabled`, `webdavEnabled`) and per folder
+(`services.sftp`, `services.webdav`, off for new folders).
+
+```
+ SFTP client ──22──► sshd (host) ── PAM: pam_winbind for uid 100000-999999 only
+                       │ Match Group *\* / User *\*,*@*: internal-sftp, chroot /srv/hardyos/sftp/%U
+                       ▼
+               /srv/hardyos/sftp/101103/{Home,Media,...}   root's 0755, bind mounts (ro for read access)
+                                                           → the person's own uid on disk (ACLs decide)
+ WebDAV client ─443 /dav/─► hardyd (Basic, Kerberos like sign-in) ── internal/dav ── files.Client ── fileworker (the person)
+```
+
+- **SFTP is OpenSSH's.** hardyd-priv (`internal/sftp`, driven by
+  `smb.Manager.applySFTP` on every apply: shared folder changes, settings,
+  the 10-minute watch) writes `/etc/ssh/sshd_config.d/hardyos-sftp.conf`,
+  checks the whole config with `sshd -t` (the previous file is put back if
+  sshd refuses it) and reloads `ssh.service` only if it runs (HardyOS
+  never starts or stops sshd). Domain accounts are matched two ways, by
+  their groups (`Match Group *\*`: winbind names every domain group
+  `HOME\...`, local groups never contain a backslash) and by the name typed
+  (`Match User *\*,*@*`), with unquoted patterns that every sshd parses
+  the same; both blocks set `AllowGroups hardyos-sftp`,
+  `ChrootDirectory /srv/hardyos/sftp/%U`, `ForceCommand internal-sftp -d /`,
+  `DisableForwarding yes` (and each forwarding switch), `PermitTTY no`,
+  `PermitUserRC no`, `PubkeyAuthentication no`, `AuthorizedKeysFile none`,
+  `AuthenticationMethods password`; the file ends with `Match all`. With
+  SFTP off (or the server out of the domain) the file says `DenyGroups *`
+  for the same matches. Local accounts' SSH is untouched.
+- **PAM, sshd only.** A marked block goes in front of `@include
+  common-auth` and `@include common-account` in `/etc/pam.d/sshd`:
+  `pam_succeed_if uid >= 100000 uid <= 999999` selects domain accounts
+  (anything else skips to the usual stack), then `pam_winbind` decides
+  alone (`success=done default=die`: wrong password, turned off, expired,
+  must-change all refused). winbind stays out of the system-wide stacks:
+  the image diverts libpam-winbind's pam-auth-update profile, and File
+  Services warns if `common-auth` has winbind anyway. Debian's file
+  without its includes is refused (`ErrPAMLayout`). Passwords go to the
+  domain through winbind's machine-account secure channel, so this works
+  on member servers too.
+- **Views.** One per domain account (from the domain's turned-on accounts,
+  IDs through the NSS helper) that has something to see:
+  `/srv/hardyos/sftp/<uid>/`, root's 0755 (`/srv/hardyos/sftp` is a
+  private mount, so binds don't spread into other mount namespaces).
+  `sftp.Plan` uses the File Manager's rule (`fileworker.Level`: none beats
+  all, highest match, admins by Domain Admins / HardyOS Admins gid all
+  folders; group rules matched by gid): write → a read-write bind, read →
+  read-only bind, none → nothing; Home is a bind of the home dataset. Binds
+  are made from O_PATH descriptors opened without following links,
+  remounted `nosuid,nodev,noexec`; the sync reads `/proc/self/mountinfo`,
+  unmounts what's no longer wanted (lazily if a session holds it) and only
+  ever `rmdir`s empty folders, never a folder something is mounted on. The
+  `hardyos-sftp` system group (`gpasswd -M`) lists exactly the accounts
+  with a view, as NSS names them. Before a folder is deleted
+  (`ShareHook.BeforeDelete`) and before a pool is exported or destroyed or
+  a dataset destroyed (`priv.Server.OnRelease`, called by the storage ops)
+  its binds are unmounted. Views are rebuilt after a reboot by the watch.
+- **WebDAV is hardyd's.** `/dav/` (and `/dav`, plus `OPTIONS /` for
+  Windows) in `api/handlers_dav.go`: HTTPS only (403 on plain HTTP unless
+  the dev `Insecure` flag), WebDAV and the folders' switches from
+  `files.status` (cached 15 s), Basic sign-in with
+  `auth.SignIn.AuthenticateDomain` (a local HardyOS account is refused
+  without its password being checked), the desktop's limiter keys
+  (`ip:<addr>` via the trusted-proxy aware client address, and the
+  account's key for every spelling), 503 without counting when the DC
+  can't be asked. A password that worked is remembered for 2 minutes
+  under HMAC-SHA256(per-process random key, account key + password); the
+  account row is read again on every request (turned off here = out), and
+  domain groups refresh like a session's. Successful sign-ins are audited
+  at most hourly per account, failures always; uploads, deletes and moves
+  are audited as `files.*` with detail `webdav`.
+- **The FileSystem** (`internal/dav`, `golang.org/x/net/webdav` with a
+  memory lock table per person) maps `/<Folder>/<path>` to `files.Service`
+  calls as the person; the top is virtual (nothing can be made, moved or
+  deleted there); hidden names never listed or reachable; files open
+  lazily (a listing doesn't start a worker per file; content types come
+  from names); uploads stream into `.hardyos-upload-<id>` and are
+  `Replace`d into place on Close only if the body, writes and (for COPY)
+  the source read all succeeded, else deleted; deletes use the recycle
+  bin; PROPPATCH stores nothing (answered 200; `Win32LastModifiedTime`
+  sets the modification time). Every response has `Content-Security-Policy:
+  default-src 'none'; sandbox`, nosniff, no-store, and GET/HEAD
+  `Content-Disposition: attachment`.
+- **Tests.** `internal/sftp` (drop-in rendering, PAM edits on Debian's
+  file, planning, view sync with a fake mounter, rollback of a refused
+  config; `TestRealSSHD` checks the drop-in with a real sshd when
+  `HARDYOS_SSHD` is set), `smb` `TestApplySFTP` (views from rules and
+  accounts, release, leave), `api` `TestDAV*` (browse, hidden names,
+  read/write/move/copy/delete/lock, a broken upload, dead properties, sign
+  in, cache, lockout shared with the desktop, DC down, switches, HTTPS),
+  and `TestSFTPMemberIntegration` (CI's Samba job, `HARDYOS_DC_INTEGRATION=1`):
+  a real DC, the host's Samba joined, a private sshd on port 2222, SFTP as
+  domain users by rule, no TTY, no tunnels, refused passwords and
+  accounts.
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly

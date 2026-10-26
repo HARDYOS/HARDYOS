@@ -121,6 +121,87 @@ the File Manager. Folders are made for new accounts within ten minutes;
 turned-off or deleted accounts keep their folder (an administrator can
 delete it).
 
+## SFTP and WebDAV (from anywhere)
+
+Two more ways in for domain accounts, handy away from home (over the
+NetBird VPN) and for apps: **SFTP** (over SSH) and **WebDAV** (over
+HTTPS). Both are off until an administrator turns them on in Control
+Panel › **File Services** › *SFTP and WebDAV*, and each shared folder has
+its own two switches (Shared Folders › Edit › *SFTP and WebDAV*, off for
+new folders). People always sign in with their domain account
+(`HOME\alice` and their domain password) and see only the folders with
+that service on that their rules let them use, plus their **Home** folder
+when home folders are on. What they can do inside is decided by the
+folder's rules and the permissions on disk, exactly as over SMB.
+
+HardyOS accounts (like the administrator you set the server up with)
+don't use SFTP or WebDAV: they're for the family's domain accounts.
+
+### SFTP
+
+Server: the server's name (`hardyos.home.example.net`) or address, port
+22, user `HOME\alice`, the domain password.
+
+- **Windows**: WinSCP or FileZilla, protocol SFTP. Or in PowerShell:
+  `sftp 'HOME\alice@hardyos.home.example.net'`.
+- **Mac**: Cyberduck or Transmit (SFTP), or in Terminal
+  `sftp 'HOME\alice@hardyos.home.example.net'`.
+- **Linux**: file managers open
+  `sftp://HOME%5Calice@hardyos.home.example.net/`; from a terminal
+  `sftp 'HOME\alice@hardyos.home.example.net'`;
+  `sshfs 'HOME\alice@hardyos.home.example.net:/Media' ~/media` mounts a
+  folder; `rclone` with an `sftp` remote works too.
+- After signing in you're at the top of your own view: one folder per
+  shared folder you may use, and `Home`. Folders you may only read are
+  read only. Nothing else on the server is reachable.
+
+Limits: SFTP accounts can't open a shell, run commands, or forward ports
+(no tunnels); only the password works (SSH keys aren't used, so changing
+your domain password or turning the account off always locks it out).
+A new account, a new rule or a new folder shows up within 10 minutes;
+an account with no folder to see can't sign in. Folders don't hide
+`.recycle` or `.zfs` over SFTP, but their permissions still apply (your
+own recycle bin, older versions read only). The server's own SSH for its
+Linux accounts (root with a key, as before) is unchanged.
+
+### WebDAV
+
+Address: `https://<the server>/dav/` (the same address as the web
+desktop, with `/dav/`), user `HOME\alice`, the domain password.
+
+- **Windows**: File Explorer › This PC › *Map network drive*, folder
+  `\\hardyos.home.example.net@SSL\dav` (or
+  `https://hardyos.home.example.net/dav/`), tick *Connect using different
+  credentials*. Windows only connects when it trusts the server's HTTPS
+  certificate: until the server has a real certificate, import its
+  certificate into *Trusted Root Certification Authorities* (open the web
+  desktop in Edge, View certificate › Export, then double-click the file).
+  Windows limits single files to 50 MB unless the `FileSizeLimitInBytes`
+  setting of its WebClient service is raised.
+- **Mac**: Finder › Go › *Connect to Server* › `https://hardyos.home.example.net/dav/`.
+  Finder writes `._name` and `.DS_Store` files next to yours.
+- **Linux**: file managers open `davs://hardyos.home.example.net/dav/`;
+  `davfs2` mounts it.
+- **rclone** (any system):
+  ```sh
+  rclone config create hardyos webdav url=https://hardyos.home.example.net/dav/ vendor=other \
+    user='HOME\alice' pass="$(rclone obscure 'your password')"
+  rclone ls hardyos:Media
+  ```
+  (add `--no-check-certificate` while the server has its own certificate).
+
+Limits: the password is checked like a desktop sign-in (five wrong ones
+in 15 minutes lock the account and the address out of WebDAV and the
+desktop for 15 minutes); a password that worked is remembered for two
+minutes, so a password changed in the domain may still work that long.
+WebDAV only works over HTTPS, and (like desktop sign-in with domain accounts) only on the server that runs the domain controller itself. Uploads go into place only once they're
+complete. Deleting goes to the folder's recycle bin. File properties
+apps try to store (WebDAV "dead properties") aren't kept, except the
+modification time Windows sets. Older versions aren't offered over
+WebDAV (use Previous Versions over SMB or the File Manager). Copying on
+the server (WebDAV COPY) streams through hardyd, so it's slower than a
+copy in the File Manager.
+
 ## How it works (for administrators)
 
 - The server runs its own Samba file server (`smbd` and `winbind`) as a

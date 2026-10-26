@@ -4013,7 +4013,7 @@ components:
     ShareServices:
       type: object
       description: How the folder is shared on the network, and its automatic snapshots
-      required: [smb, nfs, snapshots]
+      required: [smb, nfs, snapshots, sftp, webdav]
       properties:
         smb:
           type: object
@@ -4045,6 +4045,8 @@ components:
             daily: { type: integer }
             weekly: { type: integer }
             monthly: { type: integer }
+        sftp: { type: boolean, description: "Offered to domain accounts over SFTP (with File Services' SFTP on). Off for new folders" }
+        webdav: { type: boolean, description: "Offered to domain accounts at https://<server>/dav/ (with File Services' WebDAV on). Off for new folders" }
     ShareCreateRequest:
       type: object
       required: [pool, name]
@@ -4119,13 +4121,15 @@ components:
         quotaBytes: { type: integer, format: int64, description: "Each home folder's quota; 0 for none" }
     FileServicesSettings:
       type: object
-      required: [smbEnabled, homes]
+      required: [smbEnabled, homes, sftpEnabled, webdavEnabled]
       properties:
         smbEnabled: { type: boolean }
         homes: { $ref: "#/components/schemas/FileServicesHomes" }
+        sftpEnabled: { type: boolean, description: SFTP for domain accounts (folders with SFTP on, and Home) }
+        webdavEnabled: { type: boolean, description: "WebDAV at https://<server>/dav/ for domain accounts (folders with WebDAV on, and Home)" }
     FileServicesShare:
       type: object
-      required: [id, name, smb, timeMachine, previousVersions, recycle, guest, available, skipped]
+      required: [id, name, smb, timeMachine, previousVersions, recycle, guest, sftp, webdav, available, skipped]
       properties:
         id: { type: string }
         name: { type: string }
@@ -4134,6 +4138,8 @@ components:
         previousVersions: { type: boolean }
         recycle: { type: boolean }
         guest: { type: boolean }
+        sftp: { type: boolean }
+        webdav: { type: boolean }
         available: { type: boolean, description: Offered over SMB right now }
         skipped: { type: array, items: { type: string }, description: "Access rules that can't apply here (a HardyOS account, another domain's name)" }
     FileServicesStatus:
@@ -4155,6 +4161,7 @@ components:
         shares: { type: array, items: { $ref: "#/components/schemas/FileServicesShare" } }
         addresses: { type: array, items: { type: string }, description: "This server's LAN addresses" }
         joinedAt: { type: string, format: date-time }
+        sftp: { $ref: "#/components/schemas/FileServicesSFTP" }
     FileServicesJoinRequest:
       type: object
       required: [adminPassword]
@@ -4174,7 +4181,25 @@ components:
       properties:
         smbEnabled: { type: boolean }
         homes: { $ref: "#/components/schemas/FileServicesHomes" }
+        sftpEnabled: { type: boolean }
+        webdavEnabled: { type: boolean }
     # ---- end of File Services ------------------------------------------------
+    # ---- SFTP and WebDAV (file sharing part E) ------------------------------
+    # WebDAV itself is served at /dav/ (outside /api/v1, HTTP Basic sign-in
+    # with a domain account over HTTPS; see docs/file-sharing.md), so it has
+    # no paths here: File Services' settings and each folder's services turn
+    # it and SFTP on.
+    FileServicesSFTP:
+      type: object
+      required: [enabled, running, users, folders, port, problem]
+      properties:
+        enabled: { type: boolean }
+        running: { type: boolean, description: "The SSH server runs (HardyOS doesn't start or stop it)" }
+        users: { type: integer, description: Domain accounts that have something to see over SFTP }
+        folders: { type: integer, description: Folders offered in all their views together }
+        port: { type: integer, example: 22 }
+        problem: { type: string }
+    # ---- end of SFTP and WebDAV ----------------------------------------------
     DomainConfig:
       type: object
       required: [domain, realm, netbios, dcName, address, gateway, parent, mac, forwarders, enabled, createdAt]

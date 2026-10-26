@@ -33,6 +33,7 @@ func RegisterFiles(s *Server, m *smb.Manager) ShareHook {
 		},
 	}
 	registerFilesOps(s, m)
+	s.OnRelease(m.ReleaseDataset)
 	return hook
 }
 

@@ -252,7 +252,7 @@ func (s *Server) handleFilesSettings(w http.ResponseWriter, r *http.Request, u *
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.SMBEnabled == nil && req.Homes == nil {
+	if req.SMBEnabled == nil && req.Homes == nil && req.SFTPEnabled == nil && req.WebDAVEnabled == nil {
 		writeError(w, http.StatusBadRequest, "invalid", "nothing to change")
 		return
 	}
@@ -263,6 +263,12 @@ func (s *Server) handleFilesSettings(w http.ResponseWriter, r *http.Request, u *
 	var parts []string
 	if req.SMBEnabled != nil {
 		parts = append(parts, "smb="+map[bool]string{true: "on", false: "off"}[*req.SMBEnabled])
+	}
+	if req.SFTPEnabled != nil {
+		parts = append(parts, "sftp="+map[bool]string{true: "on", false: "off"}[*req.SFTPEnabled])
+	}
+	if req.WebDAVEnabled != nil {
+		parts = append(parts, "webdav="+map[bool]string{true: "on", false: "off"}[*req.WebDAVEnabled])
 	}
 	if req.Homes != nil {
 		parts = append(parts, "homes="+map[bool]string{true: "on:" + req.Homes.Pool, false: "off"}[req.Homes.Enabled])

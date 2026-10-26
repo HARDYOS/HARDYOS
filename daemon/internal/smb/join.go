@@ -201,6 +201,8 @@ func (m *Manager) Leave(ctx context.Context, a LeaveArgs) (*Status, error) {
 // and the ID map here. Settings stay.
 func (m *Manager) forget(ctx context.Context) {
 	m.stopBackgroundAll()
+	m.applySFTP(ctx, false, Settings{}, nil, nil, "", false)
+	m.users = nil
 	_ = m.systemctl(ctx, "disable", "--now", SmbdUnit, WinbindUnit)
 	d := m.dirs()
 	for _, p := range []string{d.Private, d.State, d.Cache, d.Lock} {

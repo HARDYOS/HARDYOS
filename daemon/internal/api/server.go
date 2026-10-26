@@ -89,6 +89,7 @@ type Server struct {
 	proxy    *appProxy
 	links    *sharelinks.Store
 	uploads  uploads
+	dav      davState
 	started  time.Time
 	log      *slog.Logger
 	ips      *clientip.Resolver
@@ -178,6 +179,7 @@ func (s *Server) routes() {
 		}
 		if _, ok := s.cfg.Files.(files.Service); ok {
 			s.fileRoutes()
+			s.davRoutes() // WebDAV at /dav/, outside /api and the desktop session
 		}
 	}
 
