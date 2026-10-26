@@ -322,6 +322,31 @@ now; the local admin remains the break-glass account. Shares (Phase 2) use
 the domain's users and groups, and Authentik (Phase 3) signs apps in with
 them.
 
+## Apps
+
+One-click Docker apps install from `.hardyapp` packages (format in
+[apps.md](apps.md)). The pieces:
+
+- **Packages.** `internal/apps` reads and checks packages and the Compose
+  policy. The catalog ships in `hardyos-core` at `/usr/share/hardyos/apps`
+  (built from `apps/catalog/` by `make build-apps`); uploads are kept by
+  hash in `/var/lib/hardyos/app-packages`. `internal/appstore` is hardyd's
+  view of both.
+- **Running.** `hardyd-priv` owns Docker: `apps.prepare` creates the app's
+  dataset and files and checks the resolved Compose file, `apps.pull` gets
+  one image (with retries, falling back to a copy already on the server),
+  `apps.up`, `apps.stop`, `apps.logs` and `apps.remove` do what they say.
+  Docker's data-root is `<pool>/docker`; its config is in
+  `/var/lib/hardyos/apps/engine.json` (root-written). Docker is disabled at
+  boot and started by hardyd-priv once that pool is mounted.
+- **API.** `GET /apps` (everyone: installed apps to open; admins also see
+  containers, updates and kept data), `GET /apps/catalog`,
+  `POST /apps/packages`, `POST /apps/plan`, and jobs for install, update
+  and remove. Start, stop and restart are quick synchronous calls, audited.
+- **App Store window.** My apps (open, start, stop, logs, update, remove)
+  and Discover (the catalog and the install dialog: permissions in plain
+  words, ports, settings, and the pool the first time).
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly

@@ -12,6 +12,10 @@ systemctl enable zfs-zed.service || true
 systemctl disable samba-ad-dc.service smbd.service nmbd.service winbind.service >/dev/null 2>&1 || true
 systemctl mask samba-ad-dc.service >/dev/null 2>&1 || true
 
+# Docker stays off at boot: its data lives on a pool (not the boot
+# environment), so hardyd-priv starts it once that pool is mounted.
+systemctl disable docker.service docker.socket containerd.service >/dev/null 2>&1 || true
+
 # Load the zfs module at boot so pools can be imported right away.
 echo zfs > /etc/modules-load.d/zfs.conf
 

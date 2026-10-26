@@ -1,0 +1,72 @@
+# KinCast for HardyOS. HardyOS fills in the HARDY_* variables and the
+# settings from hardyapp.json; data lives in the app's own ZFS dataset.
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kincast
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: kincast
+      TZ: ${HARDY_TZ}
+    volumes:
+      - ${HARDY_APP_DATA}/postgres:/var/lib/postgresql/data
+    networks: [kincast]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kincast"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    image: ghcr.io/hardynetworks/kintube:${KINCAST_TAG}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://kincast:${POSTGRES_PASSWORD}@db:5432/kincast
+      SESSION_SECRET: ${SESSION_SECRET}
+      RTMP_CALLBACK_SECRET: ${RTMP_CALLBACK_SECRET}
+      # Links KinCast puts in invites and stream settings; change them later
+      # in KinCast's Server admin if family reach it by another name.
+      PUBLIC_URL: http://${HARDY_HOST}:${HARDY_PORT_WEB}
+      RTMP_PUBLIC_URL: rtmp://${HARDY_HOST}:${HARDY_PORT_RTMP}/live
+      SECURE_COOKIES: "false"
+      MAX_UPLOAD_GB: ${MAX_UPLOAD_GB}
+      TRANSCODE_RENDITIONS: ${TRANSCODE_RENDITIONS}
+      X264_PRESET: ${X264_PRESET}
+      KEEP_ORIGINALS: ${KEEP_ORIGINALS}
+      TZ: ${HARDY_TZ}
+    ports:
+      - "${HARDY_PORT_WEB}:3000"
+    volumes:
+      - ${HARDY_APP_DATA}/media:/data
+      - ${HARDY_APP_DATA}/hls:/hls
+      - ${HARDY_APP_DATA}/recordings:/recordings
+    networks:
+      kincast:
+        # nginx-rtmp looks the app up once at start, so it keeps a fixed address.
+        ipv4_address: 172.30.78.10
+
+  rtmp:
+    image: ghcr.io/hardynetworks/kintube-rtmp:${KINCAST_TAG}
+    restart: unless-stopped
+    depends_on: [app]
+    environment:
+      APP_UPSTREAM: http://172.30.78.10:3000
+      RTMP_CALLBACK_SECRET: ${RTMP_CALLBACK_SECRET}
+      KINTUBE_UID: "1000"
+      KINTUBE_GID: "1000"
+    ports:
+      - "${HARDY_PORT_RTMP}:1935"
+    volumes:
+      - ${HARDY_APP_DATA}/hls:/hls
+      - ${HARDY_APP_DATA}/recordings:/recordings
+    networks: [kincast]
+
+networks:
+  kincast:
+    ipam:
+      config:
+        - subnet: 172.30.78.0/24

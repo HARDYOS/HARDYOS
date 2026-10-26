@@ -95,6 +95,31 @@ jobs:
         run: |
           sudo sh -c 'tail -60 /var/lib/hardyos-dc/log/log.* /var/lib/hardyos-dc2/log/log.* 2>/dev/null' || true
 
+  apps:
+    name: Docker apps (KinCast)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache: false
+      - name: Docker and Compose
+        run: |
+          docker version --format 'Docker {{.Server.Version}}'
+          docker compose version
+      - name: build test binary
+        working-directory: daemon
+        run: go test -c -o "$RUNNER_TEMP/apps.test" ./internal/apps
+      - name: install, run, update and remove KinCast with real Docker
+        working-directory: daemon/internal/apps
+        run: sudo HARDYOS_DOCKER_INTEGRATION=1 "$RUNNER_TEMP/apps.test" -test.run TestDockerIntegration -test.v -test.timeout 25m
+      - name: container logs
+        if: failure()
+        run: |
+          sudo docker ps -a --filter label=org.hardyos.app
+          for c in $(sudo docker ps -aq --filter label=org.hardyos.app); do sudo docker logs --tail 80 "$c" 2>&1; done
+
   web:
     name: Web (desktop)
     runs-on: ubuntu-latest

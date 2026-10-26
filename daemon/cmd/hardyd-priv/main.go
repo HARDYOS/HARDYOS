@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hardyos/hardyos/daemon/internal/apps"
 	"github.com/hardyos/hardyos/daemon/internal/backup"
 	"github.com/hardyos/hardyos/daemon/internal/boot"
 	"github.com/hardyos/hardyos/daemon/internal/domain"
@@ -107,6 +108,11 @@ func main() {
 		// crashes.
 		priv.RegisterDomain(s, dc)
 		go dc.Watch(ctx)
+		// Docker apps: Docker stays off at boot until hardyd-priv has pointed
+		// it at its dataset on the pool, then the apps come back by themselves.
+		am := &apps.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log}
+		priv.RegisterApps(s, am)
+		go am.OnStart(ctx)
 		priv.RegisterBootRepair(s, priv.StorageEnv{Runner: sysexec.Exec{}, Root: os.DirFS("/")}, "/", boot.ConfigPath)
 		if len(updater.Keys()) == 0 {
 			log.Warn("no trusted release key: updates can't be installed until one is added")

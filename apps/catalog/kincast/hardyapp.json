@@ -1,0 +1,66 @@
+{
+  "format": 1,
+  "id": "kincast",
+  "name": "KinCast",
+  "version": "1.0.0",
+  "summary": "Your family's private YouTube: share home videos and go live, with family chat.",
+  "description": "KinCast is a private video site for the whole family. Upload home videos from any device and they're converted to play smoothly everywhere. Go live from OBS or a phone for recitals, birthdays and games, with family chat. Subscribe to each other's channels and get notified about new videos. Everything stays on this server and needs a family sign-in.\n\nAfter installing, open KinCast to create the family and your admin account, then invite everyone from the Family page.",
+  "publisher": "Hardy Networks",
+  "website": "https://github.com/hardynetworks/kintube",
+  "icon": "icon.svg",
+  "arch": ["amd64", "arm64"],
+  "minMemoryMB": 2048,
+  "web": { "port": "WEB", "path": "/" },
+  "ports": [
+    { "name": "WEB", "label": "Website", "default": 8095 },
+    { "name": "RTMP", "label": "Live streaming (OBS and phone apps)", "default": 1935 }
+  ],
+  "settings": [
+    { "env": "POSTGRES_PASSWORD", "generate": "secret" },
+    { "env": "SESSION_SECRET", "generate": "secret" },
+    { "env": "RTMP_CALLBACK_SECRET", "generate": "secret" },
+    {
+      "env": "MAX_UPLOAD_GB",
+      "label": "Largest video upload (GB)",
+      "type": "number",
+      "default": "20",
+      "required": true
+    },
+    {
+      "env": "TRANSCODE_RENDITIONS",
+      "label": "Video qualities",
+      "help": "Each upload is converted to these qualities. Fewer qualities process faster and use less space.",
+      "type": "select",
+      "options": ["1080,720,360", "720,360", "1440,1080,720,360", "2160,1080,720,360"],
+      "default": "1080,720,360"
+    },
+    {
+      "env": "X264_PRESET",
+      "label": "Processing speed",
+      "help": "Faster presets finish sooner but make bigger files.",
+      "type": "select",
+      "options": ["superfast", "veryfast", "faster", "fast", "medium"],
+      "default": "veryfast"
+    },
+    {
+      "env": "KEEP_ORIGINALS",
+      "label": "Keep original files for download",
+      "type": "boolean",
+      "default": "true"
+    },
+    {
+      "env": "KINCAST_TAG",
+      "label": "KinCast version",
+      "help": "The image tag to run. \"latest\" follows new releases when you update the app.",
+      "type": "text",
+      "default": "latest",
+      "required": true
+    }
+  ],
+  "folders": [
+    { "path": "postgres", "mode": "0700" },
+    { "path": "media", "owner": "1000:1000", "mode": "0755" },
+    { "path": "hls", "owner": "1000:1000", "mode": "0777" },
+    { "path": "recordings", "owner": "1000:1000", "mode": "0777" }
+  ]
+}
