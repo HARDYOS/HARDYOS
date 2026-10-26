@@ -333,13 +333,22 @@ When the server has a domain, its accounts sign in to the web desktop too
   local HardyOS account wins for a bare name, so the break-glass admin can't
   be shadowed by a domain account. A prefix or suffix that isn't this
   server's domain is refused (`unknown_domain`).
-- **Password check.** hardyd (not root) asks the domain's DCs for a
+- **Password check.** hardyd (not root) asks this server's own DC for a
   ticket-granting ticket with a Kerberos AS exchange (gokrb5, pure Go, TCP,
-  no krb5.conf or DNS lookups): the realm and the DCs' addresses (this
-  server's own first, then its partners) come from `domain.status`, cached
-  for 30 seconds. hardyd reaches its own DC through the shim route. DCs that
-  don't accept a connection within 2 seconds are skipped and the whole check
-  is bounded at 10 seconds. The ticket is thrown away.
+  no krb5.conf or DNS lookups): the realm and the DC's address come from
+  `domain.status`, cached for 30 seconds. hardyd reaches its DC through the
+  shim route, inside the host; `SetupNetwork` pins the ARP entries on both
+  ends of it (`ip neigh ... nud permanent`), so answers from the LAN can't
+  pull that traffic away. Partner DCs are never asked, not even when the
+  local one is down: an AS reply only shows that whoever answered knows a
+  key for the password typed, which anyone answering for a partner's
+  address can make up. If the local DC doesn't accept a connection within
+  2 seconds, sign-in answers 503 `domain_unavailable` ("the domain
+  controller on this server isn't answering; sign in with a HardyOS
+  account"); the whole check is bounded at 10 seconds. A server without a
+  DC of its own (member mode, later) refuses domain sign-in with 503
+  `no_local_dc` until a service-ticket check with a machine keytab exists.
+  The ticket is thrown away.
 - **Answers.** A wrong password and an unknown name give the same
   `bad_credentials` as for local accounts (a bare name not known locally
   also runs a dummy Argon2 check, so timing doesn't tell local from domain).
@@ -352,10 +361,20 @@ When the server has a domain, its accounts sign in to the web desktop too
 - **Groups and role.** After the password, hardyd-priv's
   `domain.user_groups {username}` runs `hardyos-dc-admin user.groups`, which
   reads the account's state and its `tokenGroups` (nested groups and the
-  primary group included; BUILTIN groups left out). Turned-off and expired
-  accounts are refused. Members of `Domain Admins` or `HardyOS Admins` are
-  administrators, everyone else is a user. `HardyOS Admins` isn't created
-  automatically; the Domain page has a button for it.
+  primary group included; BUILTIN groups left out) with each group's SID
+  (`groupSids`) and the domain's SID (`domainSid`). Turned-off and expired
+  accounts are refused. The role goes by SID, never by name (anyone allowed
+  to create or rename a group picks its name): members of `<domainSid>-512`
+  (Domain Admins) or of the HardyOS Admins group whose objectSid is
+  recorded in the domain settings (`adminsGroupSid` in `hardyos-dc.json`,
+  so it's in domain backups) are administrators, everyone else is a user.
+  A renamed HardyOS Admins keeps working. It isn't created automatically:
+  the Domain page's button runs `POST /domain/admins-group` (a job,
+  audited), whose root op `domain.admins_group.create` creates the group
+  and records its SID. If a group of that name already exists, HardyOS
+  didn't make it: the page shows its members and records it only when an
+  administrator adopts it (`adopt: true`); built-in groups are never
+  adopted. A DC that joined a domain records the group again the same way.
 - **Records.** The first sign-in creates a row in `users` with
   `source = domain`, `username = HOME\alice` and an empty password hash, so
   sessions, jobs and the audit log point at domain users the same way as at
@@ -364,7 +383,10 @@ When the server has a domain, its accounts sign in to the web desktop too
   in, the groups are looked up again at most every 10 minutes (from the
   request that finds them older); a deleted, turned-off or expired account,
   or a different domain, ends all its sessions. If the domain can't be
-  asked, the known groups stay and the lookup is retried a minute later.
+  asked, the known groups stay and the lookup is retried a minute later;
+  after 30 minutes (3 refresh intervals) without a lookup that worked, the
+  account is a user (written to its row) and `/auth/me` says why in
+  `roleNote`, until a lookup works again.
 - **What a domain account can't do here.** Change its password through
   HardyOS (`/auth/password` and the admin reset answer `domain_account`,
   pointing to Domain > Users), have its name, email or role edited, be a

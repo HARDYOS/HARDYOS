@@ -196,6 +196,15 @@ func TestDCIntegration(t *testing.T) {
 	if !hasUser(t, a, "bob") {
 		t.Error("bob is missing after the restore")
 	}
+	// The recorded HardyOS Admins group (signInIntegration) came back with
+	// its SID, so desktop administrators stay administrators.
+	if rc := mustLoad(t, a); rc.AdminsGroupSID == "" {
+		t.Error("the HardyOS Admins SID wasn't restored")
+	} else if groups, err := a.Groups(ctx); err != nil {
+		t.Error(err)
+	} else if rec, _ := FindAdminsGroup(rc, groups); rec == nil {
+		t.Errorf("no group has the recorded SID %s after the restore", rc.AdminsGroupSID)
+	}
 	// Restoring over an existing domain keeps the existing one.
 	if note, err := a.RestoreFiles(ctx, cfg, archive); err != nil || !strings.Contains(note, "was kept") {
 		t.Errorf("restore over a domain: %q %v", note, err)

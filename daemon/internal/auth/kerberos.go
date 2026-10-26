@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jcmturner/gokrb5/v8/client"
@@ -20,12 +19,17 @@ import (
 // KerberosChecker verifies a domain password with a Kerberos AS exchange
 // (asking a domain controller for a ticket-granting ticket), in pure Go.
 // Nothing is kept: the ticket is thrown away.
+//
+// An AS exchange proves only that whoever answered knew a key for the
+// password typed, and an impostor answering for a DC's address can make one
+// up for any password. So only this server's own DC is asked
+// (DomainInfo.LocalKDC, reached inside the host), never a partner DC on the
+// LAN, even when the local one is down.
 type KerberosChecker struct {
 	// Timeout bounds the whole check (default 10 s).
 	Timeout time.Duration
-	// ProbeTimeout bounds finding which domain controllers answer (default
-	// 2 s). Unreachable ones are left out, so the Kerberos library's own
-	// per-server timeouts never add up.
+	// ProbeTimeout bounds finding out whether the local DC accepts a
+	// connection at all (default 2 s), so a stopped DC answers quickly.
 	ProbeTimeout time.Duration
 	// Port is the KDC port (default 88; tests).
 	Port int
@@ -33,8 +37,11 @@ type KerberosChecker struct {
 
 // CheckPassword implements PasswordChecker.
 func (k KerberosChecker) CheckPassword(ctx context.Context, d DomainInfo, username, password string) error {
-	if d.Realm == "" || len(d.KDCs) == 0 {
+	if d.Realm == "" {
 		return ErrDomainUnavailable
+	}
+	if d.LocalKDC == "" {
+		return ErrNoLocalDC
 	}
 	timeout := k.Timeout
 	if timeout <= 0 {
@@ -43,11 +50,11 @@ func (k KerberosChecker) CheckPassword(ctx context.Context, d DomainInfo, userna
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	kdcs := k.reachable(ctx, d.KDCs)
-	if len(kdcs) == 0 {
+	kdc := net.JoinHostPort(d.LocalKDC, k.port())
+	if !k.reachable(ctx, kdc) {
 		return ErrDomainUnavailable
 	}
-	cfg := krbConfig(d, kdcs)
+	cfg := krbConfig(d, kdc)
 	cl := client.NewWithPassword(username, strings.ToUpper(d.Realm), password, cfg, client.DisablePAFXFAST(true))
 	done := make(chan error, 1)
 	go func() {
@@ -71,42 +78,26 @@ func (k KerberosChecker) port() string {
 	return "88"
 }
 
-// reachable returns the KDCs that accept a TCP connection, in their original
-// order (this server's own DC first).
-func (k KerberosChecker) reachable(ctx context.Context, kdcs []string) []string {
+// reachable reports whether the KDC accepts a TCP connection.
+func (k KerberosChecker) reachable(ctx context.Context, addr string) bool {
 	pt := k.ProbeTimeout
 	if pt <= 0 {
 		pt = 2 * time.Second
 	}
-	ok := make([]bool, len(kdcs))
-	var wg sync.WaitGroup
-	for i, h := range kdcs {
-		wg.Add(1)
-		go func(i int, addr string) {
-			defer wg.Done()
-			pctx, cancel := context.WithTimeout(ctx, pt)
-			defer cancel()
-			var dl net.Dialer
-			c, err := dl.DialContext(pctx, "tcp", addr)
-			if err == nil {
-				c.Close()
-				ok[i] = true
-			}
-		}(i, net.JoinHostPort(h, k.port()))
+	pctx, cancel := context.WithTimeout(ctx, pt)
+	defer cancel()
+	var dl net.Dialer
+	c, err := dl.DialContext(pctx, "tcp", addr)
+	if err != nil {
+		return false
 	}
-	wg.Wait()
-	var out []string
-	for i, h := range kdcs {
-		if ok[i] {
-			out = append(out, net.JoinHostPort(h, k.port()))
-		}
-	}
-	return out
+	c.Close()
+	return true
 }
 
-// krbConfig is a krb5.conf for one realm with fixed KDCs: no DNS lookups,
+// krbConfig is a krb5.conf for one realm with one fixed KDC: no DNS lookups,
 // TCP only (AD tickets with group lists outgrow UDP).
-func krbConfig(d DomainInfo, kdcs []string) *config.Config {
+func krbConfig(d DomainInfo, kdc string) *config.Config {
 	realm := strings.ToUpper(d.Realm)
 	cfg := config.New()
 	cfg.LibDefaults.DefaultRealm = realm
@@ -114,7 +105,7 @@ func krbConfig(d DomainInfo, kdcs []string) *config.Config {
 	cfg.LibDefaults.DNSLookupRealm = false
 	cfg.LibDefaults.UDPPreferenceLimit = 1
 	cfg.LibDefaults.NoAddresses = true
-	cfg.Realms = []config.Realm{{Realm: realm, KDC: kdcs, DefaultDomain: strings.ToLower(d.DNS)}}
+	cfg.Realms = []config.Realm{{Realm: realm, KDC: []string{kdc}, DefaultDomain: strings.ToLower(d.DNS)}}
 	if d.DNS != "" {
 		cfg.DomainRealm[strings.ToLower(d.DNS)] = realm
 		cfg.DomainRealm["."+strings.ToLower(d.DNS)] = realm

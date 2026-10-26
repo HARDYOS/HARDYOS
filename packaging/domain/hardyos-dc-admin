@@ -69,9 +69,12 @@ def gen_time(v):
     return f"{v[0:4]}-{v[4:6]}-{v[6:8]}T{v[8:10]}:{v[10:12]}:{v[12:14]}Z"
 
 
+def sid_of(msg):
+    return str(ndr_unpack(security.dom_sid, msg["objectSid"][0]))
+
+
 def rid(msg):
-    sid = ndr_unpack(security.dom_sid, msg["objectSid"][0])
-    return int(str(sid).rsplit("-", 1)[1])
+    return int(sid_of(msg).rsplit("-", 1)[1])
 
 
 
@@ -155,6 +158,7 @@ class Directory:
             builtin = self._group_builtin(m)
             out.append({
                 "name": first(m, "sAMAccountName"),
+                "sid": sid_of(m),
                 "description": first(m, "description"),
                 "members": sorted(self.name_of(x) for x in m.get("member", [])),
                 "builtin": builtin,
@@ -163,13 +167,18 @@ class Directory:
 
     def user_groups(self, a):
         """One account's state and every group it's in (nested groups and
-        the primary group too, from tokenGroups), for desktop sign-in."""
+        the primary group too, from tokenGroups), for desktop sign-in.
+        groupSids and domainSid decide the desktop role; names are for
+        display and access rules only (anyone allowed to create or rename a
+        group picks its name)."""
+        domain_sid = str(self.db.get_domain_sid())
         try:
             m = self._user(a["username"])
         except Fail:
-            return {"exists": False, "groups": []}
+            return {"exists": False, "groups": [], "groupSids": [], "domainSid": domain_sid}
         info = self._user_json(m)
         names = set()
+        sids = set()
         res = self.db.search(base=m.dn, scope=ldb.SCOPE_BASE, attrs=["tokenGroups"])
         for raw in res[0].get("tokenGroups", []) if len(res) == 1 else []:
             sid = str(ndr_unpack(security.dom_sid, raw))
@@ -179,7 +188,10 @@ class Directory:
                                expression="(objectSid=%s)" % ldb.binary_encode(sid))
             if len(g) == 1:
                 names.add(first(g[0], "sAMAccountName"))
+                sids.add(sid)
         if not names:
+            # No tokenGroups: the names still show, but no SIDs means no
+            # administrator role.
             names = set(info["groups"])
         expires = ad_time(first(m, "accountExpires", "0"))
         return {
@@ -192,6 +204,8 @@ class Directory:
             "expired": expires > 0 and expires < int(time.time()),
             "mustChangePassword": info["mustChangePassword"],
             "groups": sorted(names, key=str.lower),
+            "groupSids": sorted(sids),
+            "domainSid": domain_sid,
         }
 
     @staticmethod

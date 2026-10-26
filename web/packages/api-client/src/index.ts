@@ -91,6 +91,7 @@ export type DomainSuggestion = S["DomainSuggestion"];
 export type DomainUser = S["DomainUser"];
 export type DomainGroup = S["DomainGroup"];
 export type DomainController = S["DomainController"];
+export type DomainAdminsGroup = S["DomainAdminsGroup"];
 export type AppsOverview = S["AppsOverview"];
 export type InstalledApp = S["App"];
 export type AppPackage = S["AppPackage"];

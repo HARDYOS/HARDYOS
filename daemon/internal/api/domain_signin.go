@@ -47,13 +47,21 @@ func (d *privDirectory) Info(ctx context.Context) (*auth.DomainInfo, error) {
 		}
 		return nil, err
 	}
-	d.info = nil
-	if st.Provisioned && st.Config != nil && st.Config.Realm != "" {
-		c := st.Config
-		d.info = &auth.DomainInfo{Realm: c.Realm, NetBIOS: c.NetBIOS, DNS: c.Domain, KDCs: c.DNSServers()}
-	}
+	d.info = domainInfo(&st)
 	d.infoAt = time.Now()
 	return d.info, nil
+}
+
+// domainInfo is sign-in's view of the domain's status, or nil without a
+// domain. Passwords are checked only with the DC this server runs itself
+// (its address, reached through the shim route inside the host), never
+// with its partners: see auth.KerberosChecker.
+func domainInfo(st *domain.Status) *auth.DomainInfo {
+	if st == nil || !st.Provisioned || st.Config == nil || st.Config.Realm == "" {
+		return nil
+	}
+	c := st.Config
+	return &auth.DomainInfo{Realm: c.Realm, NetBIOS: c.NetBIOS, DNS: c.Domain, LocalKDC: c.IP(), AdminsGroupSID: c.AdminsGroupSID}
 }
 
 func (d *privDirectory) Account(ctx context.Context, username string) (*auth.DomainAccount, error) {
@@ -69,6 +77,7 @@ func (d *privDirectory) Account(ctx context.Context, username string) (*auth.Dom
 	return &auth.DomainAccount{
 		Exists: g.Exists, Username: g.Username, DisplayName: g.DisplayName, Email: g.Email,
 		Enabled: g.Enabled, LockedOut: g.LockedOut, Expired: g.Expired, Groups: g.Groups,
+		DomainSID: g.DomainSID, GroupSIDs: g.GroupSIDs,
 	}, nil
 }
 
@@ -106,6 +115,7 @@ func loginError(w http.ResponseWriter, err error) (detail string, counts bool) {
 		{auth.ErrDisabledHere, answer{http.StatusUnauthorized, "account_disabled", false}},
 		{auth.ErrClockSkew, answer{http.StatusServiceUnavailable, "clock_skew", false}},
 		{auth.ErrDomainUnavailable, answer{http.StatusServiceUnavailable, "domain_unavailable", false}},
+		{auth.ErrNoLocalDC, answer{http.StatusServiceUnavailable, "no_local_dc", false}},
 	}
 	for _, a := range answers {
 		if errors.Is(err, a.err) {

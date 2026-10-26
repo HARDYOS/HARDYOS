@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,10 +14,20 @@ import (
 // DomainInfo is what desktop sign-in needs to know about this server's
 // domain.
 type DomainInfo struct {
-	Realm   string   // HOME.EXAMPLE.NET
-	NetBIOS string   // HOME
-	DNS     string   // home.example.net
-	KDCs    []string // the domain controllers' addresses, this server's own first
+	Realm   string // HOME.EXAMPLE.NET
+	NetBIOS string // HOME
+	DNS     string // home.example.net
+	// LocalKDC is the address of the domain controller this server runs
+	// itself, reached inside the host (the shim route). It's the only one
+	// asked for passwords: a partner DC's answer could come from anyone who
+	// can take over its address on the LAN. Empty when this server runs no
+	// DC of its own; domain sign-in is refused then (ErrNoLocalDC).
+	LocalKDC string
+	// AdminsGroupSID is the objectSid of the HardyOS Admins group, recorded
+	// when HardyOS created (or an administrator adopted) it; empty when
+	// there's none. Members are HardyOS administrators whatever the group is
+	// called now.
+	AdminsGroupSID string
 }
 
 // DomainAccount is a domain user's state and groups, from the directory.
@@ -30,8 +41,14 @@ type DomainAccount struct {
 	LockedOut   bool
 	Expired     bool
 	// Groups are group names without the domain (Domain Users, Family),
-	// nested memberships included.
+	// nested memberships included. For access rules and display only:
+	// the role comes from GroupSIDs, since anyone who may create or rename
+	// a group can choose its name.
 	Groups []string
+	// DomainSID is the domain's SID (S-1-5-21-...); GroupSIDs are the
+	// objectSids of the groups in Groups.
+	DomainSID string
+	GroupSIDs []string
 }
 
 // DomainDirectory answers questions about the domain. hardyd implements it
@@ -53,29 +70,41 @@ type PasswordChecker interface {
 // Sign-in errors for domain accounts. The messages are shown on the sign-in
 // screen.
 var (
-	ErrDomainUnavailable = errors.New("can't reach the domain controller to check the password; try again in a minute, or sign in with a local HardyOS account")
-	ErrUnknownDomain     = errors.New("that isn't this server's domain; sign in with your name, DOMAIN\\name or name@domain")
-	ErrClockSkew         = errors.New("this server's clock and the domain controller's are more than 5 minutes apart; check the time in Control Panel > Date & Time")
-	ErrAccountRevoked    = errors.New("this domain account can't sign in right now: it's turned off, locked or expired; ask an administrator (Control Panel > Domain > Users)")
-	ErrAccountDisabled   = errors.New("this domain account is turned off; an administrator can turn it on in Control Panel > Domain > Users")
-	ErrAccountLocked     = errors.New("this domain account is locked after too many wrong passwords; wait a while, or ask an administrator to set a new password in Control Panel > Domain > Users")
-	ErrAccountExpired    = errors.New("this domain account has expired; ask an administrator")
-	ErrPasswordExpired   = errors.New("this password has expired or must be changed first; change it on a computer in the domain, or ask an administrator to set a new one in Control Panel > Domain > Users")
-	ErrDisabledHere      = errors.New("this account is turned off in HardyOS; an administrator can turn it on in Control Panel > Users & Groups")
+	ErrDomainUnavailable = errors.New("the domain controller on this server isn't answering; sign in with a HardyOS account")
+	// ErrNoLocalDC refuses domain sign-in on a server that doesn't run a
+	// domain controller itself: an AS exchange with a DC elsewhere on the
+	// LAN can't tell the real one from an impostor.
+	ErrNoLocalDC       = errors.New("domain accounts can sign in only on a server that runs the domain controller itself; sign in with a HardyOS account")
+	ErrUnknownDomain   = errors.New("that isn't this server's domain; sign in with your name, DOMAIN\\name or name@domain")
+	ErrClockSkew       = errors.New("this server's clock and the domain controller's are more than 5 minutes apart; check the time in Control Panel > Date & Time")
+	ErrAccountRevoked  = errors.New("this domain account can't sign in right now: it's turned off, locked or expired; ask an administrator (Control Panel > Domain > Users)")
+	ErrAccountDisabled = errors.New("this domain account is turned off; an administrator can turn it on in Control Panel > Domain > Users")
+	ErrAccountLocked   = errors.New("this domain account is locked after too many wrong passwords; wait a while, or ask an administrator to set a new password in Control Panel > Domain > Users")
+	ErrAccountExpired  = errors.New("this domain account has expired; ask an administrator")
+	ErrPasswordExpired = errors.New("this password has expired or must be changed first; change it on a computer in the domain, or ask an administrator to set a new one in Control Panel > Domain > Users")
+	ErrDisabledHere    = errors.New("this account is turned off in HardyOS; an administrator can turn it on in Control Panel > Users & Groups")
 	// ErrAccountGone ends the sessions of a domain account that was
 	// deleted, turned off or expired since it signed in.
 	ErrAccountGone = errors.New("the domain account is no longer allowed to sign in")
 )
 
-// Groups whose members become HardyOS administrators.
-const (
-	GroupDomainAdmins  = "Domain Admins"
-	GroupHardyOSAdmins = "HardyOS Admins"
-)
+// RIDDomainAdmins is the relative ID of the domain's Domain Admins group
+// (<domain SID>-512), whose members are HardyOS administrators. The other
+// administrators' group is HardyOS Admins, known by the SID in
+// DomainInfo.AdminsGroupSID.
+const RIDDomainAdmins = 512
 
 // GroupRefreshInterval is how long a domain account's groups are trusted
 // before they're looked up again during a session.
 const GroupRefreshInterval = 10 * time.Minute
+
+// GroupTrustWindow is how long a domain account keeps its role while its
+// groups can't be looked up again: after that it's a user until a lookup
+// works.
+const GroupTrustWindow = 3 * GroupRefreshInterval
+
+// staleRoleNote is what /auth/me says while the role is held back.
+const staleRoleNote = "The domain couldn't be asked about your groups for over 30 minutes, so you have user rights until it answers again."
 
 // refreshRetry spaces out lookups while the domain can't be asked.
 const refreshRetry = time.Minute
@@ -219,6 +248,9 @@ func (s *SignIn) Authenticate(ctx context.Context, typed, pw string) (*User, err
 	if !samRE.MatchString(name) || strings.HasSuffix(name, ".") {
 		return nil, ErrBadCredentials
 	}
+	if info.LocalKDC == "" {
+		return nil, ErrNoLocalDC
+	}
 	return s.domainSignIn(ctx, info, name, pw)
 }
 
@@ -244,7 +276,7 @@ func (s *SignIn) domainSignIn(ctx context.Context, info *DomainInfo, name, pw st
 			}
 		}
 		return nil, ErrAccountRevoked
-	case isAny(err, ErrBadCredentials, ErrPasswordExpired, ErrClockSkew, ErrDomainUnavailable):
+	case isAny(err, ErrBadCredentials, ErrPasswordExpired, ErrClockSkew, ErrDomainUnavailable, ErrNoLocalDC):
 		return nil, err
 	default:
 		s.log().Warn("domain sign-in: Kerberos failed", "user", name, "err", err)
@@ -282,14 +314,30 @@ func accountUsable(a *DomainAccount) error {
 	return nil
 }
 
+// AdminBySID reports whether group SIDs make an account a HardyOS
+// administrator: Domain Admins (<domain SID>-512) or the recorded HardyOS
+// Admins group. Group names never count.
+func AdminBySID(domainSID, adminsGroupSID string, groupSIDs []string) bool {
+	da := ""
+	if strings.HasPrefix(domainSID, "S-1-5-21-") {
+		da = domainSID + "-" + strconv.Itoa(RIDDomainAdmins)
+	}
+	for _, sid := range groupSIDs {
+		if (da != "" && strings.EqualFold(sid, da)) || (adminsGroupSID != "" && strings.EqualFold(sid, adminsGroupSID)) {
+			return true
+		}
+	}
+	return false
+}
+
 func domainUpdate(info *DomainInfo, a *DomainAccount) DomainUpdate {
 	groups := make([]string, 0, len(a.Groups))
-	role := RoleUser
 	for _, g := range a.Groups {
-		if strings.EqualFold(g, GroupDomainAdmins) || strings.EqualFold(g, GroupHardyOSAdmins) {
-			role = RoleAdmin
-		}
 		groups = append(groups, info.NetBIOS+`\`+g)
+	}
+	role := RoleUser
+	if AdminBySID(a.DomainSID, info.AdminsGroupSID, a.GroupSIDs) {
+		role = RoleAdmin
 	}
 	return DomainUpdate{
 		Principal:   info.NetBIOS + `\` + a.Username,
@@ -318,10 +366,13 @@ func (s *SignIn) Verify(ctx context.Context, u *User, pw string) error {
 	if info == nil || !strings.EqualFold(part, info.NetBIOS) {
 		return ErrAccountGone
 	}
+	if info.LocalKDC == "" {
+		return ErrNoLocalDC
+	}
 	ctx, cancel := context.WithTimeout(ctx, domainCheckTimeout)
 	defer cancel()
 	err = s.kerberos().CheckPassword(ctx, *info, name, pw)
-	if err != nil && !isAny(err, ErrBadCredentials, ErrAccountRevoked, ErrPasswordExpired, ErrClockSkew, ErrDomainUnavailable) {
+	if err != nil && !isAny(err, ErrBadCredentials, ErrAccountRevoked, ErrPasswordExpired, ErrClockSkew, ErrDomainUnavailable, ErrNoLocalDC) {
 		return ErrDomainUnavailable
 	}
 	return err
@@ -331,23 +382,34 @@ func (s *SignIn) Verify(ctx context.Context, u *User, pw string) error {
 // GroupRefreshInterval, updating its role. It returns ErrAccountGone when
 // the account was deleted, turned off or expired in the domain (end its
 // sessions). While the domain can't be asked, the account keeps the groups
-// it has and the lookup is retried a minute later. Local accounts are
-// returned unchanged.
+// it has and the lookup is retried a minute later; once GroupTrustWindow
+// has passed without a lookup it's a user (RoleNote says why) until one
+// works again. Local accounts are returned unchanged.
 func (s *SignIn) Refresh(ctx context.Context, u *User) (*User, error) {
 	if u.Source != SourceDomain || time.Since(u.groupsCheckedAt) < GroupRefreshInterval {
 		return u, nil
 	}
+	nu, asked, err := s.refresh(ctx, u)
+	if err != nil || asked {
+		return nu, err
+	}
+	return s.unverified(ctx, u), nil
+}
+
+// refresh asks the domain about u. asked is false when the domain couldn't
+// be asked (or another request is asking, or it's too soon to ask again).
+func (s *SignIn) refresh(ctx context.Context, u *User) (nu *User, asked bool, err error) {
 	v, _ := s.refreshing.LoadOrStore(u.ID, &refreshState{})
 	st := v.(*refreshState)
 	if !st.mu.TryLock() {
-		return u, nil // another request is already asking
+		return u, false, nil // another request is already asking
 	}
 	defer st.mu.Unlock()
 	if time.Now().Before(st.nextTry) {
-		return u, nil
+		return u, false, nil
 	}
 	if s.Domain == nil {
-		return nil, ErrAccountGone
+		return nil, true, ErrAccountGone
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -355,27 +417,49 @@ func (s *SignIn) Refresh(ctx context.Context, u *User) (*User, error) {
 	if err != nil {
 		st.nextTry = time.Now().Add(refreshRetry)
 		s.log().Warn("domain groups refresh: can't read the domain", "user", u.Username, "err", err)
-		return u, nil
+		return u, false, nil
 	}
 	part, name, _ := splitName(u.Principal)
 	if info == nil || !strings.EqualFold(part, info.NetBIOS) {
-		return nil, ErrAccountGone
+		return nil, true, ErrAccountGone
 	}
 	a, err := s.Domain.Account(ctx, name)
 	if err != nil {
 		st.nextTry = time.Now().Add(refreshRetry)
 		s.log().Warn("domain groups refresh failed", "user", u.Username, "err", err)
-		return u, nil
+		return u, false, nil
 	}
 	if accountUsable(a) != nil {
-		return nil, ErrAccountGone
+		return nil, true, ErrAccountGone
 	}
-	nu, err := s.Users.UpsertDomain(ctx, domainUpdate(info, a))
+	nu, err = s.Users.UpsertDomain(ctx, domainUpdate(info, a))
 	if err != nil {
-		return nil, err
+		return nil, true, err
 	}
 	s.refreshing.Delete(u.ID)
-	return nu, nil
+	return nu, true, nil
+}
+
+// unverified is u while its groups can't be looked up: unchanged within
+// GroupTrustWindow of the last lookup, a user after it. The demotion is
+// written to the account's row too, so nothing reading it later sees an
+// administrator; the next lookup that works sets the role from the groups
+// again.
+func (s *SignIn) unverified(ctx context.Context, u *User) *User {
+	if time.Since(u.groupsCheckedAt) < GroupTrustWindow {
+		return u
+	}
+	c := *u
+	c.RoleNote = staleRoleNote
+	if c.Role == RoleAdmin {
+		c.Role = RoleUser
+		if err := s.Users.holdBackRole(ctx, u.ID); err != nil {
+			s.log().Warn("domain groups refresh: can't record the role held back", "user", u.Username, "err", err)
+		} else {
+			s.log().Warn("domain groups couldn't be checked for too long: administrator rights held back", "user", u.Username)
+		}
+	}
+	return &c
 }
 
 func isAny(err error, targets ...error) bool {

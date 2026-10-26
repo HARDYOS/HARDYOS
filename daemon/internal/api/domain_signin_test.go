@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http/httptest"
 	"os"
@@ -22,6 +23,19 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/updates"
 )
 
+// The pretend domain's SIDs.
+const (
+	signinDomainSID = "S-1-5-21-10-20-30"
+	signinAdminsSID = signinDomainSID + "-1105" // recorded HardyOS Admins
+)
+
+var signinGroupSIDs = map[string]string{
+	"domain users":   signinDomainSID + "-513",
+	"domain admins":  signinDomainSID + "-512",
+	"hardyos admins": signinAdminsSID,
+	"family":         signinDomainSID + "-1104",
+}
+
 // signinDC is a root helper and KDC that pretend to be the domain.
 type signinDC struct {
 	mu          sync.Mutex
@@ -30,15 +44,39 @@ type signinDC struct {
 	accounts    map[string]*domain.UserGroups // lower-case name
 	passwords   map[string]string
 	lookups     int
+	lookupErr   error
+	// cfg replaces the default domain settings when set.
+	cfg *domain.Config
+	// adminsSID is the recorded HardyOS Admins SID; groups are what
+	// domain.groups lists.
+	adminsSID string
+	groups    []domain.Group
+	nextRID   int
 }
 
 func (d *signinDC) add(name, pw string, groups ...string) *domain.UserGroups {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	g := &domain.UserGroups{Exists: true, Username: name, DisplayName: name + " Hardy", Enabled: true, Groups: append([]string{"Domain Users"}, groups...)}
+	g := &domain.UserGroups{Exists: true, Username: name, DisplayName: name + " Hardy", Enabled: true, DomainSID: signinDomainSID}
+	for _, n := range append([]string{"Domain Users"}, groups...) {
+		g.Groups = append(g.Groups, n)
+		g.GroupSIDs = append(g.GroupSIDs, signinGroupSIDs[strings.ToLower(n)])
+	}
 	d.accounts[strings.ToLower(name)] = g
 	d.passwords[strings.ToLower(name)] = pw
 	return g
+}
+
+// setGroups replaces an account's groups (by name, SIDs from signinGroupSIDs).
+func (d *signinDC) setGroups(name string, groups ...string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	g := d.accounts[strings.ToLower(name)]
+	g.Groups, g.GroupSIDs = nil, nil
+	for _, n := range groups {
+		g.Groups = append(g.Groups, n)
+		g.GroupSIDs = append(g.GroupSIDs, signinGroupSIDs[strings.ToLower(n)])
+	}
 }
 
 func (d *signinDC) register(ps *priv.Server) {
@@ -49,7 +87,10 @@ func (d *signinDC) register(ps *priv.Server) {
 			return domain.Status{Available: true}, nil
 		}
 		c := &domain.Config{Domain: "home.example.net", Realm: "HOME.EXAMPLE.NET", NetBIOS: "HOME", Address: "192.0.2.20/24", Enabled: true,
-			Others: []domain.DC{{Name: "dc2.home.example.net", Address: "192.0.2.21"}}}
+			Others: []domain.DC{{Name: "dc2.home.example.net", Address: "192.0.2.21"}}, AdminsGroupSID: d.adminsSID}
+		if d.cfg != nil {
+			c = d.cfg
+		}
 		return domain.Status{Available: true, Provisioned: true, Config: c, Running: true, Responding: true}, nil
 	})
 	ps.Handle(priv.OpDomainUserGroups, func(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -61,11 +102,41 @@ func (d *signinDC) register(ps *priv.Server) {
 		d.mu.Lock()
 		defer d.mu.Unlock()
 		d.lookups++
+		if d.lookupErr != nil {
+			return nil, d.lookupErr
+		}
 		g, ok := d.accounts[strings.ToLower(a.Username)]
 		if !ok {
 			return domain.UserGroups{Groups: []string{}}, nil
 		}
 		return g, nil
+	})
+	ps.Handle(priv.OpDomainGroups, func(ctx context.Context, _ json.RawMessage) (any, error) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return priv.DomainGroupsResult{Groups: append([]domain.Group{}, d.groups...)}, nil
+	})
+	// The root op, as domain.Manager.SetUpAdminsGroup does it.
+	ps.Handle(priv.OpDomainAdminsGroupCreate, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var a domain.AdminsGroupArgs
+		_ = json.Unmarshal(raw, &a)
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		recorded, named := domain.FindAdminsGroup(&domain.Config{AdminsGroupSID: d.adminsSID}, d.groups)
+		switch {
+		case recorded != nil:
+			return domain.AdminsGroup{Name: recorded.Name, SID: recorded.SID}, nil
+		case named != nil && !a.Adopt:
+			return nil, priv.Errorf(priv.CodeBadArgs, "%v", &domain.AdminsGroupExistsError{Members: named.Members})
+		case named != nil:
+			d.adminsSID = named.SID
+			return domain.AdminsGroup{Name: named.Name, SID: named.SID, Adopted: true}, nil
+		}
+		d.nextRID++
+		g := domain.Group{Name: domain.AdminsGroupName, SID: fmt.Sprintf("%s-%d", signinDomainSID, 1400+d.nextRID), Members: []string{}}
+		d.groups = append(d.groups, g)
+		d.adminsSID = g.SID
+		return domain.AdminsGroup{Name: g.Name, SID: g.SID, Created: true}, nil
 	})
 }
 
@@ -73,7 +144,8 @@ func (d *signinDC) register(ps *priv.Server) {
 func (d *signinDC) CheckPassword(_ context.Context, info auth.DomainInfo, name, pw string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if !d.reachable || info.Realm != "HOME.EXAMPLE.NET" || len(info.KDCs) != 2 || info.KDCs[0] != "192.0.2.20" {
+	// Only this server's own DC is ever asked, never dc2.
+	if !d.reachable || info.Realm != "HOME.EXAMPLE.NET" || info.LocalKDC != "192.0.2.20" {
 		return auth.ErrDomainUnavailable
 	}
 	g, ok := d.accounts[strings.ToLower(name)]
@@ -91,6 +163,13 @@ func (d *signinDC) CheckPassword(_ context.Context, info auth.DomainInfo, name, 
 
 func newSigninEnv(t *testing.T) (*testEnv, *signinDC) {
 	t.Helper()
+	return newSigninEnvWith(t, nil)
+}
+
+// newSigninEnvWith checks passwords with kerb (nil: the fake KDC in
+// signinDC).
+func newSigninEnvWith(t *testing.T, kerb auth.PasswordChecker) (*testEnv, *signinDC) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
@@ -101,7 +180,8 @@ func newSigninEnv(t *testing.T) (*testEnv, *signinDC) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dc := &signinDC{provisioned: true, reachable: true, accounts: map[string]*domain.UserGroups{}, passwords: map[string]string{}}
+	dc := &signinDC{provisioned: true, reachable: true, accounts: map[string]*domain.UserGroups{}, passwords: map[string]string{},
+		adminsSID: signinAdminsSID}
 	ps := &priv.Server{AllowedUIDs: []uint32{uint32(os.Getuid())}}
 	priv.RegisterBuiltins(ps)
 	dc.register(ps)
@@ -114,8 +194,11 @@ func newSigninEnv(t *testing.T) (*testEnv, *signinDC) {
 		t.Fatal(err)
 	}
 	upd := &updates.Service{Priv: pc, Jobs: m, DB: db, Dir: t.TempDir(), Notify: &notify.Center{DB: db, Events: broker}}
+	if kerb == nil {
+		kerb = dc
+	}
 	srv := httptest.NewServer(New(Config{DB: db, Jobs: m, Events: broker, Priv: pc, Updates: upd, Insecure: true,
-		Kerberos: dc, DomainInfoTTL: time.Millisecond}))
+		Kerberos: kerb, DomainInfoTTL: time.Millisecond}))
 	t.Cleanup(func() {
 		srv.Close()
 		cancel()
@@ -227,9 +310,7 @@ func TestDomainSignInAPI(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	dc.mu.Lock()
-	dc.accounts["boss"].Groups = []string{"Domain Users"}
-	dc.mu.Unlock()
+	dc.setGroups("boss", "Domain Users")
 	if code := boss.do("GET", "/api/v1/users", nil, nil); code != 200 {
 		t.Errorf("fresh groups trusted: %d", code)
 	}

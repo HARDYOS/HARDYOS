@@ -1,4 +1,4 @@
-import type { DomainConfig, DomainController, DomainStatus, DomainSuggestion } from "@hardy/api-client";
+import type { DomainConfig, DomainController, DomainStatus, DomainSuggestion, Job } from "@hardy/api-client";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 import { api, errorMessage, unwrap } from "../../api";
@@ -483,26 +483,49 @@ function Overview({ st }: { st: DomainStatus }) {
   );
 }
 
-/** The HardyOS group whose members become desktop administrators. */
+/** The group HardyOS creates for desktop administrators. */
 const HARDYOS_ADMINS = "HardyOS Admins";
 
+const sameSid = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
+
+/**
+ * Who signs in to the desktop with a domain account, and who's an
+ * administrator. Administrators are members of Domain Admins or of the
+ * HardyOS Admins group HardyOS recorded by its SID: a group that merely has
+ * the name (anyone allowed to create groups could make one) counts only
+ * after an administrator checks its members and adopts it.
+ */
 function DesktopSignIn({ c }: { c: DomainConfig }) {
   const qc = useQueryClient();
   const groups = useQuery({ queryKey: ["domain", "groups"], queryFn: () => unwrap(api.GET("/domain/groups")).then((r) => r.groups) });
-  const hasGroup = groups.data?.some((g) => g.name.toLowerCase() === HARDYOS_ADMINS.toLowerCase()) ?? false;
+  const [job, setJob] = useState<string | null>(null);
+  const [adopting, setAdopting] = useState(false);
+  const list = groups.data ?? [];
+  const recorded = list.find((g) => sameSid(g.sid, c.adminsGroupSid));
+  const named = list.find((g) => g.name.toLowerCase() === HARDYOS_ADMINS.toLowerCase());
+  const lookalike = !recorded ? named : undefined;
+  const gone = !!c.adminsGroupSid && groups.isSuccess && !recorded;
+
+  const start = async (adopt: boolean) => {
+    const r = await unwrap(api.POST("/domain/admins-group", { body: { adopt } }));
+    setJob(r.job.id);
+  };
   const create = useMutation({
-    mutationFn: () => unwrap(api.POST("/domain/groups", { body: { name: HARDYOS_ADMINS, description: "Administrators of the HardyOS desktop" } })),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["domain", "groups"] });
-      toast("success", `Created ${HARDYOS_ADMINS}`, "Add people to it on the Groups tab.");
-    },
+    mutationFn: () => start(false),
     onError: (e) => toast("error", `Couldn't create ${HARDYOS_ADMINS}`, errorMessage(e)),
   });
+  const finished = (j: Job) => {
+    setJob(null);
+    void qc.invalidateQueries({ queryKey: ["domain"] });
+    if (j.state === "succeeded") toast("success", `${HARDYOS_ADMINS} is set up`, "Add people to it on the Groups tab.");
+    else toast("error", `Couldn't set up ${HARDYOS_ADMINS}`, j.error ?? "");
+  };
+
   return (
     <Card
       title="Desktop sign-in"
       actions={
-        groups.isSuccess && !hasGroup ? (
+        groups.isSuccess && !recorded && !lookalike && !job ? (
           <Button size="sm" onClick={() => create.mutate()} busy={create.isPending}>
             <PlusIcon size={14} /> Create {HARDYOS_ADMINS}
           </Button>
@@ -512,19 +535,55 @@ function DesktopSignIn({ c }: { c: DomainConfig }) {
       <p className="small" style={{ marginTop: 0 }}>
         Everyone with a domain account can sign in to the HardyOS desktop with their domain password, as <span className="mono">name</span>,{" "}
         <span className="mono">{c.netbios}\name</span> or <span className="mono">name@{c.domain}</span>. A local HardyOS account with the same name comes
-        first.
+        first. Passwords are checked only with the domain controller on this server; while it's stopped, sign in with a HardyOS account.
       </p>
       <p className="small muted" style={{ margin: 0 }}>
         Members of <strong>Domain Admins</strong>
-        {hasGroup && (
+        {recorded && (
           <>
             {" "}
-            or <strong>{HARDYOS_ADMINS}</strong>
+            or <strong>{recorded.name}</strong>
+            {recorded.name.toLowerCase() !== HARDYOS_ADMINS.toLowerCase() && <> (the {HARDYOS_ADMINS} group, renamed)</>}
           </>
         )}{" "}
         are HardyOS administrators; everyone else is a user.
-        {groups.isSuccess && !hasGroup && <> Create {HARDYOS_ADMINS} to make someone a HardyOS administrator without making them a domain administrator.</>}
+        {groups.isSuccess && !recorded && !lookalike && (
+          <>
+            {" "}
+            {gone ? `The ${HARDYOS_ADMINS} group was deleted. ` : ""}Create {HARDYOS_ADMINS} to make someone a HardyOS administrator without making them a
+            domain administrator.
+          </>
+        )}
       </p>
+      {lookalike && !job && (
+        <Alert
+          tone="warn"
+          title={`${lookalike.name} wasn't created by HardyOS`}
+          action={
+            <Button size="sm" onClick={() => setAdopting(true)}>
+              Use this group
+            </Button>
+          }
+        >
+          A group with this name already exists, so its members aren't HardyOS administrators: anyone allowed to create groups could have made it.
+          Members: <strong>{lookalike.members.length ? lookalike.members.join(", ") : "nobody"}</strong>.
+        </Alert>
+      )}
+      {job && <JobProgress id={job} onDone={finished} />}
+      {adopting && lookalike && (
+        <ConfirmDialog
+          title={`Use ${lookalike.name} for HardyOS administrators?`}
+          confirmLabel="Use this group"
+          onClose={() => setAdopting(false)}
+          onConfirm={() => start(true)}
+        >
+          <p>
+            Everyone in it becomes a HardyOS administrator, with a root terminal: {lookalike.members.length ? lookalike.members.join(", ") : "nobody yet"}.
+            So does anyone added to it later, by whoever may change its members. If you don't know why it exists, delete it on the Groups tab and create{" "}
+            {HARDYOS_ADMINS} here instead.
+          </p>
+        </ConfirmDialog>
+      )}
     </Card>
   );
 }
