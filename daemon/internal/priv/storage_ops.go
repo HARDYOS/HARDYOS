@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -512,18 +513,78 @@ func (st *storageOps) importPool(ctx context.Context, a PoolImportArgs) (any, er
 			return nil, err
 		}
 	}
-	args := []string{"import", "-d", "/dev/disk/by-id"}
+	// -N: mount nothing yet. A pool from another machine chooses its own
+	// mount points, and one set to /etc or /usr would cover the system's
+	// own folders; they're checked first (safeMount).
+	args := []string{"import", "-N", "-d", "/dev/disk/by-id"}
 	if a.Force {
 		args = append(args, "-f")
 	}
 	if _, err := st.zpool(ctx, append(args, a.Pool)...); err != nil {
 		return nil, err
 	}
-	pools, err := st.zpool(ctx, zfs.PoolListArgs...)
+	out, err := st.zpool(ctx, zfs.PoolListArgs...)
 	if err != nil {
 		return nil, err
 	}
-	return zfs.ParsePoolList(pools)
+	pools, err := zfs.ParsePoolList(out)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range pools {
+		if p.Name == a.Pool || p.GUID == a.Pool {
+			if err := st.safeMount(ctx, p.Name); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return pools, nil
+}
+
+// safeMount puts every file system of an imported pool whose mount point
+// is outside /mnt/<pool> back under it (the pool's own folder), then
+// mounts them. HardyOS pools always live at /mnt/<pool>.
+func (st *storageOps) safeMount(ctx context.Context, pool string) error {
+	if err := zfs.ValidPoolName(pool); err != nil {
+		return Errorf(CodeBadArgs, "%v", err)
+	}
+	base := zfs.MountRoot + "/" + pool
+	out, err := st.zfs(ctx, "list", "-Hp", "-r", "-t", "filesystem", "-o", "name,mountpoint", pool)
+	if err != nil {
+		return err
+	}
+	type fsys struct{ name, mp string }
+	var all []fsys
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		f := strings.Split(line, "\t")
+		if len(f) != 2 || zfs.ValidDatasetName(f[0]) != nil || (f[0] != pool && !strings.HasPrefix(f[0], pool+"/")) {
+			return Errorf(CodeFailed, "couldn't read the file systems of %s safely; it's imported but nothing was mounted", pool)
+		}
+		all = append(all, fsys{f[0], f[1]})
+	}
+	// Parents come before their children in zfs list's order, so fixing the
+	// pool's own folder first lets the children inherit below it.
+	for _, d := range all {
+		mp := filepath.Clean(d.mp)
+		if d.mp == "none" || d.mp == "legacy" || mp == base || strings.HasPrefix(mp, base+"/") {
+			continue
+		}
+		if d.name == pool {
+			_, err = st.zfs(ctx, "set", "mountpoint="+base, pool)
+		} else {
+			_, err = st.zfs(ctx, "inherit", "mountpoint", d.name)
+		}
+		if err != nil {
+			return err
+		}
+		slog.Warn("storage: an imported file system wanted to mount outside its pool's folder; moved it back",
+			"dataset", d.name, "wanted", d.mp, "pool", pool)
+	}
+	// Mount what can be (locked encrypted ones wait for their key).
+	if _, err := st.zfs(ctx, "mount", "-a"); err != nil {
+		slog.Warn("storage: mounting the imported pool's file systems", "pool", pool, "err", err)
+	}
+	return nil
 }
 
 func (st *storageOps) destroyPool(ctx context.Context, a PoolDestroyArgs) (any, error) {
