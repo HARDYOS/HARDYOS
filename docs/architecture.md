@@ -322,6 +322,36 @@ now; the local admin remains the break-glass account. Shares (Phase 2) use
 the domain's users and groups, and Authentik (Phase 3) signs apps in with
 them.
 
+## Shared folders
+
+Folders on the data pools for the family's files and for apps (user and
+developer notes in [shares.md](shares.md)).
+
+- **Storage.** Each shared folder is a dataset `<pool>/shares/<id>`,
+  mounted at `/mnt/<pool>/shares/<id>`. Its settings are `org.hardyos:*`
+  user properties on the dataset (`share=1`, `name`, `description`,
+  `access`, `apps`, `recycle`, `guest`) and its quota is the ZFS `quota`,
+  so they move with the pool. Datasets get `acltype=posixacl`, `xattr=sa`,
+  `devices=off` and `setuid=off`.
+- **Root side.** `internal/shares` (in hardyd-priv) behind the ops
+  `shares.list/create/update/delete/starter/folders`. The apps engine uses
+  the same Manager in-process through `apps.ShareResolver`: `Resolve` gives
+  the real path of a share or a subfolder (never outside it), `GrantApp` and
+  `RevokeApp` add or remove the app user's ACL entries (the share root at
+  once with setfacl, everything below in a background walk that never
+  follows links) and record them in `org.hardyos:apps`.
+- **API.** `GET /shares` and `GET /shares/{id}` for everyone signed in
+  (family members don't see access rules, apps or pools); admins create,
+  change and delete through jobs (`shares.create`, `shares.update`,
+  `shares.delete`, `shares.starter`, run one at a time and audited) and
+  browse subfolders with `GET /shares/{id}/folders`.
+- **Control Panel › Shared Folders.** The list with usage and quota, the
+  create/edit dialog (pool, name, quota, recycle bin, guest, who can use
+  it), delete with the name typed, and the starter set when there are none.
+- **Later.** File sharing (SMB, NFS, Time Machine, SFTP/WebDAV) publishes
+  these same datasets and enforces the access rules; home folders arrive
+  with it.
+
 ## Apps
 
 One-click Docker apps install from `.hardyapp` packages (format in
