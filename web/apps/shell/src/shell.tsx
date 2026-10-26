@@ -67,9 +67,8 @@ export const APPS: AppDef[] = [
     icon: "terminal",
     color: "#11151F",
     glyph: (s) => <TerminalIcon size={s} color="#7CF2C4" />,
-    component: ComingSoon,
-    comingIn: "a follow-up build (a root shell in the browser needs its own security review)",
-    defaultSize: { width: 560, height: 360 },
+    component: lazy(() => import("./apps/terminal/Terminal")),
+    defaultSize: { width: 820, height: 520 },
     adminOnly: true,
   },
   {

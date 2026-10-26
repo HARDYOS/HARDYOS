@@ -56,6 +56,7 @@ type Server struct {
 	sessions *auth.Sessions
 	audit    *audit.Log
 	mux      *http.ServeMux
+	tickets  terminalTickets
 	started  time.Time
 	log      *slog.Logger
 }
@@ -125,6 +126,7 @@ func (s *Server) routes() {
 			s.updateRoutes()
 			s.networkRoutes()
 			s.bootRoutes()
+			s.terminalRoutes()
 		}
 		if s.cfg.Backups != nil {
 			s.backupRoutes()
