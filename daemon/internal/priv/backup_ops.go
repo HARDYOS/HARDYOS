@@ -67,7 +67,7 @@ type BackupFetchResult struct {
 // RegisterBackup adds the backup operations.
 func RegisterBackup(s *Server, r *backup.Root) {
 	s.Handle(OpBackupCollect, typed(func(ctx context.Context, a BackupCollectArgs) (any, error) {
-		files, err := r.Collect(a.Secrets)
+		files, err := r.Collect(ctx, a.Secrets)
 		if err != nil {
 			return nil, Errorf(CodeFailed, "%v", err)
 		}

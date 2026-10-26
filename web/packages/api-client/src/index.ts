@@ -90,3 +90,4 @@ export type DomainConfig = S["DomainConfig"];
 export type DomainSuggestion = S["DomainSuggestion"];
 export type DomainUser = S["DomainUser"];
 export type DomainGroup = S["DomainGroup"];
+export type DomainController = S["DomainController"];

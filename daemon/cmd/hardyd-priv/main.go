@@ -83,10 +83,18 @@ func main() {
 		updater.OnBoot(ctx)
 		priv.RegisterSystem(s, sysexec.Exec{}, updater.BeforeReboot)
 		priv.RegisterUpdates(s, updater)
-		netm := &network.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log}
+		// The domain controller, if one was set up. The NAS's resolver puts the
+		// domain's DCs first, and settings backups include the domain.
+		dc := &domain.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log}
+		netm := &network.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log, DomainDNS: dc.DNSServers}
+		dc.DNSChanged = func(ctx context.Context) {
+			if err := netm.SyncDomainDNS(ctx); err != nil {
+				log.Warn("updating the NAS's DNS servers for the domain", "err", err)
+			}
+		}
 		// A settings restore chosen before the restart is applied now,
 		// before hardyd opens its database and before networking starts.
-		bk := &backup.Root{Runner: sysexec.Exec{}, Root: "/", UID: hardydUID, GID: gid, Network: netm}
+		bk := &backup.Root{Runner: sysexec.Exec{}, Root: "/", UID: hardydUID, GID: gid, Network: netm, Domain: dc}
 		if res := bk.ApplyPending(ctx); res != nil {
 			log.Info("settings restore", "ok", res.OK, "message", res.Message, "notes", res.Notes)
 		}
@@ -95,9 +103,8 @@ func main() {
 		priv.RegisterNetwork(s, netm)
 		priv.RegisterBackup(s, bk)
 		priv.RegisterTerminal(s)
-		// The domain controller, once set up: kept attached to the LAN and
-		// running through network changes and crashes.
-		dc := &domain.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log}
+		// Kept attached to the LAN and running through network changes and
+		// crashes.
 		priv.RegisterDomain(s, dc)
 		go dc.Watch(ctx)
 		priv.RegisterBootRepair(s, priv.StorageEnv{Runner: sysexec.Exec{}, Root: os.DirFS("/")}, "/", boot.ConfigPath)

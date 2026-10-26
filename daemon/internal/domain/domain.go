@@ -36,16 +36,18 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 )
 
-// Fixed names.
+// Names. The Manager uses these unless its own fields say otherwise (tests
+// run two domain controllers on one machine).
 const (
-	DataDir    = "/var/lib/hardyos-dc"
-	Namespace  = "hardyos-dc"
-	DCLink     = "hdc0"
-	ShimLink   = "hdc-shim"
-	Service    = "hardyos-dc.service"
-	AdminTool  = "/usr/lib/hardyos/hardyos-dc-admin"
-	DCHostName = "dc1"
-	configName = "hardyos-dc.json"
+	DataDir          = "/var/lib/hardyos-dc"
+	DefaultNamespace = "hardyos-dc"
+	DCLink           = "hdc0" // inside the DC's namespace
+	DefaultShim      = "hdc-shim"
+	DefaultShimAddr  = "169.254.250.1"
+	DefaultService   = "hardyos-dc.service"
+	AdminTool        = "/usr/lib/hardyos/hardyos-dc-admin"
+	DCHostName       = "dc1" // the first DC; others are dc2, dc3...
+	configName       = "hardyos-dc.json"
 )
 
 // Config is what HardyOS knows about the domain it created.
@@ -61,6 +63,39 @@ type Config struct {
 	Forwarders []string  `json:"forwarders"`
 	Enabled    bool      `json:"enabled"`
 	CreatedAt  time.Time `json:"createdAt"`
+	// Host is this DC's short name (dc1, dc2…); empty means dc1.
+	Host string `json:"host,omitempty"`
+	// Joined is true when this DC joined an existing domain rather than
+	// creating it.
+	Joined bool `json:"joined,omitempty"`
+	// Others are the domain's other DCs, as their DNS lists them.
+	Others []DC `json:"others,omitempty"`
+}
+
+// DC is one domain controller.
+type DC struct {
+	Name    string `json:"name"`    // dc2.home.hardynetworks.net
+	Address string `json:"address"` // 192.168.1.21
+}
+
+// HostName is the DC's short name.
+func (c Config) HostName() string {
+	if c.Host != "" {
+		return c.Host
+	}
+	return DCHostName
+}
+
+// DNSServers lists every DC's address, this one first: what devices should
+// use for DNS.
+func (c Config) DNSServers() []string {
+	out := []string{c.IP()}
+	for _, o := range c.Others {
+		if o.Address != "" && o.Address != c.IP() {
+			out = append(out, o.Address)
+		}
+	}
+	return out
 }
 
 // IP is the DC's address without the prefix.
@@ -126,8 +161,48 @@ type Manager struct {
 	Root string
 	// DataDir overrides DataDir (tests).
 	DataDir string
+	// Namespace, Shim, ShimAddr and Service override the defaults (tests run
+	// two DCs on one machine).
+	Namespace, Shim, ShimAddr, Service string
+	// DNSChanged is called after the domain's DNS servers may have changed
+	// (created, joined, deleted, another DC appeared), so the NAS's own
+	// resolver can follow.
+	DNSChanged func(ctx context.Context)
 
 	mu sync.Mutex
+	// lastParent is the LAN interface the DC was last attached to, so a
+	// network change that moves the NAS (a new bond, say) moves the DC too.
+	lastParent string
+	// othersChecked is when the list of other DCs was last refreshed.
+	othersChecked time.Time
+}
+
+func or(v, def string) string {
+	if v != "" {
+		return v
+	}
+	return def
+}
+
+func (m *Manager) ns() string       { return or(m.Namespace, DefaultNamespace) }
+func (m *Manager) shim() string     { return or(m.Shim, DefaultShim) }
+func (m *Manager) shimAddr() string { return or(m.ShimAddr, DefaultShimAddr) }
+func (m *Manager) service() string  { return or(m.Service, DefaultService) }
+
+func (m *Manager) dnsChanged(ctx context.Context) {
+	if m.DNSChanged != nil {
+		m.DNSChanged(ctx)
+	}
+}
+
+// DNSServers is what the NAS should use for DNS while a domain is running:
+// its DCs and the domain to search. Empty when there's no running domain.
+func (m *Manager) DNSServers() (servers []string, domain string) {
+	c, err := m.Load()
+	if err != nil || c == nil || !c.Enabled {
+		return nil, ""
+	}
+	return c.DNSServers(), c.Domain
 }
 
 func (m *Manager) log() *slog.Logger {
@@ -230,7 +305,7 @@ func (m *Manager) responding(ctx context.Context, c *Config) bool {
 }
 
 func (m *Manager) serviceActive(ctx context.Context) bool {
-	res, err := m.Runner.Run(ctx, nil, "systemctl", "is-active", "--quiet", Service)
+	res, err := m.Runner.Run(ctx, nil, "systemctl", "is-active", "--quiet", m.service())
 	return err == nil && res.ExitCode == 0
 }
 

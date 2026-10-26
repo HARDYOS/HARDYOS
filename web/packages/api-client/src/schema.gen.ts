@@ -1361,6 +1361,82 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/domain/join": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Make this server another domain controller of an existing domain (runs as a job)
+         * @description Copies the domain from an existing domain controller (accounts, groups,
+         *     DNS) and keeps both in sync. The Administrator password reaches the job
+         *     in memory only.
+         */
+        post: operations["joinDomain"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/domain/leave": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Remove this domain controller from the domain; the others keep it (runs as a job) */
+        post: operations["leaveDomain"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/domain/controllers/remove": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Take a domain controller that's gone for good out of the domain, from this one (runs as a job)
+         * @description Roles it held move here. Refused while it still answers.
+         */
+        post: operations["removeDeadDomainController"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/domain/forwarders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** DNS servers the domain uses for names outside it (two at most); restarts the domain controller */
+        put: operations["setDomainForwarders"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/domain/users": {
         parameters: {
             query?: never;
@@ -2323,6 +2399,31 @@ export interface components {
             enabled: boolean;
             /** Format: date-time */
             createdAt: string;
+            /** @description This DC's short name (dc1, dc2…) */
+            host?: string;
+            /** @description This DC joined an existing domain */
+            joined?: boolean;
+            /** @description The domain's other domain controllers */
+            others?: components["schemas"]["DomainController"][];
+        };
+        DomainController: {
+            /** @example dc2.home.hardynetworks.net */
+            name: string;
+            address: string;
+        };
+        DomainJoinRequest: {
+            domain: string;
+            /** @description Address of one of the domain's domain controllers */
+            existing: string;
+            /**
+             * Format: password
+             * @description The domain's Administrator password
+             */
+            adminPassword: string;
+            /** @description This domain controller's own address */
+            address: string;
+            gateway?: string;
+            forwarders?: string[];
         };
         DomainStatus: {
             provisioned: boolean;
@@ -4680,6 +4781,104 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["Enabled"];
+            };
+        };
+        responses: {
+            /** @description Domain status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DomainStatus"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    joinDomain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DomainJoinRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    leaveDomain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Format: password */
+                    adminPassword: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    removeDeadDomainController: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @example dc1.home.hardynetworks.net */
+                    name: string;
+                    /** @description The same name */
+                    confirm: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    setDomainForwarders: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    forwarders: string[];
+                };
             };
         };
         responses: {

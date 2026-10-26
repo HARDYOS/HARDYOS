@@ -89,7 +89,15 @@ var Allowed = []string{
 	"var/lib/hardyos/tls/server.key",
 	"var/lib/hardyos/keys/", // *.key
 	"etc/ssh/ssh_host_",     // host keys
+	domainConfigPath,
+	domainArchivePath,
 }
+
+// The domain controller's files (see internal/domain).
+const (
+	domainConfigPath  = "var/lib/hardyos-dc/hardyos-dc.json"
+	domainArchivePath = "var/lib/hardyos-dc/domain-backup.tar.bz2"
+)
 
 // AllowedPath reports whether p may be restored.
 func AllowedPath(p string) bool {

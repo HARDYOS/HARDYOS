@@ -36,6 +36,9 @@ type Manager struct {
 	// Ports lists the physical network ports (default: /sys/class/net
 	// entries with a backing device).
 	Ports func() []string
+	// DomainDNS returns the domain's DNS servers and name while a domain
+	// runs on this NAS (nil otherwise); they go first in resolv.conf.
+	DomainDNS func() (servers []string, domain string)
 
 	mu    sync.Mutex
 	timer *time.Timer
@@ -360,7 +363,7 @@ func (m *Manager) Apply(ctx context.Context, c Config) (*PendingInfo, error) {
 		return nil, ErrPending
 	}
 
-	files := Render(c)
+	files := m.withDomain(c, Render(c))
 	prev := map[string]*string{}
 	for rel := range files {
 		if b, err := os.ReadFile(m.path(rel)); err == nil {
@@ -494,7 +497,7 @@ func (m *Manager) WriteNow(c Config) error {
 		return err
 	}
 	_ = os.Remove(m.pendingFile())
-	files := Render(c)
+	files := m.withDomain(c, Render(c))
 	for _, rel := range sortedKeys(files) {
 		if err := writeOrRemove(m.path(rel), files[rel]); err != nil {
 			return err

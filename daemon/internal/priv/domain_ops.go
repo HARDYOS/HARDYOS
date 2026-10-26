@@ -10,11 +10,15 @@ import (
 
 // Domain operation names.
 const (
-	OpDomainStatus    = "domain.status"
-	OpDomainSuggest   = "domain.suggest"
-	OpDomainProvision = "domain.provision"
-	OpDomainDestroy   = "domain.destroy"
-	OpDomainEnable    = "domain.enable"
+	OpDomainStatus     = "domain.status"
+	OpDomainSuggest    = "domain.suggest"
+	OpDomainProvision  = "domain.provision"
+	OpDomainDestroy    = "domain.destroy"
+	OpDomainEnable     = "domain.enable"
+	OpDomainJoin       = "domain.join"
+	OpDomainLeave      = "domain.leave"
+	OpDomainRemoveDead = "domain.remove_dead"
+	OpDomainForwarders = "domain.forwarders"
 
 	OpDomainUsers        = "domain.users"
 	OpDomainUserCreate   = "domain.user.create"
@@ -37,6 +41,22 @@ type DomainDestroyArgs struct {
 // DomainEnableArgs starts or stops the domain controller.
 type DomainEnableArgs struct {
 	Enabled bool `json:"enabled"`
+}
+
+// DomainLeaveArgs removes this DC from the domain.
+type DomainLeaveArgs struct {
+	AdminPassword string `json:"adminPassword"`
+}
+
+// DomainRemoveDeadArgs takes a DC that's gone for good out of the domain.
+type DomainRemoveDeadArgs struct {
+	Name    string `json:"name"`
+	Confirm string `json:"confirm"`
+}
+
+// DomainForwardersArgs sets the domain's internet DNS servers.
+type DomainForwardersArgs struct {
+	Forwarders []string `json:"forwarders"`
 }
 
 // DomainUserRef names an account.
@@ -88,6 +108,23 @@ func RegisterDomain(s *Server, m *domain.Manager) {
 	}))
 	s.Handle(OpDomainEnable, typed(func(ctx context.Context, a DomainEnableArgs) (any, error) {
 		st, err := m.SetEnabled(ctx, a.Enabled)
+		return st, domainErr(err)
+	}))
+
+	s.Handle(OpDomainJoin, typed(func(ctx context.Context, a domain.JoinArgs) (any, error) {
+		c, err := m.Join(ctx, a)
+		return c, domainErr(err)
+	}))
+	s.Handle(OpDomainLeave, typed(func(ctx context.Context, a DomainLeaveArgs) (any, error) {
+		err := m.Leave(ctx, a.AdminPassword)
+		return map[string]bool{"left": err == nil}, domainErr(err)
+	}))
+	s.Handle(OpDomainRemoveDead, typed(func(ctx context.Context, a DomainRemoveDeadArgs) (any, error) {
+		err := m.RemoveDead(ctx, a.Name, a.Confirm)
+		return map[string]bool{"removed": err == nil}, domainErr(err)
+	}))
+	s.Handle(OpDomainForwarders, typed(func(ctx context.Context, a DomainForwardersArgs) (any, error) {
+		st, err := m.SetForwarders(ctx, a.Forwarders)
 		return st, domainErr(err)
 	}))
 

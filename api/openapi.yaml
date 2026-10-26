@@ -1539,6 +1539,92 @@ paths:
         "400": { $ref: "#/components/responses/Invalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /domain/join:
+    post:
+      operationId: joinDomain
+      summary: Make this server another domain controller of an existing domain (runs as a job)
+      description: |
+        Copies the domain from an existing domain controller (accounts, groups,
+        DNS) and keeps both in sync. The Administrator password reaches the job
+        in memory only.
+      tags: [domain]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DomainJoinRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /domain/leave:
+    post:
+      operationId: leaveDomain
+      summary: Remove this domain controller from the domain; the others keep it (runs as a job)
+      tags: [domain]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [adminPassword]
+              properties:
+                adminPassword: { type: string, format: password }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /domain/controllers/remove:
+    post:
+      operationId: removeDeadDomainController
+      summary: Take a domain controller that's gone for good out of the domain, from this one (runs as a job)
+      description: Roles it held move here. Refused while it still answers.
+      tags: [domain]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, confirm]
+              properties:
+                name: { type: string, example: dc1.home.hardynetworks.net }
+                confirm: { type: string, description: The same name, typed to confirm }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /domain/forwarders:
+    put:
+      operationId: setDomainForwarders
+      summary: DNS servers the domain uses for names outside it (two at most); restarts the domain controller
+      tags: [domain]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [forwarders]
+              properties:
+                forwarders: { type: array, items: { type: string } }
+      responses:
+        "200":
+          description: Domain status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DomainStatus" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /domain/users:
     get:
       operationId: listDomainUsers
@@ -2717,6 +2803,28 @@ components:
         forwarders: { type: array, items: { type: string } }
         enabled: { type: boolean }
         createdAt: { type: string, format: date-time }
+        host: { type: string, description: "This DC's short name (dc1, dc2…)" }
+        joined: { type: boolean, description: This DC joined an existing domain }
+        others:
+          type: array
+          description: The domain's other domain controllers
+          items: { $ref: "#/components/schemas/DomainController" }
+    DomainController:
+      type: object
+      required: [name, address]
+      properties:
+        name: { type: string, example: dc2.home.hardynetworks.net }
+        address: { type: string }
+    DomainJoinRequest:
+      type: object
+      required: [domain, existing, adminPassword, address]
+      properties:
+        domain: { type: string }
+        existing: { type: string, description: Address of one of the domain's domain controllers }
+        adminPassword: { type: string, format: password, description: The domain's Administrator password }
+        address: { type: string, description: This domain controller's own address }
+        gateway: { type: string }
+        forwarders: { type: array, items: { type: string } }
     DomainStatus:
       type: object
       required: [provisioned, config, running, responding, problem, available]
