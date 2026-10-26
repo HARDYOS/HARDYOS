@@ -71,6 +71,22 @@ func (s *Server) currentUser(w http.ResponseWriter, r *http.Request) (*auth.User
 		writeError(w, http.StatusUnauthorized, "unauthenticated", "account unavailable")
 		return nil, false
 	}
+	if u.Source == auth.SourceDomain {
+		// Groups (and with them the role) are rechecked every 10 minutes.
+		nu, err := s.signin.Refresh(r.Context(), u)
+		if errors.Is(err, auth.ErrAccountGone) {
+			_ = s.sessions.RevokeUser(r.Context(), u.ID)
+			s.record(r, u, "auth.session.end", u.Username, audit.Success, "the domain account was deleted, turned off or expired")
+			s.clearCookie(w, r)
+			writeError(w, http.StatusUnauthorized, "unauthenticated", "account unavailable")
+			return nil, false
+		}
+		if err != nil {
+			s.log.Warn("refresh domain groups", "user", u.Username, "err", err)
+		} else {
+			u = nu
+		}
+	}
 	return u, true
 }
 

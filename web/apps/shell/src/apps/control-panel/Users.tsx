@@ -24,7 +24,7 @@ export function Users() {
     <>
       <PageHeader
         title="Users & Groups"
-        subtitle="People who can sign in to HardyOS. Administrators can change system settings."
+        subtitle="People who can sign in to HardyOS. Administrators can change system settings. Domain accounts appear here after their first sign-in."
         actions={
           <Button variant="primary" onClick={() => setCreating(true)}>
             <PlusIcon size={16} /> New user
@@ -68,6 +68,7 @@ export function Users() {
                     <div className="row">
                       <Badge tone={u.role === "admin" ? "accent" : "neutral"}>{u.role === "admin" ? "Admin" : "User"}</Badge>
                       {u.breakGlass && <Badge tone="neutral">Recovery account</Badge>}
+                      {u.source === "domain" && <Badge tone="neutral">Domain</Badge>}
                     </div>
                   </td>
                   <td>{u.disabled ? <Badge tone="warn">Disabled</Badge> : <Badge tone="good">Active</Badge>}</td>
@@ -76,9 +77,15 @@ export function Users() {
                     <IconButton label={`Edit ${u.username}`} onClick={() => setEditing(u)}>
                       <EditIcon size={16} />
                     </IconButton>
-                    <IconButton label={`Set a new password for ${u.username}`} onClick={() => setResetting(u)}>
-                      <KeyIcon size={16} />
-                    </IconButton>
+                    {u.source === "domain" ? (
+                      <IconButton label={`${u.username}'s password is set in Control Panel > Domain > Users`} disabled onClick={() => undefined}>
+                        <KeyIcon size={16} />
+                      </IconButton>
+                    ) : (
+                      <IconButton label={`Set a new password for ${u.username}`} onClick={() => setResetting(u)}>
+                        <KeyIcon size={16} />
+                      </IconButton>
+                    )}
                     <IconButton label={`Delete ${u.username}`} onClick={() => setDeleting(u)} disabled={u.id === me.id}>
                       <TrashIcon size={16} />
                     </IconButton>
@@ -104,9 +111,16 @@ export function Users() {
             toast("success", `Deleted ${deleting.username}`);
           }}
         >
-          <p>
-            <strong>{deleting.displayName || deleting.username}</strong> won't be able to sign in anymore. Their files stay where they are.
-          </p>
+          {deleting.source === "domain" ? (
+            <p>
+              HardyOS forgets <strong>{deleting.username}</strong> and signs them out. The domain account stays, so they can sign in again; to stop that, turn the
+              account off here or in Control Panel → Domain → Users.
+            </p>
+          ) : (
+            <p>
+              <strong>{deleting.displayName || deleting.username}</strong> won't be able to sign in anymore. Their files stay where they are.
+            </p>
+          )}
         </ConfirmDialog>
       )}
     </>
@@ -121,11 +135,17 @@ function UserDialog({ user, onClose }: { user?: User; onClose: () => void }) {
   const [role, setRole] = useState<Role>(user?.role ?? "user");
   const [disabled, setDisabled] = useState(user?.disabled ?? false);
   const [password, setPassword] = useState("");
+  const fromDomain = user?.source === "domain";
 
   const save = useMutation({
     mutationFn: () =>
       user
-        ? unwrap(api.PATCH("/users/{id}", { params: { path: { id: user.id } }, body: { displayName, email, role, disabled } }))
+        ? unwrap(
+            api.PATCH("/users/{id}", {
+              params: { path: { id: user.id } },
+              body: fromDomain ? { disabled } : { displayName, email, role, disabled },
+            }),
+          )
         : unwrap(api.POST("/users", { body: { username, displayName, email, role, password } })),
     onSuccess: (u) => {
       void qc.invalidateQueries({ queryKey: ["users"] });
@@ -149,29 +169,54 @@ function UserDialog({ user, onClose }: { user?: User; onClose: () => void }) {
       }
     >
       <div className="stack">
+        {fromDomain && user && (
+          <>
+            <Alert tone="info" title="A domain account">
+              Name, email, password and groups come from the domain: change them in Control Panel → Domain → Users. Members of Domain Admins or HardyOS
+              Admins are administrators here; everyone else is a user.
+            </Alert>
+            {user.groups.length > 0 && (
+              <p className="small muted" style={{ margin: 0 }}>
+                Groups: {user.groups.map((g) => g.split("\\").pop()).join(", ")}
+              </p>
+            )}
+            <Toggle
+              label="Turned off in HardyOS"
+              description="Stops this account signing in to HardyOS (and signs it out everywhere) without changing the domain."
+              checked={disabled}
+              onChange={setDisabled}
+            />
+          </>
+        )}
         {!user && (
           <Field label="Username" hint="Lowercase letters, digits, dots, dashes. Can't be changed later.">
             {(id) => <TextInput id={id} value={username} onChange={(e) => setUsername(e.target.value.toLowerCase())} autoCapitalize="none" spellCheck={false} required />}
           </Field>
         )}
-        <Field label="Display name">{(id) => <TextInput id={id} value={displayName} onChange={(e) => setDisplayName(e.target.value)} />}</Field>
-        <Field label="Email" hint="Optional; used for notifications later">
-          {(id) => <TextInput id={id} type="email" value={email} onChange={(e) => setEmail(e.target.value)} />}
-        </Field>
-        <Field label="Role">
-          {(id) => (
-            <Select id={id} value={role} onChange={(e) => setRole(e.target.value as Role)}>
-              <option value="user">User: uses apps and their own files</option>
-              <option value="admin">Administrator: also manages the system</option>
-            </Select>
-          )}
-        </Field>
+        {!fromDomain && (
+          <>
+            <Field label="Display name">{(id) => <TextInput id={id} value={displayName} onChange={(e) => setDisplayName(e.target.value)} />}</Field>
+            <Field label="Email" hint="Optional; used for notifications later">
+              {(id) => <TextInput id={id} type="email" value={email} onChange={(e) => setEmail(e.target.value)} />}
+            </Field>
+            <Field label="Role">
+              {(id) => (
+                <Select id={id} value={role} onChange={(e) => setRole(e.target.value as Role)}>
+                  <option value="user">User: uses apps and their own files</option>
+                  <option value="admin">Administrator: also manages the system</option>
+                </Select>
+              )}
+            </Field>
+          </>
+        )}
         {!user && (
           <Field label="Password" hint="At least 10 characters">
             {(id) => <TextInput id={id} type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" />}
           </Field>
         )}
-        {user && <Toggle label="Disabled" description="Disabled accounts can't sign in and are signed out everywhere." checked={disabled} onChange={setDisabled} />}
+        {user && !fromDomain && (
+          <Toggle label="Disabled" description="Disabled accounts can't sign in and are signed out everywhere." checked={disabled} onChange={setDisabled} />
+        )}
         {save.error && <Alert tone="bad">{errorMessage(save.error)}</Alert>}
       </div>
     </Dialog>

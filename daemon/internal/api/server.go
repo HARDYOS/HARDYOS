@@ -50,6 +50,12 @@ type Config struct {
 	Logger   *slog.Logger
 	WebRoot  string // directory with the built web desktop; empty disables static serving
 	Insecure bool   // allow session cookies over plain HTTP (true until TLS lands)
+	// Kerberos checks domain passwords; nil uses the real Kerberos client
+	// (tests pass a fake).
+	Kerberos auth.PasswordChecker
+	// DomainInfoTTL is how long the domain's realm and DCs are cached for
+	// sign-in (default 30 s; tests use less).
+	DomainInfoTTL time.Duration
 }
 
 // Server is hardyd's HTTP handler.
@@ -57,6 +63,7 @@ type Server struct {
 	cfg      Config
 	users    *auth.Users
 	sessions *auth.Sessions
+	signin   *auth.SignIn
 	audit    *audit.Log
 	mux      *http.ServeMux
 	tickets  terminalTickets
@@ -83,6 +90,10 @@ func New(cfg Config) *Server {
 		s.users = &auth.Users{DB: cfg.DB}
 		s.sessions = &auth.Sessions{DB: cfg.DB}
 		s.audit = &audit.Log{DB: cfg.DB, Events: cfg.Events}
+		s.signin = &auth.SignIn{Users: s.users, Kerberos: cfg.Kerberos, Log: cfg.Logger}
+		if cfg.Priv != nil && cfg.Installer == nil {
+			s.signin.Domain = &privDirectory{pc: cfg.Priv, ttl: cfg.DomainInfoTTL}
+		}
 	}
 	s.routes()
 	return s

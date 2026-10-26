@@ -26,6 +26,9 @@ const (
 	OpDomainUserPassword = "domain.user.password"
 	OpDomainUserEnable   = "domain.user.enable"
 	OpDomainUserDelete   = "domain.user.delete"
+	// OpDomainUserGroups looks up one account's state and groups for
+	// desktop sign-in (DomainUserRef -> domain.UserGroups).
+	OpDomainUserGroups = "domain.user_groups"
 
 	OpDomainGroups      = "domain.groups"
 	OpDomainGroupCreate = "domain.group.create"
@@ -151,6 +154,11 @@ func RegisterDomain(s *Server, m *domain.Manager) {
 	s.Handle(OpDomainUserDelete, typed(func(ctx context.Context, a DomainUserRef) (any, error) {
 		err := m.DeleteUser(ctx, a.Username)
 		return map[string]bool{"deleted": err == nil}, domainErr(err)
+	}))
+
+	s.Handle(OpDomainUserGroups, typed(func(ctx context.Context, a DomainUserRef) (any, error) {
+		g, err := m.UserGroups(ctx, a.Username)
+		return g, domainErr(err)
 	}))
 
 	s.Handle(OpDomainGroups, func(ctx context.Context, _ json.RawMessage) (any, error) {

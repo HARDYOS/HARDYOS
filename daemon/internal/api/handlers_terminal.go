@@ -124,8 +124,13 @@ func (s *Server) handleTerminalSession(w http.ResponseWriter, r *http.Request, u
 		writeError(w, http.StatusTooManyRequests, "rate_limited", fmt.Sprintf("too many wrong passwords; try again in %d minutes", int(wait.Minutes())+1))
 		return
 	}
-	if _, err := s.users.Authenticate(r.Context(), u.Username, req.Password); err != nil {
-		if errors.Is(err, auth.ErrBadCredentials) {
+	if err := s.signin.Verify(r.Context(), u, req.Password); err != nil {
+		if errors.Is(err, auth.ErrDomainUnavailable) || errors.Is(err, auth.ErrClockSkew) {
+			writeError(w, http.StatusServiceUnavailable, "domain_unavailable", err.Error())
+			return
+		}
+		if errors.Is(err, auth.ErrBadCredentials) || errors.Is(err, auth.ErrAccountRevoked) ||
+			errors.Is(err, auth.ErrPasswordExpired) || errors.Is(err, auth.ErrAccountGone) {
 			s.cfg.Limiter.Fail(key)
 			s.record(r, u, "terminal.unlock", "", audit.Failure, "wrong password")
 			writeError(w, http.StatusUnauthorized, "bad_credentials", "that password isn't right")

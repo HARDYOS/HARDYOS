@@ -22,7 +22,7 @@ const config = {
   others: [{ name: "dc2.home.hardynetworks.net", address: "192.168.1.21" }],
 };
 
-function serve(state: { provisioned: boolean }, calls: Call[]) {
+function serve(state: { provisioned: boolean; hardyosAdmins?: boolean }, calls: Call[]) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: Request | string, init?: RequestInit) => {
@@ -40,6 +40,17 @@ function serve(state: { provisioned: boolean }, calls: Call[]) {
       if (path === "/domain" && req.method === "POST")
         return json({ job: { id: "job-1", kind: "domain.provision", title: "Create the domain", state: "queued", progress: 0, message: "" }, warnings: [] }, 202);
       if (path === "/jobs/job-1") return json({ id: "job-1", kind: "domain.provision", title: "Create the domain", state: "running", progress: 10, message: "Creating the domain database" });
+      if (path === "/domain/groups" && req.method === "GET")
+        return json({
+          groups: [
+            { name: "Domain Admins", description: "", members: ["Administrator"], builtin: true },
+            ...(state.hardyosAdmins ? [{ name: "HardyOS Admins", description: "", members: [], builtin: false }] : []),
+          ],
+        });
+      if (path === "/domain/groups" && req.method === "POST") {
+        state.hardyosAdmins = true;
+        return json({ name: "HardyOS Admins", description: "", members: [], builtin: false }, 201);
+      }
       if (path === "/domain/users")
         return json({
           users: [
@@ -140,5 +151,20 @@ describe("Domain", () => {
     expect(screen.getByText("Turned off")).toBeTruthy();
     // Built-in accounts are hidden until asked for.
     expect(screen.queryByText("Administrator")).toBeNull();
+  });
+
+  it("explains desktop sign-in and creates the HardyOS Admins group", async () => {
+    const calls: Call[] = [];
+    serve({ provisioned: true }, calls);
+    renderDomain();
+    expect(await screen.findByText("Desktop sign-in")).toBeTruthy();
+    expect(screen.getByText("HOME\\name")).toBeTruthy();
+    expect(screen.getByText("name@home.hardynetworks.net")).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: "Create HardyOS Admins" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.path === "/domain/groups")).toBe(true));
+    expect(calls.find((c) => c.method === "POST" && c.path === "/domain/groups")!.body).toMatchObject({ name: "HardyOS Admins" });
+    // Once it exists, the button goes and the explanation names it.
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Create HardyOS Admins" })).toBeNull());
+    expect(screen.getAllByText("HardyOS Admins").length).toBeGreaterThan(0);
   });
 });

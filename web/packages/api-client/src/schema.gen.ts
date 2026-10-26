@@ -84,7 +84,16 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Sign in */
+        /**
+         * Sign in
+         * @description Local HardyOS accounts sign in with their username. When this server
+         *     has a domain, domain accounts sign in as `alice`, `HOME\alice` or
+         *     `alice@home.example.net` (a local account wins for a bare name); the
+         *     password is checked by Kerberos against the domain's controllers.
+         *     401 codes: `bad_credentials` (wrong password or unknown name),
+         *     `unknown_domain`, `account_disabled`, `account_locked`,
+         *     `account_expired`, `account_unavailable`, `password_expired`.
+         */
         post: operations["login"];
         delete?: never;
         options?: never;
@@ -1858,6 +1867,8 @@ export interface components {
         SetupStatus: {
             /** @description True until the first administrator exists */
             needsAdmin: boolean;
+            /** @description This server has a domain whose accounts can sign in to the desktop */
+            domainSignIn?: boolean;
         };
         SetupAdminRequest: {
             username: string;
@@ -1876,6 +1887,15 @@ export interface components {
         /** @enum {string} */
         Role: "admin" | "user";
         User: {
+            /**
+             * @description A local HardyOS account, or a domain account that has signed in to the desktop
+             * @enum {string}
+             */
+            source: "local" | "domain";
+            /** @description How access rules name this user — `alice` for local accounts, `HOME\alice` for domain accounts */
+            principal: string;
+            /** @description A domain account's groups as `HOME\Family` (Domain Users included), looked up at sign-in and at most every 10 minutes; empty for local accounts */
+            groups: string[];
             /** Format: int64 */
             id: number;
             username: string;
@@ -3010,6 +3030,15 @@ export interface operations {
             429: {
                 headers: {
                     "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The domain controller can't be reached (`domain_unavailable`) or its clock is too far off (`clock_skew`) */
+            503: {
+                headers: {
                     [name: string]: unknown;
                 };
                 content: {

@@ -1,6 +1,6 @@
 import { type FormEvent, useEffect, useState } from "react";
 import { errorMessage } from "../api";
-import { useCreateFirstAdmin, useLogin } from "../hooks/session";
+import { useCreateFirstAdmin, useLogin, useSetupStatus } from "../hooks/session";
 import { BrandIcon, BrandMark } from "../brand";
 import { PowerIcon, RestartIcon } from "../icons";
 import { Alert, Button, Field, TextInput } from "../ui";
@@ -47,6 +47,8 @@ function Footer({ hostname }: { hostname?: string }) {
 
 export function LoginScreen() {
   const login = useLogin();
+  const setup = useSetupStatus();
+  const domain = setup.data?.domainSignIn === true;
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
 
@@ -65,9 +67,9 @@ export function LoginScreen() {
         </div>
         <div className="lock-card__heading">
           <h1>Sign in</h1>
-          <p>Use your HardyOS account</p>
+          <p>{domain ? "Use your HardyOS or domain account" : "Use your HardyOS account"}</p>
         </div>
-        <Field label="Username">
+        <Field label="Username" hint={domain ? "You can use your domain account: name, DOMAIN\\name or name@domain" : undefined}>
           {(id) => (
             <TextInput id={id} value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" autoCapitalize="none" spellCheck={false} required />
           )}
