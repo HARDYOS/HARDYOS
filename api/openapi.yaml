@@ -4706,7 +4706,7 @@ components:
     # ---- Share links (part D) ----
     ShareLink:
       type: object
-      required: [id, share, path, name, dir, createdById, createdBy, createdAt, expiresAt, hasPassword, allowUpload, maxDownloads, downloadCount, lastUsedAt, revoked, status]
+      required: [id, share, path, name, dir, createdById, createdBy, createdAt, expiresAt, hasPassword, allowUpload, maxDownloads, downloadCount, lastUsedAt, revoked, status, maxUploadBytes, uploadedBytes, maxZipBytes]
       properties:
         id: { type: integer, format: int64 }
         share: { type: string, description: 'Shared folder id, or "~home"' }
@@ -4724,6 +4724,9 @@ components:
         lastUsedAt: { type: [string, "null"], format: date-time }
         revoked: { type: boolean }
         status: { type: string, enum: [active, expired, revoked, used-up] }
+        maxUploadBytes: { type: integer, format: int64, description: "What an upload link may take in, in all (bytes); 0 for links without uploads" }
+        uploadedBytes: { type: integer, format: int64, description: What it has taken in so far }
+        maxZipBytes: { type: integer, format: int64, description: "The most one \"download all\" zip of a folder link holds (bytes)" }
     ShareLinkRequest:
       type: object
       required: [share, path]
@@ -4734,6 +4737,18 @@ components:
         password: { type: string, description: "At least 6 characters; leave out for none" }
         allowUpload: { type: boolean, description: Visitors may add files (folders only) }
         maxDownloads: { type: integer, minimum: 0, description: 0 for no limit }
+        maxUploadBytes:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 1000000000000
+          description: "Upload links: what the link may take in, in all, 1 MB to 1 TB; 0 or left out for 10 GB. One file is at most 5 GB."
+        maxZipBytes:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 1000000000000
+          description: "Folder links: the most one \"download all\" zip holds, 1 MB to 1 TB; 0 or left out for 20 GB"
     ShareLinkCreated:
       type: object
       required: [link, url, token]

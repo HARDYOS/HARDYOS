@@ -67,6 +67,7 @@
 <form class="upload" method="post" action="{{.UploadURL}}" enctype="multipart/form-data">
 <label for="files">Add files to this folder</label>
 <input id="files" name="file" type="file" multiple required>
+{{if .UploadNote}}<p class="muted">{{.UploadNote}}</p>{{end}}
 <button class="btn" type="submit">Upload</button>
 </form>
 {{end}}

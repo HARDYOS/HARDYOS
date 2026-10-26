@@ -38,6 +38,7 @@ func (s *Server) shareLinkRoutes() {
 		Audit:    s.recordLink,
 		Log:      s.log,
 		Insecure: s.cfg.Insecure,
+		ClientIP: s.clientIP,
 	}
 	if s.cfg.Files == nil {
 		pub.Files = unavailableFiles{}
@@ -71,7 +72,7 @@ func (s *Server) linkOwner(ctx context.Context, id int64) (files.Who, error) {
 }
 
 func (s *Server) recordLink(r *http.Request, l *sharelinks.Link, action, target string, outcome audit.Outcome, detail string) {
-	e := audit.Entry{Action: action, Target: target, Outcome: outcome, Detail: detail, IP: clientIP(r),
+	e := audit.Entry{Action: action, Target: target, Outcome: outcome, Detail: detail, IP: s.clientIP(r),
 		Actor: "link #" + strconv.FormatInt(l.ID, 10) + " of " + l.CreatedBy}
 	if err := s.audit.Record(r.Context(), e); err != nil {
 		s.log.Error("audit write failed", "action", action, "err", err)
@@ -145,11 +146,14 @@ func (s *Server) handleShareLinkCreate(w http.ResponseWriter, r *http.Request, u
 	if l.HasPassword {
 		detail += ", password"
 	}
-	if l.AllowUpload {
-		detail += ", uploads"
-	}
 	if l.MaxDownloads > 0 {
 		detail += ", at most " + strconv.Itoa(l.MaxDownloads) + " downloads"
+	}
+	if l.AllowUpload {
+		detail += ", uploads up to " + strconv.FormatInt(l.MaxUploadBytes, 10) + " bytes in all"
+	}
+	if l.Dir {
+		detail += ", zips up to " + strconv.FormatInt(l.MaxZipBytes, 10) + " bytes"
 	}
 	s.record(r, u, "sharelink.create", target, audit.Success, "link #"+strconv.FormatInt(l.ID, 10)+": "+detail)
 	writeJSON(w, http.StatusCreated, ShareLinkCreated{Link: l, URL: "/s/" + token, Token: token})

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
@@ -22,6 +23,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/appstore"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/backups"
+	"github.com/hardyos/hardyos/daemon/internal/clientip"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/files"
 	"github.com/hardyos/hardyos/daemon/internal/install"
@@ -47,6 +49,7 @@ func main() {
 		webRoot     = flag.String("web-root", "/usr/share/hardyos/web", "directory holding the built web desktop (empty to disable)")
 		logLevel    = flag.String("log-level", "info", "debug, info, warn or error")
 		showVersion = flag.Bool("version", false, "print version and exit")
+		proxies     = flag.String("trusted-proxies", "", "reverse proxies (addresses or CIDRs, comma separated) whose X-Forwarded-For is believed; empty for none")
 	)
 	flag.Parse()
 
@@ -57,13 +60,18 @@ func main() {
 	}
 	log := newLogger(*logLevel)
 	slog.SetDefault(log)
-	if err := run(log, *httpsAddr, *httpAddr, *tlsDir, *dbPath, *privSocket, *webRoot); err != nil {
+	trusted, err := clientip.ParseTrusted(*proxies)
+	if err != nil {
+		log.Error("hardyd failed", "err", err)
+		os.Exit(2)
+	}
+	if err := run(log, *httpsAddr, *httpAddr, *tlsDir, *dbPath, *privSocket, *webRoot, trusted); err != nil {
 		log.Error("hardyd failed", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webRoot string) error {
+func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webRoot string, trustedProxies []netip.Prefix) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -135,7 +143,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		DB: db, Jobs: manager, Events: broker, Priv: pc, Logger: log,
 		Storage: stor, Notify: notifications, Metrics: collector,
 		WebRoot: webRoot, Insecure: httpsAddr == "", Installer: inst, Updates: upd, Backups: bk,
-		Apps: appStore, Files: fileAccess,
+		Apps: appStore, Files: fileAccess, TrustedProxies: trustedProxies,
 	})
 
 	go housekeeping(ctx, log, &auth.Sessions{DB: db})

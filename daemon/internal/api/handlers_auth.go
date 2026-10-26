@@ -82,7 +82,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 	userKey := s.signin.LimitKey(r.Context(), req.Username)
 	for _, key := range []string{"ip:" + ip, userKey} {
 		if ok, wait := s.cfg.Limiter.Allowed(key); !ok {
@@ -122,7 +122,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) startSession(w http.ResponseWriter, r *http.Request, u *auth.User) {
-	token, expires, err := s.sessions.Start(r.Context(), u, clientIP(r), r.UserAgent())
+	token, expires, err := s.sessions.Start(r.Context(), u, s.clientIP(r), r.UserAgent())
 	if err != nil {
 		s.log.Error("create session", "err", err)
 		return

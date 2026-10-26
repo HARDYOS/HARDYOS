@@ -30,6 +30,15 @@ const (
 	MinPasswordLength = 6
 	MaxDownloadsLimit = 100000
 	tokenBytes        = 32
+
+	// An upload link takes in at most this much in all (bytes, decimal GB):
+	// 10 GB unless the person making it picks another amount up to 1 TB.
+	DefaultUploadBudget = 10_000_000_000
+	MaxUploadBudget     = 1_000_000_000_000
+	// One "download all" zip of a folder link holds at most this much:
+	// 20 GB unless the person making it picks another amount up to 1 TB.
+	DefaultZipBytes = 20_000_000_000
+	MaxZipBytes     = 1_000_000_000_000
 )
 
 // Link states.
@@ -69,6 +78,12 @@ type Link struct {
 	LastUsedAt    *time.Time `json:"lastUsedAt"`
 	Revoked       bool       `json:"revoked"`
 	Status        string     `json:"status"`
+	// MaxUploadBytes is how much an upload link may take in, in all (0 for
+	// links without uploads); UploadedBytes is how much it has.
+	MaxUploadBytes int64 `json:"maxUploadBytes"`
+	UploadedBytes  int64 `json:"uploadedBytes"`
+	// MaxZipBytes caps one "download all" zip of a folder link.
+	MaxZipBytes int64 `json:"maxZipBytes"`
 
 	passwordHash string
 }
@@ -120,6 +135,12 @@ type Request struct {
 	AllowUpload   bool   `json:"allowUpload,omitempty"`
 	// MaxDownloads: 0 for no limit.
 	MaxDownloads int `json:"maxDownloads,omitempty"`
+	// MaxUploadBytes: what an upload link may take in, in all; 0 means
+	// DefaultUploadBudget, at most MaxUploadBudget.
+	MaxUploadBytes int64 `json:"maxUploadBytes,omitempty"`
+	// MaxZipBytes: the most one zip of a folder link holds; 0 means
+	// DefaultZipBytes, at most MaxZipBytes.
+	MaxZipBytes int64 `json:"maxZipBytes,omitempty"`
 }
 
 // Validate checks a request and cleans its path. dir says whether the path
@@ -150,6 +171,18 @@ func (q *Request) Validate() []string {
 	}
 	if q.MaxDownloads < 0 || q.MaxDownloads > MaxDownloadsLimit {
 		probs = append(probs, fmt.Sprintf("The download limit is a number from 0 (no limit) to %d.", MaxDownloadsLimit))
+	}
+	if q.MaxUploadBytes == 0 {
+		q.MaxUploadBytes = DefaultUploadBudget
+	}
+	if q.MaxUploadBytes < 1_000_000 || q.MaxUploadBytes > MaxUploadBudget {
+		probs = append(probs, "The upload limit is from 1 MB to 1 TB.")
+	}
+	if q.MaxZipBytes == 0 {
+		q.MaxZipBytes = DefaultZipBytes
+	}
+	if q.MaxZipBytes < 1_000_000 || q.MaxZipBytes > MaxZipBytes {
+		probs = append(probs, "The folder download limit is from 1 MB to 1 TB.")
 	}
 	return probs
 }
@@ -252,11 +285,22 @@ func (s *Store) Create(ctx context.Context, q Request, dir bool, owner Owner) (*
 	}
 	now := s.now()
 	exp := now.Add(time.Duration(q.ExpiresInDays) * 24 * time.Hour)
+	budget, zipMax := q.MaxUploadBytes, q.MaxZipBytes
+	if budget <= 0 {
+		budget = DefaultUploadBudget
+	}
+	if !q.AllowUpload {
+		budget = 0
+	}
+	if zipMax <= 0 {
+		zipMax = DefaultZipBytes
+	}
 	res, err := s.DB.ExecContext(ctx, `INSERT INTO share_links
-		(token_hash, share, path, is_dir, created_by, created_by_name, created_at, expires_at, password_hash, allow_upload, max_downloads)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(token_hash, share, path, is_dir, created_by, created_by_name, created_at, expires_at, password_hash, allow_upload, max_downloads,
+		 max_upload_bytes, max_zip_bytes)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		HashToken(token), q.Share, q.Path, b2i(dir), owner.ID, owner.Principal, store.FormatTime(now), store.FormatTime(exp),
-		hash, b2i(q.AllowUpload), q.MaxDownloads)
+		hash, b2i(q.AllowUpload), q.MaxDownloads, budget, zipMax)
 	if err != nil {
 		return nil, "", err
 	}
@@ -265,14 +309,16 @@ func (s *Store) Create(ctx context.Context, q Request, dir bool, owner Owner) (*
 	return l, token, err
 }
 
-const linkCols = `id, share, path, is_dir, created_by, created_by_name, created_at, expires_at, password_hash, allow_upload, max_downloads, download_count, last_used_at, revoked`
+const linkCols = `id, share, path, is_dir, created_by, created_by_name, created_at, expires_at, password_hash, allow_upload, max_downloads, download_count, last_used_at, revoked,
+	max_upload_bytes, uploaded_bytes, max_zip_bytes`
 
 func (s *Store) scan(row interface{ Scan(...any) error }) (*Link, error) {
 	var l Link
 	var dir, upload, revoked int
 	var created, expires, used string
 	if err := row.Scan(&l.ID, &l.Share, &l.Path, &dir, &l.CreatedByID, &l.CreatedBy, &created, &expires,
-		&l.passwordHash, &upload, &l.MaxDownloads, &l.DownloadCount, &used, &revoked); err != nil {
+		&l.passwordHash, &upload, &l.MaxDownloads, &l.DownloadCount, &used, &revoked,
+		&l.MaxUploadBytes, &l.UploadedBytes, &l.MaxZipBytes); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -352,6 +398,36 @@ func (s *Store) CountDownload(ctx context.Context, id int64) error {
 		return ErrUsedUp
 	}
 	return nil
+}
+
+// ErrUploadBudget: the upload link has taken in all it may.
+var ErrUploadBudget = errors.New("this link can't take more files: it has had as much as it allows")
+
+// ReserveUpload sets aside n more bytes of the link's upload budget,
+// refusing (ErrUploadBudget) when that would go over it; atomically, so
+// parallel uploads can't go over it together.
+func (s *Store) ReserveUpload(ctx context.Context, id, n int64) error {
+	if n <= 0 {
+		return nil
+	}
+	res, err := s.DB.ExecContext(ctx, `UPDATE share_links SET uploaded_bytes = uploaded_bytes + ?
+		WHERE id = ? AND allow_upload = 1 AND uploaded_bytes + ? <= max_upload_bytes`, n, id, n)
+	if err != nil {
+		return err
+	}
+	if c, _ := res.RowsAffected(); c == 0 {
+		return ErrUploadBudget
+	}
+	return nil
+}
+
+// ReleaseUpload gives back n reserved bytes (an upload that failed or
+// used less than it set aside).
+func (s *Store) ReleaseUpload(ctx context.Context, id, n int64) {
+	if n <= 0 {
+		return
+	}
+	_, _ = s.DB.ExecContext(ctx, `UPDATE share_links SET uploaded_bytes = MAX(0, uploaded_bytes - ?) WHERE id = ?`, n, id)
 }
 
 // Touch records that the link was used (uploads, which don't count as downloads).

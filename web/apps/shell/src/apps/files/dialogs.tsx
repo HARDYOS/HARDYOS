@@ -302,6 +302,9 @@ function kindLabel(name: string, kind: string): string {
 }
 
 const EXPIRY = [1, 7, 30, 90];
+const GB = 1_000_000_000;
+/** How much an upload link may take in, in all (the server's default is 10 GB). */
+const UPLOAD_BUDGETS = [1 * GB, 5 * GB, 10 * GB, 50 * GB, 100 * GB, 500 * GB, 1000 * GB];
 
 /** Makes a share link for one file or folder, then shows it once to copy. */
 export function ShareLinkDialog({ share, entry, onClose }: { share: string; entry: FileEntry; onClose: () => void }) {
@@ -309,6 +312,7 @@ export function ShareLinkDialog({ share, entry, onClose }: { share: string; entr
   const [usePassword, setUsePassword] = useState(false);
   const [password, setPassword] = useState("");
   const [upload, setUpload] = useState(false);
+  const [budget, setBudget] = useState(10 * GB);
   const [limit, setLimit] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -331,6 +335,7 @@ export function ShareLinkDialog({ share, entry, onClose }: { share: string; entr
             expiresInDays: days,
             password: usePassword ? password : undefined,
             allowUpload: entry.dir ? upload : undefined,
+            maxUploadBytes: entry.dir && upload ? budget : undefined,
             maxDownloads: limitN || undefined,
           },
         }),
@@ -424,6 +429,19 @@ export function ShareLinkDialog({ share, entry, onClose }: { share: string; entr
             checked={upload}
             onChange={setUpload}
           />
+        )}
+        {entry.dir && upload && (
+          <Field label="Upload limit" hint="The most people can add through this link, in all. One file can be up to 5 GB.">
+            {(id) => (
+              <Select id={id} value={budget} onChange={(e) => setBudget(Number(e.target.value))}>
+                {UPLOAD_BUDGETS.map((b) => (
+                  <option key={b} value={b}>
+                    {bytes(b)}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
         )}
         <Field label="Download limit" hint="Empty for no limit." error={limitProblem}>
           {(id) => <TextInput id={id} inputMode="numeric" value={limit} onChange={(e) => setLimit(e.target.value)} placeholder="No limit" />}

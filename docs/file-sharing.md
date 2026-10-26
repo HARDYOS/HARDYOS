@@ -207,8 +207,21 @@ administrators can share anything.
 - **Password** (at least 6 characters): tell it to people some other way.
 - **Let people add files** (folders only): visitors can upload into the
   folder, never change or delete anything. Their files never replace
-  yours.
-- **Download limit**: the link stops after that many downloads.
+  yours. **Upload limit** is how much the link takes in, in all (1 GB to
+  1 TB, 10 GB unless you choose otherwise); one file can be up to 5 GB.
+  Names starting with a dot (like `.htaccess`) aren't accepted, and a file
+  that fails or doesn't fit is deleted at once, not kept in the recycle
+  bin.
+- **Download limit**: the link stops after that many downloads. Each file
+  downloaded counts once: a download that is resumed, or a video that
+  skips ahead, within 6 hours doesn't count again. Every "Download all"
+  zip counts.
+
+A folder link's **Download all** makes one zip at a time per link (and
+two per visitor), of at most 20 GB (a link made through the API can choose
+1 MB to 1 TB). A bigger folder's zip stops there, with a note saying so;
+the rest can be downloaded file by file. Names that Windows can't use in a
+zip (with `\`, `:` or control characters) get `_` in their place.
 
 The link is shown **once**: copy it then. HardyOS keeps only a fingerprint
 of it, so nobody (not even an administrator) can read it back later.
@@ -232,7 +245,18 @@ once. Administrators also see **All links** and can turn off anyone's.
 
 Links work on your home network now; reaching them from outside comes
 with remote access (the reverse proxy). Every link made, used (downloads,
-uploads, wrong passwords) and turned off is in the Log Center.
+uploads, wrong passwords) and turned off is in the Log Center. Five wrong
+passwords lock that visitor out of the link for 15 minutes; others with
+the link can still open it (only very many wrong passwords from everywhere
+lock the link itself for a while).
+
+**Known limitation: PDF previews.** The File Manager's quick preview shows
+PDFs with the browser's own viewer on the desktop's address, without the
+sandbox other previews get (browser PDF viewers don't work inside one).
+Browsers don't run a PDF's scripts against the page, so this is accepted
+for now (decision 104); once remote access (the reverse proxy) lands,
+previews move to a separate address. Share link downloads are never shown
+inline.
 
 ### For developers
 
@@ -244,5 +268,8 @@ uploads, wrong passwords) and turned off is in the Log Center.
   share link API (`/api/v1/sharelinks`). Both are in `api/openapi.yaml`.
 - Share links: `daemon/internal/sharelinks` (store, public pages,
   rate limiter; `linktest` has a fake `files.Access` over a temp dir) and
-  `daemon/internal/api/handlers_sharelinks.go`. See
+  `daemon/internal/api/handlers_sharelinks.go`. Behind a reverse proxy,
+  start hardyd with `-trusted-proxies <address or CIDR,...>` so limits and
+  the Log Center see visitors' addresses (`X-Forwarded-For` is ignored
+  otherwise). See
   [architecture.md](architecture.md#file-manager-and-share-links).

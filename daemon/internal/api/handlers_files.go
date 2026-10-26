@@ -23,6 +23,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/fileworker"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
+	"github.com/hardyos/hardyos/daemon/internal/sharelinks"
 )
 
 // File Manager API (docs/plans/file-sharing.md section 3): files are read
@@ -263,6 +264,10 @@ func (s *Server) handleFilesDownload(w http.ResponseWriter, r *http.Request, u *
 			h.Set("Content-Disposition", disposition(kind, fe.Name))
 			h.Set("Cache-Control", "private, no-cache")
 			h.Set("ETag", fmt.Sprintf(`"%x-%x"`, fe.Size, fe.Modified.UnixNano()))
+			// PDFs are shown inline on the desktop's origin without the
+			// sandbox (browsers' PDF viewers don't work in one): an
+			// accepted risk, decision 104.
+			// TODO(reverse proxy): serve previews from a separate origin.
 			if !strings.HasPrefix(ct, "application/pdf") {
 				// Shown in a sandbox: nothing in it can run as the desktop.
 				h.Set("Content-Security-Policy", "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; sandbox")
@@ -310,7 +315,7 @@ func (s *Server) handleFilesDownload(w http.ResponseWriter, r *http.Request, u *
 		// each under its own name.
 		prefix := ""
 		if len(paths) > 1 {
-			prefix = e.Name
+			prefix = sharelinks.ZipName(e.Name)
 		}
 		if err := z.add(ctx, paths[i], e, prefix, 0); err != nil {
 			s.log.Warn("folder download stopped", "share", share, "err", err)
@@ -393,9 +398,11 @@ func (z *zipper) add(ctx context.Context, p string, e *files.Entry, name string,
 	}
 	for i := range l.Entries {
 		ce := l.Entries[i]
-		cn := ce.Name
+		// Backslashes, colons and control characters in a name would be
+		// folders (or worse) to Windows extractors.
+		cn := sharelinks.ZipName(ce.Name)
 		if name != "" {
-			cn = name + "/" + ce.Name
+			cn = name + "/" + cn
 		}
 		if err := z.add(ctx, ce.Path, &ce, cn, depth+1); err != nil {
 			return err

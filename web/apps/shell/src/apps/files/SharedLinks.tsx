@@ -2,7 +2,7 @@ import type { FileShare, ShareLink } from "@hardy/api-client";
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, unwrap } from "../../api";
-import { dateTime, relativeTime } from "../../format";
+import { bytes, dateTime, relativeTime } from "../../format";
 import { Badge, Button, EmptyState, ErrorBox, Loading, type Tone } from "../../ui";
 import { ConfirmDialog } from "../../ui/Dialog";
 import { toast } from "../../ui/toasts";
@@ -74,7 +74,7 @@ export function SharedLinks({ scope, shares, onOpen }: { scope: "mine" | "all"; 
                       <span className="cell-sub">
                         {where}
                         {l.hasPassword ? " · password" : ""}
-                        {l.allowUpload ? " · uploads on" : ""}
+                        {l.allowUpload ? ` · uploads on (${bytes(l.uploadedBytes)} of ${bytes(l.maxUploadBytes)})` : ""}
                       </span>
                     </td>
                     {scope === "all" && <td>{l.createdBy}</td>}

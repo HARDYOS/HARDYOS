@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"os"
 	"path"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/backups"
+	"github.com/hardyos/hardyos/daemon/internal/clientip"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/files"
 	"github.com/hardyos/hardyos/daemon/internal/installer"
@@ -68,6 +70,11 @@ type Config struct {
 	// When it's also a files.Service (files.Client is), the File Manager's
 	// /files endpoints are served.
 	Files files.Access
+
+	// TrustedProxies are the reverse proxies whose X-Forwarded-For is
+	// believed for the client's address (sign-in limits, audit, share link
+	// limits). Empty (the default): the header is never read.
+	TrustedProxies []netip.Prefix
 }
 
 // Server is hardyd's HTTP handler.
@@ -84,6 +91,7 @@ type Server struct {
 	uploads  uploads
 	started  time.Time
 	log      *slog.Logger
+	ips      *clientip.Resolver
 }
 
 // New builds the API server and registers its routes.
@@ -100,7 +108,8 @@ func New(cfg Config) *Server {
 	if cfg.Root == nil {
 		cfg.Root = os.DirFS("/")
 	}
-	s := &Server{cfg: cfg, mux: http.NewServeMux(), started: time.Now(), log: cfg.Logger}
+	s := &Server{cfg: cfg, mux: http.NewServeMux(), started: time.Now(), log: cfg.Logger,
+		ips: &clientip.Resolver{Trusted: cfg.TrustedProxies}}
 	s.proxy = &appProxy{s: s}
 	if cfg.DB != nil {
 		s.users = &auth.Users{DB: cfg.DB}
@@ -197,8 +206,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.mux.ServeHTTP(rw, r)
 	}
 	s.log.Debug("http request",
-		"method", r.Method, "path", r.URL.Path, "status", rw.status,
+		"method", r.Method, "path", logPath(r.URL.Path), "status", rw.status,
 		"duration", time.Since(start).String())
+}
+
+// logPath is a request path as it may be logged: a share link's token is
+// as good as the link, so "/s/<token>/download" is logged as "/s/…/download".
+func logPath(p string) string {
+	rest, ok := strings.CutPrefix(p, "/s/")
+	if !ok || strings.HasPrefix(rest, "-/") {
+		return p
+	}
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		return "/s/…" + rest[i:]
+	}
+	return "/s/…"
 }
 
 // csrfSafe allows safe methods, and requires state-changing requests to carry

@@ -864,11 +864,35 @@ The web desktop's File Manager and web share links (part D of
   hidden `.recycle`, `.zfs`, `.hardyos*`) and joined below the link's path;
   listings and zips leave hidden names out and never touch snapshots.
   Downloads are `attachment` with `Content-Security-Policy: sandbox`, Range
-  via `http.ServeContent`, counted once per download (not per Range part).
-  Folder downloads stream a zip (at most 20 000 entries, 32 levels).
-  Uploads are multipart, same-origin only, at most 10 GiB a request, never
-  replacing a file. Wrong passwords lock the link and the address for 15
-  minutes after five tries (`auth.LoginLimiter`).
+  via `http.ServeContent`, counted and audited once per download (decision
+  103): every GET of a file is counted unless it asks for exactly one range
+  that doesn't include byte 0 (parsed as ServeContent does, whitespace and
+  all; an If-Range that would send the whole file counts too) **and**
+  carries the download ticket the counted response set (cookie
+  `hardyos_dl_<id>_<path hash>`, path `/s/<token>`, HMAC over link id,
+  file path and expiry, 6 hours). A used-up link still lets a ticketed
+  resume finish; nothing else. HEAD is never counted or audited and reads
+  no folder. Folder downloads stream a zip, always counted whatever Range
+  says, at most one at a time per link and two per address (429), at most
+  20 000 entries, 32 levels and the link's zip cap (`max_zip_bytes`,
+  default 20 GB, 1 MB-1 TB); a bound ends the zip with a "Not included.txt"
+  note, any other failure aborts the connection. Zip entry names have `\`,
+  `:` and control characters replaced by `_` (the File Manager's zips too).
+  Uploads are multipart, same-origin only, never replacing a file, names
+  starting with `.` or with control characters refused; each link has an
+  upload budget (`max_upload_bytes`, default 10 GB, 1 MB-1 TB) reserved in
+  8 MiB steps as bytes arrive (`Store.ReserveUpload`, atomic in SQL) and a
+  per-file cap (5 GB, `Public.MaxFileBytes`); a failed or refused file is
+  deleted permanently (`DeleteItem(..., permanent=true)`), never recycled,
+  and its reservation given back. Wrong passwords lock one address out of
+  one link for 15 minutes after five tries, and the link for everyone only
+  after 200 from all addresses in 15 minutes (`auth.LoginLimiter`).
+- **Client address.** One helper, `internal/clientip`, gives the address
+  for audit, sign-in limits and link limits: the peer, or the right-most
+  untrusted `X-Forwarded-For` entry when the peer is one of
+  `-trusted-proxies` (`api.Config.TrustedProxies`, empty by default, so the
+  header is ignored until the reverse proxy sets it). The debug request
+  log writes link paths as `/s/…`, never the token.
 - **Wiring.** `api.Config.Files` is the `files.Access` from part C; while
   it's nil, links can't be made and existing ones say they don't work any
   more. The dev server proxies `/s/` to hardyd too.

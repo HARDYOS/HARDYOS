@@ -203,14 +203,25 @@ func (f *Fake) Mkdir(_ context.Context, who files.Who, share, path string) error
 	return os.Mkdir(p, 0o755)
 }
 
-// Delete implements files.Access.
-func (f *Fake) Delete(_ context.Context, who files.Who, share, path string) error {
-	f.log("delete", who, share, path)
+// Delete implements files.Access: in a real folder with a recycle bin this
+// would move the item there (logged "delete").
+func (f *Fake) Delete(ctx context.Context, who files.Who, share, path string) error {
+	_, err := f.DeleteItem(ctx, who, share, path, false)
+	return err
+}
+
+// DeleteItem is files.Extended's delete; permanent ones are logged "purge".
+func (f *Fake) DeleteItem(_ context.Context, who files.Who, share, path string, permanent bool) (bool, error) {
+	op := "delete"
+	if permanent {
+		op = "purge"
+	}
+	f.log(op, who, share, path)
 	p, err := f.resolve(who, share, path, true)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return notFound(os.RemoveAll(p))
+	return !permanent, notFound(os.RemoveAll(p))
 }
 
 // Rename implements files.Access (not used by links).

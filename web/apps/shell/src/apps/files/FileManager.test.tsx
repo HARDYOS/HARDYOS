@@ -496,6 +496,9 @@ describe("File Manager", () => {
       hasPassword: true,
       allowUpload: true,
       maxDownloads: 0,
+      maxUploadBytes: 50_000_000_000,
+      uploadedBytes: 0,
+      maxZipBytes: 20_000_000_000,
       downloadCount: 3,
       lastUsedAt: null,
       revoked: false,
@@ -531,7 +534,11 @@ describe("File Manager", () => {
     fireEvent.change(within(dialog).getByLabelText("Password"), { target: { value: "abc" } });
     expect((within(dialog).getByRole("button", { name: "Create link" }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.change(within(dialog).getByLabelText("Password"), { target: { value: "sunny-day" } });
+    expect(within(dialog).queryByLabelText("Upload limit")).toBeNull();
     fireEvent.click(within(dialog).getByRole("switch", { name: /Let people add files/ }));
+    // Uploads on: how much the link may take in, 10 GB unless changed.
+    expect((within(dialog).getByLabelText("Upload limit") as HTMLSelectElement).value).toBe("10000000000");
+    fireEvent.change(within(dialog).getByLabelText("Upload limit"), { target: { value: "50000000000" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "Create link" }));
     const ready = await screen.findByRole("dialog", { name: "Link ready" });
     expect((within(ready).getByLabelText("Share link") as HTMLInputElement).value).toBe(`${window.location.origin}/s/${"t".repeat(43)}`);
@@ -541,6 +548,7 @@ describe("File Manager", () => {
       expiresInDays: 30,
       password: "sunny-day",
       allowUpload: true,
+      maxUploadBytes: 50_000_000_000,
     });
     fireEvent.click(within(ready).getByRole("button", { name: "Done" }));
 

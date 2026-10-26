@@ -4111,6 +4111,21 @@ export interface components {
             revoked: boolean;
             /** @enum {string} */
             status: "active" | "expired" | "revoked" | "used-up";
+            /**
+             * Format: int64
+             * @description What an upload link may take in, in all (bytes); 0 for links without uploads
+             */
+            maxUploadBytes: number;
+            /**
+             * Format: int64
+             * @description What it has taken in so far
+             */
+            uploadedBytes: number;
+            /**
+             * Format: int64
+             * @description The most one "download all" zip of a folder link holds (bytes)
+             */
+            maxZipBytes: number;
         };
         ShareLinkRequest: {
             share: string;
@@ -4123,6 +4138,16 @@ export interface components {
             allowUpload?: boolean;
             /** @description 0 for no limit */
             maxDownloads?: number;
+            /**
+             * Format: int64
+             * @description Upload links: what the link may take in, in all, 1 MB to 1 TB; 0 or left out for 10 GB. One file is at most 5 GB.
+             */
+            maxUploadBytes?: number;
+            /**
+             * Format: int64
+             * @description Folder links: the most one "download all" zip holds, 1 MB to 1 TB; 0 or left out for 20 GB
+             */
+            maxZipBytes?: number;
         };
         ShareLinkCreated: {
             link: components["schemas"]["ShareLink"];
