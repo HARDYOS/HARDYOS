@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/hardyos/hardyos/daemon/internal/rootfile"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -157,8 +158,10 @@ func (u *Updater) BootedDataset() string {
 	return ""
 }
 
+// readJSON reads one of the updater's state files. They live in hardyd's
+// directory, so only files root wrote are trusted.
 func readJSON(path string, v any) (bool, error) {
-	b, err := os.ReadFile(path)
+	b, err := rootfile.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
@@ -495,7 +498,7 @@ func (u *Updater) OnBoot(ctx context.Context) {
 	var rm restoreMarker
 	if ok, _ := readJSON(u.restoreFile(), &rm); ok {
 		_ = os.Remove(u.restoreFile())
-		if rm.Snapshot != "" {
+		if rm.Snapshot != "" && strings.HasPrefix(rm.Snapshot, cfg.Pool+"/hardyos@pre-") {
 			if _, err := u.run(ctx, "zfs", "rollback", "-r", rm.Snapshot); err != nil {
 				u.setResult(false, rm.Version, "Couldn't restore settings from before the update: "+err.Error())
 			} else {
@@ -523,7 +526,13 @@ func (u *Updater) OnBoot(ctx context.Context) {
 	if booted == "" {
 		return
 	}
-	// Back on another version with the update unconfirmed: it failed.
+	// Back on another version with the update unconfirmed: it failed. Only
+	// ever touch the update's own boot environment and state snapshot.
+	if !strings.HasPrefix(p.Dataset, cfg.Pool+"/ROOT/") || p.Dataset == booted ||
+		(p.Snapshot != "" && !strings.HasPrefix(p.Snapshot, cfg.Pool+"/hardyos@pre-")) {
+		_ = os.Remove(u.pendingFile())
+		return
+	}
 	if p.Snapshot != "" {
 		if _, err := u.run(ctx, "zfs", "rollback", "-r", p.Snapshot); err != nil {
 			_ = err // keep going: the old version may still read the newer state

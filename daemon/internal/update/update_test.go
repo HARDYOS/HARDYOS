@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"github.com/hardyos/hardyos/daemon/internal/rootfile"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -514,5 +515,21 @@ func TestActivateDeleteCleanup(t *testing.T) {
 	got := strings.Join(w.bes, ",")
 	if got != "rpool/ROOT/hardyos-0.4.0,rpool/ROOT/hardyos-0.5.0" {
 		t.Fatalf("after cleanup: %s", got)
+	}
+}
+
+func TestForgedStateFilesAreIgnored(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("ownership checks need root")
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "update-pending.json")
+	_ = os.WriteFile(p, []byte(`{"dataset":"tank/photos","bootEnvironment":"x"}`), 0o644)
+	_ = os.Chown(p, 1000, 1000)
+	rootfile.Enforce = true
+	defer func() { rootfile.Enforce = false }()
+	var pend Pending
+	if ok, err := readJSON(p, &pend); ok || err == nil {
+		t.Fatalf("hardyd-owned pending file read: ok=%v err=%v", ok, err)
 	}
 }
