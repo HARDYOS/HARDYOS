@@ -115,6 +115,41 @@ Datasets are created with `acltype=posixacl`, `xattr=sa`,
 `aclinherit=passthrough`, `devices=off`, `setuid=off`, and `compression=lz4`
 unless the pool sets its own.
 
+### Pools from elsewhere
+
+Because the settings travel with the pool, a pool imported from another
+machine (or a disk someone prepared) can say anything, so HardyOS checks
+what it reads as if a person had typed it:
+
+- A value with a tab or a line break can't pose as another shared folder:
+  if `zfs list` doesn't line up with the list of datasets, each shared
+  folder is read on its own.
+- A name, description, access rule, app grant or sharing setting that
+  wouldn't be accepted in the dialog is replaced by a safe one (the id as
+  the name, no description, **administrators only**, no app, the default
+  sharing settings with NFS off) and logged. Fix it in Shared Folders ›
+  Edit.
+- A folder is only used when the kernel's mount table says its path is that
+  dataset's own ZFS mount. Anything else (a mountpoint pointing at a system
+  folder, another file system mounted on top, a bind mount) makes it show
+  as not mounted: no permissions are set, nothing is shared over SMB or
+  NFS, the File Manager doesn't open it, and the journal says why
+  (`shared folder isn't mounted where its settings say`).
+
+### Recycle bins
+
+With the recycle bin on, the folder has a hidden `.recycle` at its top:
+root's, mode 1777, without ACL entries (HardyOS puts it back that way if
+it changes; a link or a file there is refused). Inside it every person has
+their own bin, owned by them, mode 0700, named `<domain>.<name>` in lower
+case (`home.alice`), or `hardyos-files` for HardyOS administrators using
+the File Manager. Samba and the File Manager use the same bins. A bin
+someone else made under another person's name is moved aside
+(`.hardyos-quarantine-...`) and locked; the File Manager refuses to use it
+in the meantime. The permission walks never go into `.recycle` (or
+`.zfs`), so nobody else, administrators included, can open another
+person's bin.
+
 ### Apps
 
 Every installed app has its own Linux user ID (30000-30999). Giving it a

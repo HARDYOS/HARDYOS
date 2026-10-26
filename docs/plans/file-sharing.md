@@ -65,7 +65,7 @@ Cade's decisions this implements (2026-10-26):
   default, via the same fd walker as app grants, background for big trees).
   Everyone = `HOME\Domain Users`. Guest (`guest ok = yes`, guests read-only,
   mapped to `nobody`) only when the folder's guest flag is on.
-- Recycle bin: `vfs_recycle` into `.recycle/%U` (hidden, `veto files`
+- Recycle bin: `vfs_recycle` into `.recycle/<netbios>.%U` (decision 106; hidden, `veto files`
   excludes nothing else), keeping folder tree and versions; files older than
   30 days are removed daily by hardyd-priv.
 - Previous Versions: `shadow_copy2` with `shadow:snapdir = .zfs/snapshot`,

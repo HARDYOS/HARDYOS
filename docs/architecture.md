@@ -410,13 +410,33 @@ developer notes in [shares.md](shares.md)).
   `access`, `apps`, `recycle`, `guest`) and its quota is the ZFS `quota`,
   so they move with the pool. Datasets get `acltype=posixacl`, `xattr=sa`,
   `devices=off` and `setuid=off`.
+- **What a pool says isn't trusted.** A pool can come from anywhere, so
+  `shares.Manager.List` reads it defensively (decision 105): `zfs list -Hp`
+  rows are accepted only when they line up exactly with `zfs list -H -o
+  name` (one row per dataset, one field per property, each dataset once),
+  which a tab or line break in a user property breaks; otherwise each
+  `<pool>/shares/<id>` is read alone with `zfs get -Hp -o property,value`
+  (exactly one line per property). Every value is checked again like
+  input (`CleanName`, the description rules, `CleanRules`, app grants,
+  `CheckServices`; invalid ones are logged once and replaced by the id, no
+  description, administrators only, no apps, the default services). The
+  folder's path is used for root work only when `/proc/self/mountinfo`
+  says the visible mount there is a ZFS mount of that very dataset's root;
+  its device is kept in `Share.RootDev` (never sent to hardyd), and every
+  root-side user opens the folder with `shares.OpenRoot` (`openat2` from
+  `/` with `RESOLVE_NO_SYMLINKS`, must be on that device): the ACL walkers,
+  the people root, app, NFS and hardyos-files grants (checked right before
+  `setfacl`), smb.conf, the recycle bin and its cleaner, and the file
+  workers' roots. NFS exports go by `Mounted`, which is false for an
+  unverified folder.
 - **Root side.** `internal/shares` (in hardyd-priv) behind the ops
   `shares.list/create/update/delete/starter/folders`. The apps engine uses
   the same Manager in-process through `apps.ShareResolver`: `Resolve` gives
   the real path of a share or a subfolder (never outside it), `GrantApp` and
   `RevokeApp` add or remove the app user's ACL entries (the share root at
   once with setfacl, everything below in a background walk that never
-  follows links) and record them in `org.hardyos:apps`.
+  follows links and never enters `.recycle` or `.zfs` at the top) and
+  record them in `org.hardyos:apps`.
 - **API.** `GET /shares` and `GET /shares/{id}` for everyone signed in
   (family members don't see access rules, apps or pools); admins create,
   change and delete through jobs (`shares.create`, `shares.update`,
@@ -565,10 +585,26 @@ section 1; user guide in [file-sharing.md](file-sharing.md)).
   `shadow:snapprefix = ^hardyos-auto-\(hourly\|daily\|weekly\|monthly\)$`
   (a basic regex, as Samba compiles it), `shadow:delimiter = _`,
   `shadow:format = _%Y-%m-%d-%H%M`, UTC: part B's automatic snapshots.
-- **Recycle bin.** `vfs_recycle` into `.recycle/%U` (folders and versions
-  kept, access time set on delete); off on Time Machine folders. Once a day
-  hardyd-priv removes what has been there 30 days, through fds opened
-  with `O_NOFOLLOW` and `unlinkat`, staying on the folder's file system.
+- **Recycle bin.** `vfs_recycle` into `.recycle/<netbios>.%U` (the same
+  bin names as the File Manager's, decision 106; folders and versions
+  kept, access time set on delete, bins and their folders made 0700); off
+  on Time Machine folders. Every apply makes sure `.recycle` is root's,
+  1777 and without ACL entries (fixed through an `O_NOFOLLOW` descriptor; a
+  link, a file or another file system there is refused) and looks at every
+  bin named after an account: one that isn't a folder owned by that
+  account (anyone can make folders in `.recycle`) is renamed to
+  `.hardyos-quarantine-<time>-<name>` and locked (root's, 0700), one that
+  is the owner's but open to others is closed up (0700, no ACLs). Once a
+  day hardyd-priv removes what has been there 30 days, through fds opened
+  with `O_NOFOLLOW` and `unlinkat`, staying on the folder's file system;
+  a folder is only entered when the descriptor opened is the inode it
+  looked at, with its times read again from the descriptor. The people
+  walker never enters `.recycle` or `.zfs` at the top.
+- **Name lookups** go through `rangeChecked`: an ID winbind (or anything
+  else in NSS) gives outside the idmap ranges (3000-7999, 100000-999999)
+  makes the name unknown, so it never reaches an ACL entry or a chown.
+  The homes dataset's mount is verified like a shared folder's before its
+  mode is set.
 - **Time Machine and Avahi.** Folders with Time Machine get
   `fruit:time machine` (+ `max size`); `fruit:metadata = stream`,
   `fruit:model = MacSamba` are global. hardyd-priv writes
@@ -762,14 +798,28 @@ browser ── /api/v1/files/* ──▶ hardyd (files.Client) ── files.open
   `rwX` on every shared folder with the same no-follow ACL walker as app
   grants (at start-up, every 10 minutes and before an administrator's
   folders are listed). Family members with HardyOS accounts get no files.
-  Root is never acted as.
+  Root is never acted as. A person's home folder is only looked for on the
+  pool File Services keeps homes on, as `<pool>/homes/<netbios>.<user>`
+  whose `org.hardyos:home` (set when hardyd-priv made it) names that very
+  account, mounted (verified in the mount table) where it says.
+- **Accountability.** hardyd-priv logs every `files.*` operation with the
+  principal, Local and Admin as hardyd sent them, the uid/gid it ran as,
+  the folder and path(s), and the outcome (`file operation`), and every
+  refusal before an identity was found (`file operation refused`). See
+  "Trusting hardyd" below for what this does and doesn't protect.
+- **How many at once.** At most 32 workers run at once and 8 for one
+  principal (`MaxWorkers`, `MaxWorkersPerPerson`); more wait for a slot
+  until their request's context ends, so a flood of requests can't fork the
+  server to death or starve everyone else.
 - **The folder's rules** are checked first (`fileworker.Level`: a `none`
   rule beats everything, otherwise the highest matching level; no match =
   no access; administrators may use every folder). Read-only folders refuse
   every change before a worker starts. Then the disk's permissions decide,
   because the worker *is* the person.
 - **Workers.** For each operation hardyd-priv opens the share root
-  (`O_PATH`), and starts `hardyd-priv fileworker` with the person's
+  (`O_PATH`, with `shares.OpenRoot`: only a folder whose mount was
+  verified, reached without following any link and on that mount's
+  device), and starts `hardyd-priv fileworker` with the person's
   credentials set between fork and exec (`setgroups`, `setgid`, `setuid`),
   so not one instruction runs as root. The worker refuses to run as root or
   with any capability, sets `PR_SET_NO_NEW_PRIVS` (all threads) and
@@ -780,18 +830,34 @@ browser ── /api/v1/files/* ──▶ hardyd (files.Client) ── files.open
   descriptor (`renameat2(RENAME_NOREPLACE)`, `mkdirat`, `unlinkat`), and
   recursive deletes walk by descriptor. Links, devices, pipes and sockets
   are never listed or opened; `..`, `.recycle`, `.zfs` and `.hardyos*` are
-  refused in paths (except an upload's own temporary name). A worker costs
-  about 10 ms.
+  refused in paths. An upload's own temporary name (`.hardyos-upload-<hex>`)
+  may only end the path of create and openwrite, a rename's source and a
+  permanent delete (`fileworker.OpPath`), never a rename's destination. A
+  worker costs about 10 ms.
 - **Files, not bytes.** `files.open`, `files.create` and `files.openwrite`
   hand the open file to hardyd over SCM_RIGHTS (worker → hardyd-priv →
   hardyd); hardyd streams it (`http.ServeContent`: Range, If-Range), writes
   upload chunks into it, or copies between two of them (`copy_file_range`,
-  so ZFS can clone blocks). No file content goes through JSON.
+  so ZFS can clone blocks). No file content goes through JSON. Before
+  passing it on, hardyd-priv checks the descriptor: a regular file, opened
+  read only for open and write only for create/openwrite (`F_GETFL`, never
+  `O_PATH`), on the folder's own device unless it's an older version.
 - **Recycle bin.** Deleting in a folder with the recycle bin on moves the
-  item to `.recycle/<user>/<its folders>/` (`<user>`: the account name
-  without the domain, `hardyos-files` for administrators); a name already
-  there gets " (deleted <date time>)". hardyd-priv makes `.recycle` root's,
-  mode 1777, if missing; each person's bin is theirs, 0700.
+  item to `.recycle/<bin>/<its folders>/`; a name already there gets
+  " (deleted <date time>)". Bins are named so a name can only be one
+  account's (decision 106): `<netbios>.<user>` in lower case for domain
+  accounts (as in SMB's `recycle:repository`), `hardyos-files` for
+  administrators (a domain bin always has a dot, so it can never be that).
+  Before a recycled delete hardyd-priv makes sure `.recycle` is root's,
+  1777 and without ACL entries (`shares.EnsureRecycle`, through an
+  `O_NOFOLLOW` descriptor; a link or file there is refused). The worker
+  then makes or opens the person's bin and checks it on the descriptor: a
+  folder owned by the person (someone else's is refused with a clear
+  error: "delete permanently instead") with no group, other or ACL access
+  (its own, if too open, is closed up first). The ACL walkers (people,
+  apps, NFS, hardyos-files) never enter `.recycle` or `.zfs` at the top,
+  so bins stay owner-only: administrators don't get into other people's
+  bins (a root shell can).
 - **Older versions** come from `.zfs/snapshot/hardyos-auto-<kind>_<UTC
   time>/…` (contract section 2), read only. A file's versions leave out
   copies equal to the current file or to the next newer version. Restore
@@ -819,6 +885,39 @@ browser ── /api/v1/files/* ──▶ hardyd (files.Client) ── files.open
   test binary re-runs itself as the worker): as root they create files owned
   by made-up users and check each can do exactly what its user can; without
   root they run as the test's own user.
+
+### Trusting hardyd (and what comes next)
+
+hardyd is unprivileged and treated as possibly compromised, yet today the
+`Who` of a `files.*` call (principal, Local, Admin, groups) is hardyd's
+word: hardyd-priv works out the Linux identity from it and never runs as
+root for the person, but a compromised hardyd could still claim to be any
+domain account, or a HardyOS administrator (and so hardyos-files). What
+holds today: no operation ever runs as root or outside a verified shared
+folder or home, the folder rules and disk permissions still apply to the
+identity claimed, workers are capped, and every operation is logged with
+the principal and resulting uid by hardyd-priv, which hardyd can't edit.
+
+The planned fix is a **root-issued session attestation** (not built yet):
+
+- Sign-in is checked on the root side: hardyd-priv (not hardyd) verifies
+  the password or the SSO/Kerberos assertion and the account's state
+  (enabled, role, domain groups from winbind), so hardyd never decides who
+  someone is.
+- hardyd-priv then issues a short-lived token binding the session id, the
+  principal, Local/Admin, the groups and an expiry, MACed with a key only
+  hardyd-priv holds (`/run/hardyos/priv`, root 0700, new at every boot);
+  hardyd keeps it with the session and sends it with each `files.*` call
+  instead of a bare `Who`.
+- hardyd-priv verifies the MAC and the expiry, re-checks that the account
+  is still enabled (cached for a minute), and acts only as the attested
+  identity; sign-out and expiry revoke it (a revocation list in
+  hardyd-priv). Share links would carry a creator attestation renewed while
+  the creator still signs in, so a link can't outlive its creator's
+  access even if hardyd's database is changed.
+
+Without the root-side sign-in check an attestation would only launder
+hardyd's claim, so both parts come together.
 
 ## File Manager and share links
 

@@ -106,11 +106,16 @@ itself).
 
 ## Recycle bin
 
-With a folder's **Recycle bin** on, files deleted over SMB go to a hidden
-`.recycle` folder inside it, under the name of the person who deleted them,
-with their folders kept. Open `\\HARDYOS\Media\.recycle` to get one back
-(type the address; it's hidden). Files that have been there for 30 days
-are removed automatically.
+With a folder's **Recycle bin** on, files deleted over SMB or in the File
+Manager go to a hidden `.recycle` folder inside it, into the bin of the
+person who deleted them, with their folders kept. Each bin is named after
+the domain and the account (`home.alice`; `hardyos-files` for HardyOS
+administrators in the File Manager) and only its owner can open it. Open
+`\\HARDYOS\Media\.recycle\home.alice` to get something back (type the
+address; it's hidden). Files that have been there for 30 days are removed
+automatically. If someone else made a folder with your bin's name, HardyOS
+moves it aside within ten minutes; until then deleting in the File
+Manager says your bin can't be used safely (delete permanently instead).
 
 ## Home folders
 
