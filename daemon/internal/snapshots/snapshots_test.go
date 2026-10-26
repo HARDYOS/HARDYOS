@@ -174,7 +174,9 @@ func TestTick(t *testing.T) {
 	got := f.Lines()
 	want := []string{
 		listCmd + "tank/shares/media",
-		"zfs snapshot tank/shares/media@hardyos-auto-hourly_2026-11-02-0000 tank/shares/media@hardyos-auto-daily_2026-11-02-0000 tank/shares/media@hardyos-auto-weekly_2026-11-02-0000",
+		"zfs snapshot tank/shares/media@hardyos-auto-hourly_2026-11-02-0000",
+		"zfs snapshot tank/shares/media@hardyos-auto-daily_2026-11-02-0000",
+		"zfs snapshot tank/shares/media@hardyos-auto-weekly_2026-11-02-0000",
 		"zfs destroy tank/shares/media@hardyos-auto-hourly_2026-11-01-2200",
 		"zfs destroy tank/shares/media@hardyos-auto-daily_2026-11-01-0000",
 		"zfs destroy tank/shares/media@hardyos-auto-monthly_2026-10-01-0000",
@@ -224,7 +226,10 @@ func TestTickCatchUpOnlyNewest(t *testing.T) {
 	m.Tick(context.Background())
 	want := []string{
 		listCmd + "tank/shares/media",
-		"zfs snapshot tank/shares/media@hardyos-auto-hourly_2026-11-03-1500 tank/shares/media@hardyos-auto-daily_2026-11-03-0000 tank/shares/media@hardyos-auto-weekly_2026-11-02-0000 tank/shares/media@hardyos-auto-monthly_2026-11-01-0000",
+		"zfs snapshot tank/shares/media@hardyos-auto-hourly_2026-11-03-1500",
+		"zfs snapshot tank/shares/media@hardyos-auto-daily_2026-11-03-0000",
+		"zfs snapshot tank/shares/media@hardyos-auto-weekly_2026-11-02-0000",
+		"zfs snapshot tank/shares/media@hardyos-auto-monthly_2026-11-01-0000",
 	}
 	if got := f.Lines(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("commands:\n%s", strings.Join(got, "\n"))

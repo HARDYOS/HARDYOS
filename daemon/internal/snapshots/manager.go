@@ -179,21 +179,15 @@ func (m *Manager) runShare(ctx context.Context, sh shares.Share, now time.Time) 
 		}
 	}
 	var errs []error
-	if len(take) > 0 {
-		// One command: the kinds due at the same moment (midnight on a
-		// Monday the 1st) are taken atomically, in one transaction group.
-		args := []string{"snapshot"}
-		for _, n := range take {
-			args = append(args, sh.Dataset+"@"+n)
+	// One command per snapshot: ZFS refuses several snapshots of the same
+	// dataset in one call ("multiple snapshots of same fs not allowed").
+	for _, n := range take {
+		if _, err := m.zfs(ctx, "snapshot", sh.Dataset+"@"+n); err != nil {
+			errs = append(errs, fmt.Errorf("taking %s: %w", n, err))
+			continue
 		}
-		if _, err := m.zfs(ctx, args...); err != nil {
-			errs = append(errs, fmt.Errorf("taking %s: %w", strings.Join(take, ", "), err))
-		} else {
-			for _, n := range take {
-				have[n] = true
-			}
-			m.log().Info("snapshots: taken", "share", sh.ID, "snapshots", take)
-		}
+		have[n] = true
+		m.log().Info("snapshots: taken", "share", sh.ID, "snapshot", n)
 	}
 	labels := make([]string, 0, len(have))
 	for n := range have {

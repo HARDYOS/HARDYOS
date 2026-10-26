@@ -64,7 +64,9 @@ func TestZFSIntegrationSnapshots(t *testing.T) {
 	}
 	ds := photos.Dataset
 	// Snapshots the scheduler must never touch.
-	run("zfs", "snapshot", ds+"@zrepl_keep", ds+"@hardyos-auto-hourly_2026-01-01-0030", ds+"@hardyos-update-20261101-120000")
+	for _, n := range []string{"zrepl_keep", "hardyos-auto-hourly_2026-01-01-0030", "hardyos-update-20261101-120000"} {
+		run("zfs", "snapshot", ds+"@"+n)
+	}
 
 	now := time.Date(2026, 11, 2, 0, 0, 30, 0, time.UTC) // Monday 2 November
 	m := &snapshots.Manager{Runner: sysexec.Exec{}, Shares: shm, Now: func() time.Time { return now }}
