@@ -525,26 +525,42 @@ func (m *Manager) refreshOthers(ctx context.Context, c *Config) bool {
 		}
 		return strings.Split(strings.TrimSpace(string(res.Stdout)), "\n")
 	}
+	// Names come from the directory (a joining DC's object is written on the
+	// DC it joins from, at once) and from DNS (which can take minutes to
+	// replicate); either is enough.
+	names := map[string]bool{}
+	var listed struct {
+		DCs []string `json:"dcs"`
+	}
+	dirOK := m.admin(ctx, "dcs", map[string]any{}, &listed) == nil
+	for _, n := range listed.DCs {
+		names[strings.TrimSuffix(strings.ToLower(n), ".")] = true
+	}
 	srv := dig("SRV", "_ldap._tcp.dc._msdcs."+c.Domain)
-	if srv == nil {
-		return false // DNS isn't answering: keep what we know
+	for _, line := range srv {
+		if f := strings.Fields(line); len(f) == 4 {
+			names[strings.TrimSuffix(strings.ToLower(f[3]), ".")] = true
+		}
+	}
+	if !dirOK && srv == nil {
+		return false // neither answered: keep what we know
+	}
+	delete(names, strings.ToLower(c.DCName))
+	known := map[string]string{}
+	for _, o := range c.Others {
+		known[o.Name] = o.Address
 	}
 	var others []DC
-	for _, line := range srv {
-		f := strings.Fields(line)
-		if len(f) != 4 {
-			continue
-		}
-		name := strings.TrimSuffix(strings.ToLower(f[3]), ".")
-		if name == strings.ToLower(c.DCName) {
-			continue
-		}
+	for name := range names {
 		dc := DC{Name: name}
 		for _, a := range dig("A", name) {
 			if ip, err := netip.ParseAddr(strings.TrimSpace(a)); err == nil && ip.Is4() {
 				dc.Address = ip.String()
 				break
 			}
+		}
+		if dc.Address == "" {
+			dc.Address = known[name] // its A record hasn't reached us yet
 		}
 		others = append(others, dc)
 	}

@@ -164,3 +164,31 @@ func TestConfigDNSServers(t *testing.T) {
 		t.Errorf("HostName = %s", c.HostName())
 	}
 }
+
+// A DC that just joined is in the directory before DNS has its records.
+func TestRefreshOthersFromDirectory(t *testing.T) {
+	f := &sysexec.Fake{}
+	m := testManager(t, f)
+	if err := os.MkdirAll(filepath.Join(m.Root, DataDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.OnPrefix(AdminTool+" ", sysexec.Result{Stdout: []byte(`{"dcs":["dc1.home.example.net","DC2.home.example.net"]}`)})
+	f.On("dig +short +time=2 +tries=1 @192.168.1.20 SRV _ldap._tcp.dc._msdcs.home.example.net", "0 100 389 dc1.home.example.net.\n")
+	f.On("dig +short +time=2 +tries=1 @192.168.1.20 A dc2.home.example.net", "192.168.1.21\n")
+	f.OnPrefix("ip ", sysexec.Result{})
+	c := &Config{Domain: "home.example.net", Realm: "HOME.EXAMPLE.NET", DCName: "dc1.home.example.net", Address: "192.168.1.20/24"}
+	if !m.refreshOthers(context.Background(), c) {
+		t.Fatalf("no change seen: %+v\n%s", c.Others, strings.Join(f.Lines(), "\n"))
+	}
+	if len(c.Others) != 1 || c.Others[0] != (DC{Name: "dc2.home.example.net", Address: "192.168.1.21"}) {
+		t.Errorf("others = %+v", c.Others)
+	}
+	// Neither the directory nor DNS answers: what we know stays.
+	f2 := &sysexec.Fake{}
+	m.Runner = f2
+	f2.OnPrefix(AdminTool+" ", sysexec.Result{ExitCode: 2})
+	f2.OnPrefix("dig ", sysexec.Result{ExitCode: 9})
+	if m.refreshOthers(context.Background(), c) || len(c.Others) != 1 {
+		t.Errorf("forgot the DCs: %+v", c.Others)
+	}
+}

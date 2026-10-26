@@ -140,6 +140,19 @@ class Directory:
 
     # ---- commands ------------------------------------------------------
 
+    def dcs(self, _):
+        """Every domain controller, from the configuration partition (each DC
+        has an nTDSDSA object under its server object; joining creates it on
+        the DC it joined from, so it's there long before DNS replicates)."""
+        out = []
+        for m in self.db.search(base=self.db.get_config_basedn(), scope=ldb.SCOPE_SUBTREE,
+                                expression="(objectClass=nTDSDSA)", attrs=["objectGUID"]):
+            server = m.dn.parent()
+            res = self.db.search(base=server, scope=ldb.SCOPE_BASE, attrs=["dNSHostName"])
+            if len(res) == 1 and first(res[0], "dNSHostName"):
+                out.append(first(res[0], "dNSHostName").lower())
+        return {"dcs": sorted(set(out))}
+
     def users(self, _):
         res = self.db.search(
             base=self.base, scope=ldb.SCOPE_SUBTREE, attrs=USER_ATTRS,
@@ -374,6 +387,7 @@ def password_error(e):
 
 COMMANDS = {
     "users": Directory.users,
+    "dcs": Directory.dcs,
     "groups": Directory.groups,
     "user.create": Directory.user_create,
     "user.update": Directory.user_update,
