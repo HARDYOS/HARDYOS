@@ -553,6 +553,59 @@ section 3; decisions 65-69, security review 80-82):
   Create an app, and `AppFrame` (an installed app as a desktop window, id
   `os.hardy.appwindow:<app id>`).
 
+## File Manager and share links
+
+The web desktop's File Manager and web share links (part D of
+[plans/file-sharing.md](plans/file-sharing.md); user notes in
+[file-sharing.md](file-sharing.md#file-manager)).
+
+- **File Manager** (`web/apps/shell/src/apps/files/`). A desktop app over
+  the files API (`/files/shares`, `/files/list`, `/files/download`,
+  `/files/upload`, `/files/mkdir|rename|move|copy|delete`,
+  `/files/snapshots`, `/files/restore`; part C), so every read and write
+  happens as the signed-in person. Uploads are chunked (8 MiB PUTs at an
+  offset after `POST /files/upload`, three files at a time, a failed chunk
+  retried three times from what the server has, cancel = `DELETE`); they
+  never overwrite (a taken name gets " (2)"). Downloads, previews
+  (`inline=1`) and older versions (`snapshot=`) are plain links to
+  `/files/download`, so the browser streams them and seeks with Range.
+  Moves, copies and deletes accept an immediate answer or a job and follow
+  the job. The layout switches on container queries (the window's width,
+  not the screen's).
+- **Share links** (`internal/sharelinks`, API in
+  `api/handlers_sharelinks.go`). Table `share_links` (migration 0007):
+  SHA-256 of a 32-byte random token (the token is returned once), share,
+  path, folder or file, creator's user id and principal, created and
+  expires (default 7 days, 1-90), argon2id password hash (the account
+  hasher), uploads (folders only), download limit and count, revoked.
+  Making one needs `files.Access.Stat(...).Writable` as the person, or an
+  admin; revoking needs the creator or an admin; `GET /sharelinks?scope=all`
+  is admin only. Audited: `sharelink.create`, `.revoke`, `.download`,
+  `.upload` and `.password` (wrong passwords).
+- **Public pages** (`sharelinks.Public`, mounted at `/s/` by hardyd,
+  outside `/api` and the desktop session). Server-rendered `html/template`
+  pages, one stylesheet and the mark (`/s/-/static/`), no scripts:
+  `Content-Security-Policy: default-src 'none'; style-src 'self';
+  img-src 'self'; form-action 'self'; frame-ancestors 'none'`,
+  `Referrer-Policy: no-referrer`, noindex. Every request: per-IP (240/min)
+  and per-token (600/min) limits; look the link up by hash; check it is not
+  revoked, expired or used up; load the creator now (disabled, deleted or
+  gone from the domain stops it); check the password cookie (an HMAC over
+  link id, password hash and expiry, keyed per process, path `/s/<token>`);
+  and `Stat` the target as the creator. Then `List`, `Open` or `Create` as
+  the creator through `files.Access`. Sub paths are cleaned (no `..`, no
+  hidden `.recycle`, `.zfs`, `.hardyos*`) and joined below the link's path;
+  listings and zips leave hidden names out and never touch snapshots.
+  Downloads are `attachment` with `Content-Security-Policy: sandbox`, Range
+  via `http.ServeContent`, counted once per download (not per Range part).
+  Folder downloads stream a zip (at most 20 000 entries, 32 levels).
+  Uploads are multipart, same-origin only, at most 10 GiB a request, never
+  replacing a file. Wrong passwords lock the link and the address for 15
+  minutes after five tries (`auth.LoginLimiter`).
+- **Wiring.** `api.Config.Files` is the `files.Access` from part C; while
+  it's nil, links can't be made and existing ones say they don't work any
+  more. The dev server proxies `/s/` to hardyd too.
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly

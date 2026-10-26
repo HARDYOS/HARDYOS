@@ -22,19 +22,16 @@ export interface AppDef extends AppManifest {
 /** Installed Docker apps open in windows with this id prefix plus ":" and the app's id. */
 export const APP_WINDOW = "os.hardy.appwindow";
 
-const ComingSoon = lazy(() => import("./apps/ComingSoon"));
-
 /** Every app the desktop knows about, in dock order. */
 export const APPS: AppDef[] = [
   {
     id: "os.hardy.files",
-    name: "Files",
+    name: "File Manager",
     icon: "folder",
     color: "#2F6BFF",
     glyph: (s) => <FolderIcon size={s} />,
-    component: ComingSoon,
-    comingIn: "the file services phase (SMB, NFS, sharing and sync)",
-    defaultSize: { width: 560, height: 360 },
+    component: lazy(() => import("./apps/files/FileManager")),
+    defaultSize: { width: 1080, height: 700 },
   },
   {
     id: "os.hardy.storage",
