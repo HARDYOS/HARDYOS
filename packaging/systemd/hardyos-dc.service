@@ -1,0 +1,22 @@
+[Unit]
+Description=HardyOS domain controller (Samba AD DC)
+Documentation=https://github.com/HARDYOS/HARDYOS
+# Started and kept running by hardyd-priv once a domain exists; never enabled
+# directly. It runs in its own network namespace (its own address on the LAN)
+# with a private /run/samba, so the NAS's own file sharing can use Samba too.
+After=network-online.target hardyd-priv.service
+Wants=network-online.target
+ConditionPathExists=/var/lib/hardyos-dc/etc/smb.conf
+ConditionPathExists=/run/netns/hardyos-dc
+
+[Service]
+Type=notify
+NotifyAccess=all
+NetworkNamespacePath=/run/netns/hardyos-dc
+BindPaths=/var/lib/hardyos-dc/run:/run/samba
+ExecStart=/usr/sbin/samba --foreground --no-process-group -s /var/lib/hardyos-dc/etc/smb.conf
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=16384
+TimeoutStartSec=2min

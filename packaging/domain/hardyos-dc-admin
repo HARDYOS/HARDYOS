@@ -1,0 +1,353 @@
+#!/usr/bin/python3
+"""HardyOS domain directory helper.
+
+Called only by hardyd-priv. Reads one JSON object from stdin, prints one JSON
+object on stdout. Passwords arrive on stdin so they never show up in process
+listings. Works on the domain controller's database directly (Samba's own
+Python API), which is safe while the DC runs.
+
+Usage: hardyos-dc-admin <smb.conf> <command>
+"""
+
+import json
+import sys
+
+import ldb
+from samba.auth import system_session
+from samba.dsdb import (
+    GTYPE_SECURITY_GLOBAL_GROUP,
+    UF_ACCOUNTDISABLE,
+    UF_DONT_EXPIRE_PASSWD,
+    UF_LOCKOUT,
+)
+from samba.ndr import ndr_unpack
+from samba.dcerpc import security
+from samba.param import LoadParm
+from samba.samdb import SamDB
+
+# Accounts and groups Samba needs; HardyOS never deletes or renames them.
+PROTECTED_USERS = {"administrator", "krbtgt", "guest"}
+# Groups provisioning creates outside the well-known ranges.
+PROTECTED_GROUPS = {"dnsadmins", "dnsupdateproxy"}
+
+USER_ATTRS = [
+    "sAMAccountName", "givenName", "sn", "displayName", "mail",
+    "userAccountControl", "memberOf", "whenCreated", "lastLogonTimestamp",
+    "objectSid", "pwdLastSet", "lockoutTime",
+]
+GROUP_ATTRS = ["sAMAccountName", "description", "member", "objectSid", "groupType", "isCriticalSystemObject"]
+
+
+class Fail(Exception):
+    pass
+
+
+def first(msg, attr, default=""):
+    v = msg.get(attr)
+    if v is None or len(v) == 0:
+        return default
+    return str(v[0])
+
+
+def ad_time(v):
+    """AD 100ns intervals since 1601 -> unix seconds (0 = never)."""
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return 0
+    if n <= 0 or n >= 0x7FFFFFFFFFFFFFFF:
+        return 0
+    return n // 10_000_000 - 11644473600
+
+
+def gen_time(v):
+    """LDAP generalized time (20261026051154.0Z) -> RFC 3339."""
+    v = str(v or "")
+    if len(v) < 14:
+        return ""
+    return f"{v[0:4]}-{v[4:6]}-{v[6:8]}T{v[8:10]}:{v[10:12]}:{v[12:14]}Z"
+
+
+def rid(msg):
+    sid = ndr_unpack(security.dom_sid, msg["objectSid"][0])
+    return int(str(sid).rsplit("-", 1)[1])
+
+
+
+
+class Directory:
+    def __init__(self, smbconf):
+        lp = LoadParm()
+        lp.load(smbconf)
+        self.lp = lp
+        self.db = SamDB(url=lp.samdb_url(), session_info=system_session(), lp=lp)
+        self.base = self.db.domain_dn()
+        self._names = None
+
+    def name_of(self, dn):
+        """Account name (sAMAccountName) for a member or memberOf DN."""
+        if self._names is None:
+            self._names = {}
+            for m in self.db.search(base=self.base, scope=ldb.SCOPE_SUBTREE, attrs=["sAMAccountName"],
+                                    expression="(sAMAccountName=*)"):
+                self._names[str(m.dn).lower()] = first(m, "sAMAccountName")
+        key = str(dn).lower()
+        if key in self._names:
+            return self._names[key]
+        return str(ldb.Dn(self.db, str(dn)).get_rdn_value())
+
+    # ---- lookups -------------------------------------------------------
+
+    def _user(self, name):
+        res = self.db.search(
+            base=self.base, scope=ldb.SCOPE_SUBTREE, attrs=USER_ATTRS,
+            expression="(&(objectCategory=person)(objectClass=user)(sAMAccountName=%s))" % ldb.binary_encode(name),
+        )
+        if len(res) != 1:
+            raise Fail("there's no user called %s" % name)
+        return res[0]
+
+    def _group(self, name):
+        res = self.db.search(
+            base=self.base, scope=ldb.SCOPE_SUBTREE, attrs=GROUP_ATTRS,
+            expression="(&(objectClass=group)(sAMAccountName=%s))" % ldb.binary_encode(name),
+        )
+        if len(res) != 1:
+            raise Fail("there's no group called %s" % name)
+        return res[0]
+
+    def _user_json(self, m):
+        uac = int(first(m, "userAccountControl", "0"))
+        name = first(m, "sAMAccountName")
+        return {
+            "username": name,
+            "givenName": first(m, "givenName"),
+            "surname": first(m, "sn"),
+            "displayName": first(m, "displayName"),
+            "email": first(m, "mail"),
+            "enabled": not (uac & UF_ACCOUNTDISABLE),
+            "lockedOut": ad_time(first(m, "lockoutTime", "0")) > 0,
+            "mustChangePassword": first(m, "pwdLastSet", "1") == "0",
+            "groups": sorted(self.name_of(g) for g in m.get("memberOf", [])),
+            "created": gen_time(first(m, "whenCreated")),
+            "lastLogon": ad_time(first(m, "lastLogonTimestamp", "0")),
+            "builtin": name.lower() in PROTECTED_USERS or rid(m) < 1000,
+        }
+
+    # ---- commands ------------------------------------------------------
+
+    def users(self, _):
+        res = self.db.search(
+            base=self.base, scope=ldb.SCOPE_SUBTREE, attrs=USER_ATTRS,
+            expression="(&(objectCategory=person)(objectClass=user))",
+        )
+        out = [self._user_json(m) for m in res if first(m, "sAMAccountName").lower() != "krbtgt"]
+        return {"users": sorted(out, key=lambda u: u["username"].lower())}
+
+    def groups(self, _):
+        res = self.db.search(
+            base=self.base, scope=ldb.SCOPE_SUBTREE, attrs=GROUP_ATTRS,
+            expression="(objectClass=group)",
+        )
+        out = []
+        for m in res:
+            builtin = self._group_builtin(m)
+            out.append({
+                "name": first(m, "sAMAccountName"),
+                "description": first(m, "description"),
+                "members": sorted(self.name_of(x) for x in m.get("member", [])),
+                "builtin": builtin,
+            })
+        return {"groups": sorted(out, key=lambda g: (g["builtin"], g["name"].lower()))}
+
+    @staticmethod
+    def _group_builtin(m):
+        return (first(m, "isCriticalSystemObject").upper() == "TRUE" or rid(m) < 1000
+                or first(m, "sAMAccountName").lower() in PROTECTED_GROUPS)
+
+    def user_create(self, a):
+        name = a["username"]
+        try:
+            self._user(name)
+            raise Fail("a user called %s already exists" % name)
+        except Fail as e:
+            if "already" in str(e):
+                raise
+        try:
+            self.db.newuser(
+                name, a["password"],
+                givenname=a.get("givenName") or None,
+                surname=a.get("surname") or None,
+                mailaddress=a.get("email") or None,
+                force_password_change_at_next_login_req=bool(a.get("mustChangePassword")),
+            )
+        except ldb.LdbError as e:
+            raise Fail(password_error(e))
+        for g in a.get("groups") or []:
+            self.db.add_remove_group_members(g, [name], add_members_operation=True)
+        if a.get("neverExpires", True):
+            self.db.toggle_userAccountFlags(
+                "(sAMAccountName=%s)" % ldb.binary_encode(name), UF_DONT_EXPIRE_PASSWD, on=True, strict=False)
+        return self._user_json(self._user(name))
+
+    def user_update(self, a):
+        m = self._user(a["username"])
+        msg = ldb.Message(m.dn)
+        for key, attr in (("givenName", "givenName"), ("surname", "sn"), ("email", "mail"), ("displayName", "displayName")):
+            if key in a:
+                v = a[key] or ""
+                msg[attr] = ldb.MessageElement([v] if v else [], ldb.FLAG_MOD_REPLACE, attr)
+        # Keep the display name in step with the name unless it's set itself.
+        if "displayName" not in a and ("givenName" in a or "surname" in a):
+            given = a.get("givenName", first(m, "givenName"))
+            sur = a.get("surname", first(m, "sn"))
+            full = " ".join(x for x in (given, sur) if x)
+            msg["displayName"] = ldb.MessageElement([full] if full else [], ldb.FLAG_MOD_REPLACE, "displayName")
+        if len(msg) > 0:
+            self.db.modify(msg)
+        return self._user_json(self._user(a["username"]))
+
+    def user_password(self, a):
+        m = self._user(a["username"])
+        try:
+            self.db.setpassword(
+                "(distinguishedName=%s)" % ldb.binary_encode(str(m.dn)), a["password"],
+                force_change_at_next_login=bool(a.get("mustChangePassword")),
+                username=a["username"],
+            )
+        except ldb.LdbError as e:
+            raise Fail(password_error(e))
+        # A new password also clears a lockout.
+        self._unlock(m)
+        return self._user_json(self._user(a["username"]))
+
+    def _unlock(self, m):
+        if ad_time(first(m, "lockoutTime", "0")) > 0:
+            msg = ldb.Message(m.dn)
+            msg["lockoutTime"] = ldb.MessageElement(["0"], ldb.FLAG_MOD_REPLACE, "lockoutTime")
+            self.db.modify(msg)
+
+    def user_enable(self, a):
+        m = self._user(a["username"])
+        if a.get("enabled"):
+            self.db.enable_account("(distinguishedName=%s)" % ldb.binary_encode(str(m.dn)))
+            self._unlock(m)
+        else:
+            if a["username"].lower() == "administrator":
+                raise Fail("the domain Administrator can't be turned off")
+            self.db.disable_account("(distinguishedName=%s)" % ldb.binary_encode(str(m.dn)))
+        return self._user_json(self._user(a["username"]))
+
+    def user_delete(self, a):
+        m = self._user(a["username"])
+        if self._user_json(m)["builtin"]:
+            raise Fail("%s is built into the domain and can't be deleted" % a["username"])
+        self.db.delete(m.dn)
+        return {"deleted": a["username"]}
+
+    def group_create(self, a):
+        name = a["name"]
+        try:
+            self._group(name)
+            raise Fail("a group called %s already exists" % name)
+        except Fail as e:
+            if "already" in str(e):
+                raise
+        self.db.newgroup(name, description=a.get("description") or None, grouptype=GTYPE_SECURITY_GLOBAL_GROUP)
+        if a.get("members"):
+            self.db.add_remove_group_members(name, a["members"], add_members_operation=True)
+        return self._group_json(name)
+
+    def _group_json(self, name):
+        for g in self.groups(None)["groups"]:
+            if g["name"].lower() == name.lower():
+                return g
+        raise Fail("there's no group called %s" % name)
+
+    def group_update(self, a):
+        g = self._group(a["name"])
+        if "description" in a:
+            msg = ldb.Message(g.dn)
+            v = a["description"] or ""
+            msg["description"] = ldb.MessageElement([v] if v else [], ldb.FLAG_MOD_REPLACE, "description")
+            self.db.modify(msg)
+        if a.get("add"):
+            for u in a["add"]:
+                self._user(u)
+            self.db.add_remove_group_members(a["name"], a["add"], add_members_operation=True)
+        if a.get("remove"):
+            if a["name"].lower() == "domain admins" and any(u.lower() == "administrator" for u in a["remove"]):
+                raise Fail("the domain Administrator must stay in Domain Admins")
+            self.db.add_remove_group_members(a["name"], a["remove"], add_members_operation=False)
+        return self._group_json(a["name"])
+
+    def group_delete(self, a):
+        g = self._group(a["name"])
+        if self._group_builtin(g):
+            raise Fail("%s is built into the domain and can't be deleted" % a["name"])
+        self.db.delete(g.dn)
+        return {"deleted": a["name"]}
+
+    def policy(self, a):
+        """Family-friendly password policy: passwords don't expire."""
+        dn = ldb.Dn(self.db, self.base)
+        msg = ldb.Message(dn)
+        msg["maxPwdAge"] = ldb.MessageElement(["0"], ldb.FLAG_MOD_REPLACE, "maxPwdAge")
+        msg["minPwdAge"] = ldb.MessageElement(["0"], ldb.FLAG_MOD_REPLACE, "minPwdAge")
+        if "minLength" in a:
+            msg["minPwdLength"] = ldb.MessageElement([str(int(a["minLength"]))], ldb.FLAG_MOD_REPLACE, "minPwdLength")
+        self.db.modify(msg)
+        return {"ok": True}
+
+
+def password_error(e):
+    text = str(e.args[1] if len(e.args) > 1 else e)
+    if "CONSTRAINT" in text.upper() or "password" in text.lower():
+        return ("the password doesn't meet the domain's rules: use at least 8 characters "
+                "with three of: upper case, lower case, digits, symbols, and don't include the user name")
+    return text
+
+
+COMMANDS = {
+    "users": Directory.users,
+    "groups": Directory.groups,
+    "user.create": Directory.user_create,
+    "user.update": Directory.user_update,
+    "user.password": Directory.user_password,
+    "user.enable": Directory.user_enable,
+    "user.delete": Directory.user_delete,
+    "group.create": Directory.group_create,
+    "group.update": Directory.group_update,
+    "group.delete": Directory.group_delete,
+    "policy": Directory.policy,
+}
+
+
+def main():
+    if len(sys.argv) != 3 or sys.argv[2] not in COMMANDS:
+        print("usage: hardyos-dc-admin <smb.conf> <%s>" % "|".join(COMMANDS), file=sys.stderr)
+        return 2
+    raw = sys.stdin.read()
+    args = json.loads(raw) if raw.strip() else {}
+    try:
+        d = Directory(sys.argv[1])
+        out = COMMANDS[sys.argv[2]](d, args)
+    except Fail as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    except ldb.LdbError as e:
+        print(str(e.args[1] if len(e.args) > 1 else e), file=sys.stderr)
+        return 1
+    except KeyError as e:
+        print("missing argument %s" % e, file=sys.stderr)
+        return 1
+    try:
+        json.dump(out, sys.stdout)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1303,6 +1303,178 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/domain": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The Active Directory domain and its domain controller */
+        get: operations["getDomain"];
+        put?: never;
+        /**
+         * Create the domain (runs as a job, about half a minute)
+         * @description Provisions a Samba AD domain controller with its own address on the
+         *     NAS's network. The Administrator password is handed to the job in
+         *     memory, never stored with it.
+         */
+        post: operations["createDomain"];
+        /** Delete the domain and every account, group and computer in it (runs as a job) */
+        delete: operations["deleteDomain"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/domain/suggest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Defaults for the setup wizard, including a free address for the domain controller */
+        get: operations["suggestDomainSettings"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/domain/enabled": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Start or stop the domain controller */
+        put: operations["setDomainEnabled"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/domain/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The domain's accounts */
+        get: operations["listDomainUsers"];
+        put?: never;
+        /** Add an account */
+        post: operations["createDomainUser"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/domain/users/{username}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                username: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete an account */
+        delete: operations["deleteDomainUser"];
+        options?: never;
+        head?: never;
+        /** Change an account's name or email */
+        patch: operations["updateDomainUser"];
+        trace?: never;
+    };
+    "/domain/users/{username}/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                username: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Set a new password (also unlocks the account) */
+        post: operations["resetDomainUserPassword"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/domain/users/{username}/enabled": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                username: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /** Turn an account on or off */
+        put: operations["setDomainUserEnabled"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/domain/groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The domain's groups */
+        get: operations["listDomainGroups"];
+        put?: never;
+        /** Add a group */
+        post: operations["createDomainGroup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/domain/groups/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete a group (its members stay) */
+        delete: operations["deleteDomainGroup"];
+        options?: never;
+        head?: never;
+        /** Change a group's description or members */
+        patch: operations["updateDomainGroup"];
+        trace?: never;
+    };
     "/installer": {
         parameters: {
             query?: never;
@@ -2128,6 +2300,98 @@ export interface components {
         };
         TerminalSettings: {
             enabled: boolean;
+        };
+        Enabled: {
+            enabled: boolean;
+        };
+        DomainConfig: {
+            /** @example home.hardynetworks.net */
+            domain: string;
+            /** @example HOME.HARDYNETWORKS.NET */
+            realm: string;
+            /** @example HOME */
+            netbios: string;
+            /** @example dc1.home.hardynetworks.net */
+            dcName: string;
+            /** @description The domain controller's address (CIDR) */
+            address: string;
+            gateway: string;
+            /** @description The NAS interface the domain controller sits on */
+            parent: string;
+            mac: string;
+            forwarders: string[];
+            enabled: boolean;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        DomainStatus: {
+            provisioned: boolean;
+            config: components["schemas"]["DomainConfig"] | null;
+            running: boolean;
+            /** @description The domain controller answered a DNS query for the domain from the NAS */
+            responding: boolean;
+            /** @description Why the domain controller isn't working */
+            problem: string;
+            /** @description False when this build has no Samba */
+            available: boolean;
+        };
+        DomainSuggestion: {
+            parent: string;
+            hostAddress: string;
+            gateway: string;
+            dns: string[];
+            /** @description A free address for the domain controller (CIDR) */
+            address: string;
+        };
+        DomainProvisionRequest: {
+            /** @description DNS name of the domain */
+            domain: string;
+            /** @description Short (pre-Windows 2000) name; defaults to the first part of the domain */
+            netbios?: string;
+            /**
+             * Format: password
+             * @description Password for the domain's Administrator account
+             */
+            adminPassword: string;
+            /** @description The domain controller's address */
+            address: string;
+            gateway?: string;
+            /** @description DNS servers for names outside the domain */
+            forwarders?: string[];
+        };
+        DomainUser: {
+            username: string;
+            givenName: string;
+            surname: string;
+            displayName: string;
+            email: string;
+            enabled: boolean;
+            lockedOut: boolean;
+            mustChangePassword: boolean;
+            groups: string[];
+            created: string;
+            /**
+             * Format: int64
+             * @description Unix seconds; 0 means never
+             */
+            lastLogon: number;
+            builtin: boolean;
+        };
+        DomainNewUser: {
+            username: string;
+            givenName?: string;
+            surname?: string;
+            email?: string;
+            /** Format: password */
+            password: string;
+            mustChangePassword?: boolean;
+            groups?: string[];
+        };
+        DomainGroup: {
+            name: string;
+            description: string;
+            members: string[];
+            builtin: boolean;
         };
     };
     responses: {
@@ -4315,6 +4579,403 @@ export interface operations {
                 };
                 content?: never;
             };
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    getDomain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Domain status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DomainStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    createDomain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DomainProvisionRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    deleteDomain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description The domain name */
+                    confirm: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    suggestDomainSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Suggested settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DomainSuggestion"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    setDomainEnabled: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Enabled"];
+            };
+        };
+        responses: {
+            /** @description Domain status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DomainStatus"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    listDomainUsers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Accounts */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        users: components["schemas"]["DomainUser"][];
+                    };
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    createDomainUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DomainNewUser"];
+            };
+        };
+        responses: {
+            /** @description The new account */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DomainUser"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    deleteDomainUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                username: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    updateDomainUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                username: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    givenName?: string;
+                    surname?: string;
+                    email?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description The account */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DomainUser"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    resetDomainUserPassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                username: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Format: password */
+                    password: string;
+                    mustChangePassword?: boolean;
+                };
+            };
+        };
+        responses: {
+            /** @description The account */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DomainUser"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    setDomainUserEnabled: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                username: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Enabled"];
+            };
+        };
+        responses: {
+            /** @description The account */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DomainUser"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    listDomainGroups: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Groups */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        groups: components["schemas"]["DomainGroup"][];
+                    };
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    createDomainGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    name: string;
+                    description?: string;
+                    members?: string[];
+                };
+            };
+        };
+        responses: {
+            /** @description The new group */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DomainGroup"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    deleteDomainGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    updateDomainGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    description?: string;
+                    add?: string[];
+                    remove?: string[];
+                };
+            };
+        };
+        responses: {
+            /** @description The group */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DomainGroup"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
         };
     };

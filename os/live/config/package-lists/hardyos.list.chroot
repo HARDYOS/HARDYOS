@@ -46,6 +46,20 @@ ifupdown
 ifenslave
 vlan
 isc-dhcp-client
+iputils-arping
+bind9-dnsutils
+
+# Directory: Samba 4 AD domain controller (hardyos-dc.service) and the tools
+# HardyOS uses to manage it
+samba
+samba-ad-dc
+samba-ad-provision
+samba-dsdb-modules
+samba-vfs-modules
+winbind
+smbclient
+krb5-user
+ldb-tools
 
 # Live system
 live-boot

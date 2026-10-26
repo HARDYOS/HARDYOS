@@ -29,6 +29,7 @@ tags:
   - name: network
   - name: backups
   - name: terminal
+  - name: domain
 paths:
   /health:
     get:
@@ -1454,6 +1455,285 @@ paths:
       responses:
         "101": { description: Switching to the WebSocket protocol }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /domain:
+    get:
+      operationId: getDomain
+      summary: The Active Directory domain and its domain controller
+      tags: [domain]
+      responses:
+        "200":
+          description: Domain status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DomainStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: createDomain
+      summary: Create the domain (runs as a job, about half a minute)
+      description: |
+        Provisions a Samba AD domain controller with its own address on the
+        NAS's network. The Administrator password is handed to the job in
+        memory, never stored with it.
+      tags: [domain]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DomainProvisionRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      operationId: deleteDomain
+      summary: Delete the domain and every account, group and computer in it (runs as a job)
+      tags: [domain]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { type: string, description: The domain name, typed to confirm }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /domain/suggest:
+    get:
+      operationId: suggestDomainSettings
+      summary: Defaults for the setup wizard, including a free address for the domain controller
+      tags: [domain]
+      responses:
+        "200":
+          description: Suggested settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DomainSuggestion" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /domain/enabled:
+    put:
+      operationId: setDomainEnabled
+      summary: Start or stop the domain controller
+      tags: [domain]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Enabled" }
+      responses:
+        "200":
+          description: Domain status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DomainStatus" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /domain/users:
+    get:
+      operationId: listDomainUsers
+      summary: The domain's accounts
+      tags: [domain]
+      responses:
+        "200":
+          description: Accounts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [users]
+                properties:
+                  users: { type: array, items: { $ref: "#/components/schemas/DomainUser" } }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: createDomainUser
+      summary: Add an account
+      tags: [domain]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DomainNewUser" }
+      responses:
+        "201":
+          description: The new account
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DomainUser" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /domain/users/{username}:
+    parameters:
+      - { name: username, in: path, required: true, schema: { type: string } }
+    patch:
+      operationId: updateDomainUser
+      summary: Change an account's name or email
+      tags: [domain]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                givenName: { type: string }
+                surname: { type: string }
+                email: { type: string }
+      responses:
+        "200":
+          description: The account
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DomainUser" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    delete:
+      operationId: deleteDomainUser
+      summary: Delete an account
+      tags: [domain]
+      responses:
+        "204": { description: Deleted }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /domain/users/{username}/password:
+    parameters:
+      - { name: username, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: resetDomainUserPassword
+      summary: Set a new password (also unlocks the account)
+      tags: [domain]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string, format: password }
+                mustChangePassword: { type: boolean }
+      responses:
+        "200":
+          description: The account
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DomainUser" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /domain/users/{username}/enabled:
+    parameters:
+      - { name: username, in: path, required: true, schema: { type: string } }
+    put:
+      operationId: setDomainUserEnabled
+      summary: Turn an account on or off
+      tags: [domain]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Enabled" }
+      responses:
+        "200":
+          description: The account
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DomainUser" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /domain/groups:
+    get:
+      operationId: listDomainGroups
+      summary: The domain's groups
+      tags: [domain]
+      responses:
+        "200":
+          description: Groups
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [groups]
+                properties:
+                  groups: { type: array, items: { $ref: "#/components/schemas/DomainGroup" } }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: createDomainGroup
+      summary: Add a group
+      tags: [domain]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                description: { type: string }
+                members: { type: array, items: { type: string } }
+      responses:
+        "201":
+          description: The new group
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DomainGroup" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /domain/groups/{name}:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+    patch:
+      operationId: updateDomainGroup
+      summary: Change a group's description or members
+      tags: [domain]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                description: { type: string }
+                add: { type: array, items: { type: string } }
+                remove: { type: array, items: { type: string } }
+      responses:
+        "200":
+          description: The group
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DomainGroup" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    delete:
+      operationId: deleteDomainGroup
+      summary: Delete a group (its members stay)
+      tags: [domain]
+      responses:
+        "204": { description: Deleted }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /installer:
     get:
       operationId: getInstallerStatus
@@ -2417,3 +2697,89 @@ components:
       required: [enabled]
       properties:
         enabled: { type: boolean }
+    Enabled:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean }
+    DomainConfig:
+      type: object
+      required: [domain, realm, netbios, dcName, address, gateway, parent, mac, forwarders, enabled, createdAt]
+      properties:
+        domain: { type: string, example: home.hardynetworks.net }
+        realm: { type: string, example: HOME.HARDYNETWORKS.NET }
+        netbios: { type: string, example: HOME }
+        dcName: { type: string, example: dc1.home.hardynetworks.net }
+        address: { type: string, description: The domain controller's address (CIDR) }
+        gateway: { type: string }
+        parent: { type: string, description: The NAS interface the domain controller sits on }
+        mac: { type: string }
+        forwarders: { type: array, items: { type: string } }
+        enabled: { type: boolean }
+        createdAt: { type: string, format: date-time }
+    DomainStatus:
+      type: object
+      required: [provisioned, config, running, responding, problem, available]
+      properties:
+        provisioned: { type: boolean }
+        config:
+          nullable: true
+          allOf: [{ $ref: "#/components/schemas/DomainConfig" }]
+        running: { type: boolean }
+        responding: { type: boolean, description: The domain controller answered a DNS query for the domain from the NAS }
+        problem: { type: string, description: Why the domain controller isn't working, or empty }
+        available: { type: boolean, description: False when this build has no Samba }
+    DomainSuggestion:
+      type: object
+      required: [parent, hostAddress, gateway, dns, address]
+      properties:
+        parent: { type: string }
+        hostAddress: { type: string }
+        gateway: { type: string }
+        dns: { type: array, items: { type: string } }
+        address: { type: string, description: A free address for the domain controller (CIDR), or empty }
+    DomainProvisionRequest:
+      type: object
+      required: [domain, adminPassword, address]
+      properties:
+        domain: { type: string, description: DNS name of the domain, e.g. home.yourname.net }
+        netbios: { type: string, description: Short (pre-Windows 2000) name; defaults to the first part of the domain }
+        adminPassword: { type: string, format: password, description: Password for the domain's Administrator account }
+        address: { type: string, description: The domain controller's address, CIDR or a plain IP on the NAS's network }
+        gateway: { type: string }
+        forwarders: { type: array, items: { type: string }, description: DNS servers for names outside the domain }
+    DomainUser:
+      type: object
+      required: [username, givenName, surname, displayName, email, enabled, lockedOut, mustChangePassword, groups, created, lastLogon, builtin]
+      properties:
+        username: { type: string }
+        givenName: { type: string }
+        surname: { type: string }
+        displayName: { type: string }
+        email: { type: string }
+        enabled: { type: boolean }
+        lockedOut: { type: boolean }
+        mustChangePassword: { type: boolean }
+        groups: { type: array, items: { type: string } }
+        created: { type: string }
+        lastLogon: { type: integer, format: int64, description: Unix seconds; 0 means never }
+        builtin: { type: boolean }
+    DomainNewUser:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string }
+        givenName: { type: string }
+        surname: { type: string }
+        email: { type: string }
+        password: { type: string, format: password }
+        mustChangePassword: { type: boolean }
+        groups: { type: array, items: { type: string } }
+    DomainGroup:
+      type: object
+      required: [name, description, members, builtin]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        members: { type: array, items: { type: string } }
+        builtin: { type: boolean }
