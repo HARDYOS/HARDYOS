@@ -79,6 +79,11 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zfsutils-linux acl nfs-kernel-server
           sudo modprobe zfs
           sudo systemctl disable --now nfs-server.service || true
+          # As in the HardyOS image (os/live/config/hooks): no generated
+          # mount requirements for exported paths.
+          sudo mkdir -p /etc/systemd/system-generators
+          sudo ln -sf /dev/null /etc/systemd/system-generators/nfs-server-generator
+          sudo systemctl daemon-reload
       - name: build test binary
         working-directory: daemon
         run: go test -c -o "$RUNNER_TEMP/priv.test" ./internal/priv
@@ -88,6 +93,8 @@ jobs:
         if: failure()
         run: |
           sudo journalctl -u nfs-server -u nfs-mountd -u rpcbind --no-pager -n 80 || true
+          systemctl --failed --no-pager || true
+          sudo journalctl --no-pager -n 200 | grep -iE "nfs|mount|depend" || true
           sudo cat /etc/exports.d/hardyos.exports || true
 
   domain:

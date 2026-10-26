@@ -19,6 +19,13 @@ systemctl disable docker.service docker.socket containerd.service >/dev/null 2>&
 # The NFS server (and rpcbind, which it starts when needed) stays off until
 # a shared folder is shared over NFS; hardyd-priv enables it then.
 systemctl disable nfs-server.service rpcbind.service rpcbind.socket >/dev/null 2>&1 || true
+# nfs-utils' generator makes nfs-server require a mount unit for every
+# exported path under an fstab mount. Shared folders are ZFS datasets that
+# ZFS mounts (not systemd), and hardyd-priv only exports them once they're
+# mounted, so the generated requirement can only get in the way (a folder
+# deleted since the last daemon-reload stops the server from starting).
+mkdir -p /etc/systemd/system-generators
+ln -sf /dev/null /etc/systemd/system-generators/nfs-server-generator
 
 # Load the zfs module at boot so pools can be imported right away.
 echo zfs > /etc/modules-load.d/zfs.conf
