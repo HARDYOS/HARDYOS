@@ -82,6 +82,16 @@ type Manager struct {
 
 	composeMu sync.Mutex
 	compose   []string
+
+	// clock replaces time.Now in tests.
+	clock func() time.Time
+}
+
+func (m *Manager) now() time.Time {
+	if m.clock != nil {
+		return m.clock().UTC()
+	}
+	return time.Now().UTC()
 }
 
 // EngineConfig is where Docker keeps its data (written by root).
@@ -173,6 +183,13 @@ type appState struct {
 	InstalledAt time.Time         `json:"installedAt"`
 	UpdatedAt   time.Time         `json:"updatedAt"`
 	Removed     bool              `json:"removed,omitempty"`
+
+	Source     Source                 `json:"source,omitempty"`
+	SourceName string                 `json:"sourceName,omitempty"`
+	UID        int                    `json:"uid,omitempty"` // also the GID
+	Shares     map[string]ShareChoice `json:"shares,omitempty"`
+	Grants     []string               `json:"grants,omitempty"`
+	Limits     Limits                 `json:"limits"`
 }
 
 func (m *Manager) log() *slog.Logger {
@@ -384,6 +401,18 @@ func (m *Manager) OnStart(ctx context.Context) {
 		case <-time.After(5 * time.Second):
 		}
 	}
+	// The apps' slices live in /run: put them back before Docker restarts
+	// the containers, so their limits hold from the first moment.
+	if apps, err := m.installed(ctx, c); err == nil {
+		for _, ia := range apps {
+			if ia.state.Removed {
+				continue
+			}
+			if err := m.writeSlice(ctx, ia.state.ID, ia.state.Limits); err != nil {
+				m.log().Warn("apps: writing an app's slice failed", "app", ia.state.ID, "err", err)
+			}
+		}
+	}
 	if err := m.startEngine(ctx, c); err != nil {
 		m.log().Warn("apps: starting Docker failed", "err", err)
 		return
@@ -476,7 +505,32 @@ func (ia *installedApp) view(cs []Container, engine bool) App {
 		a.Web = w
 	}
 	a.State = summarize(a.Containers, engine)
+	a.Source = ia.state.Source
+	if a.Source == "" {
+		a.Source = SourceCatalog
+	}
+	a.SourceName = ia.state.SourceName
+	a.UID = ia.state.UID
+	a.Shares = ia.shares()
+	a.Grants = append([]string{}, ia.state.Grants...)
+	a.Limits = ia.state.Limits
+	a.Permissions = DescribePermissions(mf)
 	return a
+}
+
+// shares lists every share the manifest declares and what the app has for
+// it (Share "" means none: it gets an empty folder of its own).
+func (ia *installedApp) shares() []AppShare {
+	out := []AppShare{}
+	for _, s := range ia.manifest.Shares {
+		ch := ia.state.Shares[s.Name]
+		as := AppShare{Name: s.Name, Label: s.Label, Share: ch.Share, Path: ch.Path, Access: ch.Access}
+		if as.Access == "" {
+			as.Access = s.Access
+		}
+		out = append(out, as)
+	}
+	return out
 }
 
 // summarize turns container states into one word for the app.
@@ -665,6 +719,14 @@ func (m *Manager) Prepare(ctx context.Context, a PrepareArgs) (*PrepareResult, e
 	if err != nil {
 		return nil, err
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.prepare(ctx, pkg, a, false)
+}
+
+// prepare does Prepare's work with m.mu held. reconfigure: the package is
+// the installed one and the app keeps its source.
+func (m *Manager) prepare(ctx context.Context, pkg *Package, a PrepareArgs, reconfigure bool) (*PrepareResult, error) {
 	mf := pkg.Manifest
 	res := &PrepareResult{ID: mf.ID, Name: mf.Name, Warnings: []string{}}
 	if len(mf.Arch) > 0 && !contains(mf.Arch, runtime.GOARCH) {
@@ -675,14 +737,15 @@ func (m *Manager) Prepare(ctx context.Context, a PrepareArgs) (*PrepareResult, e
 			res.Warnings = append(res.Warnings, fmt.Sprintf("%s needs %d MB of memory; this server has %d MB", mf.Name, mf.MinMemoryMB, have))
 		}
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	c, err := m.engine()
 	if err != nil {
 		return nil, err
 	}
 	if c == nil {
+		if reconfigure {
+			return nil, ErrNoEngine
+		}
 		if a.Pool == "" {
 			return nil, Problems{"choose the pool for apps"}
 		}
@@ -699,10 +762,45 @@ func (m *Manager) Prepare(ctx context.Context, a PrepareArgs) (*PrepareResult, e
 		if prev, err = m.load(ctx, c, mf.ID); err != nil && !errors.Is(err, ErrNotInstalled) {
 			return nil, err
 		}
+	} else if reconfigure {
+		return nil, ErrNotInstalled
 	} else if _, err := m.run(ctx, "zfs", "create", ds); err != nil {
 		return nil, fmt.Errorf("creating %s: %w", ds, err)
 	}
+	if reconfigure && (prev == nil || prev.state.Removed) {
+		return nil, ErrNotInstalled
+	}
 	res.Upgrade = prev != nil && !prev.state.Removed
+	// What a live install carries over when the request leaves it out.
+	var live *installedApp
+	if res.Upgrade {
+		live = prev
+	}
+
+	// Where the package came from decides which permissions need grants.
+	src, srcName, err := chooseSource(a, live, reconfigure)
+	if err != nil {
+		return nil, err
+	}
+	askedGrants := a.Grants
+	if askedGrants == nil && live != nil {
+		askedGrants = live.state.Grants
+	}
+	grants, err := checkGrants(mf, src, askedGrants)
+	if err != nil {
+		return nil, err
+	}
+	limits := Limits{}
+	if prev != nil {
+		limits = prev.state.Limits
+	}
+	if a.Limits != nil {
+		limits = *a.Limits
+	}
+	if err := m.checkLimits(limits); err != nil {
+		return nil, err
+	}
+
 	// An update without a host keeps the one the app was installed with.
 	hostArg := a.Host
 	if hostArg == "" && prev != nil {
@@ -728,12 +826,28 @@ func (m *Manager) Prepare(ctx context.Context, a PrepareArgs) (*PrepareResult, e
 		return nil, err
 	}
 
+	// The app's own user: kept for as long as its data is.
+	uid, err := m.allocUID(ctx, c, prev)
+	if err != nil {
+		return nil, err
+	}
+
 	// Ports: as asked, each free (the app's own current ports count as free).
 	var prevPorts map[string]int
 	if prev != nil {
 		prevPorts = prev.state.Ports
 	}
 	ports, err := m.choosePorts(ctx, mf, a.Ports, prevPorts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Shared folders: as asked, else as before.
+	var prevShares map[string]ShareChoice
+	if live != nil {
+		prevShares = live.state.Shares
+	}
+	choices, binds, shareEnv, err := m.chooseShares(ctx, mf, a.Shares, prevShares, dataDir, res)
 	if err != nil {
 		return nil, err
 	}
@@ -749,9 +863,14 @@ func (m *Manager) Prepare(ctx context.Context, a PrepareArgs) (*PrepareResult, e
 		"HARDY_APP_DATA": dataDir,
 		"HARDY_HOST":     host,
 		"HARDY_TZ":       m.timezone(),
+		"HARDY_UID":      strconv.Itoa(uid),
+		"HARDY_GID":      strconv.Itoa(uid),
 	}
 	for name, port := range ports {
 		env[PortEnv(name)] = strconv.Itoa(port)
+	}
+	for k, v := range shareEnv {
+		env[k] = v
 	}
 	saved := map[string]string{}
 	var p Problems
@@ -821,31 +940,58 @@ func (m *Manager) Prepare(ctx context.Context, a PrepareArgs) (*PrepareResult, e
 	if err != nil {
 		return nil, err
 	}
-	if err := resolved.Check(mf, project, dataDir, ports); err != nil {
+	if err := resolved.check(mf, project, dataDir, ports, binds); err != nil {
 		return nil, err
 	}
+	// After the check: what HardyOS itself adds.
+	res.Warnings = appendNew(res.Warnings, resolved.adaptGPU(m.detectGPU(), m.sys, mf.Name)...)
+	resolved.setCgroupParent(SliceName(mf.ID))
 	if err := writeFileAtomic(filepath.Join(meta, resolvedFile), mustJSON(resolved), 0o600); err != nil {
 		return nil, err
 	}
 
 	for _, f := range mf.Folders {
-		uid, gid := -1, -1
+		// Without an owner, folders belong to the app's own user, but only
+		// when HardyOS creates them: a container may have changed the owner
+		// since (a database does), and an update mustn't undo that.
+		uidF, gidF := -1, -1
 		if f.Owner != "" {
 			u, g, _ := strings.Cut(f.Owner, ":")
-			uid, _ = strconv.Atoi(u)
-			gid, _ = strconv.Atoi(g)
+			uidF, _ = strconv.Atoi(u)
+			gidF, _ = strconv.Atoi(g)
+		} else if _, err := os.Lstat(filepath.Join(dataDir, f.Path)); errors.Is(err, fs.ErrNotExist) {
+			uidF, gidF = uid, uid
 		}
 		mode := os.FileMode(0o755)
 		if f.Mode != "" {
 			v, _ := strconv.ParseUint(f.Mode, 8, 32)
 			mode = os.FileMode(v)
 		}
-		if err := mkdirStrict(dataDir, f.Path, mode, uid, gid); err != nil {
+		if err := mkdirStrict(dataDir, f.Path, mode, uidF, gidF); err != nil {
+			return nil, err
+		}
+	}
+	// Empty stand-ins for shares the app wasn't given.
+	for _, s := range mf.Shares {
+		if choices[s.Name].Share != "" {
+			continue
+		}
+		if err := mkdirStrict(dataDir, unsharedDir, 0o755, -1, -1); err != nil {
+			return nil, err
+		}
+		if err := mkdirStrict(dataDir, unsharedDir+"/"+s.Name, 0o755, uid, uid); err != nil {
 			return nil, err
 		}
 	}
 
-	st := appState{ID: mf.ID, Version: mf.Version, Host: host, Ports: ports, Settings: saved, UpdatedAt: time.Now().UTC()}
+	// Shared folder access for the app's user (ACLs), changed only when the
+	// choices change.
+	if err := m.applyShareGrants(ctx, mf.ID, uid, prevShares, choices); err != nil {
+		return nil, err
+	}
+
+	st := appState{ID: mf.ID, Version: mf.Version, Host: host, Ports: ports, Settings: saved, UpdatedAt: m.now(),
+		Source: src, SourceName: srcName, UID: uid, Shares: choices, Grants: grants, Limits: limits}
 	if mf.Icon != "" {
 		st.Icon = "icon" + filepath.Ext(mf.Icon)
 	}
@@ -858,7 +1004,7 @@ func (m *Manager) Prepare(ctx context.Context, a PrepareArgs) (*PrepareResult, e
 		return nil, err
 	}
 	res.Services = resolved.Services()
-	m.log().Info("apps: prepared", "app", mf.ID, "version", mf.Version, "upgrade", res.Upgrade)
+	m.log().Info("apps: prepared", "app", mf.ID, "version", mf.Version, "upgrade", res.Upgrade, "source", src, "uid", uid)
 	return res, nil
 }
 
@@ -924,6 +1070,9 @@ type PortCheck struct {
 	Name     string `json:"name"`
 	Default  int    `json:"default"`
 	Protocol string `json:"protocol,omitempty"`
+	// Fixed: the app can't move to another port (it uses the host
+	// network), so the default comes back as is.
+	Fixed bool `json:"fixed,omitempty"`
 }
 
 // SuggestPorts proposes a free host port for each wanted port: the default
@@ -940,6 +1089,10 @@ func (m *Manager) SuggestPorts(ctx context.Context, wanted []PortCheck, forID st
 			proto = "tcp"
 		}
 		p := w.Default
+		if w.Fixed {
+			out[w.Name] = p
+			continue
+		}
 		if p < 1024 || p > 65535 {
 			p = 8000
 		}
@@ -1035,7 +1188,9 @@ func (m *Manager) choosePorts(ctx context.Context, mf Manifest, asked, prev map[
 		}
 		key := fmt.Sprintf("%d/%s", port, proto)
 		switch {
-		case port < 1024 || port > 65535:
+		case mf.Permissions.HostNetwork && port != pt.Default:
+			p.addf("%s: %s uses the server's network directly, so this port is fixed at %d", pt.Label, mf.Name, pt.Default)
+		case port < minPort(mf.Permissions.HostNetwork) || port > 65535:
 			p.addf("%s: port %d must be 1024-65535", pt.Label, port)
 		case reservedPorts[port]:
 			p.addf("%s: port %d is kept for HardyOS", pt.Label, port)
@@ -1087,10 +1242,12 @@ func (m *Manager) composeArgs(ia *installedApp, args ...string) []string {
 		"-f", ia.meta(resolvedFile)}, args...)
 }
 
-// resolved reads the checked compose file and makes sure no folder it mounts
-// has been swapped for a symlink leading out of the app's data folder (a
-// container can write in its folders).
-func (m *Manager) resolved(ia *installedApp) (Resolved, error) {
+// resolved reads the checked compose file and makes sure every folder it
+// mounts is still where it was allowed to be: no folder has been swapped
+// for a symlink leading out of the app's data folder (a container can write
+// in its folders), and every shared folder still resolves to the place the
+// file mounts, read-only where the grant is read.
+func (m *Manager) resolved(ctx context.Context, ia *installedApp) (Resolved, error) {
 	b, err := os.ReadFile(ia.meta(resolvedFile))
 	if err != nil {
 		return nil, err
@@ -1103,30 +1260,53 @@ func (m *Manager) resolved(ia *installedApp) (Resolved, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, src := range r.BindSources() {
-		real, err := filepath.EvalSymlinks(src)
-		if errors.Is(err, fs.ErrNotExist) {
-			// Docker creates it; make sure every existing parent is inside.
-			parent := filepath.Dir(src)
-			for parent != "/" {
-				if rp, err := filepath.EvalSymlinks(parent); err == nil {
-					if !insideDir(dataDir, rp) {
-						return nil, fmt.Errorf("%s leads outside the app's data folder; refusing to start", src)
-					}
-					break
-				}
-				parent = filepath.Dir(parent)
-			}
-			continue
-		}
+	binds, err := m.currentShareBinds(ctx, ia)
+	if err != nil {
+		return nil, err
+	}
+	for _, vm := range r.bindMounts() {
+		src, _ := vm["source"].(string)
+		real, err := realOrParent(src)
 		if err != nil {
 			return nil, err
 		}
-		if !insideDir(dataDir, real) {
-			return nil, fmt.Errorf("%s leads outside the app's data folder (%s); refusing to start", src, real)
+		share, ok := placeOf(dataDir, binds, real)
+		if !ok {
+			return nil, fmt.Errorf("%s leads outside the app's data folder and shared folders (%s); refusing to start", src, real)
+		}
+		if share != nil && !share.Write {
+			if ro, _ := vm["read_only"].(bool); !ro {
+				return nil, fmt.Errorf("%s is in a shared folder %s may only read, but isn't mounted read-only; refusing to start", src, ia.manifest.Name)
+			}
 		}
 	}
 	return r, nil
+}
+
+// realOrParent resolves p's real path. A path that doesn't exist yet
+// (Docker creates it) resolves through its nearest existing parent.
+func realOrParent(p string) (string, error) {
+	real, err := filepath.EvalSymlinks(p)
+	if err == nil {
+		return real, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+	rest := filepath.Base(p)
+	parent := filepath.Dir(p)
+	for {
+		if rp, err := filepath.EvalSymlinks(parent); err == nil {
+			return filepath.Join(rp, rest), nil
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		if parent == "/" || parent == "." {
+			return p, nil
+		}
+		rest = filepath.Join(filepath.Base(parent), rest)
+		parent = filepath.Dir(parent)
+	}
 }
 
 // Services lists the app's services and images (for downloading them one by one).
@@ -1135,7 +1315,7 @@ func (m *Manager) Services(ctx context.Context, id string) ([]ServiceImage, erro
 	if err != nil {
 		return nil, err
 	}
-	r, err := m.resolved(ia)
+	r, err := m.resolved(ctx, ia)
 	if err != nil {
 		return nil, err
 	}
@@ -1158,7 +1338,7 @@ func (m *Manager) Pull(ctx context.Context, id, service string) (*PullResult, er
 	if err != nil {
 		return nil, err
 	}
-	r, err := m.resolved(ia)
+	r, err := m.resolved(ctx, ia)
 	if err != nil {
 		return nil, err
 	}
@@ -1197,13 +1377,20 @@ func (m *Manager) Up(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	return m.up(ctx, ia, c)
+}
+
+func (m *Manager) up(ctx context.Context, ia *installedApp, c *EngineConfig) error {
 	if err := m.startEngine(ctx, c); err != nil {
 		return err
 	}
-	if _, err := m.resolved(ia); err != nil {
+	if _, err := m.resolved(ctx, ia); err != nil {
 		return err
 	}
-	_, err = m.runCompose(ctx, m.composeArgs(ia, "up", "-d", "--remove-orphans")...)
+	if err := m.writeSlice(ctx, ia.state.ID, ia.state.Limits); err != nil {
+		return err
+	}
+	_, err := m.runCompose(ctx, m.composeArgs(ia, "up", "-d", "--remove-orphans")...)
 	return err
 }
 
@@ -1226,7 +1413,10 @@ func (m *Manager) Restart(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := m.resolved(ia); err != nil {
+	if _, err := m.resolved(ctx, ia); err != nil {
+		return err
+	}
+	if err := m.writeSlice(ctx, ia.state.ID, ia.state.Limits); err != nil {
 		return err
 	}
 	_, err = m.runCompose(ctx, m.composeArgs(ia, "restart")...)
@@ -1265,6 +1455,8 @@ type RemoveArgs struct {
 }
 
 // Remove stops and deletes the app's containers, and its data if asked.
+// Its shared folder access goes either way; its user ID stays reserved
+// while its data is kept.
 func (m *Manager) Remove(ctx context.Context, a RemoveArgs) error {
 	if err := ValidID(a.ID); err != nil {
 		return Problems{err.Error()}
@@ -1280,8 +1472,7 @@ func (m *Manager) Remove(ctx context.Context, a RemoveArgs) error {
 	if err != nil {
 		return err
 	}
-	conf := strings.TrimSpace(a.Confirm)
-	if !strings.EqualFold(conf, ia.manifest.Name) && conf != ia.state.ID {
+	if !confirmed(a.Confirm, ia) {
 		return Problems{fmt.Sprintf("type the app's name (%s) to confirm", ia.manifest.Name)}
 	}
 	m.mu.Lock()
@@ -1291,6 +1482,14 @@ func (m *Manager) Remove(ctx context.Context, a RemoveArgs) error {
 			return err
 		}
 	}
+	if m.Shares != nil {
+		if err := m.Shares.RevokeApp(ctx, a.ID); err != nil {
+			return fmt.Errorf("removing %s's access to shared folders: %w", ia.manifest.Name, err)
+		}
+	}
+	if err := m.removeSlice(ctx, a.ID); err != nil {
+		m.log().Warn("apps: removing the app's slice failed", "app", a.ID, "err", err)
+	}
 	if a.DeleteData {
 		if _, err := m.run(ctx, "zfs", "destroy", "-r", ia.dataset); err != nil {
 			return fmt.Errorf("deleting %s: %w", ia.dataset, err)
@@ -1299,9 +1498,15 @@ func (m *Manager) Remove(ctx context.Context, a RemoveArgs) error {
 		return nil
 	}
 	ia.state.Removed = true
-	ia.state.UpdatedAt = time.Now().UTC()
+	ia.state.UpdatedAt = m.now()
 	m.log().Info("apps: removed, data kept", "app", a.ID)
 	return writeFileAtomic(ia.meta(stateFile), mustJSON(ia.state), 0o600)
+}
+
+// confirmed reports whether a confirmation repeats the app's name or id.
+func confirmed(conf string, ia *installedApp) bool {
+	conf = strings.TrimSpace(conf)
+	return conf != "" && (strings.EqualFold(conf, ia.manifest.Name) || conf == ia.state.ID)
 }
 
 // ---- helpers -----------------------------------------------------------------

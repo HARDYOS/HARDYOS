@@ -75,7 +75,61 @@ func DescribePermissions(m Manifest) []string {
 		what, _ := deviceAllowed(d)
 		out = append(out, fmt.Sprintf("%s (%s)", what, d))
 	}
+	if m.Permissions.HostNetwork {
+		out = append(out, "Uses the server's own network connection directly instead of a private one, and can see all its network traffic (host network)")
+	}
+	if m.Permissions.GPU {
+		out = append(out, "Uses the server's graphics card or chip, for hardware video transcoding (GPU)")
+	}
+	for _, s := range m.Shares {
+		what := "Read files in"
+		if s.Access == AccessWrite {
+			what = "Read and change files in"
+		}
+		line := fmt.Sprintf("%s the shared folder you choose for %q", what, s.Label)
+		if !s.Required {
+			line += " (optional)"
+		}
+		out = append(out, line)
+	}
 	return out
+}
+
+// basicCapabilities are in Docker's default set already: cap_add for them
+// changes nothing, so apps from any source may list them.
+var basicCapabilities = map[string]bool{
+	"CHOWN": true, "DAC_OVERRIDE": true, "FSETID": true, "FOWNER": true, "MKNOD": true, "NET_RAW": true,
+	"SETGID": true, "SETUID": true, "SETPCAP": true, "NET_BIND_SERVICE": true, "SYS_CHROOT": true,
+	"KILL": true, "AUDIT_WRITE": true,
+}
+
+// driRE matches the graphics devices the gpu permission allows.
+var driRE = regexp.MustCompile(`^/dev/dri(/(card|renderD)[0-9]{1,3})?$`)
+
+// nvidiaCapabilities may be asked for in an NVIDIA device reservation.
+var nvidiaCapabilities = map[string]bool{"gpu": true, "compute": true, "utility": true, "video": true, "graphics": true, "display": true}
+
+// shareBind is the host folder chosen for one of the app's shares.
+type shareBind struct {
+	Name  string
+	Path  string // real host path
+	Write bool
+}
+
+// placeOf finds where a host path is: in the data folder (nil, true), in a
+// chosen share (the most specific one), or nowhere allowed (nil, false).
+func placeOf(dataDir string, shares []shareBind, p string) (*shareBind, bool) {
+	if insideDir(dataDir, p) {
+		return nil, true
+	}
+	var best *shareBind
+	for i := range shares {
+		s := &shares[i]
+		if s.Path != "" && insideDir(s.Path, p) && (best == nil || len(s.Path) > len(best.Path)) {
+			best = s
+		}
+	}
+	return best, best != nil
 }
 
 // serviceKeys are the service options apps may use. Options with safety
@@ -105,7 +159,7 @@ var refusedHint = map[string]string{
 	"device_cgroup_rules":   "device rules aren't available to apps",
 	"env_file":              "env files must be inside the app",
 	"external_links":        "apps can't link to containers outside the app",
-	"gpus":                  "GPU reservations aren't available to apps yet",
+	"gpus":                  "use deploy.resources.reservations.devices with the gpu permission",
 	"runtime":               "custom container runtimes aren't available to apps",
 	"secrets":               "use settings instead of compose secrets",
 	"configs":               "use settings instead of compose configs",
@@ -134,6 +188,13 @@ type Resolved map[string]any
 // manifest's ports. It also fills in what HardyOS always sets: a restart
 // policy and a label naming the app.
 func (r Resolved) Check(m Manifest, project, dataDir string, ports map[string]int) error {
+	return r.check(m, project, dataDir, ports, nil)
+}
+
+// check is Check with the host folders chosen for the app's shares: binds
+// may also be inside those, and binds inside a share granted read-only are
+// made read-only.
+func (r Resolved) check(m Manifest, project, dataDir string, ports map[string]int, shares []shareBind) error {
 	var p Problems
 	for k := range r {
 		switch k {
@@ -184,7 +245,7 @@ func (r Resolved) Check(m Manifest, project, dataDir string, ports map[string]in
 			p.addf("service %s is malformed", name)
 			continue
 		}
-		checkService(&p, name, svc, services, dataDir, allowed, caps, devices)
+		checkService(&p, name, svc, services, dataDir, shares, allowed, caps, devices, m.Permissions)
 		// What HardyOS sets on every container.
 		if rp, _ := svc["restart"].(string); rp == "" || rp == "no" {
 			svc["restart"] = "unless-stopped"
@@ -229,7 +290,7 @@ func checkNetwork(p *Problems, project, name string, n map[string]any) {
 }
 
 func checkService(p *Problems, name string, svc map[string]any, services map[string]any, dataDir string,
-	allowedPorts map[string]string, caps, devices map[string]bool) {
+	shares []shareBind, allowedPorts map[string]string, caps, devices map[string]bool, perms Permissions) {
 	keys := make([]string, 0, len(svc))
 	for k := range svc {
 		keys = append(keys, k)
@@ -285,7 +346,7 @@ func checkService(p *Problems, name string, svc map[string]any, services map[str
 		case map[string]any:
 			src, _ = d["source"].(string)
 		}
-		if !devices[src] {
+		if !devices[src] && !(perms.GPU && driRE.MatchString(src)) {
 			p.addf("service %s: device %s isn't declared in the manifest's permissions", name, src)
 		}
 	}
@@ -304,7 +365,7 @@ func checkService(p *Problems, name string, svc map[string]any, services map[str
 			p.addf("service %s: %s %q isn't allowed", name, field, v)
 		}
 	}
-	modeOK("network_mode", false)
+	modeOK("network_mode", perms.HostNetwork)
 	modeOK("pid", false)
 	modeOK("ipc", false)
 	modeOK("uts", false)
@@ -345,8 +406,12 @@ func checkService(p *Problems, name string, svc map[string]any, services map[str
 			case "resources":
 				res, _ := v.(map[string]any)
 				if rv, ok := res["reservations"].(map[string]any); ok {
-					if _, ok := rv["devices"]; ok {
-						p.addf("service %s: device reservations (GPUs) aren't available to apps yet", name)
+					if devs, ok := rv["devices"]; ok {
+						if !perms.GPU {
+							p.addf("service %s: device reservations (GPUs) need the gpu permission in the manifest", name)
+						} else {
+							checkGPUReservations(p, name, anyList(devs))
+						}
 					}
 				}
 			case "replicas", "restart_policy", "labels":
@@ -381,8 +446,13 @@ func checkService(p *Problems, name string, svc map[string]any, services map[str
 		src, _ := vm["source"].(string)
 		switch typ {
 		case "bind":
-			if !insideDir(dataDir, src) {
-				p.addf("service %s: %s is outside the app's data folder; mount folders under ${HARDY_APP_DATA}", name, src)
+			share, ok := placeOf(dataDir, shares, src)
+			switch {
+			case !ok:
+				p.addf("service %s: %s is outside the app's data folder; mount folders under ${HARDY_APP_DATA} or a declared ${HARDY_SHARE_<NAME>}", name, src)
+			case share != nil && !share.Write:
+				// A read-only grant: the app gets the folder read-only.
+				vm["read_only"] = true
 			}
 			if b, ok := vm["bind"].(map[string]any); ok {
 				if prop, _ := b["propagation"].(string); prop != "" && prop != "private" && prop != "rprivate" {
@@ -396,6 +466,47 @@ func checkService(p *Problems, name string, svc map[string]any, services map[str
 			}
 		default:
 			p.addf("service %s: %s mounts aren't allowed", name, typ)
+		}
+	}
+}
+
+func checkGPUReservations(p *Problems, name string, devs []any) {
+	for _, raw := range devs {
+		d, _ := raw.(map[string]any)
+		if d == nil {
+			p.addf("service %s: a device reservation is malformed", name)
+			continue
+		}
+		for k := range d {
+			switch k {
+			case "driver", "count", "device_ids", "capabilities":
+			default:
+				p.addf("service %s: device reservation option %q isn't allowed", name, k)
+			}
+		}
+		if drv, _ := d["driver"].(string); drv != "nvidia" {
+			p.addf("service %s: only NVIDIA device reservations (driver: nvidia) are allowed", name)
+		}
+		hasGPU := false
+		for _, c := range anyList(d["capabilities"]) {
+			// Compose may resolve capabilities as strings or as lists of
+			// strings (alternatives).
+			cs, ok := c.([]any)
+			if !ok {
+				cs = []any{c}
+			}
+			for _, x := range cs {
+				s, _ := x.(string)
+				if s == "gpu" {
+					hasGPU = true
+				}
+				if !nvidiaCapabilities[s] {
+					p.addf("service %s: device reservation capability %q isn't allowed", name, s)
+				}
+			}
+		}
+		if !hasGPU {
+			p.addf("service %s: a device reservation must ask for capabilities [gpu]", name)
 		}
 	}
 }

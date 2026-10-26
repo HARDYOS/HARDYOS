@@ -339,6 +339,22 @@ One-click Docker apps install from `.hardyapp` packages (format in
   Docker's data-root is `<pool>/docker`; its config is in
   `/var/lib/hardyos/apps/engine.json` (root-written). Docker is disabled at
   boot and started by hardyd-priv once that pool is mounted.
+- **Apps engine (App Store v2).** Each app has its own user ID
+  (30000-30999, in its `state.json` on the pool, kept with kept data) and a
+  source (`catalog`, `upload`, `imported`, `custom`); untrusted sources need
+  per-app grants for host network, GPU, devices and extra capabilities.
+  Shared folders reach apps through `apps.ShareResolver` (implemented by
+  `internal/shares`, wired in hardyd-priv's main): `Resolve` gives the
+  host folder for `${HARDY_SHARE_<NAME>}`, `GrantApp`/`RevokeApp` set the
+  app user's ACLs. The policy allows binds in the data folder or a chosen
+  share (read grants forced read-only) and is re-checked against freshly
+  resolved shares before every start. Limits are a systemd slice per app in
+  `/run/systemd/system` plus `cgroup_parent` injected after the check; GPU
+  devices and NVIDIA reservations are fitted to the hardware found at
+  install. `apps.reconfigure`, `apps.config`, `apps.snapshot`,
+  `apps.snapshots` and `apps.rollback` change, show, snapshot and roll back
+  an installed app (code in `internal/apps/access.go`, `resources.go`,
+  `lifecycle.go`).
 - **API.** `GET /apps` (everyone: installed apps to open; admins also see
   containers, updates and kept data), `GET /apps/catalog`,
   `POST /apps/packages`, `POST /apps/plan`, and jobs for install, update

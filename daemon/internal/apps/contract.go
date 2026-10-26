@@ -2,7 +2,8 @@ package apps
 
 // Types shared between the apps engine, hardyd and the shared-folders code.
 // See docs/plans/app-store-v2.md. The names and JSON shapes here are the
-// contract; the behaviour lives in manager.go and policy.go.
+// contract; the behaviour lives in manager.go, policy.go, access.go,
+// resources.go and lifecycle.go.
 
 import (
 	"context"
@@ -136,30 +137,4 @@ type AppConfig struct {
 	Shares     []AppShare     `json:"shares"`
 	Grants     []string       `json:"grants"`
 	Limits     Limits         `json:"limits"`
-}
-
-// Reconfigure changes an installed app's settings, ports, shares, grants
-// and limits; the caller then runs Up.
-func (m *Manager) Reconfigure(ctx context.Context, a ReconfigureArgs) (*PrepareResult, error) {
-	return nil, ErrNotImplemented
-}
-
-// Snapshot takes a snapshot of the app's dataset and returns its name.
-func (m *Manager) Snapshot(ctx context.Context, a SnapshotArgs) (string, error) {
-	return "", ErrNotImplemented
-}
-
-// Snapshots lists the app's snapshots, newest first.
-func (m *Manager) Snapshots(ctx context.Context, id string) ([]Snapshot, error) {
-	return nil, ErrNotImplemented
-}
-
-// Rollback puts the app back to a snapshot.
-func (m *Manager) Rollback(ctx context.Context, a RollbackArgs) error {
-	return ErrNotImplemented
-}
-
-// Config returns the app's current configuration.
-func (m *Manager) Config(ctx context.Context, id string) (*AppConfig, error) {
-	return nil, ErrNotImplemented
 }
