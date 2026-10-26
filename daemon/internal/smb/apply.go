@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/hardyos/hardyos/daemon/internal/shares"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
@@ -155,9 +156,16 @@ func (m *Manager) apply(ctx context.Context, forceHomes bool) ([]ShareStatus, er
 		if m.released[sh.ID] {
 			continue
 		}
-		usable := sh.Mounted && filepath.IsAbs(sh.Path) && !strings.ContainsAny(sh.Path, "%\\\"\n")
+		// Only folders whose mount was verified (shares.Manager.List) and
+		// whose path is safe in smb.conf.
+		usable := sh.Usable() && filepath.IsAbs(sh.Path) && !strings.ContainsFunc(sh.Path, func(r rune) bool {
+			return r == '%' || r == '\\' || r == '"' || unicode.IsControl(r)
+		})
 		if usable {
 			m.applyACL(ctx, st, dom, sh, names)
+			if sh.Recycle {
+				m.ensureRecycle(dom, sh, names)
+			}
 		}
 		lists := mapLists(dom.NetBIOS, sh.Access, sh.Guest, dom.AdminsGroupSID)
 		ss.Skipped = append(ss.Skipped, lists.Skipped...)
@@ -252,14 +260,14 @@ func (m *Manager) applyACL(ctx context.Context, st state, dom *Domain, sh shares
 		return a.ID < b.ID
 	})
 	hash := aclHash(p)
-	if ok, err := shares.PeopleRootMatches(sh.Path, p); err == nil && ok && st.ACL[sh.Dataset] == hash && !m.walking(sh.Dataset) {
+	if ok, err := shares.PeopleRootMatches(sh.Path, sh.RootDev, p); err == nil && ok && st.ACL[sh.Dataset] == hash && !m.walking(sh.Dataset) {
 		return
 	}
-	if _, err := shares.SetPeopleRoot(sh.Path, p); err != nil {
+	if _, err := shares.SetPeopleRoot(sh.Path, sh.RootDev, p); err != nil {
 		m.log().Error("setting a shared folder's permissions", "share", sh.ID, "err", err)
 		return
 	}
-	m.background(sh.Dataset, sh.Path, p, hash)
+	m.background(sh.Dataset, sh.Path, sh.RootDev, p, hash)
 }
 
 func (m *Manager) walking(key string) bool {
@@ -271,7 +279,7 @@ func (m *Manager) walking(key string) bool {
 
 // background applies the entries below root; a newer walk for the same
 // share replaces a running one. The hash is recorded when it finishes.
-func (m *Manager) background(key, root string, p shares.PeopleACL, hash string) {
+func (m *Manager) background(key, root string, dev uint64, p shares.PeopleACL, hash string) {
 	ctx, cancel := context.WithTimeout(context.Background(), bgTimeout)
 	job := &bgWalk{cancel: cancel, done: make(chan struct{})}
 	m.bgMu.Lock()
@@ -295,7 +303,7 @@ func (m *Manager) background(key, root string, p shares.PeopleACL, hash string) 
 			<-prev.done
 		}
 		start := time.Now()
-		stats, err := walk(ctx, root, p)
+		stats, err := walk(ctx, root, dev, p)
 		m.bgMu.Lock()
 		if m.bg[key] == job {
 			delete(m.bg, key)

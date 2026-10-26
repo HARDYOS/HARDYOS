@@ -53,16 +53,16 @@ func TestPeopleACL(t *testing.T) {
 		Entries: []PersonEntry{{Group: true, ID: 100513, Level: LevelRead}, {ID: 101103, Level: LevelWrite}, {ID: 101104, Level: LevelNone}},
 		Managed: managed,
 	}
-	if ok, _ := PeopleRootMatches(share, p); ok {
+	if ok, _ := PeopleRootMatches(share, devOf(share), p); ok {
 		t.Fatal("matches before anything was set")
 	}
-	if _, err := SetPeopleRoot(share, p); err != nil {
+	if _, err := SetPeopleRoot(share, devOf(share), p); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := PeopleRootMatches(share, p); err != nil || !ok {
+	if ok, err := PeopleRootMatches(share, devOf(share), p); err != nil || !ok {
 		t.Fatalf("root doesn't match after setting it: %v", err)
 	}
-	if changed, _ := SetPeopleRoot(share, p); changed {
+	if changed, _ := SetPeopleRoot(share, devOf(share), p); changed {
 		t.Error("setting again changed something")
 	}
 	ra := pathACL(t, share, xattrAccess)
@@ -72,7 +72,7 @@ func TestPeopleACL(t *testing.T) {
 	if perm, ok := namedPerm(pathACL(t, share, xattrDefault), true, 100513); !ok || perm != 5 {
 		t.Errorf("root default group entry %v %v", perm, ok)
 	}
-	st, err := ApplyPeopleTree(context.Background(), share, p)
+	st, err := ApplyPeopleTree(context.Background(), share, devOf(share), p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestPeopleACL(t *testing.T) {
 		t.Error("followed the link out of the share")
 	}
 	// Taking everyone away removes the entries again.
-	if _, err := ApplyPeopleTree(context.Background(), share, PeopleACL{Managed: managed}); err != nil {
+	if _, err := ApplyPeopleTree(context.Background(), share, devOf(share), PeopleACL{Managed: managed}); err != nil {
 		t.Fatal(err)
 	}
 	fa = pathACL(t, file, xattrAccess)

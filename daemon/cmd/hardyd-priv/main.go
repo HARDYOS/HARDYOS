@@ -135,7 +135,7 @@ func main() {
 		am := &apps.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log, Shares: shm}
 		priv.RegisterApps(s, am)
 		// File Manager and share links: files read and written as the person.
-		if err := priv.StartFiles(ctx, s, shm, log); err != nil {
+		if err := priv.StartFiles(ctx, s, shm, fsm.HomesPool, log); err != nil {
 			log.Error("file access isn't available", "err", err)
 		}
 		go am.OnStart(ctx)

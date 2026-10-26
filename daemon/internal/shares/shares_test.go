@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
@@ -52,6 +53,31 @@ func (r row) String() string {
 	return strings.Join([]string{r.ds, "1", r.name, r.desc, r.access, r.apps, onOff(r.recycle), onOff(r.guest), q, u, mp, mounted, "1792000000", svc}, "\t")
 }
 
+// onList makes the fake answer zfs list for target ("" = everything): the
+// rows, and the dataset names they belong to.
+func onList(f *sysexec.Fake, target, out string) {
+	main, names := listAll, "zfs list -H -o name -t filesystem"
+	if target != "" {
+		main = "zfs list -Hp -t filesystem -o " + strings.Join(listProps, ",") + " " + target
+		names += " " + target
+	}
+	f.On(main, out)
+	var ns []string
+	for _, l := range splitLines([]byte(out)) {
+		n, _, _ := strings.Cut(l, "\t")
+		ns = append(ns, n)
+	}
+	f.On(names, strings.Join(ns, "\n")+"\n")
+}
+
+func devOf(p string) uint64 {
+	var st syscall.Stat_t
+	if err := syscall.Stat(p, &st); err != nil {
+		return 0
+	}
+	return uint64(st.Dev)
+}
+
 func rows(rs ...row) string {
 	lines := []string{
 		"tank\t-\t-\t-\t-\t-\t-\t-\t0\t1000\t/mnt/tank\tyes\t1792000000\t-",
@@ -80,7 +106,17 @@ func newManager(t *testing.T) (*Manager, *sysexec.Fake, string, *[]treeCall) {
 	var mu sync.Mutex
 	calls := &[]treeCall{}
 	m := &Manager{Runner: f, Root: root}
-	m.tree = func(_ context.Context, r string, uid int, write, revoke bool) (treeStats, error) {
+	// Every dataset is "mounted" where it says, on its folder's device (or a
+	// made-up one when the test didn't make the folder).
+	m.Mounts = func() (MountVerifier, error) {
+		return MountFunc(func(p, _ string) (uint64, error) {
+			if d := devOf(m.sys(p)); d != 0 {
+				return d, nil
+			}
+			return 1, nil
+		}), nil
+	}
+	m.tree = func(_ context.Context, r string, _ uint64, uid int, write, revoke bool) (treeStats, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		*calls = append(*calls, treeCall{r, uid, write, revoke})
@@ -173,7 +209,7 @@ func TestNamesAndRules(t *testing.T) {
 
 func TestListParsesShares(t *testing.T) {
 	m, f, _, _ := newManager(t)
-	f.On(listAll, rows(
+	onList(f, "", rows(
 		row{ds: "tank/shares/media", name: "Media", desc: "Films", access: `[{"kind":"everyone","level":"read"}]`,
 			apps: `[{"app":"jellyfin","uid":30001,"level":"read"}]`, recycle: true, quota: "1073741824", used: "4096", mounted: true},
 		row{ds: "vault/shares/backups", name: "Backups", access: "not json", mounted: false},
@@ -203,13 +239,13 @@ func TestCreate(t *testing.T) {
 	m, f, root, _ := newManager(t)
 	ctx := context.Background()
 	ds := "tank/shares/family-photos"
-	f.On(listAll, rows(row{ds: "tank/shares/media", name: "Media", mounted: true}))
+	onList(f, "", rows(row{ds: "tank/shares/media", name: "Media", mounted: true}))
 	f.On("zfs list -H -o name tank", "tank\n")
 	f.OnResult("zfs list -H -o name tank/shares", sysexec.Result{ExitCode: 1, Stderr: []byte("dataset does not exist")})
 	f.On("zfs create -o org.hardyos:role=shares tank/shares", "")
 	f.On("zfs get -H -o source compression tank", "local\n")
 	f.OnPrefix("zfs create -o acltype=posixacl", sysexec.Result{})
-	f.On(m.listArgsLine(ds), row{ds: ds, name: "Family Photos", desc: "Everyone's photos", recycle: true, quota: "5368709120", mounted: true}.String()+"\n")
+	onList(f, ds, row{ds: ds, name: "Family Photos", desc: "Everyone's photos", recycle: true, quota: "5368709120", mounted: true}.String()+"\n")
 	mkdir(t, filepath.Join(root, "mnt", ds))
 
 	sh, err := m.Create(ctx, NewShare{Pool: "tank", Name: " Family  Photos", Description: "Everyone's photos", QuotaBytes: 5 << 30, Recycle: true,
@@ -239,7 +275,7 @@ func TestCreate(t *testing.T) {
 	}
 
 	// Duplicates by id and by name (any case), on any pool.
-	f.On(listAll, rows(row{ds: "tank/shares/media", name: "Media", mounted: true}, row{ds: "vault/shares/photos", name: "Photos", mounted: true}))
+	onList(f, "", rows(row{ds: "tank/shares/media", name: "Media", mounted: true}, row{ds: "vault/shares/photos", name: "Photos", mounted: true}))
 	for _, a := range []NewShare{{Pool: "tank", Name: "Media Two", ID: "media"}, {Pool: "tank", Name: "photos", ID: "pics"}} {
 		if _, err := m.Create(ctx, a); !isValidation(err) || !strings.Contains(err.Error(), "already") {
 			t.Errorf("Create(%+v) = %v", a, err)
@@ -258,12 +294,12 @@ func (m *Manager) listArgsLine(ds string) string { return "zfs " + strings.Join(
 func TestCreateUsesLZ4WhenThePoolHasNoCompression(t *testing.T) {
 	m, f, _, _ := newManager(t)
 	ds := "tank/shares/docs"
-	f.On(listAll, rows())
+	onList(f, "", rows())
 	f.On("zfs list -H -o name tank", "tank\n")
 	f.On("zfs list -H -o name tank/shares", "tank/shares\n")
 	f.On("zfs get -H -o source compression tank", "default\n")
 	f.OnPrefix("zfs create ", sysexec.Result{})
-	f.On(m.listArgsLine(ds), row{ds: ds, name: "Docs", mounted: true}.String())
+	onList(f, ds, row{ds: ds, name: "Docs", mounted: true}.String())
 	if _, err := m.Create(context.Background(), NewShare{Pool: "tank", Name: "Docs"}); err != nil {
 		t.Fatal(err)
 	}
@@ -282,10 +318,10 @@ func TestUpdate(t *testing.T) {
 	m, f, _, _ := newManager(t)
 	ctx := context.Background()
 	ds := "tank/shares/media"
-	f.On(listAll, rows(row{ds: ds, name: "Media", desc: "Films", used: "3221225472", mounted: true}, row{ds: "tank/shares/backups", name: "Backups", mounted: true}))
+	onList(f, "", rows(row{ds: ds, name: "Media", desc: "Films", used: "3221225472", mounted: true}, row{ds: "tank/shares/backups", name: "Backups", mounted: true}))
 	f.OnPrefix("zfs set ", sysexec.Result{})
 	f.On("zfs inherit org.hardyos:description "+ds, "")
-	f.On(m.listArgsLine(ds), row{ds: ds, name: "Movies", mounted: true}.String())
+	onList(f, ds, row{ds: ds, name: "Movies", mounted: true}.String())
 
 	name, desc, quota, guest := "Movies", "", uint64(10<<30), true
 	rules := []Rule{{Kind: KindUser, Name: `HOME\alice`, Level: LevelWrite}}
@@ -320,7 +356,7 @@ func TestUpdate(t *testing.T) {
 func TestDeleteNeedsTheNameAndNoApps(t *testing.T) {
 	m, f, _, _ := newManager(t)
 	ctx := context.Background()
-	f.On(listAll, rows(
+	onList(f, "", rows(
 		row{ds: "tank/shares/media", name: "Media", apps: `[{"app":"jellyfin","uid":30001,"level":"read"},{"app":"plex","uid":30002,"level":"read"}]`, mounted: true},
 		row{ds: "tank/shares/old-stuff", name: "Old Stuff", mounted: true},
 	))
@@ -354,13 +390,13 @@ func TestDeleteNeedsTheNameAndNoApps(t *testing.T) {
 func TestStarter(t *testing.T) {
 	m, f, root, _ := newManager(t)
 	ctx := context.Background()
-	f.On(listAll, rows())
+	onList(f, "", rows())
 	f.On("zfs list -H -o name tank", "tank\n")
 	f.On("zfs list -H -o name tank/shares", "tank/shares\n")
 	f.On("zfs get -H -o source compression tank", "local\n")
 	f.OnPrefix("zfs create ", sysexec.Result{})
-	f.On(m.listArgsLine("tank/shares/media"), row{ds: "tank/shares/media", name: "Media", recycle: true, mounted: true}.String())
-	f.On(m.listArgsLine("tank/shares/backups"), row{ds: "tank/shares/backups", name: "Backups", mounted: true}.String())
+	onList(f, "tank/shares/media", row{ds: "tank/shares/media", name: "Media", recycle: true, mounted: true}.String())
+	onList(f, "tank/shares/backups", row{ds: "tank/shares/backups", name: "Backups", mounted: true}.String())
 	mkdir(t, filepath.Join(root, "mnt/tank/shares/media"))
 
 	if _, err := m.CreateStarter(ctx, StarterArgs{Pool: "tank"}); !isValidation(err) {
@@ -390,12 +426,12 @@ func TestStarter(t *testing.T) {
 	}
 
 	// Already there: only what's missing is made, and nothing at all is an error.
-	f.On(listAll, rows(row{ds: "tank/shares/media", name: "Media", mounted: true}))
+	onList(f, "", rows(row{ds: "tank/shares/media", name: "Media", mounted: true}))
 	made, err = m.CreateStarter(ctx, StarterArgs{Pool: "tank", Media: true, Backups: true})
 	if err != nil || len(made) != 1 || made[0].ID != "backups" {
 		t.Errorf("second starter = %+v %v", made, err)
 	}
-	f.On(listAll, rows(row{ds: "tank/shares/media", name: "Media", mounted: true}, row{ds: "vault/shares/backups", name: "Backups", mounted: true}))
+	onList(f, "", rows(row{ds: "tank/shares/media", name: "Media", mounted: true}, row{ds: "vault/shares/backups", name: "Backups", mounted: true}))
 	if _, err := m.CreateStarter(ctx, StarterArgs{Pool: "tank", Media: true, Backups: true}); !isValidation(err) || !strings.Contains(err.Error(), "Media and Backups already exist") {
 		t.Errorf("everything exists: %v", err)
 	}
@@ -405,7 +441,8 @@ func TestGrantAndRevoke(t *testing.T) {
 	m, f, root, calls := newManager(t)
 	ctx := context.Background()
 	media := filepath.Join(root, "mnt/tank/shares/media")
-	f.On(listAll, rows(
+	mkdir(t, media)
+	onList(f, "", rows(
 		row{ds: "tank/shares/media", name: "Media", apps: `[{"app":"plex","uid":30002,"level":"read"}]`, mounted: true},
 		row{ds: "tank/shares/offline", name: "Offline", mounted: false},
 	))
@@ -449,19 +486,20 @@ func TestGrantAndRevoke(t *testing.T) {
 	}
 
 	// Revoke takes plex off every share that has it.
-	f.On(listAll, rows(
+	onList(f, "", rows(
 		row{ds: "tank/shares/media", name: "Media", apps: `[{"app":"jellyfin","uid":30001,"level":"read"},{"app":"plex","uid":30002,"level":"read"}]`, mounted: true},
 		row{ds: "tank/shares/movies", name: "Movies", apps: `[{"app":"plex","uid":30002,"level":"write"}]`, mounted: true},
 		row{ds: "tank/shares/docs", name: "Docs", mounted: true},
 	))
 	*calls = nil
+	movies := filepath.Join(root, "mnt/tank/shares/movies")
+	mkdir(t, movies)
 	before := len(f.Lines())
 	if err := m.RevokeApp(ctx, "plex"); err != nil {
 		t.Fatal(err)
 	}
 	m.Wait()
 	lines = f.Lines()[before:]
-	movies := filepath.Join(root, "mnt/tank/shares/movies")
 	for _, want := range []string{
 		"setfacl -x u:30002,d:u:30002 -- " + media,
 		`zfs set org.hardyos:apps=[{"app":"jellyfin","uid":30001,"level":"read"}] tank/shares/media`,
@@ -485,7 +523,7 @@ func TestGrantAndRevoke(t *testing.T) {
 	}
 
 	// An unmounted share keeps the record (its ACL is still on disk) ...
-	f.On(listAll, rows(row{ds: "tank/shares/offline", name: "Offline", apps: `[{"app":"plex","uid":30002,"level":"write"}]`, mounted: false}))
+	onList(f, "", rows(row{ds: "tank/shares/offline", name: "Offline", apps: `[{"app":"plex","uid":30002,"level":"write"}]`, mounted: false}))
 	before = len(f.Lines())
 	if err := m.RevokeApp(ctx, "plex"); err != nil {
 		t.Fatal(err)
@@ -496,7 +534,8 @@ func TestGrantAndRevoke(t *testing.T) {
 		}
 	}
 	// ... and the next app given that user ID takes the record over.
-	f.On(listAll, rows(row{ds: "tank/shares/offline", name: "Offline", apps: `[{"app":"plex","uid":30002,"level":"write"}]`, mounted: true}))
+	onList(f, "", rows(row{ds: "tank/shares/offline", name: "Offline", apps: `[{"app":"plex","uid":30002,"level":"write"}]`, mounted: true}))
+	mkdir(t, filepath.Join(root, "mnt/tank/shares/offline"))
 	before = len(f.Lines())
 	if err := m.GrantApp(ctx, "offline", "radarr", 30002, false); err != nil {
 		t.Fatal(err)
@@ -510,7 +549,7 @@ func TestGrantAndRevoke(t *testing.T) {
 func TestResolveStaysInsideTheShare(t *testing.T) {
 	m, f, root, _ := newManager(t)
 	ctx := context.Background()
-	f.On(listAll, rows(row{ds: "tank/shares/media", name: "Media", mounted: true}, row{ds: "tank/shares/off", name: "Off"}))
+	onList(f, "", rows(row{ds: "tank/shares/media", name: "Media", mounted: true}, row{ds: "tank/shares/off", name: "Off"}))
 	base := filepath.Join(root, "mnt/tank/shares/media")
 	mkdir(t, filepath.Join(base, "Movies/Kids"))
 	mkdir(t, filepath.Join(base, "TV"))

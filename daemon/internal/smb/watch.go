@@ -15,10 +15,10 @@ func (m *Manager) CleanRecycle(ctx context.Context) (int, error) {
 	cutoff := m.now().Add(-RecycleDays * 24 * time.Hour)
 	total := 0
 	for _, sh := range list {
-		if !sh.Recycle || !sh.Mounted || sh.Path == "" {
+		if !sh.Recycle || !sh.Usable() {
 			continue
 		}
-		n, err := cleanRecycleDir(sh.Path, cutoff)
+		n, err := cleanRecycleDir(sh.Path, sh.RootDev, cutoff)
 		if err != nil {
 			m.log().Warn("emptying a recycle bin", "share", sh.ID, "err", err)
 			continue

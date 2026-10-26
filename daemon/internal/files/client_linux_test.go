@@ -85,6 +85,15 @@ type env struct {
 // newEnv runs a real hardyd-priv (in this process) with two shares, a
 // (recycle bin on) and b, and a client acting as HOME\alice (the test's
 // own user, or user 100001 when running as root).
+// devOf is a folder's device, standing in for its verified mount.
+func devOf(p string) uint64 {
+	var st syscall.Stat_t
+	if err := syscall.Stat(p, &st); err != nil {
+		return 0
+	}
+	return uint64(st.Dev)
+}
+
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	e := &env{a: t.TempDir(), who: Who{Principal: `HOME\alice`}}
@@ -113,8 +122,8 @@ func newEnv(t *testing.T) *env {
 	ps := &priv.Server{AllowedUIDs: []uint32{uint32(os.Getuid())}}
 	fw := &fileworker.Server{
 		Shares: fakeShares{
-			{ID: "a", Name: "A", Mounted: true, Path: e.a, Recycle: true, Access: []shares.Rule{{Kind: shares.KindEveryone, Level: shares.LevelWrite}}},
-			{ID: "b", Name: "B", Mounted: true, Path: e.b, Access: []shares.Rule{{Kind: shares.KindGroup, Name: `HOME\Family`, Level: shares.LevelWrite}}},
+			{ID: "a", Name: "A", Mounted: true, Path: e.a, RootDev: devOf(e.a), Recycle: true, Access: []shares.Rule{{Kind: shares.KindEveryone, Level: shares.LevelWrite}}},
+			{ID: "b", Name: "B", Mounted: true, Path: e.b, RootDev: devOf(e.b), Access: []shares.Rule{{Kind: shares.KindGroup, Name: `HOME\Family`, Level: shares.LevelWrite}}},
 		},
 		Exe: workerExe(t), Args: []string{fileworker.Subcommand},
 		LookupUser: func(_ context.Context, name string) (*fileworker.Identity, error) {
@@ -254,7 +263,7 @@ func TestClient(t *testing.T) {
 	if recycled, err := c.DeleteItem(ctx, who, "a", "Photos/renamed.txt", false); err != nil || !recycled {
 		t.Fatalf("delete = %v %v", recycled, err)
 	}
-	if _, err := os.Stat(filepath.Join(e.a, ".recycle/alice/Photos/renamed.txt")); err != nil {
+	if _, err := os.Stat(filepath.Join(e.a, ".recycle/home.alice/Photos/renamed.txt")); err != nil {
 		t.Errorf("not in the bin: %v", err)
 	}
 	if recycled, err := c.DeleteItem(ctx, who, "b", "Moved", false); err != nil || recycled {

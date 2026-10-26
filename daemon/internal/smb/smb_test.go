@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -200,6 +201,14 @@ func TestAddWinbindNSS(t *testing.T) {
 
 type fakeShares struct{ l []shares.Share }
 
+func devOf(p string) uint64 {
+	var st syscall.Stat_t
+	if err := syscall.Stat(p, &st); err != nil {
+		return 0
+	}
+	return uint64(st.Dev)
+}
+
 func (f *fakeShares) List(context.Context) ([]shares.Share, error) { return f.l, nil }
 
 func newTestManager(t *testing.T, f *sysexec.Fake, l []shares.Share) *Manager {
@@ -212,7 +221,15 @@ func newTestManager(t *testing.T, f *sysexec.Fake, l []shares.Share) *Manager {
 		ServerName:   "hardyos", NoDataset: true, Installed: func() bool { return true },
 		LocalDomain: func() *Domain { d := home; return &d },
 		resolver:    names,
-		walk: func(context.Context, string, shares.PeopleACL) (shares.PeopleStats, error) {
+		Mounts: func() (shares.MountVerifier, error) {
+			return shares.MountFunc(func(p, _ string) (uint64, error) {
+				if d := devOf(p); d != 0 {
+					return d, nil
+				}
+				return 0, os.ErrNotExist
+			}), nil
+		},
+		walk: func(context.Context, string, uint64, shares.PeopleACL) (shares.PeopleStats, error) {
 			return shares.PeopleStats{}, nil
 		},
 	}
@@ -318,10 +335,13 @@ func TestApplySharesAndLeave(t *testing.T) {
 	off := shares.DefaultServices()
 	off.SMB.Enabled = false
 	l := []shares.Share{
-		{ID: "media", Name: "Media", Dataset: "tank/shares/media", Path: media, Mounted: true, Recycle: true, Guest: true,
+		{ID: "media", Name: "Media", Dataset: "tank/shares/media", Path: media, Mounted: true, RootDev: devOf(media), Recycle: true, Guest: true,
 			Access: []shares.Rule{{Kind: shares.KindEveryone, Level: shares.LevelRead}}, Services: sv},
-		{ID: "backups", Name: "Backups", Dataset: "tank/shares/backups", Path: backups, Mounted: true, Services: tm},
-		{ID: "private", Name: "Private", Dataset: "tank/shares/private", Path: "/nowhere", Mounted: true, Services: off},
+		{ID: "backups", Name: "Backups", Dataset: "tank/shares/backups", Path: backups, Mounted: true, RootDev: devOf(backups), Services: tm},
+		{ID: "private", Name: "Private", Dataset: "tank/shares/private", Path: "/nowhere", Mounted: true, RootDev: 1, Services: off},
+		// Mounted where it says, but not verified (shares.Manager.List
+		// found another file system there): never shared.
+		{ID: "fake", Name: "Fake", Dataset: "tank/shares/fake", Path: backups, Mounted: true, Services: sv},
 		{ID: "gone", Name: "Gone", Dataset: "tank2/shares/gone", Mounted: false, Services: sv},
 	}
 	f := okFake()
@@ -330,7 +350,7 @@ func TestApplySharesAndLeave(t *testing.T) {
 		walkMu sync.Mutex
 		walked []string
 	)
-	m.walk = func(_ context.Context, root string, p shares.PeopleACL) (shares.PeopleStats, error) {
+	m.walk = func(_ context.Context, root string, _ uint64, p shares.PeopleACL) (shares.PeopleStats, error) {
 		walkMu.Lock()
 		walked = append(walked, root)
 		walkMu.Unlock()
@@ -347,7 +367,7 @@ func TestApplySharesAndLeave(t *testing.T) {
 			t.Errorf("smb.conf lacks %q:\n%s", want, conf)
 		}
 	}
-	for _, not := range []string{"[Private]", "[Gone]", "[homes]"} {
+	for _, not := range []string{"[Private]", "[Gone]", "[homes]", "[Fake]"} {
 		if strings.Contains(string(conf), not) {
 			t.Errorf("smb.conf has %q", not)
 		}
@@ -449,6 +469,26 @@ func TestHomes(t *testing.T) {
 	}
 }
 
+// The homes dataset's mountpoint comes from the pool: root changes nothing
+// there unless the kernel says it's that dataset's mount.
+func TestHomesRootNeedsItsMount(t *testing.T) {
+	root := t.TempDir()
+	os.Chmod(root, 0o755)
+	f := okFake()
+	f.On("zfs list -H -o name tank/homes", "tank/homes\n")
+	f.On("zfs get -H -o value mounted,mountpoint tank/homes", "yes\t"+root+"\n")
+	m := newTestManager(t, f, nil)
+	m.Mounts = func() (shares.MountVerifier, error) {
+		return shares.MountFunc(func(string, string) (uint64, error) { return 0, os.ErrNotExist }), nil
+	}
+	if _, err := m.homesRoot(context.Background(), "tank"); err == nil {
+		t.Error("homes used without its mount")
+	}
+	if fi, _ := os.Stat(root); fi.Mode().Perm() != 0o755 {
+		t.Errorf("changed to %v", fi.Mode())
+	}
+}
+
 func TestCleanRecycle(t *testing.T) {
 	share := t.TempDir()
 	rb := filepath.Join(share, ".recycle", "alice", "Docs")
@@ -473,7 +513,7 @@ func TestCleanRecycle(t *testing.T) {
 	// Today everything here just arrived in the bin (ctimes are now; old
 	// access/modification times alone don't make something old), so the
 	// nightly run keeps it all.
-	m := newTestManager(t, okFake(), []shares.Share{{ID: "s", Path: share, Mounted: true, Recycle: true}})
+	m := newTestManager(t, okFake(), []shares.Share{{ID: "s", Path: share, Mounted: true, RootDev: devOf(share), Recycle: true}})
 	n, err := m.CleanRecycle(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -485,7 +525,7 @@ func TestCleanRecycle(t *testing.T) {
 	}
 	// Once the cutoff passes their arrival, everything in the bin goes,
 	// and nothing a link points to outside it.
-	n, err = cleanRecycleDir(share, time.Now().Add(time.Hour))
+	n, err = cleanRecycleDir(share, devOf(share), time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}

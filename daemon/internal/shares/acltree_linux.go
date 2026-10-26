@@ -23,12 +23,14 @@ const maxTreeDepth = 256
 // through that descriptor. An app with write access to the share can't
 // steer it elsewhere by swapping a folder for a link mid-walk, which a
 // path-based tool would be open to. Root itself is left alone (the caller
-// sets it). Devices, pipes and sockets are skipped.
-func applyTree(ctx context.Context, root string, uid int, write, revoke bool) (treeStats, error) {
+// sets it). Devices, pipes and sockets are skipped, and so are the recycle
+// bin and .zfs at the top. root must be the verified mount on dev
+// (OpenRoot).
+func applyTree(ctx context.Context, root string, dev uint64, uid int, write, revoke bool) (treeStats, error) {
 	var st treeStats
-	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := OpenRoot(root, dev, unix.O_RDONLY)
 	if err != nil {
-		return st, fmt.Errorf("opening %s: %w", root, err)
+		return st, err
 	}
 	var rs unix.Stat_t
 	if err := unix.Fstat(fd, &rs); err != nil {
@@ -92,6 +94,10 @@ func (w *treeWalker) dir(fd int, path string, depth int) error {
 // errors that should stop the whole walk.
 func (w *treeWalker) entry(dirfd int, parent, name string, depth int) error {
 	path := parent + "/" + name
+	if skipAtTop(depth, name) {
+		w.st.Skipped++
+		return nil
+	}
 	var st unix.Stat_t
 	if err := unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		w.fail(path, err)

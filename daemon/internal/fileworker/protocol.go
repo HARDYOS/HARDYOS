@@ -183,8 +183,32 @@ var ErrBadPath = errors.New("bad path")
 // CleanPath checks a path inside a share ("/" separated; a leading or
 // trailing "/" is ignored; "" is the top) and returns its components. "." and
 // ".." components, empty components ("a//b"), hidden names, NUL bytes and
-// names that aren't UTF-8 are refused.
-func CleanPath(p string) ([]string, error) {
+// names that aren't UTF-8 are refused. An upload's temporary name
+// (UploadTempRE) is accepted as the last component; hardyd-priv and the
+// workers check each operation's paths with OpPath, which only lets the
+// operations that need one use it.
+func CleanPath(p string) ([]string, error) { return cleanPath(p, true) }
+
+// OpPath checks an operation's path (see CleanPath). An upload's temporary
+// name may only end the path that create and openwrite open, a rename's
+// source (finishing the upload) and a permanent delete (cancelling it):
+// never a rename's destination, a folder to make or list, a recycled
+// delete, ...
+func OpPath(op, p string, permanent bool) ([]string, error) {
+	upload := false
+	switch op {
+	case OpCreate, OpOpenWrite, OpRename:
+		upload = true
+	case OpDelete:
+		upload = permanent
+	}
+	return cleanPath(p, upload)
+}
+
+// RenameTarget checks a rename's destination: never an upload's name.
+func RenameTarget(p string) ([]string, error) { return cleanPath(p, false) }
+
+func cleanPath(p string, upload bool) ([]string, error) {
 	if len(p) > maxPathLen {
 		return nil, errorf(CodeBadArgs, "the path is too long")
 	}
@@ -201,7 +225,7 @@ func CleanPath(p string) ([]string, error) {
 	}
 	for i, c := range parts {
 		switch {
-		case i == len(parts)-1 && UploadTempRE.MatchString(c):
+		case upload && i == len(parts)-1 && UploadTempRE.MatchString(c):
 		case c == "":
 			return nil, errorf(CodeBadArgs, "the path has an empty folder name")
 		case c == "." || c == "..":
@@ -215,9 +239,10 @@ func CleanPath(p string) ([]string, error) {
 	return parts, nil
 }
 
-// CleanName checks a single new file or folder name.
+// CleanName checks a single new file or folder name (never an upload's
+// temporary name).
 func CleanName(n string) error {
-	parts, err := CleanPath(n)
+	parts, err := cleanPath(n, false)
 	if err != nil {
 		return err
 	}

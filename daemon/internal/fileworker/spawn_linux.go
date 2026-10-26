@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"syscall"
 	"time"
 
+	"github.com/hardyos/hardyos/daemon/internal/shares"
 	"golang.org/x/sys/unix"
 )
 
@@ -20,7 +22,7 @@ import (
 const MaxResultBytes = 64 << 20
 
 // spawn runs one worker as ident with the given roots.
-func (s *Server) spawn(ctx context.Context, ident *Identity, paths []string, req Request) (json.RawMessage, *os.File, error) {
+func (s *Server) spawn(ctx context.Context, ident *Identity, roots []*root, req Request) (json.RawMessage, *os.File, error) {
 	if ident.UID == 0 || ident.GID == 0 {
 		return nil, nil, errorf(CodeNoAccess, "refusing to act as root")
 	}
@@ -48,20 +50,23 @@ func (s *Server) spawn(ctx context.Context, ident *Identity, paths []string, req
 	defer mine.Close()
 	theirs := os.NewFile(uintptr(sp[1]), "fileworker-child")
 	files = append(files, theirs)
-	for _, p := range paths {
-		fd, err := unix.Open(p, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	for _, r := range roots {
+		// Only the verified mount of the folder's own dataset (or home
+		// folder), reached without following any link.
+		fd, err := shares.OpenRoot(r.path, r.dev, unix.O_PATH)
 		if err != nil {
-			return nil, nil, errorf(CodeNotFound, "the folder isn't available right now (%v)", err)
+			s.log().Warn("file worker: folder refused", "folder", r.id, "path", r.path, "err", err)
+			return nil, nil, errorf(CodeNotFound, "the folder isn't available right now")
 		}
-		files = append(files, os.NewFile(uintptr(fd), p))
+		files = append(files, os.NewFile(uintptr(fd), r.path))
 	}
 	if req.Op == OpDelete && req.Recycle {
-		if err := ensureRecycle(int(files[1].Fd())); err != nil {
+		if err := s.ensureRecycle(roots[0], int(files[1].Fd())); err != nil {
 			return nil, nil, err
 		}
 	}
 
-	req.UID, req.GID, req.Roots = ident.UID, ident.GID, len(paths)
+	req.UID, req.GID, req.Roots = ident.UID, ident.GID, len(roots)
 	in, err := json.Marshal(req)
 	if err != nil {
 		return nil, nil, err
@@ -124,6 +129,11 @@ func (s *Server) spawn(ctx context.Context, ident *Identity, paths []string, req
 		if file == nil {
 			return nil, nil, errorf(CodeFailed, "the file worker didn't hand over the file")
 		}
+		if err := checkHanded(file, req.Op, roots[0].dev, req.Snapshot != ""); err != nil {
+			file.Close()
+			s.log().Warn("file worker handed over the wrong kind of file", "op", req.Op, "err", err)
+			return nil, nil, errorf(CodeFailed, "the file worker handed over the wrong file")
+		}
 	default:
 		if file != nil {
 			file.Close()
@@ -166,31 +176,67 @@ func receiveFile(sock *os.File) (*os.File, error) {
 	return file, nil
 }
 
-// ensureRecycle makes the share's .recycle folder (root's, sticky and open
-// to everyone, like /tmp: each person's own bin inside it is private).
-// Done as root through the share's descriptor; an existing link or file
-// there is refused, never followed.
-func ensureRecycle(rootfd int) error {
-	err := unix.Mkdirat(rootfd, ".recycle", 0o700)
-	created := err == nil
-	if err != nil && err != unix.EEXIST {
-		return errorf(CodeFailed, "making the recycle bin: %v", err)
+// ensureRecycle makes sure the share's .recycle is root's, 1777 and
+// without ACL entries (shares.EnsureRecycle), as root through the share's
+// descriptor; each person's bin inside it is made and checked by their
+// worker. An existing link or file there is refused, never followed.
+func (s *Server) ensureRecycle(r *root, rootfd int) error {
+	fixed, err := shares.EnsureRecycle(rootfd)
+	switch {
+	case slices.Contains(fixed, "owner"):
+		s.log().Warn("recycle bin belonged to someone else; given back to root", "folder", r.id, "fixed", fixed)
+	case len(fixed) > 0:
+		s.log().Info("recycle bin set up", "folder", r.id, "fixed", fixed)
 	}
-	fd, err := unix.Openat(rootfd, ".recycle", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return errorf(CodeFailed, "the recycle bin can't be used (%v); remove .recycle from the shared folder", err)
-	}
-	defer unix.Close(fd)
-	if created {
-		var st unix.Stat_t
-		if err := unix.Fstat(fd, &st); err != nil || st.Uid != uint32(os.Geteuid()) {
-			return errorf(CodeFailed, "the recycle bin changed while it was made")
+		var be *shares.BinError
+		if errors.As(err, &be) {
+			s.log().Warn("recycle bin refused", "folder", r.id, "err", err)
+			return errorf(CodeNotAllowed, "%s; delete permanently instead", be.Msg)
 		}
-		if err := unix.Fchmod(fd, 0o1777); err != nil {
-			return errorf(CodeFailed, "making the recycle bin: %v", err)
-		}
+		return errorf(CodeFailed, "the recycle bin: %v", err)
 	}
 	return nil
+}
+
+// checkHanded checks the descriptor a worker handed back before hardyd
+// gets it: a regular file opened for exactly what the operation is for
+// (read only for open, write only for create and openwrite; never O_PATH),
+// on the folder's own file system unless it's an older version.
+func checkHanded(f *os.File, op string, dev uint64, snapshot bool) error {
+	fd := int(f.Fd())
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+		return fmt.Errorf("not a regular file (mode %o)", st.Mode)
+	}
+	fl, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
+	if err != nil {
+		return err
+	}
+	want := unix.O_RDONLY
+	if op == OpCreate || op == OpOpenWrite {
+		want = unix.O_WRONLY
+	}
+	if fl&unix.O_PATH != 0 || fl&unix.O_ACCMODE != want {
+		return fmt.Errorf("opened with flags %#o for %s", fl, op)
+	}
+	if !snapshot && st.Dev != dev {
+		return fmt.Errorf("on another file system")
+	}
+	return nil
+}
+
+// canOpenRoot reports whether r is still its verified mount.
+func canOpenRoot(r *root) bool {
+	fd, err := shares.OpenRoot(r.path, r.dev, unix.O_PATH)
+	if err != nil {
+		return false
+	}
+	unix.Close(fd)
+	return true
 }
 
 // capped keeps at most max bytes (and fails the write past that).

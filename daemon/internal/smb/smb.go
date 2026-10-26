@@ -175,9 +175,12 @@ type Manager struct {
 	NoDataset bool
 	// Now is the clock (tests).
 	Now func() time.Time
+	// Mounts says where datasets are really mounted (the homes dataset is
+	// checked before root changes it); nil reads /proc/self/mountinfo.
+	Mounts func() (shares.MountVerifier, error)
 	// walk applies ACLs below a share's root; shares.ApplyPeopleTree
 	// unless a test sets it.
-	walk func(ctx context.Context, root string, p shares.PeopleACL) (shares.PeopleStats, error)
+	walk func(ctx context.Context, root string, dev uint64, p shares.PeopleACL) (shares.PeopleStats, error)
 	// resolver overrides name lookups (tests).
 	resolver Resolver
 
@@ -540,7 +543,93 @@ func (n nssResolver) GroupIDBySID(sid string) (uint32, error) {
 
 func (m *Manager) names(ctx context.Context) Resolver {
 	if m.resolver != nil {
-		return m.resolver
+		return rangeChecked{m.resolver}
 	}
-	return nssResolver{ctx: ctx, r: m.Runner}
+	return rangeChecked{nssResolver{ctx: ctx, r: m.Runner}}
+}
+
+// DomainID reports whether a Linux ID is one winbind gives domain
+// accounts and groups (its idmap ranges): the only IDs file sharing puts
+// in ACLs or gives files to.
+func DomainID(id uint32) bool {
+	return (id >= IDMapDefaultLow && id <= IDMapDefaultHigh) || (id >= IDMapDomainLow && id <= IDMapDomainHigh)
+}
+
+// ErrOutOfRange is an ID from the name service outside winbind's ranges
+// (a local account or root shadowing a domain name, or a misconfigured
+// idmap): the name is treated as unknown.
+type ErrOutOfRange struct {
+	Name string
+	ID   uint32
+}
+
+func (e *ErrOutOfRange) Error() string {
+	return fmt.Sprintf("%s has the Linux ID %d, outside the domain's ranges", e.Name, e.ID)
+}
+
+// rangeChecked refuses IDs outside winbind's ranges, whatever the name
+// service says, before they reach an ACL or a chown.
+type rangeChecked struct{ r Resolver }
+
+func checkID(name string, id uint32, err error) (uint32, error) {
+	if err != nil {
+		return 0, err
+	}
+	if !DomainID(id) {
+		return 0, &ErrOutOfRange{Name: name, ID: id}
+	}
+	return id, nil
+}
+
+func (c rangeChecked) UserID(name string) (uint32, error) {
+	id, err := c.r.UserID(name)
+	return checkID(name, id, err)
+}
+
+func (c rangeChecked) GroupID(name string) (uint32, error) {
+	id, err := c.r.GroupID(name)
+	return checkID(name, id, err)
+}
+
+func (c rangeChecked) GroupIDBySID(sid string) (uint32, error) {
+	id, err := c.r.GroupIDBySID(sid)
+	return checkID(sid, id, err)
+}
+
+// unknownName: the name can't be used (deleted, renamed, or not a domain
+// ID); rules for it are skipped rather than stopping everything.
+func unknownName(err error) bool {
+	var u *ErrUnknownName
+	var o *ErrOutOfRange
+	return errors.As(err, &u) || errors.As(err, &o)
+}
+
+// verifyMount checks that path is dataset's own ZFS mount and returns its
+// device (shares.MountTable.VerifyMount).
+func (m *Manager) verifyMount(path, dataset string) (uint64, error) {
+	var mv shares.MountVerifier
+	if m.Mounts != nil {
+		v, err := m.Mounts()
+		if err != nil {
+			return 0, err
+		}
+		mv = v
+	} else {
+		t, err := shares.ReadMountTable()
+		if err != nil {
+			return 0, err
+		}
+		mv = t
+	}
+	return mv.VerifyMount(path, dataset)
+}
+
+// HomesPool is the pool home folders are kept on, or "" when home folders
+// are off (the file workers only look for homes there).
+func (m *Manager) HomesPool() string {
+	s := m.loadSettings()
+	if !s.Homes.Enabled {
+		return ""
+	}
+	return s.Homes.Pool
 }

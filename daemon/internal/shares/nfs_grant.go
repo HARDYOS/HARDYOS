@@ -51,8 +51,8 @@ func (m *Manager) nfsACL(ctx context.Context, id string, uid int, write, revoke 
 	if err != nil {
 		return err
 	}
-	if !sh.Mounted {
-		return fmt.Errorf("the shared folder %s isn't available right now (is its pool imported and unlocked?)", sh.Name)
+	if err := m.checkRoot(sh); err != nil {
+		return err
 	}
 	path := m.sys(sh.Path)
 	if revoke {
@@ -65,7 +65,7 @@ func (m *Manager) nfsACL(ctx context.Context, id string, uid int, write, revoke 
 			return err
 		}
 	}
-	m.background(sh.ID, path, uid, write, revoke)
+	m.background(sh.ID, path, sh.RootDev, uid, write, revoke)
 	m.log().Info("shared folder NFS access", "share", sh.ID, "uid", uid, "write", write, "revoke", revoke)
 	return nil
 }

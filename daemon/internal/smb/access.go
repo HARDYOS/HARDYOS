@@ -134,7 +134,7 @@ func shareACL(nb string, rules []shares.Rule, guest bool, adminsSID string, r Re
 	if adminsSID != "" {
 		if gid, err := r.GroupIDBySID(adminsSID); err == nil {
 			set(true, gid, shares.LevelWrite)
-		} else if _, unknown := err.(*ErrUnknownName); !unknown {
+		} else if !unknownName(err) {
 			return p, nil, err
 		}
 	}
@@ -167,7 +167,7 @@ func shareACL(nb string, rules []shares.Rule, guest bool, adminsSID string, r Re
 			continue
 		}
 		if err != nil {
-			if _, unknown := err.(*ErrUnknownName); unknown {
+			if unknownName(err) {
 				skipped = append(skipped, rule.Name)
 				continue
 			}

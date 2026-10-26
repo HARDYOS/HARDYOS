@@ -29,15 +29,18 @@ func (m *Manager) EnsureFilesUser(ctx context.Context) error {
 	}
 	var first error
 	for _, sh := range l {
-		if !sh.Mounted || sh.Path == "" {
+		if !sh.Usable() {
 			continue
 		}
 		path := m.sys(sh.Path)
-		if hasFilesUser(path) {
+		if hasFilesUser(path, sh.RootDev) {
 			continue
 		}
 		m.mu.Lock()
-		err := m.setfacl(ctx, "-m", fmt.Sprintf("u:%d:rwX,d:u:%d:rwX", FilesUID, FilesUID), path)
+		err := m.checkRoot(&sh)
+		if err == nil {
+			err = m.setfacl(ctx, "-m", fmt.Sprintf("u:%d:rwX,d:u:%d:rwX", FilesUID, FilesUID), path)
+		}
 		m.mu.Unlock()
 		if err != nil {
 			if first == nil {
@@ -45,7 +48,7 @@ func (m *Manager) EnsureFilesUser(ctx context.Context) error {
 			}
 			continue
 		}
-		m.background(sh.ID, path, FilesUID, true, false)
+		m.background(sh.ID, path, sh.RootDev, FilesUID, true, false)
 		m.log().Info("hardyos-files given the shared folder", "share", sh.ID)
 	}
 	return first
@@ -53,8 +56,8 @@ func (m *Manager) EnsureFilesUser(ctx context.Context) error {
 
 // hasFilesUser: the folder's access and default ACLs both give
 // hardyos-files rwx.
-func hasFilesUser(path string) bool {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+func hasFilesUser(path string, dev uint64) bool {
+	fd, err := OpenRoot(path, dev, unix.O_RDONLY)
 	if err != nil {
 		return false
 	}

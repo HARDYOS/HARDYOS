@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/hardyos/hardyos/daemon/internal/shares"
 	"golang.org/x/sys/unix"
 )
 
@@ -119,7 +120,7 @@ func (w *worker) run() (any, error) {
 	if r.Op == OpShares {
 		return w.shares(), nil
 	}
-	parts, err := CleanPath(r.Path)
+	parts, err := OpPath(r.Op, r.Path, r.Op == OpDelete && !r.Recycle)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +145,7 @@ func (w *worker) run() (any, error) {
 	case OpMkdir:
 		return w.mkdir(parts)
 	case OpRename:
-		to, err := CleanPath(r.To)
+		to, err := RenameTarget(r.To)
 		if err != nil {
 			return nil, err
 		}
@@ -529,19 +530,66 @@ func (w *worker) delete(parts []string) (any, error) {
 	return map[string]any{"recycled": true, "binPath": dest}, nil
 }
 
+// validBin: the administrators' bin, or a domain account's
+// <netbios>.<user> (shares.BinName).
+func validBin(bin string) bool {
+	if bin == shares.FilesBin {
+		return true
+	}
+	nb, user, ok := strings.Cut(bin, ".")
+	return ok && shares.BinName(nb, user) == bin
+}
+
+// openBin opens the person's own bin in .recycle (making it, 0700, if it
+// isn't there) and makes sure it is theirs alone: owned by them, with no
+// group, other or ACL access. A bin someone else made (.recycle is open to
+// everyone) is refused, so nobody can collect another person's deleted
+// files; one that is the person's but too open is closed up.
+func (w *worker) openBin(bin string) (int, error) {
+	if !validBin(bin) {
+		return -1, errorf(CodeFailed, "no recycle bin name")
+	}
+	rfd, err := openIn(w.roots[0], shares.RecycleDir, unix.O_PATH|unix.O_DIRECTORY, 0)
+	if err != nil {
+		return -1, fmt.Errorf("the recycle bin: %w", err)
+	}
+	defer unix.Close(rfd)
+	if err := unix.Mkdirat(rfd, bin, 0o700); err != nil && err != unix.EEXIST {
+		return -1, fmt.Errorf("the recycle bin: %w", err)
+	}
+	fd, err := openIn(rfd, bin, unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	if err != nil {
+		if err == unix.EACCES || err == unix.ELOOP || err == unix.ENOTDIR || err == unix.EXDEV {
+			return -1, errorf(CodeNotAllowed, "your recycle bin in this shared folder (.recycle/%s) isn't yours, so nothing can be put in it; ask an administrator to look at it, or delete permanently", bin)
+		}
+		return -1, fmt.Errorf("the recycle bin: %w", err)
+	}
+	owner, err := shares.CheckBin(fd, uint32(w.req.UID))
+	if err != nil && owner {
+		if terr := shares.TightenBin(fd); terr == nil {
+			_, err = shares.CheckBin(fd, uint32(w.req.UID))
+		}
+	}
+	if err != nil {
+		unix.Close(fd)
+		var be *shares.BinError
+		if errors.As(err, &be) {
+			return -1, errorf(CodeNotAllowed, "your recycle bin in this shared folder (.recycle/%s) can't be used safely (%s); ask an administrator to look at it, or delete permanently", bin, be.Msg)
+		}
+		return -1, fmt.Errorf("the recycle bin: %w", err)
+	}
+	return fd, nil
+}
+
 // toRecycle moves parent/name into .recycle/<bin>/<its folders>/, keeping
 // the folder tree and never replacing an earlier deleted copy.
 func (w *worker) toRecycle(pfd int, name string, parts []string, st *unix.Stat_t) (string, error) {
 	bin := w.req.Bin
-	if bin == "" || strings.ContainsAny(bin, "/\x00") || bin == "." || bin == ".." || len(bin) > maxNameLen {
-		return "", errorf(CodeFailed, "no recycle bin name")
-	}
-	rfd, err := openIn(w.roots[0], ".recycle", unix.O_PATH|unix.O_DIRECTORY, 0)
+	dir, err := w.openBin(bin)
 	if err != nil {
-		return "", fmt.Errorf("the recycle bin: %w", err)
+		return "", err
 	}
-	dir := rfd
-	for _, c := range append([]string{bin}, parts[:len(parts)-1]...) {
+	for _, c := range parts[:len(parts)-1] {
 		if err := unix.Mkdirat(dir, c, 0o700); err != nil && err != unix.EEXIST {
 			unix.Close(dir)
 			return "", fmt.Errorf("the recycle bin: %w", err)

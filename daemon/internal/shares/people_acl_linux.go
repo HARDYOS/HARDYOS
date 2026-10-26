@@ -14,11 +14,12 @@ import (
 
 // SetPeopleRoot sets p's entries on the share's root folder (access and
 // default ACL, and the root's "other" permission). changed is false when
-// the root already had exactly them. The folder is opened with O_NOFOLLOW.
-func SetPeopleRoot(root string, p PeopleACL) (changed bool, err error) {
-	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+// the root already had exactly them. root must be the verified mount on
+// dev; it is opened with OpenRoot (no link followed anywhere).
+func SetPeopleRoot(root string, dev uint64, p PeopleACL) (changed bool, err error) {
+	fd, err := OpenRoot(root, dev, unix.O_RDONLY)
 	if err != nil {
-		return false, fmt.Errorf("opening %s: %w", root, err)
+		return false, err
 	}
 	defer unix.Close(fd)
 	var st unix.Stat_t
@@ -30,8 +31,8 @@ func SetPeopleRoot(root string, p PeopleACL) (changed bool, err error) {
 
 // PeopleRootMatches reports whether the share's root already carries
 // exactly p's entries (so nothing needs doing).
-func PeopleRootMatches(root string, p PeopleACL) (bool, error) {
-	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+func PeopleRootMatches(root string, dev uint64, p PeopleACL) (bool, error) {
+	fd, err := OpenRoot(root, dev, unix.O_RDONLY)
 	if err != nil {
 		return false, err
 	}
@@ -50,12 +51,13 @@ func PeopleRootMatches(root string, p PeopleACL) (bool, error) {
 // ApplyPeopleTree sets p's entries on everything below root (not root
 // itself, see SetPeopleRoot), with the same no-follow, one-file-system walk
 // as app grants: every entry is opened relative to its parent folder with
-// O_NOFOLLOW and changed through its file descriptor.
-func ApplyPeopleTree(ctx context.Context, root string, p PeopleACL) (PeopleStats, error) {
+// O_NOFOLLOW and changed through its file descriptor. The recycle bin and
+// .zfs at the top are never entered: each person's bin stays theirs alone.
+func ApplyPeopleTree(ctx context.Context, root string, dev uint64, p PeopleACL) (PeopleStats, error) {
 	var st PeopleStats
-	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := OpenRoot(root, dev, unix.O_RDONLY)
 	if err != nil {
-		return st, fmt.Errorf("opening %s: %w", root, err)
+		return st, err
 	}
 	var rs unix.Stat_t
 	if err := unix.Fstat(fd, &rs); err != nil {
@@ -106,6 +108,10 @@ func (w *peopleWalker) dir(fd int, path string, depth int) error {
 
 func (w *peopleWalker) entry(dirfd int, parent, name string, depth int) error {
 	path := parent + "/" + name
+	if skipAtTop(depth, name) {
+		w.st.Skipped++
+		return nil
+	}
 	var st unix.Stat_t
 	if err := unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		w.fail(path, err)

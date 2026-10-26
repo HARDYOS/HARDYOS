@@ -232,7 +232,9 @@ func renderConf(in confInput) string {
 		w("hide files = /.recycle/.zfs/")
 		w("veto files = /.hardyos*/")
 		if recycle {
-			w("recycle:repository = .recycle/%%U")
+			// The same bins as the File Manager's: <netbios>.<user>, so a
+			// name can only ever be one domain account's (shares.BinName).
+			w("recycle:repository = .recycle/%s.%%U", strings.ToLower(nb))
 			w("recycle:keeptree = yes")
 			w("recycle:versions = yes")
 			w("recycle:touch = yes")

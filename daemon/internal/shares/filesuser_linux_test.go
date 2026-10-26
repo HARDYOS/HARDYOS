@@ -18,7 +18,7 @@ func TestEnsureFilesUser(t *testing.T) {
 	done := filepath.Join(root, "mnt/tank/shares/done")
 	mkdir(t, media)
 	mkdir(t, done)
-	f.On(listAll, rows(
+	onList(f, "", rows(
 		row{ds: "tank/shares/media", name: "Media", mounted: true},
 		row{ds: "tank/shares/done", name: "Done", mounted: true},
 		row{ds: "tank/shares/offline", name: "Offline", mounted: false},

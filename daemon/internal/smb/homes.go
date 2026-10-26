@@ -10,7 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hardyos/hardyos/daemon/internal/shares"
 	"github.com/hardyos/hardyos/daemon/internal/zfs"
+	"golang.org/x/sys/unix"
 )
 
 // Home folders: <pool>/homes holds one dataset per domain account,
@@ -51,11 +53,22 @@ func (m *Manager) homesRoot(ctx context.Context, pool string) (string, error) {
 		return "", err
 	}
 	f := strings.Fields(string(out))
-	if len(f) != 2 || f[0] != "yes" || !filepath.IsAbs(f[1]) || strings.ContainsAny(f[1], "%\\\" ") {
+	if len(f) != 2 || f[0] != "yes" || !filepath.IsAbs(f[1]) || filepath.Clean(f[1]) != f[1] || strings.ContainsAny(f[1], "%\\\" ") {
 		return "", fmt.Errorf("%s isn't mounted", ds)
 	}
+	// The pool says where it's mounted; the kernel must agree before root
+	// changes anything there.
+	dev, err := m.verifyMount(f[1], ds)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", ds, err)
+	}
+	fd, err := shares.OpenRoot(f[1], dev, unix.O_RDONLY)
+	if err != nil {
+		return "", err
+	}
+	defer unix.Close(fd)
 	// People may pass through to their own folder, not list the others.
-	if err := os.Chmod(f[1], 0o711); err != nil {
+	if err := unix.Fchmod(fd, 0o711); err != nil {
 		return "", err
 	}
 	return f[1], nil

@@ -75,12 +75,14 @@ func RegisterFileWorker(s *Server, w *fileworker.Server) {
 
 // StartFiles sets up file access in hardyd-priv: the files.* operations,
 // and hardyos-files' access to every shared folder (now and every 10
-// minutes, so folders on imported pools get it too).
-func StartFiles(ctx context.Context, s *Server, m *shares.Manager, log *slog.Logger) error {
+// minutes, so folders on imported pools get it too). homesPool is where
+// File Services keeps home folders ("" = off).
+func StartFiles(ctx context.Context, s *Server, m *shares.Manager, homesPool func() string, log *slog.Logger) error {
 	w, err := fileworker.NewServer(m, sysexec.Exec{}, log)
 	if err != nil {
 		return err
 	}
+	w.HomesPool = homesPool
 	w.FilesUser = func(ctx context.Context) {
 		if err := m.EnsureFilesUser(ctx); err != nil {
 			log.Warn("giving hardyos-files the shared folders", "err", err)

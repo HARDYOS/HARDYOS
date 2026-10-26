@@ -63,7 +63,18 @@ type Share struct {
 	CreatedAt   time.Time  `json:"createdAt"`
 	// Services: how the folder is shared on the network, and snapshots.
 	Services Services `json:"services"`
+	// RootDev is the device number of the dataset's own ZFS mount at Path,
+	// set by Manager.List only after checking /proc/self/mountinfo (see
+	// mounts.go); 0 means unverified. Nothing is done to a folder as root
+	// without it. Never sent over the wire: a Share decoded from JSON is
+	// unverified.
+	RootDev uint64 `json:"-"`
 }
+
+// Usable reports whether the folder is mounted where it says and verified,
+// so root-side work (ACLs, the recycle bin, SMB, file workers) may use
+// Path, opening it with OpenRoot(Path, RootDev, ...).
+func (sh *Share) Usable() bool { return sh.Mounted && sh.Path != "" && sh.RootDev != 0 }
 
 // NewShare creates a shared folder.
 type NewShare struct {

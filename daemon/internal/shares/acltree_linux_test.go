@@ -74,7 +74,7 @@ func TestApplyTree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	st, err := applyTree(context.Background(), share, 30001, true, false)
+	st, err := applyTree(context.Background(), share, devOf(share), 30001, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,10 +106,10 @@ func TestApplyTree(t *testing.T) {
 	}
 
 	// Running again changes nothing; read-only lowers it.
-	if st, _ := applyTree(context.Background(), share, 30001, true, false); st.Changed != 0 {
+	if st, _ := applyTree(context.Background(), share, devOf(share), 30001, true, false); st.Changed != 0 {
 		t.Errorf("second run changed %d", st.Changed)
 	}
-	if _, err := applyTree(context.Background(), share, 30001, false, false); err != nil {
+	if _, err := applyTree(context.Background(), share, devOf(share), 30001, false, false); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := userPerm(pathACL(t, share+"/Movies/film.mkv", xattrAccess), 30001); got != 4 {
@@ -117,7 +117,7 @@ func TestApplyTree(t *testing.T) {
 	}
 
 	// Revoking puts everything back as it was.
-	if _, err := applyTree(context.Background(), share, 30001, false, true); err != nil {
+	if _, err := applyTree(context.Background(), share, devOf(share), 30001, false, true); err != nil {
 		t.Fatal(err)
 	}
 	for _, p := range []string{share + "/Movies", share + "/Movies/Kids", share + "/Movies/film.mkv"} {
@@ -135,7 +135,7 @@ func TestApplyTree(t *testing.T) {
 	// A cancelled walk stops.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := applyTree(ctx, share, 30001, true, false); !errors.Is(err, context.Canceled) {
+	if _, err := applyTree(ctx, share, devOf(share), 30001, true, false); !errors.Is(err, context.Canceled) {
 		t.Errorf("cancelled walk: %v", err)
 	}
 }

@@ -70,6 +70,7 @@ func openRoot(t *testing.T, p string) int {
 // resolution and the operations themselves.
 func inproc(t *testing.T, roots []int, req Request, out any) (*os.File, error) {
 	t.Helper()
+	req.UID, req.GID = os.Geteuid(), os.Getegid()
 	w := &worker{req: req, roots: roots, sock: -1}
 	data, err := w.run()
 	if err != nil {
@@ -255,20 +256,20 @@ func TestWorkerChanges(t *testing.T) {
 
 	// delete to the recycle bin keeps the folders and never overwrites.
 	var res map[string]any
-	if _, err := inproc(t, roots, Request{Op: OpDelete, Path: "docs/sub/b.txt", Recycle: true, Bin: "alice"}, &res); err != nil {
+	if _, err := inproc(t, roots, Request{Op: OpDelete, Path: "docs/sub/b.txt", Recycle: true, Bin: "home.alice"}, &res); err != nil {
 		t.Fatal(err)
 	}
-	if res["binPath"] != "alice/docs/sub/b.txt" || read(".recycle/alice/docs/sub/b.txt") != "bravo" {
+	if res["binPath"] != "home.alice/docs/sub/b.txt" || read(".recycle/home.alice/docs/sub/b.txt") != "bravo" {
 		t.Fatalf("recycled %v", res)
 	}
 	os.WriteFile(filepath.Join(d, "docs/sub/b.txt"), []byte("b2"), 0o644)
-	if _, err := inproc(t, roots, Request{Op: OpDelete, Path: "docs/sub/b.txt", Recycle: true, Bin: "alice"}, &res); err != nil {
+	if _, err := inproc(t, roots, Request{Op: OpDelete, Path: "docs/sub/b.txt", Recycle: true, Bin: "home.alice"}, &res); err != nil {
 		t.Fatal(err)
 	}
-	if bp, _ := res["binPath"].(string); !strings.HasPrefix(bp, "alice/docs/sub/b (deleted ") || !strings.HasSuffix(bp, ").txt") || read(".recycle/"+bp) != "b2" {
+	if bp, _ := res["binPath"].(string); !strings.HasPrefix(bp, "home.alice/docs/sub/b (deleted ") || !strings.HasSuffix(bp, ").txt") || read(".recycle/"+bp) != "b2" {
 		t.Fatalf("second recycle = %v", res)
 	}
-	if fi, err := os.Stat(filepath.Join(d, ".recycle/alice")); err != nil || fi.Mode().Perm() != 0o700 {
+	if fi, err := os.Stat(filepath.Join(d, ".recycle/home.alice")); err != nil || fi.Mode().Perm() != 0o700 {
 		t.Fatalf("bin mode = %v %v", fi, err)
 	}
 	// Permanent delete of a tree, links inside are removed, not followed.

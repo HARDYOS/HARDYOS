@@ -15,6 +15,8 @@ func ChildMain() {
 	os.Exit(1)
 }
 
-func (s *Server) spawn(context.Context, *Identity, []string, Request) (json.RawMessage, *os.File, error) {
+func canOpenRoot(*root) bool { return false }
+
+func (s *Server) spawn(context.Context, *Identity, []*root, Request) (json.RawMessage, *os.File, error) {
 	return nil, nil, errorf(CodeFailed, "file access is only supported on Linux")
 }

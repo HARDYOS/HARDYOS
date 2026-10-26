@@ -15,7 +15,8 @@ func TestNFSGrantAndRevoke(t *testing.T) {
 	m, f, root, calls := newManager(t)
 	ctx := context.Background()
 	media := filepath.Join(root, "mnt/tank/shares/media")
-	f.On(listAll, rows(
+	mkdir(t, media)
+	onList(f, "", rows(
 		row{ds: "tank/shares/media", name: "Media", mounted: true},
 		row{ds: "tank/shares/offline", name: "Offline", mounted: false},
 	))

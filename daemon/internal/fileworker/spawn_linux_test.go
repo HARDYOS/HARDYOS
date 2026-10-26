@@ -65,6 +65,14 @@ func workerExe(t *testing.T) string {
 	return exePath
 }
 
+func devOf(p string) uint64 {
+	var st syscall.Stat_t
+	if err := syscall.Stat(p, &st); err != nil {
+		return 0
+	}
+	return uint64(st.Dev)
+}
+
 type fakeShares []shares.Share
 
 func (f fakeShares) List(context.Context) ([]shares.Share, error) { return f, nil }
@@ -128,11 +136,11 @@ func TestSpawn(t *testing.T) {
 	alice := `HOME\alice`
 	s := &Server{
 		Shares: fakeShares{
-			{ID: "docs", Name: "Docs", Mounted: true, Path: d, Recycle: true,
+			{ID: "docs", Name: "Docs", Mounted: true, Path: d, RootDev: devOf(d), Recycle: true,
 				Access: []shares.Rule{{Kind: shares.KindUser, Name: alice, Level: shares.LevelWrite}}},
-			{ID: "ro", Name: "Read Only", Mounted: true, Path: ro,
+			{ID: "ro", Name: "Read Only", Mounted: true, Path: ro, RootDev: devOf(ro),
 				Access: []shares.Rule{{Kind: shares.KindEveryone, Level: shares.LevelRead}}},
-			{ID: "nobody", Name: "Nobody", Mounted: true, Path: ro},
+			{ID: "nobody", Name: "Nobody", Mounted: true, Path: ro, RootDev: devOf(ro)},
 			{ID: "gone", Name: "Gone", Mounted: false},
 		},
 		Exe: workerExe(t), Args: []string{Subcommand},
@@ -181,7 +189,7 @@ func TestSpawn(t *testing.T) {
 	if fi, err := os.Stat(filepath.Join(d, ".recycle")); err != nil || fi.Mode()&os.ModeSticky == 0 || fi.Mode().Perm() != 0o777 {
 		t.Fatalf(".recycle = %v %v", fi, err)
 	}
-	if b, _ := os.ReadFile(filepath.Join(d, ".recycle/alice/made.txt")); string(b) != "hello" {
+	if b, _ := os.ReadFile(filepath.Join(d, ".recycle/home.alice/made.txt")); string(b) != "hello" {
 		t.Fatal("not in alice's bin")
 	}
 	if _, err := doJSON(t, s, OpDelete, Args{Who: who, Share: "docs", Path: "top.txt", Permanent: true}, &res); err != nil || res["recycled"] != false {
@@ -257,7 +265,7 @@ func TestPrivilegeDrop(t *testing.T) {
 	os.Chown(d, 0, 0)
 
 	s := &Server{
-		Shares: fakeShares{{ID: "s", Name: "S", Mounted: true, Path: d,
+		Shares: fakeShares{{ID: "s", Name: "S", Mounted: true, Path: d, RootDev: devOf(d),
 			Access: []shares.Rule{{Kind: shares.KindEveryone, Level: shares.LevelWrite}}}},
 		Exe: workerExe(t), Args: []string{Subcommand},
 		LookupUser: ids{
