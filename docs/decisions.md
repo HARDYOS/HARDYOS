@@ -38,3 +38,5 @@ Settled choices, newest last. Change one by adding a row that supersedes it.
 | 32 | 2026-10-25 | Network settings stay on ifupdown (no NetworkManager or systemd-networkd), rendered from one settings file | Debian's default for servers, already used by the installer; plain files are easy to inspect and restore |
 | 33 | 2026-10-25 | Network changes undo themselves unless confirmed within 3 minutes | A wrong address or gateway can't lock anyone out of a headless server |
 | 34 | 2026-10-25 | Servers check GitHub Releases daily and offer new versions; installing always takes an administrator's click | No update server to run; a person picks when the server restarts |
+| 35 | 2026-10-25 | Settings backups go nightly to a data pool and on demand as a password-protected download; encryption keys only in downloads | Survives a reinstall without extra hardware; keys on the same disks as the data would defeat encryption |
+| 36 | 2026-10-25 | hardyd-priv only acts on state files in /var/lib/hardyos that root wrote | That directory belongs to hardyd; a compromised hardyd mustn't be able to steer root |

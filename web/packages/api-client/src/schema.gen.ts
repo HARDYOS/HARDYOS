@@ -1029,6 +1029,148 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/system/backups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Nightly backup settings, backups kept on pools, and restore state */
+        get: operations["getBackups"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system/backups/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Change the nightly backup settings */
+        put: operations["setBackupSettings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system/backups/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Back up settings onto a pool now */
+        post: operations["runBackup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system/backups/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Make a password-protected backup to download
+         * @description Not a job, so the password is never kept. Fetch the file from /system/backups/files/{name} within an hour.
+         */
+        post: operations["prepareBackupDownload"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system/backups/files/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Download a prepared backup file */
+        get: operations["getBackupFile"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system/backups/upload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Upload a backup file to restore */
+        post: operations["uploadBackup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system/backups/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Check a backup and restore it at the next restart
+         * @description Not a job, so the password is never kept.
+         */
+        post: operations["restoreBackup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system/backups/restore/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel a restore waiting for a restart */
+        post: operations["cancelRestore"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/installer": {
         parameters: {
             query?: never;
@@ -1768,6 +1910,75 @@ export interface components {
             /** @description Why the last check failed (empty when it worked) */
             lastError: string;
             available: components["schemas"]["AvailableUpdate"] | null;
+        };
+        BackupSettings: {
+            nightly: boolean;
+            /** @description Empty for the first data pool */
+            pool: string;
+            keep: number;
+            /** @description HH:MM in the server's time zone */
+            time: string;
+        };
+        BackupManifest: {
+            format: number;
+            /** Format: date-time */
+            createdAt: string;
+            version: string;
+            hostname: string;
+            schema: number;
+            secrets: boolean;
+            users: number;
+            note?: string;
+            entries: {
+                path: string;
+                /** Format: int64 */
+                size: number;
+                sha256: string;
+            }[];
+        };
+        PoolBackup: {
+            pool: string;
+            name: string;
+            /** Format: int64 */
+            size: number;
+            manifest: components["schemas"]["BackupManifest"];
+        };
+        BackupStaged: {
+            manifest: components["schemas"]["BackupManifest"];
+            /** Format: date-time */
+            stagedAt: string;
+        };
+        RestoreResult: {
+            ok: boolean;
+            /** Format: date-time */
+            at: string;
+            message: string;
+            notes: string[];
+            /** Format: date-time */
+            from: string;
+        };
+        BackupStatus: {
+            settings: components["schemas"]["BackupSettings"];
+            pools: string[];
+            backups: components["schemas"]["PoolBackup"][];
+            /** Format: date-time */
+            lastRun: string | null;
+            lastError: string;
+            pending: components["schemas"]["BackupStaged"] | null;
+            lastResult: components["schemas"]["RestoreResult"] | null;
+        };
+        BackupDownload: {
+            name: string;
+            file: string;
+            /** Format: int64 */
+            size: number;
+        };
+        RestoreSource: {
+            /** @description From /system/backups/upload */
+            upload?: string;
+            pool?: string;
+            name?: string;
+            password?: string;
         };
     };
     responses: {
@@ -3549,6 +3760,211 @@ export interface operations {
                 };
             };
             400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    getBackups: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Backup state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    setBackupSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BackupSettings"];
+            };
+        };
+        responses: {
+            /** @description Saved settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupSettings"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    runBackup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description Empty for the configured or first data pool */
+                    pool?: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    prepareBackupDownload: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    password: string;
+                    /** @description Also include storage encryption keys and SSH host keys */
+                    secrets: boolean;
+                };
+            };
+        };
+        responses: {
+            /** @description The prepared file */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupDownload"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    getBackupFile: {
+        parameters: {
+            query?: {
+                /** @description File name to save as */
+                as?: string;
+            };
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The backup file */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": string;
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    uploadBackup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/octet-stream": string;
+            };
+        };
+        responses: {
+            /** @description The upload's name, for /system/backups/restore */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        upload: string;
+                    };
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    restoreBackup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RestoreSource"];
+            };
+        };
+        responses: {
+            /** @description The restore waiting for a restart */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupStaged"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    cancelRestore: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Cancelled */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
         };

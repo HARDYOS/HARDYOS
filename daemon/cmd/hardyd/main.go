@@ -19,6 +19,7 @@ import (
 
 	"github.com/hardyos/hardyos/daemon/internal/api"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
+	"github.com/hardyos/hardyos/daemon/internal/backups"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/install"
 	"github.com/hardyos/hardyos/daemon/internal/installer"
@@ -100,6 +101,11 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		upd = &updates.Service{Priv: pc, Jobs: manager, Notify: notifications, DB: db, Log: log, Current: version.Version}
 		upd.RegisterJobs(manager)
 	}
+	var bk *backups.Service
+	if !live {
+		bk = &backups.Service{DB: db, Priv: pc, Jobs: manager, Notify: notifications, Log: log, Current: version.Version}
+		bk.RegisterJobs(manager)
+	}
 	var inst *installer.Service
 	if live {
 		inst = &installer.Service{Priv: pc, Jobs: manager, Limiter: auth.NewLoginLimiter()}
@@ -115,7 +121,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 	handler := api.New(api.Config{
 		DB: db, Jobs: manager, Events: broker, Priv: pc, Logger: log,
 		Storage: stor, Notify: notifications, Metrics: collector,
-		WebRoot: webRoot, Insecure: httpsAddr == "", Installer: inst, Updates: upd,
+		WebRoot: webRoot, Insecure: httpsAddr == "", Installer: inst, Updates: upd, Backups: bk,
 	})
 
 	go housekeeping(ctx, log, &auth.Sessions{DB: db})
@@ -126,6 +132,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		// a minute and report the result.
 		go upd.ConfirmWhenHealthy(ctx, time.Minute)
 		go upd.RunChecks(ctx) // look for new versions on GitHub daily
+		go bk.Run(ctx)        // nightly settings backup
 	}
 
 	var servers []*http.Server

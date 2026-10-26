@@ -2,7 +2,9 @@
 Description=HardyOS privileged helper
 Documentation=https://github.com/HARDYOS/HARDYOS
 After=local-fs.target zfs-mount.service
-Before=hardyd.service
+# Before networking: a settings restore applied at start-up writes the network
+# files that networking then brings up.
+Before=hardyd.service networking.service
 
 [Service]
 # Ready once the socket is up, after any rollback of a failed update has
