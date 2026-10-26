@@ -10,6 +10,7 @@ import { ConfirmDialog } from "../../ui/Dialog";
 import { toast } from "../../ui/toasts";
 import { JobProgress } from "../shared";
 import { linuxMount, smbPath } from "./fileServicesRules";
+import { RemoteAccessCard } from "./FileServicesRemote";
 import { useFileServices } from "./ShareSMBSection";
 import { jobDone } from "./shareServices";
 
@@ -45,6 +46,7 @@ export function FileServices({ admin }: { admin: boolean }) {
           {admin && st.problem && <Alert tone="warn">{st.problem}</Alert>}
           {admin && <ServerCard st={st} onDone={() => void files.refetch()} />}
           {admin && <HomesCard st={st} />}
+          <RemoteAccessCard st={st} admin={admin} />
           <HowToConnect st={st} />
         </>
       )}

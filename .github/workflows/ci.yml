@@ -129,6 +129,12 @@ jobs:
         run: |
           sudo HARDYOS_DC_INTEGRATION=1 HARDYOS_DC_TEST_ADDRESS=10.123.0.20/24 HARDYOS_DC_TEST_GATEWAY=10.123.0.1 \
             "$RUNNER_TEMP/domain.test" -test.run TestSMBMemberIntegration -test.v -test.timeout 20m
+      - name: SFTP - domain accounts in their own views, by rule, no shell or tunnels
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server
+          sudo mkdir -p /run/sshd
+          sudo HARDYOS_DC_INTEGRATION=1 HARDYOS_DC_TEST_ADDRESS=10.123.0.20/24 HARDYOS_DC_TEST_GATEWAY=10.123.0.1 \
+            "$RUNNER_TEMP/domain.test" -test.run TestSFTPMemberIntegration -test.v -test.timeout 20m
       - name: domain controller logs
         if: failure()
         run: |

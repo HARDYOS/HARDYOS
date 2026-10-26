@@ -26,6 +26,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/network"
 	"github.com/hardyos/hardyos/daemon/internal/nfs"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
+	"github.com/hardyos/hardyos/daemon/internal/sftp"
 	"github.com/hardyos/hardyos/daemon/internal/shares"
 	"github.com/hardyos/hardyos/daemon/internal/smb"
 	"github.com/hardyos/hardyos/daemon/internal/snapshots"
@@ -126,6 +127,8 @@ func main() {
 		// SMB file server: the host's Samba as a member of the domain.
 		fsm := &smb.Manager{Runner: sysexec.Exec{}, Log: log, Shares: shm, LocalDomain: localSMBDomain(dc),
 			Addresses: func(ctx context.Context) []string { return smb.LANAddresses(ctx, sysexec.Exec{}) }}
+		// SFTP for domain accounts: sshd's settings and each person's view of the folders.
+		fsm.SFTP = &sftp.Manager{Runner: sysexec.Exec{}, Log: log}
 		priv.RegisterShares(s, shm, priv.RegisterNFS(s, nfsm), priv.RegisterFiles(s, fsm))
 		go nfsm.Watch(ctx)
 		go fsm.Watch(ctx)

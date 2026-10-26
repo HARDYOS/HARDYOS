@@ -3414,6 +3414,10 @@ export interface components {
                 weekly: number;
                 monthly: number;
             };
+            /** @description Offered to domain accounts over SFTP (with File Services' SFTP on). Off for new folders */
+            sftp: boolean;
+            /** @description Offered to domain accounts at https://<server>/dav/ (with File Services' WebDAV on). Off for new folders */
+            webdav: boolean;
         };
         ShareCreateRequest: {
             pool: string;
@@ -3508,6 +3512,10 @@ export interface components {
         FileServicesSettings: {
             smbEnabled: boolean;
             homes: components["schemas"]["FileServicesHomes"];
+            /** @description SFTP for domain accounts (folders with SFTP on */
+            sftpEnabled: boolean;
+            /** @description WebDAV at https://<server>/dav/ for domain accounts (folders with WebDAV on, and Home) */
+            webdavEnabled: boolean;
         };
         FileServicesShare: {
             id: string;
@@ -3517,6 +3525,8 @@ export interface components {
             previousVersions: boolean;
             recycle: boolean;
             guest: boolean;
+            sftp: boolean;
+            webdav: boolean;
             /** @description Offered over SMB right now */
             available: boolean;
             /** @description Access rules that can't apply here (a HardyOS account, another domain's name) */
@@ -3548,6 +3558,7 @@ export interface components {
             addresses: string[];
             /** Format: date-time */
             joinedAt?: string;
+            sftp?: components["schemas"]["FileServicesSFTP"];
         };
         FileServicesJoinRequest: {
             /** @description The domain's DNS name; leave out for this server's own domain */
@@ -3570,6 +3581,20 @@ export interface components {
         FileServicesSettingsRequest: {
             smbEnabled?: boolean;
             homes?: components["schemas"]["FileServicesHomes"];
+            sftpEnabled?: boolean;
+            webdavEnabled?: boolean;
+        };
+        FileServicesSFTP: {
+            enabled: boolean;
+            /** @description The SSH server runs (HardyOS doesn't start or stop it) */
+            running: boolean;
+            /** @description Domain accounts that have something to see over SFTP */
+            users: number;
+            /** @description Folders offered in all their views together */
+            folders: number;
+            /** @example 22 */
+            port: number;
+            problem: string;
         };
         DomainConfig: {
             /** @example home.hardynetworks.net */

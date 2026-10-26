@@ -261,7 +261,7 @@ func TestCreate(t *testing.T) {
 		`-o org.hardyos:access=[{"kind":"group","name":"HOME\\Family","level":"write"}] -o org.hardyos:apps=[] ` +
 		`-o org.hardyos:recycle=on -o org.hardyos:guest=off ` +
 		`-o org.hardyos:services={"smb":{"enabled":true,"timeMachine":false,"timeMachineMaxBytes":0,"previousVersions":true},` +
-		`"nfs":{"enabled":false,"clients":[]},"snapshots":{"hourly":24,"daily":14,"weekly":8,"monthly":6}} ` + ds
+		`"nfs":{"enabled":false,"clients":[]},"snapshots":{"hourly":24,"daily":14,"weekly":8,"monthly":6},"sftp":false,"webdav":false} ` + ds
 	if !slices.Contains(f.Lines(), want) {
 		t.Errorf("create command missing:\nwant %s\ngot  %s", want, strings.Join(f.Lines(), "\n     "))
 	}

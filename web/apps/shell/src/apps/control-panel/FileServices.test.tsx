@@ -27,6 +27,8 @@ const backups: Share = {
     smb: { enabled: true, timeMachine: false, timeMachineMaxBytes: 0, previousVersions: true },
     nfs: { enabled: false, clients: [] },
     snapshots: { hourly: 24, daily: 14, weekly: 8, monthly: 6 },
+    sftp: false,
+    webdav: false,
   },
 };
 
@@ -40,10 +42,10 @@ const joined: FileServicesStatus = {
   running: true,
   winbind: true,
   problem: "",
-  settings: { smbEnabled: true, homes: { enabled: false, pool: "", quotaBytes: 0 } },
+  settings: { smbEnabled: true, homes: { enabled: false, pool: "", quotaBytes: 0 }, sftpEnabled: false, webdavEnabled: false },
   shares: [
-    { id: "backups", name: "Backups", smb: true, timeMachine: true, previousVersions: true, recycle: false, guest: false, available: true, skipped: [] },
-    { id: "media", name: "Family Media", smb: true, timeMachine: false, previousVersions: true, recycle: true, guest: true, available: true, skipped: ["admin"] },
+    { id: "backups", name: "Backups", smb: true, timeMachine: true, previousVersions: true, recycle: false, guest: false, sftp: false, webdav: false, available: true, skipped: [] },
+    { id: "media", name: "Family Media", smb: true, timeMachine: false, previousVersions: true, recycle: true, guest: true, sftp: false, webdav: false, available: true, skipped: ["admin"] },
   ],
   addresses: ["192.168.1.105"],
   joinedAt: "2026-10-26T12:00:00Z",

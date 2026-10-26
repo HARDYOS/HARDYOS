@@ -33,6 +33,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hardyos/hardyos/daemon/internal/fileworker"
+	"github.com/hardyos/hardyos/daemon/internal/sftp"
 	"github.com/hardyos/hardyos/daemon/internal/shares"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 )
@@ -78,6 +80,11 @@ type HomesSettings struct {
 type Settings struct {
 	SMBEnabled bool          `json:"smbEnabled"`
 	Homes      HomesSettings `json:"homes"`
+	// SFTPEnabled offers the folders with SFTP on to domain accounts over
+	// SSH; WebDAVEnabled those with WebDAV on at https://<server>/dav/
+	// (served by hardyd). Both off until turned on.
+	SFTPEnabled   bool `json:"sftpEnabled"`
+	WebDAVEnabled bool `json:"webdavEnabled"`
 }
 
 // ShareStatus is how one shared folder is offered over SMB.
@@ -89,6 +96,9 @@ type ShareStatus struct {
 	PreviousVersions bool   `json:"previousVersions"`
 	Recycle          bool   `json:"recycle"`
 	Guest            bool   `json:"guest"`
+	// SFTP and WebDAV: the folder's own switches (shares.Services).
+	SFTP   bool `json:"sftp"`
+	WebDAV bool `json:"webdav"`
 	// Available: SMB on and the folder mounted.
 	Available bool `json:"available"`
 	// Skipped names rules that can't apply (another domain, a HardyOS account).
@@ -114,6 +124,8 @@ type Status struct {
 	Shares      []ShareStatus `json:"shares"`
 	Addresses   []string      `json:"addresses"`
 	JoinedAt    *time.Time    `json:"joinedAt,omitempty"`
+	// SFTP is how SFTP is doing (nil: this build has no SFTP).
+	SFTP *sftp.Status `json:"sftp,omitempty"`
 }
 
 // JoinArgs joins the domain.
@@ -134,8 +146,10 @@ type LeaveArgs struct {
 
 // SettingsArgs changes settings; nil fields keep their values.
 type SettingsArgs struct {
-	SMBEnabled *bool          `json:"smbEnabled,omitempty"`
-	Homes      *HomesSettings `json:"homes,omitempty"`
+	SMBEnabled    *bool          `json:"smbEnabled,omitempty"`
+	Homes         *HomesSettings `json:"homes,omitempty"`
+	SFTPEnabled   *bool          `json:"sftpEnabled,omitempty"`
+	WebDAVEnabled *bool          `json:"webdavEnabled,omitempty"`
 }
 
 // ShareSource lists shared folders (shares.Manager).
@@ -183,6 +197,11 @@ type Manager struct {
 	walk func(ctx context.Context, root string, dev uint64, p shares.PeopleACL) (shares.PeopleStats, error)
 	// resolver overrides name lookups (tests).
 	resolver Resolver
+	// SFTP keeps the SFTP views and sshd's settings (nil: no SFTP).
+	SFTP *sftp.Manager
+	// LookupUser resolves a domain account's IDs for SFTP;
+	// nil uses fileworker.HelperLookup.
+	LookupUser func(ctx context.Context, name string) (*fileworker.Identity, error)
 
 	mu        sync.Mutex // one change at a time
 	stateMu   sync.Mutex // state.json
@@ -191,6 +210,8 @@ type Manager struct {
 	wg        sync.WaitGroup
 	lastHomes time.Time
 	released  map[string]bool // shares being deleted (m.mu)
+	users     []string        // the domain's turned-on accounts (m.mu)
+	usersAt   time.Time
 }
 
 type bgWalk struct {

@@ -16,6 +16,8 @@ export const DEFAULT_SERVICES: ShareServices = {
   smb: { enabled: true, timeMachine: false, timeMachineMaxBytes: 0, previousVersions: true },
   nfs: { enabled: false, clients: [] },
   snapshots: { hourly: 24, daily: 14, weekly: 8, monthly: 6 },
+  sftp: false,
+  webdav: false,
 };
 
 /**
