@@ -231,6 +231,26 @@ always password-protected (argon2id and AES-256-GCM) and never kept on a pool.
   settings that don't work on the machine (different ports) are skipped, so
   restoring onto new hardware can't leave the server unreachable.
 
+## Terminal
+
+The Terminal app is a root shell in the browser, for administrators only. It's
+the one deliberate exception to the fixed-operations rule (decision 37): a
+person types into it, but no API call can run a command through it.
+
+1. The administrator enters their password again (`POST /terminal/session`,
+   rate limited) and gets a one-time ticket that lasts 30 seconds.
+2. The browser opens `GET /terminal/ws?ticket=…`. hardyd asks hardyd-priv for
+   `terminal.open`, which starts `bash --login` on a new pseudo-terminal in the
+   host's mount namespace and passes the terminal's file descriptor back over
+   the socket (SCM_RIGHTS). At most 4 run at once.
+3. hardyd relays bytes over the WebSocket (binary frames; resize and "closed"
+   messages are text frames). It closes the session after 15 minutes without
+   typing or 8 hours in total. Every unlock attempt, open and close (with the
+   reason and length) goes in the security log.
+
+Control Panel > Security has the on/off switch (`terminal.enabled`, on by
+default).
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly

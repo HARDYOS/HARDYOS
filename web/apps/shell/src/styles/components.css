@@ -1108,3 +1108,18 @@
   margin: 0;
   line-height: 1.5;
 }
+
+/* Terminal app */
+.terminal-unlock {
+  width: min(380px, 100%);
+}
+.terminal-host {
+  height: 100%;
+  width: 100%;
+  background: #05070d;
+  padding: 6px 0 0 8px;
+  box-sizing: border-box;
+}
+.terminal-host .xterm {
+  height: 100%;
+}

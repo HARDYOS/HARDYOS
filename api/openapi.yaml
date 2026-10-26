@@ -28,6 +28,7 @@ tags:
   - name: updates
   - name: network
   - name: backups
+  - name: terminal
 paths:
   /health:
     get:
@@ -1374,6 +1375,85 @@ paths:
         "400": { $ref: "#/components/responses/Invalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /terminal/settings:
+    get:
+      operationId: getTerminalSettings
+      summary: Whether the browser terminal is on
+      tags: [terminal]
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TerminalSettings" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    put:
+      operationId: setTerminalSettings
+      summary: Turn the browser terminal on or off
+      tags: [terminal]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TerminalSettings" }
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TerminalSettings" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /terminal/session:
+    post:
+      operationId: openTerminalSession
+      summary: Re-enter the password to get a one-time ticket for /terminal/ws
+      description: The ticket works once, within 30 seconds, for the same administrator.
+      tags: [terminal]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string }
+      responses:
+        "200":
+          description: The ticket
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ticket]
+                properties:
+                  ticket: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429":
+          description: Too many wrong passwords
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /terminal/ws:
+    get:
+      operationId: terminalWebSocket
+      summary: WebSocket to a root shell
+      description: |
+        Upgrade with ?ticket=&cols=&rows=. Binary frames carry terminal bytes
+        both ways; text frames carry control messages: {"type":"resize","cols":N,"rows":N}
+        from the browser, {"type":"closed","reason":"..."} to it. The session
+        closes after 15 minutes without input and after 8 hours.
+      tags: [terminal]
+      parameters:
+        - { name: ticket, in: query, required: true, schema: { type: string } }
+        - { name: cols, in: query, required: true, schema: { type: integer } }
+        - { name: rows, in: query, required: true, schema: { type: integer } }
+      responses:
+        "101": { description: Switching to the WebSocket protocol }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /installer:
     get:
       operationId: getInstallerStatus
@@ -2332,3 +2412,8 @@ components:
               espPartUUID: { type: string }
         candidates: { type: array, items: { $ref: "#/components/schemas/Disk" } }
         minBytes: { type: integer, format: int64, description: The smallest disk that can join }
+    TerminalSettings:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean }

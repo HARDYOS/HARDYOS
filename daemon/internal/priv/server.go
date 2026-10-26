@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"golang.org/x/sys/unix"
 	"io"
 	"log/slog"
 	"net"
@@ -152,9 +153,22 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 		writeResponse(conn, Response{Error: pe})
 		return
 	}
+	// An operation can hand over an open file (a terminal) with its result.
+	var file *os.File
+	if fr, ok := result.(*FileResult); ok {
+		result, file = fr.Data, fr.File
+		defer file.Close() // the caller has its own copy once sent
+	}
 	data, err := json.Marshal(result)
 	if err != nil {
 		writeResponse(conn, Response{Error: Errorf(CodeFailed, "encode result: %v", err)})
+		return
+	}
+	if file != nil {
+		b, _ := json.Marshal(Response{OK: true, Data: data})
+		if _, _, err := conn.WriteMsgUnix(append(b, '\n'), unix.UnixRights(int(file.Fd())), nil); err != nil {
+			log.Warn("priv op: sending the file failed", "op", req.Op, "err", err)
+		}
 		return
 	}
 	writeResponse(conn, Response{OK: true, Data: data})
@@ -170,6 +184,13 @@ func (s *Server) allowed(uid uint32) bool {
 		}
 	}
 	return false
+}
+
+// FileResult is an operation result that also passes an open file to the
+// caller (SCM_RIGHTS over the socket). Only CallFile receives it.
+type FileResult struct {
+	Data any
+	File *os.File
 }
 
 func writeResponse(w io.Writer, r Response) {
