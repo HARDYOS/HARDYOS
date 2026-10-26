@@ -54,6 +54,8 @@ export function useLogout() {
       qc.clear();
       qc.setQueryData(["me"], null);
       qc.setQueryData(["setup"], { needsAdmin: false });
+      // Fetch the rest (whether domain accounts can sign in) for the sign-in screen.
+      void qc.invalidateQueries({ queryKey: ["setup"] });
     },
   });
 }

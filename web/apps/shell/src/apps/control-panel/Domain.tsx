@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 import { api, errorMessage, unwrap } from "../../api";
 import { dateTime } from "../../format";
-import { DomainIcon, EditIcon, PlayIcon, StopIcon, TrashIcon } from "../../icons";
+import { DomainIcon, EditIcon, PlayIcon, PlusIcon, StopIcon, TrashIcon } from "../../icons";
 import { Alert, Badge, Button, Card, EmptyState, ErrorBox, Field, IconButton, Loading, PageHeader, TextInput } from "../../ui";
 import { ConfirmDialog, Dialog } from "../../ui/Dialog";
 import { toast } from "../../ui/toasts";
@@ -419,6 +419,7 @@ function Overview({ st }: { st: DomainStatus }) {
           </div>
         </Card>
       </div>
+      <DesktopSignIn c={c} />
       <div className="grid-2">
         <Card title="DNS for your network">
           <p className="small" style={{ marginTop: 0 }}>
@@ -479,6 +480,52 @@ function Overview({ st }: { st: DomainStatus }) {
         </ConfirmDialog>
       )}
     </>
+  );
+}
+
+/** The HardyOS group whose members become desktop administrators. */
+const HARDYOS_ADMINS = "HardyOS Admins";
+
+function DesktopSignIn({ c }: { c: DomainConfig }) {
+  const qc = useQueryClient();
+  const groups = useQuery({ queryKey: ["domain", "groups"], queryFn: () => unwrap(api.GET("/domain/groups")).then((r) => r.groups) });
+  const hasGroup = groups.data?.some((g) => g.name.toLowerCase() === HARDYOS_ADMINS.toLowerCase()) ?? false;
+  const create = useMutation({
+    mutationFn: () => unwrap(api.POST("/domain/groups", { body: { name: HARDYOS_ADMINS, description: "Administrators of the HardyOS desktop" } })),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["domain", "groups"] });
+      toast("success", `Created ${HARDYOS_ADMINS}`, "Add people to it on the Groups tab.");
+    },
+    onError: (e) => toast("error", `Couldn't create ${HARDYOS_ADMINS}`, errorMessage(e)),
+  });
+  return (
+    <Card
+      title="Desktop sign-in"
+      actions={
+        groups.isSuccess && !hasGroup ? (
+          <Button size="sm" onClick={() => create.mutate()} busy={create.isPending}>
+            <PlusIcon size={14} /> Create {HARDYOS_ADMINS}
+          </Button>
+        ) : undefined
+      }
+    >
+      <p className="small" style={{ marginTop: 0 }}>
+        Everyone with a domain account can sign in to the HardyOS desktop with their domain password, as <span className="mono">name</span>,{" "}
+        <span className="mono">{c.netbios}\name</span> or <span className="mono">name@{c.domain}</span>. A local HardyOS account with the same name comes
+        first.
+      </p>
+      <p className="small muted" style={{ margin: 0 }}>
+        Members of <strong>Domain Admins</strong>
+        {hasGroup && (
+          <>
+            {" "}
+            or <strong>{HARDYOS_ADMINS}</strong>
+          </>
+        )}{" "}
+        are HardyOS administrators; everyone else is a user.
+        {groups.isSuccess && !hasGroup && <> Create {HARDYOS_ADMINS} to make someone a HardyOS administrator without making them a domain administrator.</>}
+      </p>
+    </Card>
   );
 }
 

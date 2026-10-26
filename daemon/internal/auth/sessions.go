@@ -35,6 +35,10 @@ type SessionInfo struct {
 	CreatedAt time.Time
 	LastSeen  time.Time
 	ExpiresAt time.Time
+	// Source and Principal record which kind of account signed in
+	// (SourceLocal "alice", SourceDomain "HOME\alice").
+	Source    string
+	Principal string
 }
 
 func hashToken(token string) string {
@@ -42,8 +46,22 @@ func hashToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// Create starts a session for userID and returns the token for the cookie.
+// Create starts a session for a local account and returns the token for the
+// cookie. Use Start when the User is at hand.
 func (s *Sessions) Create(ctx context.Context, userID int64, ip, userAgent string) (string, time.Time, error) {
+	return s.create(ctx, userID, SourceLocal, "", ip, userAgent)
+}
+
+// Start starts a session for u, recording its source and principal.
+func (s *Sessions) Start(ctx context.Context, u *User, ip, userAgent string) (string, time.Time, error) {
+	src := u.Source
+	if src == "" {
+		src = SourceLocal
+	}
+	return s.create(ctx, u.ID, src, u.Principal, ip, userAgent)
+}
+
+func (s *Sessions) create(ctx context.Context, userID int64, source, principal, ip, userAgent string) (string, time.Time, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return "", time.Time{}, err
@@ -54,9 +72,9 @@ func (s *Sessions) Create(ctx context.Context, userID int64, ip, userAgent strin
 	if len(userAgent) > 256 {
 		userAgent = userAgent[:256]
 	}
-	_, err := s.DB.ExecContext(ctx, `INSERT INTO sessions (id_hash, user_id, created_at, last_seen_at, expires_at, ip, user_agent)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		hashToken(token), userID, store.FormatTime(now), store.FormatTime(now), store.FormatTime(expires), ip, userAgent)
+	_, err := s.DB.ExecContext(ctx, `INSERT INTO sessions (id_hash, user_id, created_at, last_seen_at, expires_at, ip, user_agent, source, principal)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		hashToken(token), userID, store.FormatTime(now), store.FormatTime(now), store.FormatTime(expires), ip, userAgent, source, principal)
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -71,8 +89,8 @@ func (s *Sessions) Validate(ctx context.Context, token string) (*SessionInfo, er
 	id := hashToken(token)
 	var info SessionInfo
 	var created, seen, expires string
-	err := s.DB.QueryRowContext(ctx, `SELECT user_id, created_at, last_seen_at, expires_at FROM sessions WHERE id_hash = ?`, id).
-		Scan(&info.UserID, &created, &seen, &expires)
+	err := s.DB.QueryRowContext(ctx, `SELECT user_id, created_at, last_seen_at, expires_at, source, principal FROM sessions WHERE id_hash = ?`, id).
+		Scan(&info.UserID, &created, &seen, &expires, &info.Source, &info.Principal)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNoSession
 	}

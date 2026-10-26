@@ -17,6 +17,8 @@ func writeUserError(s *Server, w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "user_exists", err.Error())
 	case errors.Is(err, auth.ErrLastAdmin):
 		writeError(w, http.StatusConflict, "last_admin", err.Error())
+	case errors.Is(err, auth.ErrDomainManaged):
+		writeError(w, http.StatusConflict, "domain_account", err.Error())
 	case isErr(err, auth.ErrInvalidName, auth.ErrWeakPassword, auth.ErrPasswordTooLong, auth.ErrInvalidRole):
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
 	default:

@@ -100,6 +100,7 @@ func TestDCIntegration(t *testing.T) {
 	if _, err := a.SetUserEnabled(ctx, "alice", true); err != nil {
 		t.Fatal(err)
 	}
+	signInIntegration(t, a, c1, pw)
 	if _, err := a.SetForwarders(ctx, []string{"1.1.1.1"}); err != nil {
 		t.Fatal(err)
 	}

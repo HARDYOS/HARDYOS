@@ -46,7 +46,8 @@ undo only writes the network files).
 ## Sign-in and sessions
 
 - Passwords are hashed with Argon2id. Five failed sign-ins in 15 minutes lock
-  that IP and that username for 15 minutes.
+  that IP and that username for 15 minutes. Domain accounts can sign in too
+  (see Domain controller > Desktop sign-in with domain accounts).
 - Sessions are random 256-bit tokens in an HttpOnly, Secure, SameSite=Strict
   cookie; only a SHA-256 hash is stored. They expire after 24 hours idle and
   30 days at most. Password changes and disabling an account end its sessions.
@@ -317,10 +318,64 @@ for the domain controller and sets the domain Administrator's password.
   already on the server is kept, and a DC that had partners isn't restored
   (it rejoins instead).
 
-The local HardyOS accounts (Control Panel > Users & Groups) stay separate for
-now; the local admin remains the break-glass account. Shares (Phase 2) use
-the domain's users and groups, and Authentik (Phase 3) signs apps in with
-them.
+The local HardyOS accounts (Control Panel > Users & Groups) stay alongside
+the domain's; the local admin remains the break-glass account. Shares
+(Phase 2) use the domain's users and groups, and Authentik (Phase 3) signs
+apps in with them.
+
+### Desktop sign-in with domain accounts
+
+When the server has a domain, its accounts sign in to the web desktop too
+(`internal/auth` `SignIn`, used by `POST /auth/login`):
+
+- **Names.** `alice`, `HOME\alice` and `alice@home.example.net` all mean
+  the domain's alice; `DNS-domain\alice` and `alice@REALM` work as well. A
+  local HardyOS account wins for a bare name, so the break-glass admin can't
+  be shadowed by a domain account. A prefix or suffix that isn't this
+  server's domain is refused (`unknown_domain`).
+- **Password check.** hardyd (not root) asks the domain's DCs for a
+  ticket-granting ticket with a Kerberos AS exchange (gokrb5, pure Go, TCP,
+  no krb5.conf or DNS lookups): the realm and the DCs' addresses (this
+  server's own first, then its partners) come from `domain.status`, cached
+  for 30 seconds. hardyd reaches its own DC through the shim route. DCs that
+  don't accept a connection within 2 seconds are skipped and the whole check
+  is bounded at 10 seconds. The ticket is thrown away.
+- **Answers.** A wrong password and an unknown name give the same
+  `bad_credentials` as for local accounts (a bare name not known locally
+  also runs a dummy Argon2 check, so timing doesn't tell local from domain).
+  A turned-off, locked or expired account, or an expired password, gets its
+  own message: the KDC already tells any device on the network that much.
+  An unreachable DC or a clock more than 5 minutes off answer 503 and don't
+  count as failed guesses. Failed guesses count against the IP and against
+  the account under one key for every spelling (`user:home\alice`), with the
+  same 5-in-15-minutes lockout as local sign-in.
+- **Groups and role.** After the password, hardyd-priv's
+  `domain.user_groups {username}` runs `hardyos-dc-admin user.groups`, which
+  reads the account's state and its `tokenGroups` (nested groups and the
+  primary group included; BUILTIN groups left out). Turned-off and expired
+  accounts are refused. Members of `Domain Admins` or `HardyOS Admins` are
+  administrators, everyone else is a user. `HardyOS Admins` isn't created
+  automatically; the Domain page has a button for it.
+- **Records.** The first sign-in creates a row in `users` with
+  `source = domain`, `username = HOME\alice` and an empty password hash, so
+  sessions, jobs and the audit log point at domain users the same way as at
+  local ones. The row holds the name, email, role and groups (`HOME\Family`)
+  from the domain; sessions record `source` and `principal`. While signed
+  in, the groups are looked up again at most every 10 minutes (from the
+  request that finds them older); a deleted, turned-off or expired account,
+  or a different domain, ends all its sessions. If the domain can't be
+  asked, the known groups stay and the lookup is retried a minute later.
+- **What a domain account can't do here.** Change its password through
+  HardyOS (`/auth/password` and the admin reset answer `domain_account`,
+  pointing to Domain > Users), have its name, email or role edited, be a
+  break-glass account, or count as the last administrator. An admin can turn
+  it off in HardyOS (a local switch) or forget it (delete the row). A domain
+  admin can open the terminal: the password is checked by Kerberos again.
+- **For access checks.** `auth.Identity` (implemented by `*auth.User`)
+  gives `IdentitySource()`, `IdentityPrincipal()` (`alice` or `HOME\alice`),
+  `IdentityGroups()` and `Matches(kind, name)` for rules of kind `user`,
+  `group` or `everyone`, compared case-insensitively. `/auth/me` returns
+  `source`, `principal` and `groups`.
 
 ## Shared folders
 

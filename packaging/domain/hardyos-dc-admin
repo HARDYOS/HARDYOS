@@ -11,6 +11,7 @@ Usage: hardyos-dc-admin <smb.conf> <command>
 
 import json
 import sys
+import time
 
 import ldb
 from samba.auth import system_session
@@ -33,7 +34,7 @@ PROTECTED_GROUPS = {"dnsadmins", "dnsupdateproxy"}
 USER_ATTRS = [
     "sAMAccountName", "givenName", "sn", "displayName", "mail",
     "userAccountControl", "memberOf", "whenCreated", "lastLogonTimestamp",
-    "objectSid", "pwdLastSet", "lockoutTime",
+    "objectSid", "pwdLastSet", "lockoutTime", "accountExpires",
 ]
 GROUP_ATTRS = ["sAMAccountName", "description", "member", "objectSid", "groupType", "isCriticalSystemObject"]
 
@@ -159,6 +160,39 @@ class Directory:
                 "builtin": builtin,
             })
         return {"groups": sorted(out, key=lambda g: (g["builtin"], g["name"].lower()))}
+
+    def user_groups(self, a):
+        """One account's state and every group it's in (nested groups and
+        the primary group too, from tokenGroups), for desktop sign-in."""
+        try:
+            m = self._user(a["username"])
+        except Fail:
+            return {"exists": False, "groups": []}
+        info = self._user_json(m)
+        names = set()
+        res = self.db.search(base=m.dn, scope=ldb.SCOPE_BASE, attrs=["tokenGroups"])
+        for raw in res[0].get("tokenGroups", []) if len(res) == 1 else []:
+            sid = str(ndr_unpack(security.dom_sid, raw))
+            if sid.startswith("S-1-5-32-"):
+                continue  # BUILTIN\Users and friends aren't domain groups
+            g = self.db.search(base=self.base, scope=ldb.SCOPE_SUBTREE, attrs=["sAMAccountName"],
+                               expression="(objectSid=%s)" % ldb.binary_encode(sid))
+            if len(g) == 1:
+                names.add(first(g[0], "sAMAccountName"))
+        if not names:
+            names = set(info["groups"])
+        expires = ad_time(first(m, "accountExpires", "0"))
+        return {
+            "exists": True,
+            "username": info["username"],
+            "displayName": info["displayName"] or " ".join(x for x in (info["givenName"], info["surname"]) if x),
+            "email": info["email"],
+            "enabled": info["enabled"],
+            "lockedOut": info["lockedOut"],
+            "expired": expires > 0 and expires < int(time.time()),
+            "mustChangePassword": info["mustChangePassword"],
+            "groups": sorted(names, key=str.lower),
+        }
 
     @staticmethod
     def _group_builtin(m):
@@ -332,6 +366,7 @@ COMMANDS = {
     "user.password": Directory.user_password,
     "user.enable": Directory.user_enable,
     "user.delete": Directory.user_delete,
+    "user.groups": Directory.user_groups,
     "group.create": Directory.group_create,
     "group.update": Directory.group_update,
     "group.delete": Directory.group_delete,

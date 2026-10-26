@@ -93,6 +93,14 @@ paths:
     post:
       operationId: login
       summary: Sign in
+      description: |
+        Local HardyOS accounts sign in with their username. When this server
+        has a domain, domain accounts sign in as `alice`, `HOME\alice` or
+        `alice@home.example.net` (a local account wins for a bare name); the
+        password is checked by Kerberos against the domain's controllers.
+        401 codes: `bad_credentials` (wrong password or unknown name),
+        `unknown_domain`, `account_disabled`, `account_locked`,
+        `account_expired`, `account_unavailable`, `password_expired`.
       tags: [auth]
       security: []
       requestBody:
@@ -107,6 +115,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/User" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "503":
+          description: The domain controller can't be reached (`domain_unavailable`) or its clock is too far off (`clock_skew`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "429":
           description: Too many failed sign-ins; see Retry-After
           headers:
@@ -2313,6 +2326,7 @@ components:
       required: [needsAdmin]
       properties:
         needsAdmin: { type: boolean, description: True until the first administrator exists }
+        domainSignIn: { type: boolean, description: This server has a domain whose accounts can sign in to the desktop }
     SetupAdminRequest:
       type: object
       required: [username, password]
@@ -2341,8 +2355,19 @@ components:
       enum: [admin, user]
     User:
       type: object
-      required: [id, username, displayName, email, role, disabled, breakGlass, createdAt, lastLoginAt]
+      required: [id, username, displayName, email, role, disabled, breakGlass, createdAt, lastLoginAt, source, principal, groups]
       properties:
+        source:
+          type: string
+          enum: [local, domain]
+          description: A local HardyOS account, or a domain account that has signed in to the desktop
+        principal:
+          type: string
+          description: How access rules name this user — `alice` for local accounts, `HOME\alice` for domain accounts
+        groups:
+          type: array
+          items: { type: string }
+          description: A domain account's groups as `HOME\Family` (Domain Users included), looked up at sign-in and at most every 10 minutes; empty for local accounts
         id: { type: integer, format: int64 }
         username: { type: string }
         displayName: { type: string }
