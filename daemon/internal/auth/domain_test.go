@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hardyos/hardyos/daemon/internal/store"
 	"github.com/jcmturner/gokrb5/v8/iana/errorcode"
 	"github.com/jcmturner/gokrb5/v8/iana/nametype"
 	"github.com/jcmturner/gokrb5/v8/krberror"
@@ -32,23 +33,55 @@ type fakeDomain struct {
 	checks   []string
 }
 
+// The fake domain's SIDs.
+const (
+	testDomainSID = "S-1-5-21-1111-2222-3333"
+	testAdminsSID = testDomainSID + "-1105" // the recorded HardyOS Admins
+)
+
+// testGroupSIDs are the fake domain's groups by name.
+var testGroupSIDs = map[string]string{
+	"domain users":   testDomainSID + "-513",
+	"domain admins":  testDomainSID + "-512",
+	"hardyos admins": testAdminsSID,
+	"family":         testDomainSID + "-1104",
+}
+
 func newFakeDomain() *fakeDomain {
 	return &fakeDomain{
-		info:     &DomainInfo{Realm: "HOME.EXAMPLE.NET", NetBIOS: "HOME", DNS: "home.example.net", KDCs: []string{"192.0.2.20"}},
+		info: &DomainInfo{Realm: "HOME.EXAMPLE.NET", NetBIOS: "HOME", DNS: "home.example.net", LocalKDC: "192.0.2.20",
+			AdminsGroupSID: testAdminsSID},
 		accounts: map[string]*DomainAccount{},
 		pw:       map[string]string{},
 		revoked:  map[string]bool{},
 	}
 }
 
+// add creates an account in the named groups (SIDs from testGroupSIDs).
 func (f *fakeDomain) add(name, pw string, groups ...string) *DomainAccount {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	a := &DomainAccount{Exists: true, Username: name, DisplayName: strings.ToUpper(name[:1]) + name[1:], Enabled: true,
-		Groups: append([]string{"Domain Users"}, groups...)}
+		DomainSID: testDomainSID}
+	for _, g := range append([]string{"Domain Users"}, groups...) {
+		sid, ok := testGroupSIDs[strings.ToLower(g)]
+		if !ok {
+			sid = fmt.Sprintf("%s-%d", testDomainSID, 2000+len(testGroupSIDs)+len(a.Groups))
+		}
+		a.Groups = append(a.Groups, g)
+		a.GroupSIDs = append(a.GroupSIDs, sid)
+	}
 	f.accounts[strings.ToLower(name)] = a
 	f.pw[strings.ToLower(name)] = pw
 	return a
+}
+
+// join puts an account in a group with the given SID.
+func (f *fakeDomain) join(a *DomainAccount, group, sid string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a.Groups = append(a.Groups, group)
+	a.GroupSIDs = append(a.GroupSIDs, sid)
 }
 
 func (f *fakeDomain) Info(context.Context) (*DomainInfo, error) {
@@ -69,6 +102,7 @@ func (f *fakeDomain) Account(_ context.Context, name string) (*DomainAccount, er
 	}
 	c := *a
 	c.Groups = append([]string(nil), a.Groups...)
+	c.GroupSIDs = append([]string(nil), a.GroupSIDs...)
 	return &c, nil
 }
 
@@ -231,6 +265,90 @@ func TestDomainRolesAndStates(t *testing.T) {
 	}
 }
 
+// The role comes from SIDs: a group anyone could name "HardyOS Admins" or
+// "Domain Admins" grants nothing, the recorded group keeps working when
+// it's renamed, and Domain Admins counts only as this domain's -512.
+func TestDomainAdminRoleBySID(t *testing.T) {
+	ctx := context.Background()
+	s, f := newSignIn(t)
+	cases := []struct {
+		name, group, sid string
+		admin            bool
+	}{
+		{"fake1", "HardyOS Admins", testDomainSID + "-1200", false}, // made by an Account Operator
+		{"fake2", "Domain Admins", testDomainSID + "-1201", false},
+		{"fake3", "Domain Admins", "S-1-5-21-9-9-9-512", false}, // another domain's
+		{"fake4", "Administrators", "S-1-5-32-544", false},
+		{"renamed", "Desktop Bosses", testAdminsSID, true},
+		{"da", "Domain Admins", testDomainSID + "-512", true},
+		{"lower", "domain admins", strings.ToLower(testDomainSID) + "-512", true},
+	}
+	for _, c := range cases {
+		a := f.add(c.name, "Passw0rd-"+c.name)
+		f.join(a, c.group, c.sid)
+		u, err := s.Authenticate(ctx, `HOME\`+c.name, "Passw0rd-"+c.name)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if u.IsAdmin() != c.admin {
+			t.Errorf("%s in %q (%s): admin = %v, want %v", c.name, c.group, c.sid, u.IsAdmin(), c.admin)
+		}
+		if !strings.Contains(strings.Join(u.Groups, ","), `HOME\`+c.group) {
+			t.Errorf("%s: groups = %v", c.name, u.Groups)
+		}
+	}
+
+	// No HardyOS Admins recorded: its members are users.
+	f.info.AdminsGroupSID = ""
+	if u, err := s.Authenticate(ctx, `HOME\renamed`, "Passw0rd-renamed"); err != nil || u.IsAdmin() {
+		t.Errorf("unrecorded HardyOS Admins: %+v %v", u, err)
+	}
+	// A helper that doesn't say SIDs (an old one) gives no administrators.
+	a := f.add("old", "Passw0rd-old", "Domain Admins")
+	a.DomainSID, a.GroupSIDs = "", nil
+	if u, err := s.Authenticate(ctx, `HOME\old`, "Passw0rd-old"); err != nil || u.IsAdmin() {
+		t.Errorf("no SIDs: %+v %v", u, err)
+	}
+	if AdminBySID("", "", []string{"-512"}) || AdminBySID("S-1-5-21-1", "", nil) {
+		t.Error("AdminBySID without SIDs")
+	}
+}
+
+// Without a domain controller of its own, the server can't tell a real DC
+// from an impostor, so domain sign-in is refused and Kerberos isn't asked.
+func TestNoLocalDC(t *testing.T) {
+	ctx := context.Background()
+	s, f := newSignIn(t)
+	f.add("alice", "Al1ce-Passw0rd!", "Domain Admins")
+	u, err := s.Authenticate(ctx, `HOME\alice`, "Al1ce-Passw0rd!")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.checks = nil
+	f.info.LocalKDC = ""
+	for _, typed := range []string{"alice", `HOME\alice`, "alice@home.example.net"} {
+		if _, err := s.Authenticate(ctx, typed, "Al1ce-Passw0rd!"); !errors.Is(err, ErrNoLocalDC) {
+			t.Errorf("%s: %v", typed, err)
+		}
+	}
+	if err := s.Verify(ctx, u, "Al1ce-Passw0rd!"); !errors.Is(err, ErrNoLocalDC) {
+		t.Errorf("terminal check: %v", err)
+	}
+	if len(f.checks) != 0 {
+		t.Errorf("Kerberos was asked: %v", f.checks)
+	}
+	if err := (KerberosChecker{}).CheckPassword(ctx, *f.info, "alice", "pw"); !errors.Is(err, ErrNoLocalDC) {
+		t.Errorf("KerberosChecker without a local DC: %v", err)
+	}
+	// Local accounts still sign in.
+	if _, err := s.Users.Create(ctx, NewUser{Username: "cade", Role: RoleAdmin, Password: "supersecret1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Authenticate(ctx, "cade", "supersecret1"); err != nil {
+		t.Errorf("local: %v", err)
+	}
+}
+
 func TestNoDomain(t *testing.T) {
 	ctx := context.Background()
 	s, f := newSignIn(t)
@@ -273,7 +391,7 @@ func TestGroupRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	u, _ = s.Users.Get(ctx, u.ID)
-	a.Groups = append(a.Groups, "HardyOS Admins")
+	f.join(a, "HardyOS Admins", testAdminsSID)
 
 	// Fresh groups aren't looked up again.
 	if got, err := s.Refresh(ctx, u); err != nil || got.IsAdmin() {
@@ -286,8 +404,9 @@ func TestGroupRefresh(t *testing.T) {
 		t.Fatalf("aged refresh: %+v, %v", got, err)
 	}
 
-	// The domain can't be asked: keep what we know, try again later.
-	agedGroups(t, s, u.ID)
+	// The domain can't be asked: keep what we know (within the trust
+	// window), try again later.
+	setGroupsCheckedAt(t, s, u.ID, time.Now().Add(-GroupRefreshInterval-time.Minute))
 	u, _ = s.Users.Get(ctx, u.ID)
 	f.acctErr = errors.New("down")
 	if got, err := s.Refresh(ctx, u); err != nil || got != u {
@@ -308,7 +427,7 @@ func TestGroupRefresh(t *testing.T) {
 	if _, err := (&SignIn{Users: s.Users, Domain: f}).Refresh(ctx, u); !errors.Is(err, ErrAccountGone) {
 		t.Errorf("deleted in the domain: %v", err)
 	}
-	f.info = &DomainInfo{Realm: "NEW.EXAMPLE.NET", NetBIOS: "NEW", DNS: "new.example.net", KDCs: []string{"192.0.2.9"}}
+	f.info = &DomainInfo{Realm: "NEW.EXAMPLE.NET", NetBIOS: "NEW", DNS: "new.example.net", LocalKDC: "192.0.2.9"}
 	if _, err := (&SignIn{Users: s.Users, Domain: f}).Refresh(ctx, u); !errors.Is(err, ErrAccountGone) {
 		t.Errorf("another domain now: %v", err)
 	}
@@ -316,6 +435,82 @@ func TestGroupRefresh(t *testing.T) {
 	local, _ := s.Users.Create(ctx, NewUser{Username: "cade", Role: RoleAdmin, Password: "supersecret1"})
 	if got, err := s.Refresh(ctx, local); err != nil || got != local {
 		t.Errorf("local refresh: %+v %v", got, err)
+	}
+}
+
+func setGroupsCheckedAt(t *testing.T, s *SignIn, id int64, at time.Time) {
+	t.Helper()
+	if _, err := s.Users.DB.Exec(`UPDATE users SET groups_checked_at = ? WHERE id = ?`, store.FormatTime(at), id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A failing group lookup keeps the role for GroupTrustWindow, then holds
+// administrator rights back until a lookup works again.
+func TestGroupRefreshFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	s, f := newSignIn(t)
+	f.add("boss", "B0ss-Passw0rd!", "Domain Admins")
+	f.add("kid", "K1d-Passw0rd!x", "Family")
+	boss, err := s.Authenticate(ctx, `HOME\boss`, "B0ss-Passw0rd!")
+	if err != nil || !boss.IsAdmin() {
+		t.Fatalf("boss: %+v %v", boss, err)
+	}
+	kid, _ := s.Authenticate(ctx, `HOME\kid`, "K1d-Passw0rd!x")
+	f.acctErr = errors.New("helper broke")
+	reload := func(id int64) *User {
+		u, err := s.Users.Get(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return u
+	}
+	fresh := func() { s.refreshing = sync.Map{} } // skip the minute between retries
+
+	// Within the window: still an administrator.
+	setGroupsCheckedAt(t, s, boss.ID, time.Now().Add(-GroupTrustWindow+5*time.Minute))
+	got, err := s.Refresh(ctx, reload(boss.ID))
+	if err != nil || !got.IsAdmin() || got.RoleNote != "" {
+		t.Fatalf("inside the window: %+v %v", got, err)
+	}
+
+	// Past it: a user, saying why, and the row says so too.
+	fresh()
+	setGroupsCheckedAt(t, s, boss.ID, time.Now().Add(-GroupTrustWindow-time.Minute))
+	got, err = s.Refresh(ctx, reload(boss.ID))
+	if err != nil || got.IsAdmin() || got.Role != RoleUser || !strings.Contains(got.RoleNote, "30 minutes") {
+		t.Fatalf("past the window: %+v %v", got, err)
+	}
+	if reload(boss.ID).Role != RoleUser {
+		t.Error("the held-back role wasn't recorded")
+	}
+	// Retries that are too soon (or a lookup already running) don't give it back.
+	if got, _ := s.Refresh(ctx, reload(boss.ID)); got.IsAdmin() || got.RoleNote == "" {
+		t.Errorf("between retries: %+v", got)
+	}
+	// A user just gets the note.
+	fresh()
+	setGroupsCheckedAt(t, s, kid.ID, time.Now().Add(-time.Hour))
+	if got, _ := s.Refresh(ctx, reload(kid.ID)); got.IsAdmin() || got.RoleNote == "" {
+		t.Errorf("kid: %+v", got)
+	}
+
+	// The next lookup that works restores the role.
+	fresh()
+	f.acctErr = nil
+	got, err = s.Refresh(ctx, reload(boss.ID))
+	if err != nil || !got.IsAdmin() || got.RoleNote != "" {
+		t.Fatalf("after the domain answered again: %+v %v", got, err)
+	}
+	if !reload(boss.ID).IsAdmin() {
+		t.Error("the row wasn't restored")
+	}
+	// A broken directory (no Info) counts the same.
+	fresh()
+	f.infoErr = errors.New("root helper down")
+	setGroupsCheckedAt(t, s, boss.ID, time.Now().Add(-2*time.Hour))
+	if got, _ := s.Refresh(ctx, reload(boss.ID)); got.IsAdmin() {
+		t.Errorf("Info failing: %+v", got)
 	}
 }
 
@@ -476,7 +671,7 @@ func fakeKDC(t *testing.T, code int32) int {
 
 func TestKerberosCheckerAgainstFakeKDC(t *testing.T) {
 	ctx := context.Background()
-	d := DomainInfo{Realm: "HOME.EXAMPLE.NET", NetBIOS: "HOME", DNS: "home.example.net", KDCs: []string{"127.0.0.1"}}
+	d := DomainInfo{Realm: "HOME.EXAMPLE.NET", NetBIOS: "HOME", DNS: "home.example.net", LocalKDC: "127.0.0.1"}
 	for code, want := range map[int32]error{
 		errorcode.KDC_ERR_C_PRINCIPAL_UNKNOWN: ErrBadCredentials,
 		errorcode.KDC_ERR_CLIENT_REVOKED:      ErrAccountRevoked,
@@ -500,7 +695,7 @@ func TestKerberosCheckerAgainstFakeKDC(t *testing.T) {
 	if time.Since(start) > 3*time.Second {
 		t.Errorf("took %s to give up", time.Since(start))
 	}
-	if err := k.CheckPassword(ctx, DomainInfo{Realm: "X"}, "alice", "pw"); !errors.Is(err, ErrDomainUnavailable) {
-		t.Errorf("no KDCs: %v", err)
+	if err := k.CheckPassword(ctx, DomainInfo{LocalKDC: "127.0.0.1"}, "alice", "pw"); !errors.Is(err, ErrDomainUnavailable) {
+		t.Errorf("no realm: %v", err)
 	}
 }

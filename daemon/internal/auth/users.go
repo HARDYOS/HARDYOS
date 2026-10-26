@@ -49,6 +49,10 @@ type User struct {
 	// Groups are a domain account's groups as NETBIOS\group, Domain Users
 	// included; empty for local accounts.
 	Groups []string `json:"groups"`
+	// RoleNote explains a domain account's role when it isn't what its
+	// groups would give: the domain couldn't be asked about them for too
+	// long (see SignIn.Refresh). Empty otherwise.
+	RoleNote string `json:"roleNote,omitempty"`
 
 	passwordHash    string
 	groupsCheckedAt time.Time
@@ -406,6 +410,13 @@ func (s *Users) UpsertDomain(ctx context.Context, d DomainUpdate) (*User, error)
 		return nil, ErrUserExists
 	}
 	return u, nil
+}
+
+// holdBackRole makes a domain account a user until its groups can be looked
+// up again (UpsertDomain then sets the role from them).
+func (s *Users) holdBackRole(ctx context.Context, id int64) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE users SET role = 'user', updated_at = ? WHERE id = ? AND source = 'domain' AND role = 'admin'`, store.Now(), id)
+	return err
 }
 
 func boolInt(b bool) int {

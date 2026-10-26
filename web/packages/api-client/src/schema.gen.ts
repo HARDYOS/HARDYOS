@@ -89,7 +89,10 @@ export interface paths {
          * @description Local HardyOS accounts sign in with their username. When this server
          *     has a domain, domain accounts sign in as `alice`, `HOME\alice` or
          *     `alice@home.example.net` (a local account wins for a bare name); the
-         *     password is checked by Kerberos against the domain's controllers.
+         *     password is checked by Kerberos with the domain controller this
+         *     server runs itself, never with its partners. The role is admin for
+         *     members of Domain Admins (`<domain SID>-512`) or of the HardyOS
+         *     Admins group recorded by its SID; group names don't count.
          *     401 codes: `bad_credentials` (wrong password or unknown name),
          *     `unknown_domain`, `account_disabled`, `account_locked`,
          *     `account_expired`, `account_unavailable`, `password_expired`.
@@ -1651,6 +1654,32 @@ export interface paths {
         patch: operations["updateDomainGroup"];
         trace?: never;
     };
+    "/domain/admins-group": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create the HardyOS Admins group and record its SID (runs as a job)
+         * @description Members of the recorded group are HardyOS administrators, by SID, so
+         *     renaming it doesn't matter and another group given its name grants
+         *     nothing. When a group called HardyOS Admins already exists that
+         *     HardyOS didn't record, the answer is 409 `admins_group_exists`
+         *     (the message lists its members) unless `adopt` is true, after an
+         *     administrator checked them. 409 `admins_group_recorded` when it's
+         *     already set up. The job's result is a DomainAdminsGroup.
+         */
+        post: operations["setUpDomainAdminsGroup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/apps": {
         parameters: {
             query?: never;
@@ -2000,6 +2029,8 @@ export interface components {
             createdAt: string;
             /** Format: date-time */
             lastLoginAt: string | null;
+            /** @description Why a domain account's role isn't what its groups give: its groups couldn't be looked up for over 30 minutes, so it has user rights until the domain answers again. Absent otherwise. */
+            roleNote?: string;
         };
         CreateUserRequest: {
             username: string;
@@ -2769,6 +2800,8 @@ export interface components {
             host?: string;
             /** @description This DC joined an existing domain */
             joined?: boolean;
+            /** @description objectSid of the HardyOS Admins group, recorded when HardyOS created it or an administrator adopted an existing one; its members are HardyOS administrators whatever the group is called now. Absent until then. */
+            adminsGroupSid?: string;
             /** @description The domain's other domain controllers */
             others?: components["schemas"]["DomainController"][];
         };
@@ -2856,9 +2889,20 @@ export interface components {
         };
         DomainGroup: {
             name: string;
+            /** @description The group's objectSid; it stays when the group is renamed */
+            sid?: string;
             description: string;
             members: string[];
             builtin: boolean;
+        };
+        DomainAdminsGroup: {
+            name: string;
+            sid: string;
+            members: string[];
+            /** @description HardyOS created the group just now */
+            created: boolean;
+            /** @description An existing group was recorded */
+            adopted: boolean;
         };
         AppsOverview: {
             /** @description False when this build has no Docker */
@@ -3203,7 +3247,7 @@ export interface operations {
                     "application/json": components["schemas"]["Error"];
                 };
             };
-            /** @description The domain controller can't be reached (`domain_unavailable`) or its clock is too far off (`clock_skew`) */
+            /** @description This server's own domain controller isn't answering (`domain_unavailable`), its clock is too far off (`clock_skew`), or this server runs no domain controller of its own (`no_local_dc`) */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -5857,6 +5901,30 @@ export interface operations {
             400: components["responses"]["Invalid"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    setUpDomainAdminsGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description Use the existing group called HardyOS Admins */
+                    adopt?: boolean;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     listApps: {

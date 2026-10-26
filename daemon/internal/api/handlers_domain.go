@@ -25,6 +25,7 @@ const (
 	JobKindDomainJoin      = "domain.join"
 	JobKindDomainLeave     = "domain.leave"
 	JobKindDomainRemove    = "domain.remove_dead"
+	JobKindDomainAdmins    = "domain.admins_group"
 )
 
 // jobSecrets hands a password from a request to the job it starts without
@@ -208,6 +209,31 @@ func registerDomainMoreJobs(m *jobs.Manager, pc *priv.Client) {
 	})
 }
 
+// registerDomainAdminsJob adds the HardyOS Admins job. Sign-in sees the
+// recorded SID within DomainInfoTTL (30 s) of it finishing.
+func registerDomainAdminsJob(m *jobs.Manager, pc *priv.Client) {
+	m.Register(jobs.Kind{
+		Name:      JobKindDomainAdmins,
+		AdminOnly: true,
+		LockKey:   func(json.RawMessage) string { return "domain" },
+		Run: func(jc *jobs.Context) (any, error) {
+			var p domain.AdminsGroupArgs
+			if err := jc.Params(&p); err != nil {
+				return nil, err
+			}
+			jc.Progress(20, "Setting up "+domain.AdminsGroupName)
+			ctx, cancel := context.WithTimeout(jc, 2*time.Minute)
+			defer cancel()
+			var g domain.AdminsGroup
+			if err := pc.Call(ctx, priv.OpDomainAdminsGroupCreate, p, &g); err != nil {
+				return nil, err
+			}
+			jc.Progress(100, g.Name+" makes its members HardyOS administrators")
+			return g, nil
+		},
+	})
+}
+
 func (s *Server) domainRoutes() {
 	m := s.mux
 	m.Handle("GET /api/v1/domain", s.admin(s.handleDomainStatus))
@@ -231,6 +257,7 @@ func (s *Server) domainRoutes() {
 	m.Handle("POST /api/v1/domain/groups", s.admin(s.handleDomainGroupCreate))
 	m.Handle("PATCH /api/v1/domain/groups/{name}", s.admin(s.handleDomainGroupUpdate))
 	m.Handle("DELETE /api/v1/domain/groups/{name}", s.admin(s.handleDomainGroupDelete))
+	m.Handle("POST /api/v1/domain/admins-group", s.admin(s.handleDomainAdminsGroup))
 }
 
 func (s *Server) handleDomainStatus(w http.ResponseWriter, r *http.Request, _ *auth.User) {
@@ -453,6 +480,50 @@ func (s *Server) handleDomainGroupUpdate(w http.ResponseWriter, r *http.Request,
 func (s *Server) handleDomainGroupDelete(w http.ResponseWriter, r *http.Request, u *auth.User) {
 	name := r.PathValue("name")
 	s.domainCall(w, r, u, priv.OpDomainGroupDelete, "domain.group.delete", name, priv.DomainGroupRef{Name: name}, nil, 0)
+}
+
+type adminsGroupRequest struct {
+	Adopt bool `json:"adopt"`
+}
+
+// handleDomainAdminsGroup creates the HardyOS Admins group and records its
+// SID (a job, audited). A group that already has the name but wasn't made
+// by HardyOS is refused (409 admins_group_exists, with its members) unless
+// the request says adopt: true.
+func (s *Server) handleDomainAdminsGroup(w http.ResponseWriter, r *http.Request, u *auth.User) {
+	var req adminsGroupRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	st, ok := s.domainStatus(w, r)
+	if !ok {
+		return
+	}
+	if !st.Provisioned || st.Config == nil {
+		writeError(w, http.StatusNotFound, "not_found", domain.ErrNotProvisioned.Error())
+		return
+	}
+	var res priv.DomainGroupsResult
+	if err := s.cfg.Priv.Call(r.Context(), priv.OpDomainGroups, nil, &res); err != nil {
+		s.writePrivError(w, err)
+		return
+	}
+	recorded, named := domain.FindAdminsGroup(st.Config, res.Groups)
+	if recorded != nil {
+		writeError(w, http.StatusConflict, "admins_group_recorded", recorded.Name+" is already the HardyOS Admins group")
+		return
+	}
+	if named != nil && !req.Adopt {
+		s.record(r, u, "domain.admins_group.create", named.Name, audit.Failure, "a group with the name exists; not confirmed")
+		writeError(w, http.StatusConflict, "admins_group_exists", (&domain.AdminsGroupExistsError{Members: named.Members}).Error())
+		return
+	}
+	title, target := "Create "+domain.AdminsGroupName, domain.AdminsGroupName
+	if named != nil {
+		title = "Use the existing " + named.Name + " group for HardyOS administrators"
+		target = named.Name + " " + named.SID + " (adopted)"
+	}
+	s.submit(w, r, u, JobKindDomainAdmins, title, domain.AdminsGroupArgs{Adopt: req.Adopt}, "domain.admins_group.create", target, nil)
 }
 
 func (s *Server) domainStatus(w http.ResponseWriter, r *http.Request) (*domain.Status, bool) {

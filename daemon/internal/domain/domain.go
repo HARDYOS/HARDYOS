@@ -70,6 +70,11 @@ type Config struct {
 	Joined bool `json:"joined,omitempty"`
 	// Others are the domain's other DCs, as their DNS lists them.
 	Others []DC `json:"others,omitempty"`
+	// AdminsGroupSID is the objectSid of the HardyOS Admins group, recorded
+	// when HardyOS created it or an administrator adopted an existing one
+	// (SetUpAdminsGroup). Its members are HardyOS administrators whatever
+	// the group is called now; a group that merely has the name isn't.
+	AdminsGroupSID string `json:"adminsGroupSid,omitempty"`
 }
 
 // DC is one domain controller.

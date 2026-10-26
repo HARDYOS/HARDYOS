@@ -20,6 +20,7 @@ import (
 // ipAddr is the part of `ip -j addr` used here.
 type ipAddr struct {
 	IfName   string   `json:"ifname"`
+	Address  string   `json:"address"` // MAC address
 	Flags    []string `json:"flags"`
 	Link     string   `json:"link"` // parent of a macvlan/vlan
 	AddrInfo []struct {
@@ -315,6 +316,9 @@ func (m *Manager) SetupNetwork(ctx context.Context, c *Config) error {
 	if err := m.setupShim(ctx, parent, dcAddr.Addr(), moved); err != nil {
 		return err
 	}
+	if err := m.pinNeighbors(ctx, c.MAC, dcAddr.Addr()); err != nil {
+		return err
+	}
 	if c.Domain != "" {
 		return m.writeResolv(c)
 	}
@@ -357,6 +361,27 @@ func (m *Manager) setupShim(ctx context.Context, parent string, dcIP netip.Addr,
 		return err
 	}
 	return m.run(ctx, "ip", "route", "replace", dcIP.String()+"/32", "dev", m.shim(), "src", m.shimAddr())
+}
+
+// pinNeighbors fixes the MAC addresses on both ends of the shim route, so
+// the NAS's traffic to its own DC (desktop sign-in's password checks among
+// it) can't be pulled away by forged ARP answers from the LAN: the two
+// macvlans sit on the same port and talk inside the host.
+func (m *Manager) pinNeighbors(ctx context.Context, dcMAC string, dcIP netip.Addr) error {
+	if dcMAC != "" {
+		if err := m.run(ctx, "ip", "neigh", "replace", dcIP.String(), "lladdr", dcMAC, "dev", m.shim(), "nud", "permanent"); err != nil {
+			return fmt.Errorf("pinning the domain controller's address on the NAS: %w", err)
+		}
+	}
+	list, err := m.addrs(ctx, "-d", "addr", "show", "dev", m.shim())
+	if err != nil || len(list) == 0 || list[0].Address == "" {
+		m.log().Warn("domain: can't read the shim's MAC address to pin it in the DC's namespace", "err", err)
+		return nil
+	}
+	if err := m.run(ctx, "ip", "-n", m.ns(), "neigh", "replace", m.shimAddr(), "lladdr", list[0].Address, "dev", DCLink, "nud", "permanent"); err != nil {
+		return fmt.Errorf("pinning the NAS's address in the domain controller's network: %w", err)
+	}
+	return nil
 }
 
 // networkProblem says what's wrong with the DC's network, or "".
