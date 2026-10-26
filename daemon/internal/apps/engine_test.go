@@ -148,7 +148,7 @@ func (e *testEnv) listApps(ids ...string) {
 // scriptCompose makes `docker compose config` print e.compose for notes.
 func (e *testEnv) scriptCompose() {
 	data := filepath.Join(e.dir("notes"), dataDirName)
-	out := strings.NewReplacer("DATA", data, "MEDIA", filepath.Join(e.shares.root, "media", "Movies"),
+	out := strings.NewReplacer("DATA", data, "MEDIA", filepath.Join(e.shares.root, "media"),
 		"DL", filepath.Join(data, unsharedDir, "DOWNLOADS")).Replace(e.compose)
 	meta := filepath.Join(e.dir("notes"), metaDir)
 	e.fake.On(fmt.Sprintf("docker compose -p hardyos-notes --project-directory %s -f %s --env-file %s config --format json",
@@ -183,6 +183,15 @@ func (e *testEnv) install(a PrepareArgs) (*PrepareResult, error) {
 		e.listApps("old", "notes")
 	}
 	return res, err
+}
+
+// shipInCatalog puts a package in the test's catalog folder.
+func (e *testEnv) shipInCatalog(pkg []byte) {
+	e.t.Helper()
+	if e.m.CatalogDir == "" {
+		e.m.CatalogDir = e.t.TempDir()
+	}
+	must(e.t, os.WriteFile(filepath.Join(e.m.CatalogDir, fmt.Sprintf("app%d.hardyapp", len(pkg))), pkg, 0o644))
 }
 
 func (e *testEnv) state(id string) appState {
@@ -224,7 +233,7 @@ func TestInstallWithSharesUIDAndLimits(t *testing.T) {
 	ctx := context.Background()
 	res, err := e.install(PrepareArgs{
 		Settings: map[string]string{"ADMIN_PASSWORD": "hunter2"},
-		Shares:   map[string]ShareChoice{"MEDIA": {Share: "media", Path: "Movies"}},
+		Shares:   map[string]ShareChoice{"MEDIA": {Share: "media"}},
 		Limits:   &Limits{MemoryMB: 512, CPUs: 1.5},
 		Source:   SourceUpload,
 	})
@@ -240,12 +249,12 @@ func TestInstallWithSharesUIDAndLimits(t *testing.T) {
 	if st.UID != 30001 || st.Source != SourceUpload || st.Limits != (Limits{512, 1.5}) {
 		t.Errorf("state: %+v", st)
 	}
-	if ch := st.Shares["MEDIA"]; ch.Share != "media" || ch.Path != "Movies" || ch.Access != "read" || len(st.Shares) != 1 {
+	if ch := st.Shares["MEDIA"]; ch.Share != "media" || ch.Path != "" || ch.Access != "read" || len(st.Shares) != 1 {
 		t.Errorf("shares in state: %+v", st.Shares)
 	}
 	env := e.env("notes")
 	if env["HARDY_UID"] != "30001" || env["HARDY_GID"] != "30001" ||
-		env["HARDY_SHARE_MEDIA"] != filepath.Join(e.shares.root, "media", "Movies") ||
+		env["HARDY_SHARE_MEDIA"] != filepath.Join(e.shares.root, "media") ||
 		env["HARDY_SHARE_DOWNLOADS"] != filepath.Join(data, ".unshared", "DOWNLOADS") {
 		t.Errorf("env: %v", env)
 	}
@@ -273,7 +282,7 @@ func TestInstallWithSharesUIDAndLimits(t *testing.T) {
 	}
 	for _, v := range r.bindMounts() {
 		ro, _ := v["read_only"].(bool)
-		if want := strings.HasSuffix(v["source"].(string), "Movies"); ro != want {
+		if want := strings.HasSuffix(v["source"].(string), "/media"); ro != want {
 			t.Errorf("%v: read_only %v", v["source"], ro)
 		}
 	}
@@ -300,7 +309,7 @@ func TestInstallWithSharesUIDAndLimits(t *testing.T) {
 	}
 	a := o.Apps[0]
 	if a.Source != SourceUpload || a.UID != 30001 || a.Limits.MemoryMB != 512 || len(a.Grants) != 0 ||
-		len(a.Shares) != 2 || a.Shares[0] != (AppShare{Name: "MEDIA", Label: "Media library", Share: "media", Path: "Movies", Access: "read"}) ||
+		len(a.Shares) != 2 || a.Shares[0] != (AppShare{Name: "MEDIA", Label: "Media library", Share: "media", Path: "", Access: "read"}) ||
 		a.Shares[1].Share != "" || a.Shares[1].Access != "write" || len(a.Permissions) != 2 {
 		t.Errorf("app view: %+v", a)
 	}
@@ -391,9 +400,18 @@ func TestInstallRefusals(t *testing.T) {
 		"write to a read share": {args: PrepareArgs{Shares: map[string]ShareChoice{"MEDIA": {Share: "media", Access: "write"}}}, want: "may only read"},
 		"unknown share":         {args: PrepareArgs{Shares: map[string]ShareChoice{"PHOTOS": {Share: "media"}}}, want: "no shared folder called PHOTOS"},
 		"missing share":         {args: PrepareArgs{Shares: map[string]ShareChoice{"MEDIA": {Share: "nope"}}}, want: "no shared folder with that id"},
-		"climbing out of share": {args: PrepareArgs{Shares: map[string]ShareChoice{"MEDIA": {Share: "media", Path: "../../etc"}}}, want: "inside the shared folder"},
-		"bad share id":          {args: PrepareArgs{Shares: map[string]ShareChoice{"MEDIA": {Share: "Media!"}}}, want: "isn't a shared folder id"},
-		"bind outside shares": {args: PrepareArgs{Shares: map[string]ShareChoice{"MEDIA": {Share: "media", Path: "Movies"}}},
+		"climbing out of share": {args: PrepareArgs{Shares: map[string]ShareChoice{"MEDIA": {Share: "media", Path: "../../etc"}}}, want: "not a subfolder"},
+		"share subfolder":       {args: PrepareArgs{Shares: map[string]ShareChoice{"MEDIA": {Share: "media", Path: "Movies"}}}, want: "whole shared folder"},
+		"bind in a share": {args: PrepareArgs{Shares: map[string]ShareChoice{"MEDIA": {Share: "media"}}},
+			compose: `{"services":{"app":{"image":"x","volumes":[{"type":"bind","source":"MEDIA/Movies","target":"/m"}]}}}`, want: "mount the shared folder itself"},
+		"bind in a stand-in": {compose: `{"services":{"app":{"image":"x","volumes":[{"type":"bind","source":"DL/x","target":"/m"}]}}}`,
+			want: "${HARDY_SHARE_DOWNLOADS}"},
+		"nested data binds": {compose: `{"services":{"app":{"image":"x","volumes":[{"type":"bind","source":"DATA","target":"/all"}]},
+			"db":{"image":"y","volumes":[{"type":"bind","source":"DATA/db","target":"/db"}]}}}`, want: "inside "},
+		"data root and stand-in": {compose: `{"services":{"app":{"image":"x","volumes":[{"type":"bind","source":"DATA","target":"/all"},{"type":"bind","source":"DL","target":"/dl"}]}}}`,
+			want: "a container could replace it"},
+		"bad share id": {args: PrepareArgs{Shares: map[string]ShareChoice{"MEDIA": {Share: "Media!"}}}, want: "isn't a shared folder id"},
+		"bind outside shares": {args: PrepareArgs{Shares: map[string]ShareChoice{"MEDIA": {Share: "media"}}},
 			compose: `{"services":{"app":{"image":"x","volumes":[{"type":"bind","source":"/srv","target":"/srv"}]}}}`, want: "/srv is outside"},
 		"host network undeclared": {compose: `{"services":{"app":{"image":"x","network_mode":"host"}}}`, want: "network_mode: host"},
 		"untrusted without grants": {perms: `,"permissions":{"hostNetwork":true,"gpu":true,"capabilities":["NET_ADMIN","CHOWN"],"devices":["/dev/net/tun"]}`,
@@ -403,7 +421,7 @@ func TestInstallRefusals(t *testing.T) {
 		"imported no name": {args: PrepareArgs{Source: SourceImported}, want: "catalog's name"},
 		"huge limit":       {args: PrepareArgs{Limits: &Limits{MemoryMB: 1 << 20}}, want: "memory limit"},
 		"tiny cpu":         {args: PrepareArgs{Limits: &Limits{CPUs: 0.001}}, want: "processor limit"},
-		"host network moved port": {perms: `,"permissions":{"hostNetwork":true}`, args: PrepareArgs{Ports: map[string]int{"WEB": 8200}},
+		"host network moved port": {perms: `,"permissions":{"hostNetwork":true}`, args: PrepareArgs{Ports: map[string]int{"WEB": 8200}, Grants: []string{"hostNetwork"}},
 			want: "fixed at 8100"},
 		"no shares here": {noRes: true, perms: "REQ", args: PrepareArgs{Shares: map[string]ShareChoice{"MEDIA": {Share: "media"}}}, want: "aren't available"},
 	}
@@ -450,7 +468,8 @@ func TestRequiredShareAndGrants(t *testing.T) {
 	e = newTestEnv(t)
 	e.compose = `{"services":{"app":{"image":"x","network_mode":"host","cap_add":["NET_ADMIN","CHOWN"]}}}`
 	_, err := e.install(PrepareArgs{Package: enginePackage(t, perms), Source: SourceUpload, Grants: []string{"hostNetwork"}})
-	if t2 := problemText(err); !strings.Contains(t2, "NET_ADMIN") || strings.Contains(t2, "CHOWN") || strings.Contains(t2, "host network") {
+	if t2 := problemText(err); !strings.Contains(t2, "NET_ADMIN") || strings.Contains(t2, "CHOWN") || strings.Contains(t2, "(host network)") ||
+		!strings.Contains(t2, "server's own network settings") {
 		t.Errorf("partial grants: %v", err)
 	}
 	if _, err := e.install(PrepareArgs{Package: enginePackage(t, perms), Source: SourceUpload,
@@ -465,13 +484,16 @@ func TestRequiredShareAndGrants(t *testing.T) {
 		t.Errorf("view: %+v", a)
 	}
 
-	// A catalog app with the same permissions needs no grants.
+	// A catalog app with the same permissions needs no grants: hardyd-priv
+	// finds its bytes in the shipped catalog, whatever hardyd says.
 	e = newTestEnv(t)
 	e.compose = `{"services":{"app":{"image":"x","network_mode":"host","cap_add":["NET_ADMIN"]}}}`
-	if _, err := e.install(PrepareArgs{Package: enginePackage(t, perms), Source: SourceCatalog}); err != nil {
+	pkg := enginePackage(t, perms)
+	e.shipInCatalog(pkg)
+	if _, err := e.install(PrepareArgs{Package: pkg}); err != nil {
 		t.Fatal(err)
 	}
-	if st := e.state("notes"); len(st.Grants) != 0 || st.Source != SourceCatalog {
+	if st := e.state("notes"); len(st.Grants) != 0 || st.Source != SourceCatalog || st.CatalogSHA256 != packageSum(pkg) {
 		t.Errorf("catalog state: %+v", st)
 	}
 }
@@ -480,7 +502,7 @@ func TestReconfigure(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
 	if _, err := e.install(PrepareArgs{Settings: map[string]string{"ADMIN_PASSWORD": "hunter2", "TITLE": "Ours"},
-		Shares: map[string]ShareChoice{"MEDIA": {Share: "media", Path: "Movies"}}, Source: SourceUpload}); err != nil {
+		Shares: map[string]ShareChoice{"MEDIA": {Share: "media"}}, Source: SourceUpload}); err != nil {
 		t.Fatal(err)
 	}
 	e.shares.take()
@@ -529,7 +551,7 @@ func TestReconfigure(t *testing.T) {
 func TestStartRechecksShares(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	if _, err := e.install(PrepareArgs{Shares: map[string]ShareChoice{"MEDIA": {Share: "media", Path: "Movies"}}}); err != nil {
+	if _, err := e.install(PrepareArgs{Shares: map[string]ShareChoice{"MEDIA": {Share: "media"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.m.Up(ctx, "notes"); err != nil {
@@ -566,7 +588,7 @@ func (s *movedShares) Resolve(ctx context.Context, share, sub string) (string, e
 func TestSnapshotsAndRollback(t *testing.T) {
 	e := newTestEnv(t)
 	ctx := context.Background()
-	if _, err := e.install(PrepareArgs{Shares: map[string]ShareChoice{"MEDIA": {Share: "media", Path: "Movies"}}}); err != nil {
+	if _, err := e.install(PrepareArgs{Shares: map[string]ShareChoice{"MEDIA": {Share: "media"}}}); err != nil {
 		t.Fatal(err)
 	}
 	ds := "tank/apps/notes"
@@ -668,17 +690,23 @@ func TestPolicyPermissionsV2(t *testing.T) {
 		}
 	}
 
-	// Binds in shares: write grants as they are, read grants made read-only.
+	// Binds of shares: write grants as they are, read grants made read-only.
 	shares := []shareBind{{Name: "MEDIA", Path: "/mnt/tank/shares/media", Write: false},
-		{Name: "MOVIES", Path: "/mnt/tank/shares/media/Movies", Write: true}}
-	r := resolved(t, `"volumes":[{"type":"bind","source":"/mnt/tank/shares/media/TV","target":"/tv"},
-		{"type":"bind","source":"/mnt/tank/shares/media/Movies/x","target":"/movies"}]`, "")
+		{Name: "DL", Path: "/mnt/tank/shares/downloads", Write: true}}
+	r := resolved(t, `"volumes":[{"type":"bind","source":"/mnt/tank/shares/media","target":"/media"},
+		{"type":"bind","source":"/mnt/tank/shares/downloads/","target":"/dl"}]`, "")
 	if err := r.check(plain, "hardyos-notes", dataDir, ports, shares); err != nil {
 		t.Fatal(err)
 	}
 	bm := r.bindMounts()
 	if bm[0]["read_only"] != true || bm[1]["read_only"] != nil {
 		t.Errorf("read-only forcing: %v", bm)
+	}
+	// Only the share itself: a folder in it could be swapped for a link by
+	// anything else that writes in the share.
+	r = resolved(t, `"volumes":[{"type":"bind","source":"/mnt/tank/shares/media/TV","target":"/tv"}]`, "")
+	if err := r.check(plain, "hardyos-notes", dataDir, ports, shares); !strings.Contains(problemText(err), "${HARDY_SHARE_MEDIA}") {
+		t.Errorf("a folder in a share: %v", err)
 	}
 	r = resolved(t, `"volumes":[{"type":"bind","source":"/mnt/tank/shares/mediax","target":"/x"}]`, "")
 	if err := r.check(plain, "hardyos-notes", dataDir, ports, shares); err == nil {
@@ -817,7 +845,7 @@ func TestAllocUIDSkipsTaken(t *testing.T) {
 	}
 	sort.Strings(ids)
 	e.listApps(ids...)
-	if _, err := e.install(PrepareArgs{Shares: map[string]ShareChoice{"MEDIA": {Share: "media", Path: "Movies"}}}); err != nil {
+	if _, err := e.install(PrepareArgs{Shares: map[string]ShareChoice{"MEDIA": {Share: "media"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if uid := e.state("notes").UID; uid != 30003 {

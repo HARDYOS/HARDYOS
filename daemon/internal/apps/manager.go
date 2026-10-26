@@ -20,7 +20,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/rootfile"
@@ -34,6 +33,7 @@ import (
 //	  hardyapp.json             the manifest
 //	  compose.yaml              the compose file as packaged
 //	  compose.json              the checked, resolved compose file that runs
+//	  package.hardyapp          the package as installed (its bytes decide the source)
 //	  app.env                   HardyOS variables, settings and generated secrets (0600)
 //	  state.json                ports, non-secret settings, dates
 //	  icon.svg / icon.png
@@ -50,6 +50,7 @@ const (
 	stateFile       = "state.json"
 	envFile         = "app.env"
 	resolvedFile    = "compose.json"
+	packageFile     = "package.hardyapp"
 	maxLogBytes     = 512 << 10
 )
 
@@ -77,6 +78,9 @@ type Manager struct {
 	MemTotal func() uint64
 	// Shares resolves and grants shared folders (nil: apps get none).
 	Shares ShareResolver
+	// CatalogDir overrides DefaultCatalogDir under Root (tests): packages
+	// whose bytes match a file there are catalog apps.
+	CatalogDir string
 
 	mu sync.Mutex // installs and removals, one at a time
 
@@ -138,6 +142,9 @@ type App struct {
 	Grants      []string   `json:"grants"`
 	Limits      Limits     `json:"limits"`
 	Permissions []string   `json:"permissions"`
+	// Blocked, when set, says why the app can't start until an admin
+	// changes its settings (see Rollback).
+	Blocked string `json:"blocked,omitempty"`
 }
 
 // Container is one service's container.
@@ -190,6 +197,12 @@ type appState struct {
 	Shares     map[string]ShareChoice `json:"shares,omitempty"`
 	Grants     []string               `json:"grants,omitempty"`
 	Limits     Limits                 `json:"limits"`
+	// CatalogSHA256 is the hash of the package when hardyd-priv found it in
+	// the shipped catalog (empty for every other source).
+	CatalogSHA256 string `json:"catalogSHA256,omitempty"`
+	// Blocked says why the app may not start (a rollback whose permissions
+	// the admin has since taken away). Reconfiguring clears it.
+	Blocked string `json:"blocked,omitempty"`
 }
 
 func (m *Manager) log() *slog.Logger {
@@ -507,8 +520,11 @@ func (ia *installedApp) view(cs []Container, engine bool) App {
 	a.State = summarize(a.Containers, engine)
 	a.Source = ia.state.Source
 	if a.Source == "" {
-		a.Source = SourceCatalog
+		// Installed before hardyd-priv decided sources itself: not
+		// verified, so not shown as catalog.
+		a.Source = SourceUpload
 	}
+	a.Blocked = ia.state.Blocked
 	a.SourceName = ia.state.SourceName
 	a.UID = ia.state.UID
 	a.Shares = ia.shares()
@@ -691,8 +707,10 @@ type PrepareArgs struct {
 	Host     string            `json:"host"`
 	Ports    map[string]int    `json:"ports,omitempty"`
 	Settings map[string]string `json:"settings,omitempty"`
-	// Source is where the package came from (see contract.go); it decides
-	// which permissions need explicit grants.
+	// Source is where hardyd says the package came from (see contract.go).
+	// It is only a label: hardyd-priv decides catalog itself by comparing
+	// the package with the shipped catalog, and everything else needs
+	// explicit grants for extra permissions.
 	Source     Source                 `json:"source,omitempty"`
 	SourceName string                 `json:"sourceName,omitempty"`
 	Shares     map[string]ShareChoice `json:"shares,omitempty"`
@@ -777,8 +795,18 @@ func (m *Manager) prepare(ctx context.Context, pkg *Package, a PrepareArgs, reco
 		live = prev
 	}
 
-	// Where the package came from decides which permissions need grants.
-	src, srcName, err := chooseSource(a, live, reconfigure)
+	// Where the package came from decides which permissions need grants,
+	// and only the package bytes decide it (re-derived on every update,
+	// reconfigure and rollback).
+	var liveState *appState
+	if live != nil {
+		liveState = &live.state
+	}
+	askedSrc, askedName := a.Source, a.SourceName
+	if reconfigure {
+		askedSrc, askedName = "", ""
+	}
+	src, srcName, catalogSum, err := m.deriveSource(pkg.Raw, askedSrc, askedName, liveState)
 	if err != nil {
 		return nil, err
 	}
@@ -819,10 +847,10 @@ func (m *Manager) prepare(ctx context.Context, pkg *Package, a PrepareArgs, reco
 	}
 	meta := filepath.Join(dir, metaDir)
 	dataDir := filepath.Join(dir, dataDirName)
-	if err := mkdirStrict(dir, metaDir, 0o700, -1, -1); err != nil {
+	if err := mkdirStrict(dir, metaDir, 0o700, keepOwner); err != nil {
 		return nil, err
 	}
-	if err := mkdirStrict(dir, dataDirName, 0o755, -1, -1); err != nil {
+	if err := mkdirStrict(dir, dataDirName, 0o755, keepOwner); err != nil {
 		return nil, err
 	}
 
@@ -923,6 +951,11 @@ func (m *Manager) prepare(ctx context.Context, pkg *Package, a PrepareArgs, reco
 	if mf.Icon != "" {
 		files["icon"+filepath.Ext(mf.Icon)] = pkg.Icon
 	}
+	if len(pkg.Raw) > 0 {
+		// The package itself, so reconfiguring and rolling back can decide
+		// the source again from the bytes.
+		files[packageFile] = pkg.Raw
+	}
 	for name, b := range files {
 		if err := writeFileAtomic(filepath.Join(meta, name), b, 0o600); err != nil {
 			return nil, err
@@ -954,20 +987,19 @@ func (m *Manager) prepare(ctx context.Context, pkg *Package, a PrepareArgs, reco
 		// Without an owner, folders belong to the app's own user, but only
 		// when HardyOS creates them: a container may have changed the owner
 		// since (a database does), and an update mustn't undo that.
-		uidF, gidF := -1, -1
+		own := dirOwner{UID: uid, GID: uid, OnlyIfNew: true}
 		if f.Owner != "" {
 			u, g, _ := strings.Cut(f.Owner, ":")
-			uidF, _ = strconv.Atoi(u)
-			gidF, _ = strconv.Atoi(g)
-		} else if _, err := os.Lstat(filepath.Join(dataDir, f.Path)); errors.Is(err, fs.ErrNotExist) {
-			uidF, gidF = uid, uid
+			own.UID, _ = strconv.Atoi(u)
+			own.GID, _ = strconv.Atoi(g)
+			own.OnlyIfNew = false
 		}
 		mode := os.FileMode(0o755)
 		if f.Mode != "" {
 			v, _ := strconv.ParseUint(f.Mode, 8, 32)
 			mode = os.FileMode(v)
 		}
-		if err := mkdirStrict(dataDir, f.Path, mode, uidF, gidF); err != nil {
+		if err := mkdirStrict(dataDir, f.Path, mode, own); err != nil {
 			return nil, err
 		}
 	}
@@ -976,10 +1008,10 @@ func (m *Manager) prepare(ctx context.Context, pkg *Package, a PrepareArgs, reco
 		if choices[s.Name].Share != "" {
 			continue
 		}
-		if err := mkdirStrict(dataDir, unsharedDir, 0o755, -1, -1); err != nil {
+		if err := mkdirStrict(dataDir, unsharedDir, 0o755, keepOwner); err != nil {
 			return nil, err
 		}
-		if err := mkdirStrict(dataDir, unsharedDir+"/"+s.Name, 0o755, uid, uid); err != nil {
+		if err := mkdirStrict(dataDir, unsharedDir+"/"+s.Name, 0o755, dirOwner{UID: uid, GID: uid}); err != nil {
 			return nil, err
 		}
 	}
@@ -991,7 +1023,7 @@ func (m *Manager) prepare(ctx context.Context, pkg *Package, a PrepareArgs, reco
 	}
 
 	st := appState{ID: mf.ID, Version: mf.Version, Host: host, Ports: ports, Settings: saved, UpdatedAt: m.now(),
-		Source: src, SourceName: srcName, UID: uid, Shares: choices, Grants: grants, Limits: limits}
+		Source: src, SourceName: srcName, UID: uid, Shares: choices, Grants: grants, Limits: limits, CatalogSHA256: catalogSum}
 	if mf.Icon != "" {
 		st.Icon = "icon" + filepath.Ext(mf.Icon)
 	}
@@ -1264,21 +1296,29 @@ func (m *Manager) resolved(ctx context.Context, ia *installedApp) (Resolved, err
 	if err != nil {
 		return nil, err
 	}
+	var reals []string
 	for _, vm := range r.bindMounts() {
 		src, _ := vm["source"].(string)
 		real, err := realOrParent(src)
 		if err != nil {
 			return nil, err
 		}
+		reals = append(reals, real)
 		share, ok := placeOf(dataDir, binds, real)
 		if !ok {
 			return nil, fmt.Errorf("%s leads outside the app's data folder and shared folders (%s); refusing to start", src, real)
+		}
+		if share != nil && real != share.Path {
+			return nil, fmt.Errorf("%s is inside shared folder %s instead of being the shared folder itself; refusing to start", src, share.Name)
 		}
 		if share != nil && !share.Write {
 			if ro, _ := vm["read_only"].(bool); !ro {
 				return nil, fmt.Errorf("%s is in a shared folder %s may only read, but isn't mounted read-only; refusing to start", src, ia.manifest.Name)
 			}
 		}
+	}
+	if inner, outer, ok := nestedBind(reals); ok {
+		return nil, fmt.Errorf("%s is inside %s, which the app also mounts; refusing to start", inner, outer)
 	}
 	return r, nil
 }
@@ -1381,6 +1421,9 @@ func (m *Manager) Up(ctx context.Context, id string) error {
 }
 
 func (m *Manager) up(ctx context.Context, ia *installedApp, c *EngineConfig) error {
+	if err := checkBlocked(ia); err != nil {
+		return err
+	}
 	if err := m.startEngine(ctx, c); err != nil {
 		return err
 	}
@@ -1411,6 +1454,9 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 func (m *Manager) Restart(ctx context.Context, id string) error {
 	ia, _, err := m.app(ctx, id)
 	if err != nil {
+		return err
+	}
+	if err := checkBlocked(ia); err != nil {
 		return err
 	}
 	if _, err := m.resolved(ctx, ia); err != nil {
@@ -1511,37 +1557,13 @@ func confirmed(conf string, ia *installedApp) bool {
 
 // ---- helpers -----------------------------------------------------------------
 
-// mkdirStrict creates base/rel one level at a time without following
-// symlinks, so a link planted by a container can't redirect it. uid/gid
-// below 0 leave the owner as is.
-func mkdirStrict(base, rel string, mode os.FileMode, uid, gid int) error {
-	cur := base
-	segs := strings.Split(rel, "/")
-	for i, seg := range segs {
-		cur = filepath.Join(cur, seg)
-		fi, err := os.Lstat(cur)
-		switch {
-		case errors.Is(err, fs.ErrNotExist):
-			if err := os.Mkdir(cur, 0o755); err != nil {
-				return err
-			}
-		case err != nil:
-			return err
-		case !fi.IsDir():
-			return fmt.Errorf("%s exists and isn't a folder", cur)
-		}
-		if i == len(segs)-1 {
-			if err := os.Chmod(cur, mode); err != nil {
-				return err
-			}
-			if uid >= 0 || gid >= 0 {
-				if err := os.Lchown(cur, uid, gid); err != nil && !errors.Is(err, syscall.EPERM) {
-					return err
-				}
-			}
-		}
+// checkBlocked refuses to start an app whose rollback left it needing a
+// permission an admin has since taken away.
+func checkBlocked(ia *installedApp) error {
+	if ia.state.Blocked == "" {
+		return nil
 	}
-	return nil
+	return fmt.Errorf("%s can't start: %s", ia.manifest.Name, ia.state.Blocked)
 }
 
 func writeFileAtomic(path string, b []byte, mode os.FileMode) error {

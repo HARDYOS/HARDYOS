@@ -69,7 +69,15 @@ func deviceAllowed(path string) (string, bool) {
 func DescribePermissions(m Manifest) []string {
 	out := []string{}
 	for _, c := range m.Permissions.Capabilities {
-		out = append(out, fmt.Sprintf("%s (%s)", AllowedCapabilities[c], c))
+		switch {
+		case c == "NET_ADMIN" && m.Permissions.HostNetwork:
+			// On the host network, "its own network" is the server's.
+			out = append(out, "Change the server's own network settings: addresses, routes and firewall rules (NET_ADMIN on the host network)")
+		case c == "NET_RAW" && m.Permissions.HostNetwork:
+			out = append(out, "Send raw packets on the server's own network and capture its traffic (NET_RAW on the host network)")
+		default:
+			out = append(out, fmt.Sprintf("%s (%s)", AllowedCapabilities[c], c))
+		}
 	}
 	for _, d := range m.Permissions.Devices {
 		what, _ := deviceAllowed(d)
@@ -122,6 +130,12 @@ func placeOf(dataDir string, shares []shareBind, p string) (*shareBind, bool) {
 	if insideDir(dataDir, p) {
 		return nil, true
 	}
+	best := shareOf(shares, p)
+	return best, best != nil
+}
+
+// shareOf finds the most specific of shares that p is in, or nil.
+func shareOf(shares []shareBind, p string) *shareBind {
 	var best *shareBind
 	for i := range shares {
 		s := &shares[i]
@@ -129,7 +143,7 @@ func placeOf(dataDir string, shares []shareBind, p string) (*shareBind, bool) {
 			best = s
 		}
 	}
-	return best, best != nil
+	return best
 }
 
 // serviceKeys are the service options apps may use. Options with safety
@@ -233,6 +247,19 @@ func (r Resolved) check(m Manifest, project, dataDir string, ports map[string]in
 	}
 	caps := setOf(m.Permissions.Capabilities)
 	devices := setOf(m.Permissions.Devices)
+	// Shares the app wasn't given point at an empty stand-in folder in the
+	// data folder; they follow the same rule as real shares, so a compose
+	// file doesn't pass now and fail once a share is chosen.
+	standIns := []shareBind{}
+	for _, s := range m.Shares {
+		given := false
+		for _, b := range shares {
+			given = given || b.Name == s.Name
+		}
+		if !given {
+			standIns = append(standIns, shareBind{Name: s.Name, Path: filepath.Join(dataDir, unsharedDir, s.Name), Write: true})
+		}
+	}
 
 	names := make([]string, 0, len(services))
 	for n := range services {
@@ -245,7 +272,7 @@ func (r Resolved) check(m Manifest, project, dataDir string, ports map[string]in
 			p.addf("service %s is malformed", name)
 			continue
 		}
-		checkService(&p, name, svc, services, dataDir, shares, allowed, caps, devices, m.Permissions)
+		checkService(&p, name, svc, services, dataDir, shares, standIns, allowed, caps, devices, m.Permissions)
 		// What HardyOS sets on every container.
 		if rp, _ := svc["restart"].(string); rp == "" || rp == "no" {
 			svc["restart"] = "unless-stopped"
@@ -258,7 +285,39 @@ func (r Resolved) check(m Manifest, project, dataDir string, ports map[string]in
 		labels["org.hardyos.app.version"] = m.Version
 		svc["labels"] = labels
 	}
+	// Docker mounts bind sources by path again whenever it restarts a
+	// container by itself (restart policy, daemon restart), without asking
+	// HardyOS. A source inside another source of the same app could be
+	// swapped for a link by the container that mounts the outer folder, so
+	// no source may be inside another.
+	var sources []string
+	for _, vm := range r.bindMounts() {
+		if s, _ := vm["source"].(string); s != "" {
+			sources = append(sources, s)
+		}
+	}
+	if inner, outer, ok := nestedBind(sources); ok {
+		p.addf("%s is inside %s, which the app also mounts: a container could replace it. Mount folders side by side instead (e.g. ${HARDY_APP_DATA}/config and ${HARDY_APP_DATA}/media, not ${HARDY_APP_DATA} and ${HARDY_APP_DATA}/media)", inner, outer)
+	}
 	return p.err()
+}
+
+// nestedBind finds a bind source strictly inside another one (the same
+// folder twice is fine).
+func nestedBind(sources []string) (inner, outer string, found bool) {
+	clean := make([]string, 0, len(sources))
+	for _, s := range sources {
+		clean = append(clean, filepath.Clean(s))
+	}
+	sort.Strings(clean)
+	for _, a := range clean {
+		for _, b := range clean {
+			if a != b && insideDir(b, a) {
+				return a, b, true
+			}
+		}
+	}
+	return "", "", false
 }
 
 func checkNetwork(p *Problems, project, name string, n map[string]any) {
@@ -290,7 +349,7 @@ func checkNetwork(p *Problems, project, name string, n map[string]any) {
 }
 
 func checkService(p *Problems, name string, svc map[string]any, services map[string]any, dataDir string,
-	shares []shareBind, allowedPorts map[string]string, caps, devices map[string]bool, perms Permissions) {
+	shares, standIns []shareBind, allowedPorts map[string]string, caps, devices map[string]bool, perms Permissions) {
 	keys := make([]string, 0, len(svc))
 	for k := range svc {
 		keys = append(keys, k)
@@ -452,9 +511,18 @@ func checkService(p *Problems, name string, svc map[string]any, services map[str
 		switch typ {
 		case "bind":
 			share, ok := placeOf(dataDir, shares, src)
+			standIn := shareOf(standIns, src)
 			switch {
 			case !ok:
 				p.addf("service %s: %s is outside the app's data folder; mount folders under ${HARDY_APP_DATA} or a declared ${HARDY_SHARE_<NAME>}", name, src)
+			case share != nil && filepath.Clean(src) != share.Path, standIn != nil && filepath.Clean(src) != standIn.Path:
+				// Anything that can write in a share (another app) could swap
+				// a subfolder for a link; only the share's root, a ZFS
+				// mountpoint, can't be replaced.
+				if share == nil {
+					share = standIn
+				}
+				p.addf("service %s: %s is inside a shared folder; mount the shared folder itself (${HARDY_SHARE_%s}), not a folder in it", name, src, share.Name)
 			case share != nil && !share.Write:
 				// A read-only grant: the app gets the folder read-only.
 				vm["read_only"] = true

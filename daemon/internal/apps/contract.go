@@ -25,8 +25,10 @@ const (
 )
 
 // Trusted reports whether the source may use the permissions its manifest
-// declares without per-app grants.
-func (s Source) Trusted() bool { return s == SourceCatalog || s == "" }
+// declares without per-app grants. Only hardyd-priv decides that a package
+// is from the catalog (its bytes match a package HardyOS ships); an empty
+// or unknown source is never trusted.
+func (s Source) Trusted() bool { return s == SourceCatalog }
 
 // ShareMount is a shared folder an app can be given (manifest "shares").
 type ShareMount struct {
@@ -43,8 +45,10 @@ func ShareEnv(name string) string { return "HARDY_SHARE_" + name }
 
 // ShareChoice is what an admin picked for one of the app's ShareMounts.
 type ShareChoice struct {
-	Share  string `json:"share"`            // shared folder id; "" = none
-	Path   string `json:"path,omitempty"`   // subfolder inside it
+	Share string `json:"share"` // shared folder id; "" = none
+	// Path must be "": apps get whole shared folders (their roots are ZFS
+	// mountpoints no container can replace). Kept for JSON compatibility.
+	Path   string `json:"path,omitempty"`
 	Access string `json:"access,omitempty"` // "read" or "write" (at most the manifest's)
 }
 
@@ -53,7 +57,7 @@ type AppShare struct {
 	Name   string `json:"name"`
 	Label  string `json:"label"`
 	Share  string `json:"share"`
-	Path   string `json:"path"`
+	Path   string `json:"path"` // always "" (whole shared folders only)
 	Access string `json:"access"`
 }
 
@@ -80,7 +84,8 @@ const (
 // ShareResolver is what the apps engine needs from shared folders
 // (implemented by shares.Manager; wired in hardyd-priv's main).
 type ShareResolver interface {
-	// Resolve returns the real host path of a share (or a subfolder).
+	// Resolve returns the real host path of a share (or a subfolder; the
+	// apps engine only asks for share roots, sub "").
 	Resolve(ctx context.Context, share, sub string) (string, error)
 	GrantApp(ctx context.Context, share, app string, uid int, write bool) error
 	RevokeApp(ctx context.Context, app string) error

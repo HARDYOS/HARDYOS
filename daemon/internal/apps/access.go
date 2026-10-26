@@ -2,7 +2,10 @@ package apps
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -16,35 +19,94 @@ import (
 // wasn't given, so ${HARDY_SHARE_<NAME>} always names a folder.
 const unsharedDir = ".unshared"
 
-// chooseSource decides the app's source: as asked, else (an update) the
-// one it was installed from. Reconfiguring never changes it.
-func chooseSource(a PrepareArgs, live *installedApp, reconfigure bool) (Source, string, error) {
-	if reconfigure || (a.Source == "" && live != nil) {
-		if live == nil {
-			return SourceCatalog, "", nil
-		}
-		src := live.state.Source
-		if src == "" {
-			src = SourceCatalog
-		}
-		return src, live.state.SourceName, nil
+// DefaultCatalogDir is where HardyOS ships its catalog packages (under
+// Root; packaging/nfpm.yaml installs dist/apps/*.hardyapp there).
+const DefaultCatalogDir = "/usr/share/hardyos/apps"
+
+func (m *Manager) catalogDir() string {
+	if m.CatalogDir != "" {
+		return m.CatalogDir
 	}
-	src, name := a.Source, strings.TrimSpace(a.SourceName)
-	switch src {
-	case "":
-		src = SourceCatalog
-	case SourceCatalog, SourceUpload, SourceCustom:
+	return m.sys(DefaultCatalogDir)
+}
+
+// inCatalog reports whether raw is, byte for byte, one of the packages
+// shipped in the catalog folder (root-owned, read-only to hardyd).
+func (m *Manager) inCatalog(raw []byte) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	want := sha256.Sum256(raw)
+	dir := m.catalogDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".hardyapp") {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		fi, err := os.Lstat(p)
+		if err != nil || !fi.Mode().IsRegular() || fi.Size() != int64(len(raw)) {
+			continue
+		}
+		b, err := os.ReadFile(p)
+		if err == nil && sha256.Sum256(b) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// packageSum is a package's SHA-256 (hex).
+func packageSum(raw []byte) string {
+	s := sha256.Sum256(raw)
+	return hex.EncodeToString(s[:])
+}
+
+// deriveSource decides the app's source from the package bytes, never from
+// what hardyd says: a package is catalog only if it is one HardyOS ships,
+// or the very package root found in the catalog when it installed it
+// (prev.CatalogSHA256, so a catalog app stays one after an OS update ships
+// a newer version). Anything else is untrusted: the source hardyd asked
+// for (upload, imported, custom) is kept as a label, and "catalog" or
+// nothing becomes upload (or the label the app already had). It returns
+// the source, its name and, for catalog packages, the package's hash.
+func (m *Manager) deriveSource(raw []byte, asked Source, askedName string, prev *appState) (Source, string, string, error) {
+	name := strings.TrimSpace(askedName)
+	switch asked {
+	case "", SourceCatalog, SourceUpload, SourceCustom:
 	case SourceImported:
 		if name == "" {
-			return "", "", Problems{"an app from an imported catalog needs the catalog's name"}
+			return "", "", "", Problems{"an app from an imported catalog needs the catalog's name"}
 		}
 	default:
-		return "", "", Problems{fmt.Sprintf("source %q: use catalog, upload, imported or custom", a.Source)}
+		return "", "", "", Problems{fmt.Sprintf("source %q: use catalog, upload, imported or custom", asked)}
 	}
 	if len(name) > 80 || strings.IndexFunc(name, unicode.IsControl) >= 0 {
-		return "", "", Problems{"the source name must be at most 80 characters on one line"}
+		return "", "", "", Problems{"the source name must be at most 80 characters on one line"}
 	}
-	return src, name, nil
+	if len(raw) > 0 {
+		sum := packageSum(raw)
+		if m.inCatalog(raw) || (prev != nil && prev.CatalogSHA256 != "" && prev.CatalogSHA256 == sum) {
+			return SourceCatalog, "", sum, nil
+		}
+	}
+	src := asked
+	if src == "" || src == SourceCatalog {
+		src = SourceUpload
+		if prev != nil && (prev.Source == SourceUpload || prev.Source == SourceImported || prev.Source == SourceCustom) {
+			src = prev.Source
+			if name == "" {
+				name = prev.SourceName
+			}
+		}
+	}
+	if src == SourceImported && name == "" {
+		return "", "", "", Problems{"an app from an imported catalog needs the catalog's name"}
+	}
+	return src, name, "", nil
 }
 
 // neededGrants lists the grants an untrusted app needs for what its
@@ -69,8 +131,10 @@ func neededGrants(mf Manifest) []string {
 }
 
 // grantWords says what a grant allows, for messages.
-func grantWords(g string) string {
+func grantWords(mf Manifest, g string) string {
 	switch {
+	case g == GrantCapability+"NET_ADMIN" && mf.Permissions.HostNetwork:
+		return "the capability NET_ADMIN, which together with the host network lets it change the server's own network settings (addresses, routes, firewall)"
 	case g == GrantHostNetwork:
 		return "the server's own network (host network)"
 	case g == GrantGPU:
@@ -118,7 +182,7 @@ func checkGrants(mf Manifest, src Source, asked []string) ([]string, error) {
 	}
 	for _, g := range neededGrants(mf) {
 		if !have[g] {
-			p.addf("%s wants %s; an administrator must allow that for this app", mf.Name, grantWords(g))
+			p.addf("%s wants %s; an administrator must allow that for this app", mf.Name, grantWords(mf, g))
 			continue
 		}
 		out = append(out, g)
@@ -149,24 +213,6 @@ func (m *Manager) allocUID(ctx context.Context, c *EngineConfig, prev *installed
 	return 0, fmt.Errorf("every app user ID (%d-%d) is taken; delete the data of apps you removed", FirstAppUID, LastAppUID)
 }
 
-// checkSubPath checks a subfolder chosen inside a shared folder. The
-// shares code resolves it for real (no symlinks, inside the share).
-func checkSubPath(sub string) error {
-	if sub == "" {
-		return nil
-	}
-	if len(sub) > 400 || strings.HasPrefix(sub, "/") || strings.ContainsAny(sub, "'\\\x00") ||
-		strings.IndexFunc(sub, unicode.IsControl) >= 0 {
-		return fmt.Errorf("subfolder %q: use a path inside the shared folder", sub)
-	}
-	for _, seg := range strings.Split(sub, "/") {
-		if seg == "" || seg == "." || seg == ".." {
-			return fmt.Errorf("subfolder %q: use a path inside the shared folder", sub)
-		}
-	}
-	return nil
-}
-
 // chooseShares settles the shared folder for each of the manifest's
 // shares (as asked, else as before), resolves each to its host folder and
 // returns the choices, the folders for the policy and the variables.
@@ -190,7 +236,15 @@ func (m *Manager) chooseShares(ctx context.Context, mf Manifest, asked, prev map
 		if !ok {
 			ch = prev[s.Name]
 		}
-		ch.Share, ch.Path = strings.TrimSpace(ch.Share), strings.Trim(strings.TrimSpace(ch.Path), "/")
+		ch.Share = strings.TrimSpace(ch.Share)
+		if strings.Trim(strings.TrimSpace(ch.Path), "/") != "" {
+			// A subfolder could be swapped for a link by anything that can
+			// write in the share (another app), and Docker mounts by path
+			// whenever it restarts a container itself.
+			p.addf("%s: apps get a whole shared folder, not a subfolder (%q); choose the shared folder itself", s.Label, ch.Path)
+			continue
+		}
+		ch.Path = ""
 		unshared := filepath.Join(dataDir, unsharedDir, s.Name)
 		if ch.Share == "" {
 			if s.Required {
@@ -213,10 +267,6 @@ func (m *Manager) chooseShares(ctx context.Context, mf Manifest, asked, prev map
 			p.addf("%s: %s may only read this shared folder", s.Label, mf.Name)
 			continue
 		}
-		if err := checkSubPath(ch.Path); err != nil {
-			p.addf("%s: %v", s.Label, err)
-			continue
-		}
 		if m.Shares == nil {
 			if s.Required {
 				p.addf("%s: shared folders aren't available on this server yet", s.Label)
@@ -226,7 +276,7 @@ func (m *Manager) chooseShares(ctx context.Context, mf Manifest, asked, prev map
 			}
 			continue
 		}
-		host, err := m.Shares.Resolve(ctx, ch.Share, ch.Path)
+		host, err := m.Shares.Resolve(ctx, ch.Share, "")
 		if err != nil {
 			p.addf("%s: %v", s.Label, err)
 			continue
@@ -261,10 +311,13 @@ func (m *Manager) currentShareBinds(ctx context.Context, ia *installedApp) ([]sh
 		if ch.Share == "" {
 			continue
 		}
+		if ch.Path != "" {
+			return nil, fmt.Errorf("%s has a subfolder of shared folder %s for %s; apps get whole shared folders now: choose the shared folder again in the app's settings", ia.manifest.Name, ch.Share, name)
+		}
 		if m.Shares == nil {
 			return nil, fmt.Errorf("%s uses shared folders, which aren't available; refusing to start", ia.manifest.Name)
 		}
-		host, err := m.Shares.Resolve(ctx, ch.Share, ch.Path)
+		host, err := m.Shares.Resolve(ctx, ch.Share, "")
 		if err != nil {
 			return nil, fmt.Errorf("shared folder %s for %s: %w", ch.Share, name, err)
 		}

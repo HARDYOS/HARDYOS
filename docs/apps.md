@@ -75,11 +75,18 @@ catalog in `apps/catalog/`) and check it with `hardyctl app-check`.
 - **folders**: created under the data folder before the app starts, with
   the owner (`uid:gid`) and mode the containers need. Without an owner, a
   folder HardyOS creates belongs to the app's own user (`HARDY_UID`); an
-  update never changes the owner of a folder that's already there.
+  update never changes the owner of a folder that's already there. Folders
+  are created one level at a time relative to the folder above
+  (`mkdirat`/`openat` with `O_NOFOLLOW`), and their mode and owner are set
+  through the opened folder itself, so a running container that swaps a
+  folder for a link can't redirect root anywhere else.
 - **shares**: shared folders the app can be given. `name` (`MEDIA`,
   capital letters, digits and `_`) becomes `${HARDY_SHARE_MEDIA}`, which
-  the compose file binds. The install dialog offers every shared folder,
-  plus an optional subfolder; `suggest` preselects a shared folder by id.
+  the compose file binds as it is (never a folder inside it). The install
+  dialog offers every shared folder; apps always get a whole shared folder,
+  never a subfolder (`path` in a share choice must be empty), because only a
+  share's root, a ZFS mountpoint, can't be swapped for a link by something
+  else that writes in the share. `suggest` preselects a shared folder by id.
   `access` (`read` or `write`) is the most the app gets: an admin may give
   read where the app asks for write, never the reverse. `required` shares
   must be chosen; any other share left out points at an empty folder of the
@@ -113,7 +120,7 @@ catalog in `apps/catalog/`) and check it with `hardyctl app-check`.
 | `HARDY_TZ` | The server's time zone |
 | `HARDY_PORT_<NAME>` | The host port chosen for each manifest port |
 | `HARDY_UID`, `HARDY_GID` | The app's own user and group ID (the same number), from 30000-30999 |
-| `HARDY_SHARE_<NAME>` | The host folder chosen for each manifest share (or its empty stand-in) |
+| `HARDY_SHARE_<NAME>` | The root of the shared folder chosen for each manifest share (or its empty stand-in) |
 
 Each app gets its own user ID at its first install: the lowest free one
 from 30000-30999. It's kept in the app's state and stays reserved while the
@@ -131,11 +138,19 @@ runs. Anything not allowed is refused:
 - No `privileged`, no `pid`, `ipc`, `uts` or `cgroup` set to `host`, no
   joining containers or networks outside the app. `network_mode: host` only
   with the `hostNetwork` permission.
-- Bind mounts only inside `${HARDY_APP_DATA}` or inside the folder chosen
-  for one of the manifest's shares, with private propagation. A bind inside
-  a share the app was given read access to is made `read_only`. No named
-  volumes (data goes in folders HardyOS can snapshot); anonymous volumes and
-  tmpfs are fine.
+- Bind mounts only inside `${HARDY_APP_DATA}` or of the shared folder
+  chosen for one of the manifest's shares (`${HARDY_SHARE_<NAME>}` itself,
+  not a folder in it; the same goes for the empty stand-in of a share left
+  out), with private propagation. A share the app was given read access to
+  is mounted `read_only`. No bind source may be inside another one of the
+  same app, across all its services: not `${HARDY_APP_DATA}` together with
+  `${HARDY_APP_DATA}/db`, not `config` together with `config/cache`. Mount
+  folders side by side instead. Docker mounts bind sources by path again
+  whenever it restarts a container by itself (restart policy, Docker
+  restarting), without HardyOS checking again, and a container that mounts
+  the outer folder could have replaced the inner one with a link. The same
+  folder mounted twice is fine. No named volumes (data goes in folders
+  HardyOS can snapshot); anonymous volumes and tmpfs are fine.
 - Published ports only as declared in the manifest.
 - Capabilities and devices only as declared in the manifest's permissions
   (graphics devices and NVIDIA reservations with `gpu`).
@@ -149,16 +164,32 @@ the labels `org.hardyos.app` and `org.hardyos.app.version` and, after the
 check, `cgroup_parent` (the app's slice, see Limits) on every container.
 Before every start it resolves each bind mount's real path and each shared
 folder again: a container can't swap a folder for a link to somewhere else,
-a share that moved or went away isn't mounted from its old place, and a
-read-only share must still be mounted read-only.
+a share that moved or went away isn't mounted from its old place, a share
+bind must still be the share's root, no bind may be inside another, and a
+read-only share must still be mounted read-only. An app installed with a
+share subfolder (allowed before) doesn't start until its shared folder is
+chosen again in its settings.
 
 ## Sources and grants
 
 Every app records where its package came from: `catalog` (shipped with
 HardyOS), `upload` (an admin uploaded a `.hardyapp`), `imported` (from an
 imported catalog, whose name is kept as `sourceName`) or `custom` (built
-from a pasted Compose file). An update keeps the source unless it's given
-again.
+from a pasted Compose file).
+
+`hardyd-priv` decides whether a package is from the catalog, never hardyd
+(which must be treated as possibly compromised): a package is `catalog`
+only if its bytes (SHA-256) are those of a `.hardyapp` file shipped in
+`/usr/share/hardyos/apps` (a regular file, not a link), or of the package
+`hardyd-priv` itself found there when it installed the app (kept as
+`catalogSHA256` in its state, so the app stays a catalog app after an OS
+update ships a newer version). Everything else is untrusted: a source of
+`upload`, `imported` or `custom` that hardyd sends is kept as a label, and
+`catalog` or no source becomes `upload` (or the label the app already had).
+The installed package is kept in `.hardyos/package.hardyapp`, and the source
+is decided again from those bytes on every update, settings change and
+rollback. Apps installed before HardyOS kept the package, and any state
+without a verified hash, count as untrusted and are shown as `upload`.
 
 Catalog apps get what their manifest declares. Every other app is
 sandboxed: each of these needs an admin's grant, by name, in the install
@@ -176,6 +207,13 @@ Capabilities already in Docker's default set (`CHOWN`, `NET_RAW`,
 (`grants`), only the ones its manifest uses; an update that asks for
 something new is refused until that is granted too. hardyd only forwards
 grants an admin ticked, and audits them.
+
+With the host network, `NET_ADMIN` controls the server's own network
+(addresses, routes, firewall), not a private one; the install dialog says
+so, and an untrusted app needs both grants (`hostNetwork` and
+`cap:NET_ADMIN`). `NET_RAW` is in Docker's default set, so every container,
+host network or not, has it unless it drops it; with the host network it
+is described as raw access to the server's network.
 
 ## Limits
 
@@ -206,7 +244,8 @@ The first install asks which pool apps go on. HardyOS then creates:
 - `<pool>/apps/<id>`: one dataset per app. `data/` is `HARDY_APP_DATA`;
   `.hardyos/` (root only) holds the manifest, compose file, the resolved
   and checked compose file that actually runs, `app.env` with the settings
-  and passwords, and `state.json`.
+  and passwords, `state.json`, and the package as installed
+  (`package.hardyapp`).
 
 Removing an app keeps its dataset unless "Also delete its data" is ticked.
 Installing it again picks the data, passwords and user ID back up (its
@@ -225,10 +264,20 @@ snapshot's name so the App Store offers Roll back.
 
 `apps.snapshots` lists an app's snapshots, newest first, with their
 versions. `apps.rollback` needs the app's name as confirmation; it stops the
-app, runs `zfs rollback -r` (later snapshots go), puts the images back on
-their tags if those images are still on the server, gives back the shared
-folders the snapshot had, and starts the app with the package, settings and
-limits inside the snapshot.
+app, runs `zfs rollback -r` (later snapshots go), and brings back the data,
+package, settings and limits inside the snapshot, but never a permission
+the admin has taken away since: the app's grants become those both the
+snapshot and the app had just before, and a shared folder is kept only
+where both had one for the same share name (the current choice, at most
+the access the snapshot's manifest allows, and only if the shared folder
+still exists). Everything is then checked again like a settings change
+(source from the package bytes, grants, the full compose policy). If that
+passes, it puts the images back on their tags if those images are still on
+the server and starts the app. If not, the app stays stopped with the
+restored data and is marked `blocked` (shown on the app) with what is
+missing; starting it is refused until an admin allows that in the app's
+settings (`apps.reconfigure`), which checks everything again and clears the
+mark.
 
 ## How installing works
 
