@@ -212,7 +212,7 @@ func (m *Manager) status(ctx context.Context) (*Status, error) {
 	case !c.Enabled:
 		st.Problem = "The domain controller is stopped."
 	case !st.Running:
-		st.Problem = "The domain controller isn't running. HardyOS keeps trying to start it; the Log Center has details."
+		st.Problem = "The domain controller isn't running. HardyOS keeps trying to start it; in the Terminal, journalctl -u hardyos-dc shows why."
 	default:
 		if p := m.networkProblem(ctx, c); p != "" {
 			st.Problem = p

@@ -20,9 +20,11 @@ RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
 Restart=on-failure
 RestartSec=2s
-# Root is needed for zfs, disks and network changes; limit everything else.
-ProtectHome=yes
-PrivateTmp=yes
+# Root is needed for zfs, disks and network changes. No private mount
+# namespace (PrivateTmp, ProtectHome and the like): pools, datasets and the
+# domain controller's network namespace that hardyd-priv mounts must be
+# visible to the whole system, and mounts made inside a private namespace
+# never leave it.
 ProtectKernelTunables=no
 LockPersonality=yes
 RestrictRealtime=yes

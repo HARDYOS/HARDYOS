@@ -4,10 +4,10 @@ Documentation=https://github.com/HARDYOS/HARDYOS
 # Started and kept running by hardyd-priv once a domain exists; never enabled
 # directly. It runs in its own network namespace (its own address on the LAN)
 # with a private /run/samba, so the NAS's own file sharing can use Samba too.
+# No start conditions: if its folder or namespace is missing, starting fails
+# loudly instead of being skipped.
 After=network-online.target hardyd-priv.service
 Wants=network-online.target
-ConditionPathExists=/var/lib/hardyos-dc/etc/smb.conf
-ConditionPathExists=/run/netns/hardyos-dc
 
 [Service]
 Type=notify

@@ -46,3 +46,4 @@ Settled choices, newest last. Change one by adding a row that supersedes it.
 | 40 | 2026-10-25 | The NAS reaches the DC through a host macvlan ("shim") with a link-local address, not its LAN address | A macvlan child can't talk to its parent port; reusing the LAN address on the shim would answer ARP twice and confuse other devices |
 | 41 | 2026-10-25 | Domain passwords travel to Samba on stdin (a small helper using Samba's Python API) and to jobs through a one-time in-memory reference | They never appear in process listings, job history or the audit log |
 | 42 | 2026-10-25 | Domain passwords don't expire by default | A family domain; forced rotation leads to weaker passwords (current NIST guidance) |
+| 43 | 2026-10-26 | hardyd-priv runs in the system's mount namespace (no PrivateTmp/ProtectHome) | Pools, datasets and the DC's network namespace it mounts must be visible system-wide; mounts made in a private namespace never leave it |

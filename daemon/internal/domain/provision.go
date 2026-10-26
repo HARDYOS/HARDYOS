@@ -87,10 +87,10 @@ func (m *Manager) Provision(ctx context.Context, a ProvisionArgs) (*Config, erro
 		return nil, err
 	}
 	if err := m.run(ctx, "systemctl", "start", Service); err != nil {
-		return nil, fmt.Errorf("starting the domain controller: %w", err)
+		return nil, fmt.Errorf("starting the domain controller: %w%s", err, m.serviceLog(ctx))
 	}
 	if !m.waitActive(ctx, 60*time.Second) {
-		return nil, errors.New("the domain controller didn't start; the Log Center has details")
+		return nil, fmt.Errorf("the domain controller didn't start%s", m.serviceLog(ctx))
 	}
 	ok = true
 	m.log().Info("domain created", "domain", c.Domain)
@@ -280,6 +280,16 @@ func (m *Manager) writeSmbConf(c *Config) error {
 		return err
 	}
 	return os.WriteFile(p, []byte(b.String()), 0o644)
+}
+
+// serviceLog is the DC service's last log lines, for error messages.
+func (m *Manager) serviceLog(ctx context.Context) string {
+	res, err := m.Runner.Run(ctx, nil, "journalctl", "-u", Service, "-n", "12", "-o", "cat", "--no-pager")
+	out := strings.TrimSpace(string(res.Stdout))
+	if err != nil || out == "" || strings.HasPrefix(out, "-- No entries") {
+		return ""
+	}
+	return ". Its log ends with:\n" + out
 }
 
 func (m *Manager) waitActive(ctx context.Context, d time.Duration) bool {
