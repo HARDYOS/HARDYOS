@@ -624,6 +624,11 @@ func (m *Manager) GrantApp(ctx context.Context, id, app string, uid int, write b
 	path := m.sys(sh.Path)
 	grants := []AppGrant{}
 	for _, g := range sh.Apps {
+		if g.App != app && g.UID == uid {
+			// A record left by an app removed while this share was
+			// unmounted: the user ID now belongs to app.
+			continue
+		}
 		if g.App != app {
 			grants = append(grants, g)
 			continue
@@ -662,6 +667,17 @@ func (m *Manager) RevokeApp(ctx context.Context, app string) error {
 		return err
 	}
 	for _, sh := range l {
+		if !sh.Mounted {
+			// Keep the record: the ACL entries are still on disk and are
+			// removed when that user ID is next given to an app (GrantApp).
+			for _, g := range sh.Apps {
+				if g.App == app {
+					m.log().Warn("shared folder isn't mounted; its access for a removed app stays until the user ID is reused",
+						"app", app, "share", sh.ID, "uid", g.UID)
+				}
+			}
+			continue
+		}
 		keep := []AppGrant{}
 		var gone []AppGrant
 		for _, g := range sh.Apps {
@@ -676,7 +692,7 @@ func (m *Manager) RevokeApp(ctx context.Context, app string) error {
 		}
 		path := m.sys(sh.Path)
 		for _, g := range gone {
-			if !sh.Mounted || uidUsed(keep, g.UID, "") {
+			if uidUsed(keep, g.UID, "") {
 				continue
 			}
 			if err := m.setfacl(ctx, "-x", fmt.Sprintf("u:%d,d:u:%d", g.UID, g.UID), path); err != nil {

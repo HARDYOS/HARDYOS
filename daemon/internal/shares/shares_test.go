@@ -476,6 +476,28 @@ func TestGrantAndRevoke(t *testing.T) {
 	if err := m.RevokeApp(ctx, "not an app"); !isValidation(err) {
 		t.Errorf("bad app id: %v", err)
 	}
+
+	// An unmounted share keeps the record (its ACL is still on disk) ...
+	f.On(listAll, rows(row{ds: "tank/shares/offline", name: "Offline", apps: `[{"app":"plex","uid":30002,"level":"write"}]`, mounted: false}))
+	before = len(f.Lines())
+	if err := m.RevokeApp(ctx, "plex"); err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range f.Lines()[before:] {
+		if strings.HasPrefix(l, "zfs set") || strings.HasPrefix(l, "setfacl") {
+			t.Errorf("unmounted share changed: %s", l)
+		}
+	}
+	// ... and the next app given that user ID takes the record over.
+	f.On(listAll, rows(row{ds: "tank/shares/offline", name: "Offline", apps: `[{"app":"plex","uid":30002,"level":"write"}]`, mounted: true}))
+	before = len(f.Lines())
+	if err := m.GrantApp(ctx, "offline", "radarr", 30002, false); err != nil {
+		t.Fatal(err)
+	}
+	m.Wait()
+	if want := `zfs set org.hardyos:apps=[{"app":"radarr","uid":30002,"level":"read"}] tank/shares/offline`; !slices.Contains(f.Lines()[before:], want) {
+		t.Errorf("missing %s\ngot %s", want, strings.Join(f.Lines()[before:], "\n    "))
+	}
 }
 
 func TestResolveStaysInsideTheShare(t *testing.T) {
