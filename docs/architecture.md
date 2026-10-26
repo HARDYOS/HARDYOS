@@ -1028,13 +1028,35 @@ them on (`settings.json`: `sftpEnabled`, `webdavEnabled`) and per folder
   `PermitUserRC no`, `PubkeyAuthentication no`, `AuthorizedKeysFile none`,
   `AuthenticationMethods password`; the file ends with `Match all`. With
   SFTP off (or the server out of the domain) the file says `DenyGroups *`
-  for the same matches. Local accounts' SSH is untouched.
+  for the same matches. Local accounts' SSH is untouched. Order on
+  every apply (decision 109): views, group, drop-in (`sshd -t`, reload),
+  then `sshd -T -C user=<first planned account's NSS name>,host=x,addr=127.0.0.1`
+  must show `forcecommand internal-sftp -d /`, `chrootdirectory <root>/%U`,
+  `disableforwarding yes`, `allowgroups hardyos-sftp` (only),
+  `authenticationmethods password`, `pubkeyauthentication no`,
+  `permittty no` and the forwarding switches off (`sftp.CheckEffective`);
+  only then does the PAM block go in. Any failure (no Include, another
+  file setting something first, `sshd -T` failing, the session check
+  below) takes the PAM block out and File Services shows *SFTP sign-in
+  for domain accounts is off until this is fixed*. With nobody to let in
+  the PAM block stays out.
 - **PAM, sshd only.** A marked block goes in front of `@include
   common-auth` and `@include common-account` in `/etc/pam.d/sshd`:
   `pam_succeed_if uid >= 100000 uid <= 999999` selects domain accounts
-  (anything else skips to the usual stack), then `pam_winbind` decides
-  alone (`success=done default=die`: wrong password, turned off, expired,
-  must-change all refused). winbind stays out of the system-wide stacks:
+  (anything else skips to the usual stack), `pam_succeed_if user ingroup
+  hardyos-sftp` refuses non-members before winbind is asked (sshd hands
+  PAM a deliberately wrong password for accounts AllowGroups refuses;
+  that must not count towards their lockout in AD), then
+  `pam_faillock preauth/authfail/authsucc deny=10 unlock_time=900` around
+  `pam_winbind`, which decides alone (wrong password, turned off,
+  expired, must-change all refused); the account block has the same
+  membership check. A third block before `@include common-session` gives
+  domain accounts `pam_limits` and ends their session stack
+  (`pam_permit`, `done`), so common-session's `pam_systemd` (a
+  `systemd --user` outside the chroot running `~/.config/systemd/user`)
+  never runs for them; `sftp.CheckPAMSession` refuses the edit if a
+  `pam_systemd` session line comes before that block (directly or via an
+  include). Jumps never cross an `@include`. winbind stays out of the system-wide stacks:
   the image diverts libpam-winbind's pam-auth-update profile, and File
   Services warns if `common-auth` has winbind anyway. Debian's file
   without its includes is refused (`ErrPAMLayout`). Passwords go to the
@@ -1051,29 +1073,73 @@ them on (`settings.json`: `sftpEnabled`, `webdavEnabled`) and per folder
   folders whose mount was verified get a view (decision 105), and a home
   only when the mount table says it's that home dataset's mount; the bind's
   source is opened with `shares.OpenRoot` on that mount's device. Binds
-  are made from O_PATH descriptors opened without following links,
-  remounted `nosuid,nodev,noexec`; the sync reads `/proc/self/mountinfo`,
-  unmounts what's no longer wanted (lazily if a session holds it) and only
-  ever `rmdir`s empty folders, never a folder something is mounted on. The
+  (decision 108) are `open_tree(OPEN_TREE_CLONE|OPEN_TREE_CLOEXEC)` of
+  that descriptor (no `AT_RECURSIVE`), `mount_setattr` to
+  `nosuid,nodev,noexec` (+`rdonly`) and `MS_PRIVATE` while still
+  detached, then `move_mount` onto the target's O_PATH descriptor; the
+  fallback is a non-recursive `MS_BIND`, `MS_PRIVATE` at once, the
+  restricting remount, and the bind is dropped if anything appeared
+  inside it meanwhile. A view is thus in no peer group: nothing the host
+  mounts later shows up in it (no rw or suid copies inside read-only
+  views), and nothing unmounted in it reaches the host. Not recursive on
+  purpose: a dataset mounted inside a shared folder is an empty folder in
+  views (accepted: ZFS makes mountpoint folders root's 0755, writes there
+  would land hidden under the child mount on the host; SMB, WebDAV and
+  the File Manager see the child). Every sync and release first makes
+  the root private and then everything below it (`MS_PRIVATE`, then
+  `MS_PRIVATE|MS_REC`), which also detaches binds made by earlier
+  versions from the shared folders' peer groups before anything is
+  unmounted. The sync manages only mounts exactly at
+  `<root>/<uid>/<name>`: one is kept only if it's alone there, has
+  nothing mounted inside, has the planned read-only flag, is restricted
+  and private, shows the dataset's root (mountinfo field 4 `/`), the
+  dataset as source and the verified device; anything else there is
+  unmounted (detached with what's inside, if busy) and bound again;
+  nothing deeper is ever unmounted by itself. Existing folders in the
+  views are never chowned or chmodded (one could be a shared folder's top
+  mounted there): only ones just made; a target on another device than
+  its folder (something mounted) or still holding a mount that couldn't
+  go is skipped. Folders are only ever `rmdir`ed when empty, never one
+  something is mounted on. The
   `hardyos-sftp` system group (`gpasswd -M`) lists exactly the accounts
   with a view, as NSS names them. Before a folder is deleted
   (`ShareHook.BeforeDelete`) and before a pool is exported or destroyed or
   a dataset destroyed (`priv.Server.OnRelease`, called by the storage ops)
-  its binds are unmounted. Views are rebuilt after a reboot by the watch.
+  its binds are unmounted, and the dataset (with everything below it)
+  is held out of the views until the operation is over
+  (`ShareHook.AfterDelete`, the done function `priv.Server.OnRelease`
+  takes; at most 30 minutes), so the watch can't bind it again in
+  between. Domain administrators get no view unless
+  `settings.json` `sftpAdmins` (File Services › *Domain administrators
+  too*) is on. Views are rebuilt after a reboot by the watch.
 - **WebDAV is hardyd's.** `/dav/` (and `/dav`, plus `OPTIONS /` for
   Windows) in `api/handlers_dav.go`: HTTPS only (403 on plain HTTP unless
   the dev `Insecure` flag), WebDAV and the folders' switches from
   `files.status` (cached 15 s), Basic sign-in with
-  `auth.SignIn.AuthenticateDomain` (a local HardyOS account is refused
-  without its password being checked), the desktop's limiter keys
+  `auth.SignIn.AuthenticateDomain` (a local HardyOS account's name is
+  refused without its password being checked, answered 401 like a wrong
+  password and counted against the address and `dav-local:<key>`, never
+  the account's own key), the desktop's limiter keys
   (`ip:<addr>` via the trusted-proxy aware client address, and the
   account's key for every spelling), 503 without counting when the DC
   can't be asked. A password that worked is remembered for 2 minutes
   under HMAC-SHA256(per-process random key, account key + password); the
   account row is read again on every request (turned off here = out), and
   domain groups refresh like a session's. Successful sign-ins are audited
-  at most hourly per account, failures always; uploads, deletes and moves
-  are audited as `files.*` with detail `webdav`.
+  at most hourly per account, failures always, rate-limited ones once per
+  key per 15 minutes (with the count refused since); uploads, deletes,
+  `MKCOL` (`files.mkdir`), modification times set by PROPPATCH
+  (`files.settime`), moves (source and destination) and COPY
+  (`files.copy`, from where) are audited with detail `webdav`. Request
+  limits (decision 110): bodies other than PUT's at most 1 MiB;
+  `PROPFIND` with `Depth: infinity` (or none) 403 with
+  `<D:propfind-finite-depth/>`; `POST` 405; COPY/MOVE `Destination` is
+  cleaned and must stay below `/dav`, the same file or folder as the
+  source (after cleaning and resolving) or a folder into itself is 403
+  before x/net/webdav (which would delete the destination first) sees
+  it, and it gets the cleaned, escaped paths; LOCK timeouts are capped
+  at an hour (the `Timeout` header is rewritten so the answer matches),
+  256 locks per person, 8192 in all, owner notes over 1 KiB dropped.
 - **The FileSystem** (`internal/dav`, `golang.org/x/net/webdav` with a
   memory lock table per person) maps `/<Folder>/<path>` to `files.Service`
   calls as the person; the top is virtual (nothing can be made, moved or
@@ -1081,22 +1147,42 @@ them on (`settings.json`: `sftpEnabled`, `webdavEnabled`) and per folder
   lazily (a listing doesn't start a worker per file; content types come
   from names); uploads stream into `.hardyos-upload-<id>` and are
   `Replace`d into place on Close only if the body, writes and (for COPY)
-  the source read all succeeded, else deleted; deletes use the recycle
+  the source read all succeeded, else deleted; replacing an existing file
+  (PUT, or COPY/MOVE with Overwrite) first opens it for writing as the
+  person (`OpenWrite`; refused = 403, nothing changed), and in a folder
+  with a recycle bin its old version is recycled just before the rename
+  (without a bin the rename replaces it in one step; if the rename then
+  fails the old version is in the bin, not lost); deletes use the recycle
   bin; PROPPATCH stores nothing (answered 200; `Win32LastModifiedTime`
   sets the modification time). Every response has `Content-Security-Policy:
   default-src 'none'; sandbox`, nosniff, no-store, and GET/HEAD
   `Content-Disposition: attachment`.
 - **Tests.** `internal/sftp` (drop-in rendering, PAM edits on Debian's
-  file, planning, view sync with a fake mounter, rollback of a refused
-  config; `TestRealSSHD` checks the drop-in with a real sshd when
-  `HARDYOS_SSHD` is set), `smb` `TestApplySFTP` (views from rules and
-  accounts, release, leave), `api` `TestDAV*` (browse, hidden names,
-  read/write/move/copy/delete/lock, a broken upload, dead properties, sign
-  in, cache, lockout shared with the desktop, DC down, switches, HTTPS),
+  file incl. faillock, the membership check and jump targets, the session
+  check, planning, view sync with a fake mounter that models propagation
+  (migration of shared binds, every keep condition, never chmod an
+  existing target, never mount over a mount that stayed), held datasets,
+  `sshd -T` parsing and PAM only after it, rollback of a refused config;
+  `TestRealSSHD` checks the drop-in and `CheckEffective` with a real sshd
+  when `HARDYOS_SSHD` is set; `TestRealBindNamespace` makes real binds
+  both ways in a private mount namespace of its own when
+  `HARDYOS_MOUNT_NS=1` as root: private, read-only, child mounts not
+  propagated, an old shared view replaced without unmounting anything on
+  the host), `smb` `TestApplySFTP` (views from rules and accounts,
+  administrators only with the switch, release, leave), `api` `TestDAV*`
+  (browse, hidden names, read/write/move/copy/delete/lock, a broken
+  upload, PUT/COPY/MOVE over a read-only file, the old version in the
+  bin, depth, POST, body and lock limits, Destination spelled as the
+  source, audit rows, dead properties, sign in, local names, cache,
+  lockout shared with the desktop, DC down, switches, HTTPS),
   and `TestSFTPMemberIntegration` (CI's Samba job, `HARDYOS_DC_INTEGRATION=1`):
-  a real DC, the host's Samba joined, a private sshd on port 2222, SFTP as
+  a real DC, the host's Samba joined, a private sshd on port 2222 (in a
+  fresh private mount namespace per (re)start, with a copy of `/etc/pam.d`
+  whose common-* stacks have no winbind, as on the image), SFTP as
   domain users by rule, no TTY, no tunnels, refused passwords and
-  accounts.
+  accounts, the domain administrator refused by default, a faillock
+  lockout after ten wrong passwords, and an overriding drop-in caught by
+  the effective-config check (PAM off, problem shown) and recovered.
 
 ## Data and state
 

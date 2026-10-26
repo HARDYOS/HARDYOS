@@ -9,7 +9,9 @@
 // .hardyos*) are never listed and can't be reached; snapshots aren't
 // offered. Uploads are streamed into a temporary file next to the target
 // and renamed into place only once the whole body arrived, so a broken
-// upload never replaces a file. Deletes go to the recycle bin. Dead
+// upload never replaces a file; replacing one needs write access to that
+// file, and its old version goes to the recycle bin first when the folder
+// has one (CheckReplace, writeFile.Close). Deletes go to the recycle bin. Dead
 // properties (PROPPATCH) are never stored: they're answered as accepted
 // and dropped, except Windows' Win32LastModifiedTime, which sets the file's
 // modification time.

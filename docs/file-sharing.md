@@ -164,10 +164,27 @@ Limits: SFTP accounts can't open a shell, run commands, or forward ports
 (no tunnels); only the password works (SSH keys aren't used, so changing
 your domain password or turning the account off always locks it out).
 A new account, a new rule or a new folder shows up within 10 minutes;
-an account with no folder to see can't sign in. Folders don't hide
+an account with no folder to see can't sign in. Ten wrong passwords in
+15 minutes lock that name out of SFTP for 15 minutes (the domain isn't
+asked during the lock); domain accounts without SFTP folders are refused
+before their password is even checked, so attempts never count towards
+their lockout in the domain. **Domain administrators** (Domain Admins,
+HardyOS Admins) can't use SFTP unless File Services › *Domain
+administrators too* is on. Folders don't hide
 `.recycle` or `.zfs` over SFTP, but their permissions still apply (your
-own recycle bin, older versions read only). The server's own SSH for its
-Linux accounts (root with a key, as before) is unchanged.
+own recycle bin, older versions read only). A dataset made *inside* a
+shared folder (Storage › Datasets, below the folder's own) shows as an
+empty folder over SFTP; reach it over SMB, WebDAV or the File Manager.
+The server's own SSH for its Linux accounts (root with a key, as before)
+is unchanged.
+
+If File Services shows *SFTP sign-in for domain accounts is off until
+this is fixed*, the SSH server doesn't apply HardyOS's settings to
+domain accounts (usually `/etc/ssh/sshd_config` lost its `Include
+/etc/ssh/sshd_config.d/*.conf` line, another file there sets one of the
+same settings first, or pam_systemd was added ahead of HardyOS's lines
+in `/etc/pam.d/sshd`); nobody can sign in with a domain password until
+it's fixed, and it's checked again on every change and every 10 minutes.
 
 ### WebDAV
 
@@ -199,8 +216,14 @@ Limits: the password is checked like a desktop sign-in (five wrong ones
 in 15 minutes lock the account and the address out of WebDAV and the
 desktop for 15 minutes); a password that worked is remembered for two
 minutes, so a password changed in the domain may still work that long.
-WebDAV only works over HTTPS, and (like desktop sign-in with domain accounts) only on the server that runs the domain controller itself. Uploads go into place only once they're
-complete. Deleting goes to the folder's recycle bin. File properties
+The server's own accounts' names are answered like a wrong password (and
+counted against the address). WebDAV only works over HTTPS, and (like desktop sign-in with domain accounts) only on the server that runs the domain controller itself. Uploads go into place only once they're
+complete. Saving over a file needs permission to change that file (a
+read-only file stays as it is); the old version goes to the folder's
+recycle bin first when it has one. Deleting goes to the folder's recycle
+bin. Locks last at most an hour (apps renew them); listing a whole tree
+at once (`Depth: infinity`) is refused, so clients list folder by
+folder. File properties
 apps try to store (WebDAV "dead properties") aren't kept, except the
 modification time Windows sets. Older versions aren't offered over
 WebDAV (use Previous Versions over SMB or the File Manager). Copying on

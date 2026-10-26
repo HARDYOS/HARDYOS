@@ -9,8 +9,11 @@
 // that the person's access rules let in (read-only binds for read access)
 // and of their home folder; on disk, the folders' ACLs still decide as the
 // person. Domain passwords are checked by pam_winbind, added to sshd's PAM
-// stack only (/etc/pam.d/sshd) and only for user IDs in the domain's range;
-// local accounts (root, the administrator's own) sign in to SSH as before.
+// stack only (/etc/pam.d/sshd) and only for user IDs in the domain's range
+// that are in hardyos-sftp, behind pam_faillock; that block goes in only
+// after sshd -T shows the drop-in in effect (effective.go, pam.go). Binds
+// are private and non-recursive (mounts_linux.go). Local accounts (root,
+// the administrator's own) sign in to SSH as before.
 //
 // Layout:
 //
