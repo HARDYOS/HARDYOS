@@ -1,4 +1,0 @@
-#!/bin/sh
-# ifupdown hook: refresh the console's web address.
-[ -x /usr/lib/hardyos/hardyos-issue ] && exec /usr/lib/hardyos/hardyos-issue
-exit 0
