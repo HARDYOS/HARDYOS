@@ -3406,7 +3406,7 @@ components:
         level: { type: string, enum: [read, write] }
     Share:
       type: object
-      required: [id, name, description, pool, dataset, path, mounted, quotaBytes, usedBytes, recycle, guest, access, apps, createdAt]
+      required: [id, name, description, pool, dataset, path, mounted, quotaBytes, usedBytes, recycle, guest, access, apps, createdAt, services]
       properties:
         id: { type: string }
         name: { type: string }
@@ -3425,6 +3425,42 @@ components:
           items: { $ref: "#/components/schemas/ShareRule" }
         apps: { type: array, items: { $ref: "#/components/schemas/ShareAppGrant" } }
         createdAt: { type: string, format: date-time }
+        services: { $ref: "#/components/schemas/ShareServices" }
+    ShareServices:
+      type: object
+      description: How the folder is shared on the network, and its automatic snapshots
+      required: [smb, nfs, snapshots]
+      properties:
+        smb:
+          type: object
+          required: [enabled, timeMachine, timeMachineMaxBytes, previousVersions]
+          properties:
+            enabled: { type: boolean, description: Windows and Mac file sharing (SMB) }
+            timeMachine: { type: boolean, description: Macs can back up here with Time Machine }
+            timeMachineMaxBytes: { type: integer, format: int64, description: Most each Mac's backups may use; 0 = the folder's quota }
+            previousVersions: { type: boolean, description: Snapshots show in Windows' Previous Versions }
+        nfs:
+          type: object
+          required: [enabled, clients]
+          properties:
+            enabled: { type: boolean }
+            clients:
+              type: array
+              items:
+                type: object
+                required: [client, access]
+                properties:
+                  client: { type: string, description: "An address or network, like 192.168.1.50 or 192.168.1.0/24" }
+                  access: { type: string, enum: [read, write] }
+        snapshots:
+          type: object
+          description: How many automatic snapshots to keep; 0 turns that kind off
+          required: [hourly, daily, weekly, monthly]
+          properties:
+            hourly: { type: integer }
+            daily: { type: integer }
+            weekly: { type: integer }
+            monthly: { type: integer }
     ShareCreateRequest:
       type: object
       required: [pool, name]
@@ -3438,6 +3474,7 @@ components:
         guest: { type: boolean }
         access: { type: array, items: { $ref: "#/components/schemas/ShareRule" } }
         subfolders: { type: array, items: { type: string } }
+        services: { $ref: "#/components/schemas/ShareServices" }
     ShareUpdateRequest:
       type: object
       properties:
@@ -3447,6 +3484,7 @@ components:
         recycle: { type: boolean }
         guest: { type: boolean }
         access: { type: array, items: { $ref: "#/components/schemas/ShareRule" } }
+        services: { $ref: "#/components/schemas/ShareServices" }
     ShareStarterRequest:
       type: object
       required: [pool, media, backups]

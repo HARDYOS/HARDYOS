@@ -26,6 +26,9 @@ const (
 	PropApps        = "org.hardyos:apps"
 	PropRecycle     = "org.hardyos:recycle"
 	PropGuest       = "org.hardyos:guest"
+	// PropServices holds how the folder is shared on the network (SMB, Time
+	// Machine, NFS) and its snapshot schedule, as JSON (see services.go).
+	PropServices = "org.hardyos:services"
 )
 
 // SharesDataset is the parent of every shared folder on a pool.
@@ -35,7 +38,7 @@ func SharesDataset(pool string) string { return pool + "/shares" }
 func Dataset(pool, id string) string { return SharesDataset(pool) + "/" + id }
 
 var listProps = []string{"name", PropShare, PropName, PropDescription, PropAccess, PropApps,
-	PropRecycle, PropGuest, "quota", "used", "mountpoint", "mounted", "creation"}
+	PropRecycle, PropGuest, "quota", "used", "mountpoint", "mounted", "creation", PropServices}
 
 // bgTimeout bounds one background ACL walk (a huge photo library on slow
 // disks still finishes well within it).
@@ -157,6 +160,14 @@ func (m *Manager) parseShare(line string) (Share, bool) {
 	if secs := num(f[12]); secs > 0 {
 		sh.CreatedAt = time.Unix(int64(secs), 0).UTC()
 	}
+	sh.Services = DefaultServices()
+	if s := val(f[13]); s != "" {
+		if err := json.Unmarshal([]byte(s), &sh.Services); err != nil {
+			m.log().Warn("shared folder has unreadable sharing settings", "dataset", f[0], "err", err)
+			sh.Services = DefaultServices()
+		}
+	}
+	sh.Services.normalize()
 	return sh, true
 }
 
@@ -281,6 +292,7 @@ func (m *Manager) create(ctx context.Context, a NewShare, existing []Share) (*Sh
 		"-o", PropApps+"=[]",
 		"-o", PropRecycle+"="+onOff(a.Recycle),
 		"-o", PropGuest+"="+onOff(a.Guest),
+		"-o", PropServices+"="+mustJSON(*a.Services),
 		ds)
 	if _, err := m.zfs(ctx, args...); err != nil {
 		return nil, fmt.Errorf("creating the shared folder: %w", err)
@@ -438,6 +450,16 @@ func (m *Manager) Update(ctx context.Context, a ShareUpdate) (*Share, error) {
 			return nil, err
 		}
 		set = append(set, PropAccess+"="+mustJSON(rules))
+	}
+	if a.Services != nil {
+		sv, err := CheckServices(*a.Services)
+		if err != nil {
+			return nil, err
+		}
+		if len(mustJSON(sv)) > maxPropLen {
+			return nil, invalid("the sharing settings are too long")
+		}
+		set = append(set, PropServices+"="+mustJSON(sv))
 	}
 	if len(set) > 0 {
 		if _, err := m.zfs(ctx, append(append([]string{"set"}, set...), sh.Dataset)...); err != nil {

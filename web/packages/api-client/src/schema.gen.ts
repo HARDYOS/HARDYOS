@@ -2919,6 +2919,39 @@ export interface components {
             apps: components["schemas"]["ShareAppGrant"][];
             /** Format: date-time */
             createdAt: string;
+            services: components["schemas"]["ShareServices"];
+        };
+        /** @description How the folder is shared on the network, and its automatic snapshots */
+        ShareServices: {
+            smb: {
+                /** @description Windows and Mac file sharing (SMB) */
+                enabled: boolean;
+                /** @description Macs can back up here with Time Machine */
+                timeMachine: boolean;
+                /**
+                 * Format: int64
+                 * @description Most each Mac's backups may use; 0 = the folder's quota
+                 */
+                timeMachineMaxBytes: number;
+                /** @description Snapshots show in Windows' Previous Versions */
+                previousVersions: boolean;
+            };
+            nfs: {
+                enabled: boolean;
+                clients: {
+                    /** @description An address or network, like 192.168.1.50 or 192.168.1.0/24 */
+                    client: string;
+                    /** @enum {string} */
+                    access: "read" | "write";
+                }[];
+            };
+            /** @description How many automatic snapshots to keep; 0 turns that kind off */
+            snapshots: {
+                hourly: number;
+                daily: number;
+                weekly: number;
+                monthly: number;
+            };
         };
         ShareCreateRequest: {
             pool: string;
@@ -2936,6 +2969,7 @@ export interface components {
             guest?: boolean;
             access?: components["schemas"]["ShareRule"][];
             subfolders?: string[];
+            services?: components["schemas"]["ShareServices"];
         };
         ShareUpdateRequest: {
             name?: string;
@@ -2948,6 +2982,7 @@ export interface components {
             recycle?: boolean;
             guest?: boolean;
             access?: components["schemas"]["ShareRule"][];
+            services?: components["schemas"]["ShareServices"];
         };
         ShareStarterRequest: {
             pool: string;

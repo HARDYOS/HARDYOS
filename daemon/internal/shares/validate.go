@@ -217,6 +217,14 @@ func CheckNew(a NewShare) (NewShare, error) {
 	if err := checkPropSize(a.Access); err != nil {
 		return a, err
 	}
+	sv := DefaultServices()
+	if a.Services != nil {
+		sv = *a.Services
+	}
+	if sv, err = CheckServices(sv); err != nil {
+		return a, err
+	}
+	a.Services = &sv
 	if len(a.Subfolders) > MaxSubfolders {
 		return a, invalid("too many subfolders: at most %d", MaxSubfolders)
 	}

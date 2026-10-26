@@ -17,6 +17,7 @@ var listAll = "zfs list -Hp -t filesystem -o " + strings.Join(listProps, ",")
 
 type row struct {
 	ds, name, desc, access, apps string
+	services                     string // org.hardyos:services; "" = not set
 	recycle, guest               bool
 	quota, used                  string
 	mounted                      bool
@@ -44,16 +45,20 @@ func (r row) String() string {
 	if r.desc == "" {
 		r.desc = "-"
 	}
-	return strings.Join([]string{r.ds, "1", r.name, r.desc, r.access, r.apps, onOff(r.recycle), onOff(r.guest), q, u, mp, mounted, "1792000000"}, "\t")
+	svc := r.services
+	if svc == "" {
+		svc = "-"
+	}
+	return strings.Join([]string{r.ds, "1", r.name, r.desc, r.access, r.apps, onOff(r.recycle), onOff(r.guest), q, u, mp, mounted, "1792000000", svc}, "\t")
 }
 
 func rows(rs ...row) string {
 	lines := []string{
-		"tank\t-\t-\t-\t-\t-\t-\t-\t0\t1000\t/mnt/tank\tyes\t1792000000",
-		"tank/apps\t-\t-\t-\t-\t-\t-\t-\t0\t1000\t/mnt/tank/apps\tyes\t1792000000",
-		"tank/shares\t-\t-\t-\t-\t-\t-\t-\t0\t1000\t/mnt/tank/shares\tyes\t1792000000",
+		"tank\t-\t-\t-\t-\t-\t-\t-\t0\t1000\t/mnt/tank\tyes\t1792000000\t-",
+		"tank/apps\t-\t-\t-\t-\t-\t-\t-\t0\t1000\t/mnt/tank/apps\tyes\t1792000000\t-",
+		"tank/shares\t-\t-\t-\t-\t-\t-\t-\t0\t1000\t/mnt/tank/shares\tyes\t1792000000\t-",
 		// Not a shared folder: no org.hardyos:share=1.
-		"tank/shares/stray\t-\t-\t-\t-\t-\t-\t-\t0\t1000\t/mnt/tank/shares/stray\tyes\t1792000000",
+		"tank/shares/stray\t-\t-\t-\t-\t-\t-\t-\t0\t1000\t/mnt/tank/shares/stray\tyes\t1792000000\t-",
 	}
 	for _, r := range rs {
 		lines = append(lines, r.String())
@@ -218,7 +223,9 @@ func TestCreate(t *testing.T) {
 	want := `zfs create -o acltype=posixacl -o xattr=sa -o aclinherit=passthrough -o devices=off -o setuid=off -o quota=5368709120 ` +
 		`-o org.hardyos:share=1 -o org.hardyos:name=Family Photos -o org.hardyos:description=Everyone's photos ` +
 		`-o org.hardyos:access=[{"kind":"group","name":"HOME\\Family","level":"write"}] -o org.hardyos:apps=[] ` +
-		`-o org.hardyos:recycle=on -o org.hardyos:guest=off ` + ds
+		`-o org.hardyos:recycle=on -o org.hardyos:guest=off ` +
+		`-o org.hardyos:services={"smb":{"enabled":true,"timeMachine":false,"timeMachineMaxBytes":0,"previousVersions":true},` +
+		`"nfs":{"enabled":false,"clients":[]},"snapshots":{"hourly":24,"daily":14,"weekly":8,"monthly":6}} ` + ds
 	if !slices.Contains(f.Lines(), want) {
 		t.Errorf("create command missing:\nwant %s\ngot  %s", want, strings.Join(f.Lines(), "\n     "))
 	}
@@ -558,5 +565,27 @@ func TestResolveStaysInsideTheShare(t *testing.T) {
 	}
 	if _, err := m.Folders(ctx, "media", "escape"); err == nil {
 		t.Error("listed a folder outside the share")
+	}
+}
+
+func TestCheckServices(t *testing.T) {
+	ok := DefaultServices()
+	ok.NFS = NFS{Enabled: true, Clients: []NFSRule{{Client: " 192.168.1.7/24 ", Access: LevelWrite}, {Client: "fd00::5", Access: LevelRead}}}
+	got, err := CheckServices(ok)
+	if err != nil || got.NFS.Clients[0].Client != "192.168.1.0/24" || got.NFS.Clients[1].Client != "fd00::5" {
+		t.Errorf("clean = %+v %v", got.NFS, err)
+	}
+	for name, s := range map[string]Services{
+		"time machine without smb": {SMB: SMB{TimeMachine: true}},
+		"nfs on, nobody allowed":   {NFS: NFS{Enabled: true}},
+		"nfs to everyone":          {NFS: NFS{Clients: []NFSRule{{Client: "0.0.0.0/0", Access: LevelRead}}}},
+		"nfs bad access":           {NFS: NFS{Clients: []NFSRule{{Client: "10.0.0.1", Access: "admin"}}}},
+		"nfs twice":                {NFS: NFS{Clients: []NFSRule{{Client: "10.0.0.0/8", Access: LevelRead}, {Client: "10.1.2.3/8", Access: LevelRead}}}},
+		"too many hourly":          {Snapshots: Snapshots{Hourly: 1000}},
+		"negative":                 {Snapshots: Snapshots{Daily: -1}},
+	} {
+		if _, err := CheckServices(s); !isValidation(err) {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }

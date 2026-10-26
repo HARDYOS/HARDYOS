@@ -105,6 +105,7 @@ export type ShareAppGrant = S["ShareAppGrant"];
 export type ShareCreateRequest = S["ShareCreateRequest"];
 export type ShareUpdateRequest = S["ShareUpdateRequest"];
 export type ShareStarterRequest = S["ShareStarterRequest"];
+export type ShareServices = S["ShareServices"];
 export type AppSource = S["AppSource"];
 export type AppShareMount = S["AppShareMount"];
 export type AppShareChoice = S["AppShareChoice"];

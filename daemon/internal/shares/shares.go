@@ -61,6 +61,8 @@ type Share struct {
 	Access      []Rule     `json:"access"`
 	Apps        []AppGrant `json:"apps"`
 	CreatedAt   time.Time  `json:"createdAt"`
+	// Services: how the folder is shared on the network, and snapshots.
+	Services Services `json:"services"`
 }
 
 // NewShare creates a shared folder.
@@ -74,17 +76,20 @@ type NewShare struct {
 	Guest       bool     `json:"guest"`
 	Access      []Rule   `json:"access,omitempty"`
 	Subfolders  []string `json:"subfolders,omitempty"`
+	// Services; nil = DefaultServices.
+	Services *Services `json:"services,omitempty"`
 }
 
 // ShareUpdate changes a shared folder; nil fields keep their values.
 type ShareUpdate struct {
-	ID          string  `json:"id"`
-	Name        *string `json:"name,omitempty"`
-	Description *string `json:"description,omitempty"`
-	QuotaBytes  *uint64 `json:"quotaBytes,omitempty"`
-	Recycle     *bool   `json:"recycle,omitempty"`
-	Guest       *bool   `json:"guest,omitempty"`
-	Access      *[]Rule `json:"access,omitempty"`
+	ID          string    `json:"id"`
+	Name        *string   `json:"name,omitempty"`
+	Description *string   `json:"description,omitempty"`
+	QuotaBytes  *uint64   `json:"quotaBytes,omitempty"`
+	Recycle     *bool     `json:"recycle,omitempty"`
+	Guest       *bool     `json:"guest,omitempty"`
+	Access      *[]Rule   `json:"access,omitempty"`
+	Services    *Services `json:"services,omitempty"`
 }
 
 // StarterArgs creates the starter set on a pool.
