@@ -23,6 +23,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/backups"
 	"github.com/hardyos/hardyos/daemon/internal/events"
+	"github.com/hardyos/hardyos/daemon/internal/files"
 	"github.com/hardyos/hardyos/daemon/internal/install"
 	"github.com/hardyos/hardyos/daemon/internal/installer"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
@@ -112,6 +113,12 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 	if !live {
 		api.RegisterAppJobs(manager, pc, appStore)
 	}
+	// File Manager and share links: files read and written as the person.
+	var fileAccess files.Service
+	if !live {
+		fileAccess = &files.Client{Priv: pc, Lookup: files.UserLookup(&auth.Users{DB: db})}
+		api.RegisterFileJobs(manager, fileAccess)
+	}
 	var inst *installer.Service
 	if live {
 		inst = &installer.Service{Priv: pc, Jobs: manager, Limiter: auth.NewLoginLimiter()}
@@ -128,7 +135,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		DB: db, Jobs: manager, Events: broker, Priv: pc, Logger: log,
 		Storage: stor, Notify: notifications, Metrics: collector,
 		WebRoot: webRoot, Insecure: httpsAddr == "", Installer: inst, Updates: upd, Backups: bk,
-		Apps: appStore,
+		Apps: appStore, Files: fileAccess,
 	})
 
 	go housekeeping(ctx, log, &auth.Sessions{DB: db})

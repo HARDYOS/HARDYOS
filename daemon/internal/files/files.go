@@ -20,6 +20,8 @@ var (
 	ErrNoAccess   = errors.New("you don't have access to that")
 	ErrExists     = errors.New("something with that name is already there")
 	ErrNotAllowed = errors.New("that isn't allowed here")
+	// ErrFull: the shared folder (its quota or its pool) is full.
+	ErrFull = errors.New("there's no space left in this shared folder")
 )
 
 // HomeShare is the share id the person's own home folder goes by.
@@ -60,6 +62,8 @@ type Version struct {
 	Taken    time.Time `json:"taken"`
 	Size     int64     `json:"size"`
 	Modified time.Time `json:"modified"`
+	// Dir: the path was a folder in that snapshot.
+	Dir bool `json:"dir"`
 }
 
 // Access reads and writes files as a person. Paths are inside the share,

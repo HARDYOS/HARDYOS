@@ -16,6 +16,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/backups"
 	"github.com/hardyos/hardyos/daemon/internal/events"
+	"github.com/hardyos/hardyos/daemon/internal/files"
 	"github.com/hardyos/hardyos/daemon/internal/installer"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/metrics"
@@ -57,6 +58,9 @@ type Config struct {
 	// Kerberos checks domain passwords; nil uses the real Kerberos client
 	// (tests pass a fake).
 	Kerberos auth.PasswordChecker
+	// Files reads and writes files as the signed-in person (File Manager);
+	// nil leaves the /files endpoints out.
+	Files files.Service
 	// DomainInfoTTL is how long the domain's realm and DCs are cached for
 	// sign-in (default 30 s; tests use less).
 	DomainInfoTTL time.Duration
@@ -72,6 +76,7 @@ type Server struct {
 	mux      *http.ServeMux
 	tickets  terminalTickets
 	proxy    *appProxy
+	uploads  uploads
 	started  time.Time
 	log      *slog.Logger
 }
@@ -153,6 +158,9 @@ func (s *Server) routes() {
 		}
 		if s.cfg.Backups != nil {
 			s.backupRoutes()
+		}
+		if s.cfg.Files != nil {
+			s.fileRoutes()
 		}
 	}
 

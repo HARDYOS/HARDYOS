@@ -20,6 +20,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/backup"
 	"github.com/hardyos/hardyos/daemon/internal/boot"
 	"github.com/hardyos/hardyos/daemon/internal/domain"
+	"github.com/hardyos/hardyos/daemon/internal/fileworker"
 	"github.com/hardyos/hardyos/daemon/internal/hw"
 	"github.com/hardyos/hardyos/daemon/internal/install"
 	"github.com/hardyos/hardyos/daemon/internal/network"
@@ -31,6 +32,11 @@ import (
 )
 
 func main() {
+	// A file worker: the same binary, re-run as the person whose files it
+	// reads or writes (internal/fileworker). Never returns.
+	if len(os.Args) == 2 && os.Args[1] == fileworker.Subcommand {
+		fileworker.ChildMain()
+	}
 	var (
 		socket      = flag.String("socket", priv.DefaultSocket, "unix socket path")
 		allowUser   = flag.String("allow-user", "hardyd", "user allowed to connect besides root")
@@ -115,6 +121,10 @@ func main() {
 		priv.RegisterShares(s, shm)
 		am := &apps.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log, Shares: shm}
 		priv.RegisterApps(s, am)
+		// File Manager and share links: files read and written as the person.
+		if err := priv.StartFiles(ctx, s, shm, log); err != nil {
+			log.Error("file access isn't available", "err", err)
+		}
 		go am.OnStart(ctx)
 		priv.RegisterBootRepair(s, priv.StorageEnv{Runner: sysexec.Exec{}, Root: os.DirFS("/")}, "/", boot.ConfigPath)
 		if len(updater.Keys()) == 0 {
