@@ -118,6 +118,21 @@ operation per pool at a time). Progress streams to the browser over the
   the account on first boot (only if no accounts exist) and deletes the file.
 - Secure Boot is not supported yet (GRUB is unsigned).
 
+### Boot disk repair
+
+Storage Manager's System pool card manages the boot mirror (hardyd-priv's
+`boot.*` operations):
+
+- **Replace** a failed or missing disk: the new disk is wiped, gets a copy of
+  a working boot disk's partition table (`sgdisk --replicate`, then new GUIDs),
+  a fresh EFI partition, joins the pool with `zpool replace` and gets GRUB and
+  the kernels (`boot.Sync` with `InstallGRUB`). `boot.json` and the UEFI boot
+  entries are updated. The new disk must be at least as big as the boot disks.
+- **Add** a disk the same way with `zpool attach`, to mirror a single boot disk
+  or widen the mirror (up to 4).
+- **Remove** a dead disk that won't be replaced (`zpool detach`); never the
+  last working one.
+
 ## Updates and rollback
 
 - A release is a signed update file (`.hupd`): a tar of `manifest.json`

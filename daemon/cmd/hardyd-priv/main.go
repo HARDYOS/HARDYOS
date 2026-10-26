@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/backup"
+	"github.com/hardyos/hardyos/daemon/internal/boot"
 	"github.com/hardyos/hardyos/daemon/internal/hw"
 	"github.com/hardyos/hardyos/daemon/internal/install"
 	"github.com/hardyos/hardyos/daemon/internal/network"
@@ -92,6 +93,7 @@ func main() {
 		netm.OnStart(ctx)
 		priv.RegisterNetwork(s, netm)
 		priv.RegisterBackup(s, bk)
+		priv.RegisterBootRepair(s, priv.StorageEnv{Runner: sysexec.Exec{}, Root: os.DirFS("/")}, "/", boot.ConfigPath)
 		if len(updater.Keys()) == 0 {
 			log.Warn("no trusted release key: updates can't be installed until one is added")
 		}

@@ -1300,6 +1300,80 @@ paths:
         "204": { description: Cancelled }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /storage/boot:
+    get:
+      operationId: getBootDisks
+      summary: The boot (system) pool, its disks, and disks that could join it
+      tags: [storage]
+      responses:
+        "200":
+          description: Boot disks
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BootDisks" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /storage/boot/replace:
+    post:
+      operationId: replaceBootDisk
+      summary: Replace a boot disk with a new one
+      description: The new disk gets the same partitions as a working boot disk, joins the mirror and gets the boot loader.
+      tags: [storage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [old, disk, confirmWipe]
+              properties:
+                old: { type: string, description: The device as the pool status names it }
+                disk: { type: string, description: The new disk's by-id path }
+                confirmWipe: { type: boolean }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /storage/boot/attach:
+    post:
+      operationId: attachBootDisk
+      summary: Add a disk to the boot mirror
+      tags: [storage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [disk, confirmWipe]
+              properties:
+                disk: { type: string }
+                confirmWipe: { type: boolean }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /storage/boot/detach:
+    post:
+      operationId: detachBootDisk
+      summary: Remove a disk from the boot mirror (refused for the last working one)
+      tags: [storage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [device]
+              properties:
+                device: { type: string }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /installer:
     get:
       operationId: getInstallerStatus
@@ -2242,3 +2316,19 @@ components:
         pool: { type: string }
         name: { type: string }
         password: { type: string }
+    BootDisks:
+      type: object
+      required: [pool, status, disks, candidates, minBytes]
+      properties:
+        pool: { type: string }
+        status: { $ref: "#/components/schemas/PoolStatus" }
+        disks:
+          type: array
+          items:
+            type: object
+            required: [byId, espPartUUID]
+            properties:
+              byId: { type: string }
+              espPartUUID: { type: string }
+        candidates: { type: array, items: { $ref: "#/components/schemas/Disk" } }
+        minBytes: { type: integer, format: int64, description: The smallest disk that can join }

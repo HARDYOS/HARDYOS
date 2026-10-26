@@ -5,6 +5,7 @@ import { isBootPool, usePools } from "../../hooks/queries";
 import { StorageIcon } from "../../icons";
 import { Alert, Badge, Button, Card, EmptyState, ErrorBox, Loading, PageHeader, Progress } from "../../ui";
 import { toast } from "../../ui/toasts";
+import { SystemPoolCard } from "./BootDisks";
 import { healthTone } from "./StorageManager";
 
 export function PoolsOverview({ onOpenPool, onCreate }: { onOpenPool: (p: string) => void; onCreate: () => void }) {
@@ -66,18 +67,7 @@ export function PoolsOverview({ onOpenPool, onCreate }: { onOpenPool: (p: string
       )}
 
       {system.map((p) => (
-        <Card key={p.name} title="System pool">
-          <div className="row row--between">
-            <span className="small muted">
-              <span className="mono">{p.name}</span> holds HardyOS itself on the boot disks. It's managed by updates, not here.
-            </span>
-            <Badge tone={healthTone(p.health)}>{p.health.toLowerCase()}</Badge>
-          </div>
-          <Progress value={p.capacityPct} label={`${p.name} ${p.capacityPct}% full`} tone={p.capacityPct > 85 ? "warn" : "accent"} />
-          <span className="small muted">
-            {bytes(p.allocBytes)} used of {bytes(p.sizeBytes)}
-          </span>
-        </Card>
+        <SystemPoolCard key={p.name} pool={p} />
       ))}
 
       {importable.data && importable.data.length > 0 && (

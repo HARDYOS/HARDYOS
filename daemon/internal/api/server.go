@@ -124,6 +124,7 @@ func (s *Server) routes() {
 			// Installed systems only, like updates (the live installer has neither).
 			s.updateRoutes()
 			s.networkRoutes()
+			s.bootRoutes()
 		}
 		if s.cfg.Backups != nil {
 			s.backupRoutes()
