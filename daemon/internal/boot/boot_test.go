@@ -56,6 +56,8 @@ func TestRenderGrub(t *testing.T) {
 		`menuentry "HardyOS 0.1.0 (previous)" --id "hardyos-0.1.0"`,
 		"linux /hardyos/hardyos-0.2.0/vmlinuz root=ZFS=rpool/ROOT/hardyos-0.2.0 ",
 		"initrd /hardyos/hardyos-0.1.0/initrd.img",
+		`if [ "${next_entry}" ]; then`,
+		"save_env next_entry",
 	} {
 		if !strings.Contains(cfg, want) {
 			t.Errorf("grub.cfg missing %q:\n%s", want, cfg)
@@ -202,5 +204,40 @@ func TestConfigRoundTrip(t *testing.T) {
 	got, err := LoadConfig(p)
 	if err != nil || got.Disks[0].ESPPartUUID != "abcd-1234" {
 		t.Fatalf("got %+v, %v", got, err)
+	}
+}
+
+func TestTryingLabel(t *testing.T) {
+	cfg := RenderGrub([]MenuEntry{
+		{ID: "hardyos-0.1.0", Title: "HardyOS 0.1.0", Dataset: "rpool/ROOT/hardyos-0.1.0", Created: 100},
+		{ID: "hardyos-0.2.0", Title: "HardyOS 0.2.0", Dataset: "rpool/ROOT/hardyos-0.2.0", Created: 200},
+		{ID: "hardyos-0.0.9", Title: "HardyOS 0.0.9", Dataset: "rpool/ROOT/hardyos-0.0.9", Created: 50},
+	})
+	if !strings.Contains(cfg, `"HardyOS 0.2.0 (trying)"`) || !strings.Contains(cfg, `"HardyOS 0.0.9 (previous)"`) {
+		t.Fatalf("labels:\n%s", cfg)
+	}
+}
+
+func TestNextBoot(t *testing.T) {
+	env, f, cfg := fakeHost(t)
+	f.OnPrefix("grub-editenv ", sysexec.Result{})
+	if err := SetNextBoot(context.Background(), env, cfg, "hardyos-0.2.0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClearNextBoot(context.Background(), env, cfg); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Join(f.Lines(), "\n")
+	for _, want := range []string{
+		"grub-editenv /run/hardyos/boot/esp0/grub/grubenv set next_entry=hardyos-0.2.0",
+		"grub-editenv /run/hardyos/boot/esp1/grub/grubenv set next_entry=hardyos-0.2.0",
+		"grub-editenv /run/hardyos/boot/esp1/grub/grubenv unset next_entry",
+	} {
+		if !strings.Contains(lines, want) {
+			t.Errorf("missing %q in\n%s", want, lines)
+		}
+	}
+	if err := SetNextBoot(context.Background(), env, cfg, "bad name; reboot"); err == nil {
+		t.Error("accepted a bad boot environment name")
 	}
 }

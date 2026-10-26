@@ -31,3 +31,7 @@ Settled choices, newest last. Change one by adding a row that supersedes it.
 | 25 | 2026-10-24 | The installer creates the first admin and passes only the password hash to root | No setup race on first boot; the plain password never leaves hardyd |
 | 26 | 2026-10-24 | Install steps are registered only on the live ISO | An installed system has no API that can repartition boot disks |
 | 27 | 2026-10-25 | Accent colors follow the HardyOS logo: cyan solid accent, cyan-to-violet gradient for primary actions with near-black text | Matches the brand; white text fails contrast on cyan, near-black passes at least 6:1 across the gradient |
+| 28 | 2026-10-25 | Updates are whole signed system images (ed25519), installed into a new boot environment | Atomic: a version is either fully there or not; the same image as the ISO; no package-by-package upgrades to go wrong |
+| 29 | 2026-10-25 | The release signing key stays on Cade's release computer; servers trust compiled-in public keys | Matches building releases locally; a GitHub account compromise can't ship updates |
+| 30 | 2026-10-25 | New versions boot once via GRUB `next_entry` and become the default only after hardyd confirms health | A version that can't start falls back by itself, even after a kernel panic or power cycle |
+| 31 | 2026-10-25 | Settings are snapshotted right before restarting into an update and restored if it fails | The old version never meets a database migrated by a version that didn't work |

@@ -11,9 +11,10 @@ fi
 
 if [ -d /run/systemd/system ]; then
   systemctl daemon-reload
-  systemctl enable hardyd-priv.service hardyd.service >/dev/null
+  systemctl enable hardyos-issue.service hardyd-priv.service hardyd.service >/dev/null
   systemctl restart hardyd-priv.service hardyd.service || true
+  /usr/lib/hardyos/hardyos-issue || true
 else
   # Inside an image build (no running systemd): just enable the units.
-  systemctl enable hardyd-priv.service hardyd.service >/dev/null 2>&1 || true
+  systemctl enable hardyos-issue.service hardyd-priv.service hardyd.service >/dev/null 2>&1 || true
 fi

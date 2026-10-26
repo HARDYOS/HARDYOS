@@ -209,6 +209,7 @@ type MenuEntry struct {
 	ID      string // boot environment name
 	Title   string
 	Dataset string
+	Created int64 // unix seconds; newer than the default means "trying"
 }
 
 // RenderGrub builds grub.cfg. entries[0] is the default.
@@ -221,9 +222,24 @@ func RenderGrub(entries []MenuEntry) string {
 	if len(entries) > 0 {
 		fmt.Fprintf(&b, "set default=%q\n", entries[0].ID)
 	}
+	// A one-time choice (an update being tried) overrides the default once:
+	// it is cleared before booting, so if that system never comes up, the
+	// next boot goes back to the default.
+	b.WriteString(`if [ -s $prefix/grubenv ]; then
+	load_env next_entry
+fi
+if [ "${next_entry}" ]; then
+	set default="${next_entry}"
+	set next_entry=
+	save_env next_entry
+fi
+`)
 	for i, e := range entries {
 		title := e.Title
-		if i > 0 {
+		switch {
+		case i > 0 && e.Created > entries[0].Created:
+			title += " (trying)"
+		case i > 0:
 			title += " (previous)"
 		}
 		fmt.Fprintf(&b, "\nmenuentry %q --id %q {\n", title, e.ID)
@@ -302,7 +318,7 @@ func Sync(ctx context.Context, env Env, cfg *Config, opts SyncOptions) ([]MenuEn
 		} else {
 			title += " (" + be.Name + ")"
 		}
-		chosen = append(chosen, staged{MenuEntry{ID: be.Name, Title: title, Dataset: be.Dataset}, k})
+		chosen = append(chosen, staged{MenuEntry{ID: be.Name, Title: title, Dataset: be.Dataset, Created: be.Created}, k})
 	}
 	// bes[0] is the default (or the newest when bootfs is unset); it must boot.
 	if len(chosen) == 0 || chosen[0].entry.Dataset != bes[0].Dataset {
@@ -405,6 +421,60 @@ func espDevice(ctx context.Context, env Env, partUUID string) string {
 		return dev
 	}
 	return link
+}
+
+// eachESP mounts every boot disk's ESP in turn and runs fn on its mount
+// point. Like Sync, it succeeds when at least one disk worked.
+func eachESP(ctx context.Context, env Env, cfg *Config, fn func(dir string) error) error {
+	var failed []string
+	for i, d := range cfg.Disks {
+		dir := filepath.Join(env.mountDir(), fmt.Sprintf("esp%d", i))
+		err := func() error {
+			if !partUUIDRE.MatchString(d.ESPPartUUID) {
+				return fmt.Errorf("invalid ESP partition UUID %q", d.ESPPartUUID)
+			}
+			if err := os.MkdirAll(env.path(dir), 0o755); err != nil {
+				return err
+			}
+			if _, err := sysexec.Output(ctx, env.Runner, "mount", "-t", "vfat", "-o", "umask=0077", espDevice(ctx, env, d.ESPPartUUID), dir); err != nil {
+				return fmt.Errorf("mount ESP: %w", err)
+			}
+			defer func() { _, _ = env.Runner.Run(context.Background(), nil, "umount", dir) }()
+			return fn(dir)
+		}()
+		if err != nil {
+			failed = append(failed, fmt.Sprintf("%s: %v", d.ByID, err))
+		}
+	}
+	if len(failed) == len(cfg.Disks) {
+		return fmt.Errorf("no boot disk could be updated: %s", strings.Join(failed, "; "))
+	}
+	if len(failed) > 0 {
+		return &PartialError{Failed: failed}
+	}
+	return nil
+}
+
+var beNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$`)
+
+// SetNextBoot makes the next boot (only) start boot environment id. The
+// boot menu must already list it (Sync).
+func SetNextBoot(ctx context.Context, env Env, cfg *Config, id string) error {
+	if !beNameRE.MatchString(id) {
+		return fmt.Errorf("invalid boot environment name %q", id)
+	}
+	return eachESP(ctx, env, cfg, func(dir string) error {
+		_, err := sysexec.Output(ctx, env.Runner, "grub-editenv", filepath.Join(dir, "grub", "grubenv"), "set", "next_entry="+id)
+		return err
+	})
+}
+
+// ClearNextBoot removes a pending one-time boot choice from every disk.
+func ClearNextBoot(ctx context.Context, env Env, cfg *Config) error {
+	return eachESP(ctx, env, cfg, func(dir string) error {
+		_, err := sysexec.Output(ctx, env.Runner, "grub-editenv", filepath.Join(dir, "grub", "grubenv"), "unset", "next_entry")
+		return err
+	})
 }
 
 // EFITarget returns GRUB's EFI platform for this CPU architecture.

@@ -21,6 +21,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/storage"
 	"github.com/hardyos/hardyos/daemon/internal/store"
+	"github.com/hardyos/hardyos/daemon/internal/updates"
 )
 
 // Config controls the API server. Every dependency except DB is optional in
@@ -37,10 +38,12 @@ type Config struct {
 	// Installer, when set, turns hardyd into the live ISO's web installer:
 	// only the installer API is served.
 	Installer *installer.Service
-	Root      fs.FS // filesystem rooted at "/" for system info; nil uses the real one
-	Logger    *slog.Logger
-	WebRoot   string // directory with the built web desktop; empty disables static serving
-	Insecure  bool   // allow session cookies over plain HTTP (true until TLS lands)
+	// Updates enables the update and version endpoints (nil disables them).
+	Updates  *updates.Service
+	Root     fs.FS // filesystem rooted at "/" for system info; nil uses the real one
+	Logger   *slog.Logger
+	WebRoot  string // directory with the built web desktop; empty disables static serving
+	Insecure bool   // allow session cookies over plain HTTP (true until TLS lands)
 }
 
 // Server is hardyd's HTTP handler.
@@ -114,6 +117,9 @@ func (s *Server) routes() {
 		m.Handle("POST /api/v1/system/self-test", s.admin(s.handleSelfTest))
 		s.storageRoutes()
 		s.notifyRoutes()
+		if s.cfg.Updates != nil {
+			s.updateRoutes()
+		}
 	}
 
 	m.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {

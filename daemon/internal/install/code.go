@@ -75,8 +75,8 @@ func PublishCode(root, code string, gid int) error {
   =====================================================
    HardyOS installer
 
-   On another computer, open:  https://\4
-   and enter this code:        %s
+   Open the address above in a browser on another
+   computer and enter this code:  %s
   =====================================================
 
 `, code)

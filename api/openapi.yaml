@@ -25,6 +25,7 @@ tags:
   - name: storage
   - name: notifications
   - name: installer
+  - name: updates
 paths:
   /health:
     get:
@@ -880,6 +881,112 @@ paths:
       tags: [notifications]
       responses:
         "204": { description: Marked read }
+  /system/updates:
+    get:
+      operationId: getUpdateStatus
+      summary: Installed versions, a pending update and the last update result
+      tags: [updates]
+      responses:
+        "200":
+          description: Update state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UpdateStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /system/updates/upload:
+    post:
+      operationId: uploadUpdate
+      summary: Upload a signed update file (.hupd) and install it as a new version
+      description: The request body is the raw file. The new version starts on the next restart.
+      tags: [updates]
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413":
+          description: The file is too large
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /system/updates/download:
+    post:
+      operationId: downloadUpdate
+      summary: Download a signed update file from an https address and install it
+      tags: [updates]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /system/versions/{name}/activate:
+    post:
+      operationId: activateVersion
+      summary: Start an installed version on the next restart (roll back)
+      tags: [updates]
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                restoreSettings:
+                  type: boolean
+                  description: Also restore settings saved before the running version was installed
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /system/versions/{name}/delete:
+    post:
+      operationId: deleteVersion
+      summary: Remove an installed version that is not running or the default
+      tags: [updates]
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirmName]
+              properties:
+                confirmName: { type: string }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /system/reboot:
+    post:
+      operationId: rebootSystem
+      summary: Restart the server (saves settings first when an update is waiting)
+      tags: [system]
+      responses:
+        "202": { description: Restarting }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/Failed" }
   /installer:
     get:
       operationId: getInstallerStatus
@@ -1487,6 +1594,53 @@ components:
         current: { $ref: "#/components/schemas/MetricSample" }
         history: { type: array, items: { $ref: "#/components/schemas/MetricSample" } }
         cpus: { type: integer }
+    InstalledVersion:
+      type: object
+      required: [dataset, name, version, created, default, running, trying]
+      properties:
+        dataset: { type: string, examples: ["rpool/ROOT/hardyos-0.1.0"] }
+        name: { type: string, examples: ["hardyos-0.1.0"] }
+        version: { type: string }
+        created: { type: integer, description: Unix seconds }
+        default: { type: boolean, description: Starts on a normal restart }
+        running: { type: boolean }
+        trying: { type: boolean, description: Installed and waiting for its first start }
+    PendingUpdate:
+      type: object
+      required: [bootEnvironment, dataset, version, fromBootEnvironment, fromVersion, stagedAt]
+      properties:
+        bootEnvironment: { type: string }
+        dataset: { type: string }
+        version: { type: string }
+        fromBootEnvironment: { type: string }
+        fromVersion: { type: string }
+        stagedAt: { type: string, format: date-time }
+        snapshot: { type: string }
+        notes: { type: string }
+    UpdateResult:
+      type: object
+      required: [ok, version, message, at]
+      properties:
+        ok: { type: boolean }
+        version: { type: string }
+        message: { type: string }
+        at: { type: string, format: date-time }
+    UpdateStatus:
+      type: object
+      required: [running, versions, pending, last, restoreOnBoot, managed]
+      properties:
+        running: { type: string }
+        versions: { type: array, items: { $ref: "#/components/schemas/InstalledVersion" } }
+        pending:
+          oneOf:
+            - { $ref: "#/components/schemas/PendingUpdate" }
+            - { type: "null" }
+        last:
+          oneOf:
+            - { $ref: "#/components/schemas/UpdateResult" }
+            - { type: "null" }
+        restoreOnBoot: { type: boolean }
+        managed: { type: boolean, description: False when not installed with the HardyOS installer }
     InstallerStatus:
       type: object
       required: [active, unlocked]

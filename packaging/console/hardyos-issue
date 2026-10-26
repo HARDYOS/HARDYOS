@@ -1,0 +1,32 @@
+#!/bin/sh
+# Writes the server's web address to the console login screen and refreshes
+# it. Runs at boot and from ifupdown hooks whenever an interface goes up or
+# down. agetty's own \4 escape falls back to the hostname's 127.0.1.1 when no
+# address exists yet, which is useless from another computer.
+set -u
+OUT=/etc/issue.d/40-hardyos-address.issue
+
+addrs=$(ip -4 -o addr show scope global 2>/dev/null | awk '{ split($4, a, "/"); print a[1] }')
+
+tmp="$OUT.tmp"
+{
+	if [ -n "$addrs" ]; then
+		echo "  Open this address in a browser on another computer:"
+		echo
+		for a in $addrs; do
+			echo "      https://$a"
+		done
+		echo
+		echo "  Your browser will warn about the certificate the first time;"
+		echo "  that is expected for a new server."
+	else
+		echo "  Waiting for a network address..."
+		echo
+		echo "  This screen updates when the server is on the network. If it"
+		echo "  stays here, check the network cable and DHCP."
+	fi
+	echo
+} > "$tmp" && mv "$tmp" "$OUT"
+
+# Redraw any login prompt that is already showing.
+agetty --reload 2>/dev/null || true

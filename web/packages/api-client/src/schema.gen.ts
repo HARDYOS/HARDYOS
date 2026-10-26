@@ -789,6 +789,111 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/system/updates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Installed versions, a pending update and the last update result */
+        get: operations["getUpdateStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system/updates/upload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload a signed update file (.hupd) and install it as a new version
+         * @description The request body is the raw file. The new version starts on the next restart.
+         */
+        post: operations["uploadUpdate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system/updates/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Download a signed update file from an https address and install it */
+        post: operations["downloadUpdate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system/versions/{name}/activate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start an installed version on the next restart (roll back) */
+        post: operations["activateVersion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system/versions/{name}/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Remove an installed version that is not running or the default */
+        post: operations["deleteVersion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system/reboot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Restart the server (saves settings first when an update is waiting) */
+        post: operations["rebootSystem"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/installer": {
         parameters: {
             query?: never;
@@ -1306,6 +1411,47 @@ export interface components {
             current: components["schemas"]["MetricSample"];
             history: components["schemas"]["MetricSample"][];
             cpus: number;
+        };
+        InstalledVersion: {
+            /** @example rpool/ROOT/hardyos-0.1.0 */
+            dataset: string;
+            /** @example hardyos-0.1.0 */
+            name: string;
+            version: string;
+            /** @description Unix seconds */
+            created: number;
+            /** @description Starts on a normal restart */
+            default: boolean;
+            running: boolean;
+            /** @description Installed and waiting for its first start */
+            trying: boolean;
+        };
+        PendingUpdate: {
+            bootEnvironment: string;
+            dataset: string;
+            version: string;
+            fromBootEnvironment: string;
+            fromVersion: string;
+            /** Format: date-time */
+            stagedAt: string;
+            snapshot?: string;
+            notes?: string;
+        };
+        UpdateResult: {
+            ok: boolean;
+            version: string;
+            message: string;
+            /** Format: date-time */
+            at: string;
+        };
+        UpdateStatus: {
+            running: string;
+            versions: components["schemas"]["InstalledVersion"][];
+            pending: components["schemas"]["PendingUpdate"] | null;
+            last: components["schemas"]["UpdateResult"] | null;
+            restoreOnBoot: boolean;
+            /** @description False when not installed with the HardyOS installer */
+            managed: boolean;
         };
         InstallerStatus: {
             /** @description This server is running the live installer */
@@ -2767,6 +2913,145 @@ export interface operations {
                 };
                 content?: never;
             };
+        };
+    };
+    getUpdateStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Update state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpdateStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    uploadUpdate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/octet-stream": string;
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description The file is too large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    downloadUpdate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    url: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    activateVersion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description Also restore settings saved before the running version was installed */
+                    restoreSettings?: boolean;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    deleteVersion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    confirmName: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    rebootSystem: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Restarting */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            422: components["responses"]["Failed"];
         };
     };
     getInstallerStatus: {

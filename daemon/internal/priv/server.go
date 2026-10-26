@@ -22,6 +22,8 @@ type Server struct {
 	Logger      *slog.Logger
 	// OpTimeout bounds each operation. Zero means 10 minutes.
 	OpTimeout time.Duration
+	// OnListen runs once the socket is ready (systemd readiness notification).
+	OnListen func()
 
 	mu  sync.RWMutex
 	ops map[string]HandlerFunc
@@ -67,6 +69,9 @@ func (s *Server) ListenAndServe(ctx context.Context, path string, mode os.FileMo
 			ln.Close()
 			return err
 		}
+	}
+	if s.OnListen != nil {
+		s.OnListen()
 	}
 	return s.Serve(ctx, ln.(*net.UnixListener))
 }

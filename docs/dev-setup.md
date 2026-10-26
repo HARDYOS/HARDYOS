@@ -83,7 +83,32 @@ Boot problems? `hardyctl boot-list` shows the boot environments and
 `hardyctl boot-sync --reinstall` rewrites the boot loader and kernels on every
 boot disk.
 
-## 4. Fast loop without an ISO
+## 4. Releases and updates
+
+Once, on the laptop that builds releases:
+
+```sh
+make release-key   # writes ~/.config/hardyos/release.key and daemon/internal/update/keys/release.pub
+git add daemon/internal/update/keys/release.pub && git commit -m "Add the release signing key"
+```
+
+Back up `~/.config/hardyos/release.key` (a password manager or a USB stick in a
+drawer). If it's lost, servers can't verify new updates until they get an ISO
+with a new key. Never commit it.
+
+For each release, from a clean tree:
+
+```sh
+make release       # dist/hardyos-<version>-amd64.iso and .hupd (+ .sha256)
+```
+
+Install the `.hupd` on a server from Control Panel > Updates (upload, or an
+https address). It installs next to the running version and switches on the
+next restart; if the new version doesn't start, the server goes back by
+itself. The first server with the key must be installed from an ISO built
+after the key was committed.
+
+## 5. Fast loop without an ISO
 
 For desktop and API work you don't need a VM:
 

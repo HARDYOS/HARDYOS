@@ -34,6 +34,20 @@ contents:
     dst: /lib/systemd/system/hardyd.service
   - src: ./systemd/hardyd-priv.service
     dst: /lib/systemd/system/hardyd-priv.service
+  - src: ./systemd/hardyos-issue.service
+    dst: /lib/systemd/system/hardyos-issue.service
+  # Console login screen: the server's web address, refreshed on network changes.
+  - src: ./console/hardyos-issue
+    dst: /usr/lib/hardyos/hardyos-issue
+    file_info: { mode: 0755 }
+  - src: ./console/ifupdown-hook
+    dst: /etc/network/if-up.d/hardyos-issue
+    type: config
+    file_info: { mode: 0755 }
+  - src: ./console/ifupdown-hook
+    dst: /etc/network/if-post-down.d/hardyos-issue
+    type: config
+    file_info: { mode: 0755 }
   # Keep the boot disks in sync with kernel and initramfs updates.
   - src: ./boot/zz-hardyos-boot
     dst: /etc/kernel/postinst.d/zz-hardyos-boot
