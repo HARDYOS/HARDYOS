@@ -2085,17 +2085,29 @@ paths:
       - { name: id, in: path, required: true, schema: { type: string } }
     post:
       operationId: updateApp
-      summary: Update an app to the catalog's version, or to an uploaded package (runs as a job)
-      description: The app keeps its data, ports and settings, and downloads newer images.
+      summary: Update an app (runs as a job; a snapshot is taken first)
+      description: |
+        Without a body: to the newest version in the catalog the app came from
+        (HardyOS's or an imported one). Uploaded and custom apps name the new
+        package. The app keeps its data, ports, settings and shares. The job
+        snapshots the app first; if a later step fails it ends with
+        `result.snapshot` so the App Store can offer to roll back. An update
+        of a non-catalog app that asks for new permissions answers 400
+        `grants_required` (with `grants`) before anything changes: send it
+        again with every grant in `grants`.
       tags: [apps]
       requestBody:
         required: false
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/AppPackageRef" }
+            schema: { $ref: "#/components/schemas/AppUpdateRequest" }
       responses:
         "202": { $ref: "#/components/responses/JobAccepted" }
-        "400": { $ref: "#/components/responses/Invalid" }
+        "400":
+          description: Invalid, or new permissions need allowing (code grants_required)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppGrantsNeeded" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -2140,6 +2152,211 @@ paths:
         "400": { $ref: "#/components/responses/Invalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  # ---- App Store v2: apps API and web (docs/plans/app-store-v2.md section 3) ----
+  /apps/catalogs:
+    get:
+      operationId: listImportedAppCatalogs
+      summary: Imported (third-party) app catalogs
+      tags: [apps]
+      responses:
+        "200":
+          description: Catalogs, by name
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/AppCatalog" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: importAppCatalog
+      summary: Import a catalog from an https index.json, or refresh one already imported
+      description: |
+        hardyd fetches the index (at most 1 MB, 30 second timeout). Apps with
+        problems are left out and described in `lastError`. Packages are
+        downloaded when first planned and used only if their SHA-256 matches.
+      tags: [apps]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppCatalogRequest" }
+      responses:
+        "200":
+          description: The catalog
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppCatalog" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    delete:
+      operationId: removeAppCatalog
+      summary: Forget an imported catalog (apps installed from it keep running)
+      tags: [apps]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppCatalogRemoveRequest" }
+      responses:
+        "204": { description: Removed }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /apps/custom:
+    post:
+      operationId: createCustomApp
+      summary: Build a custom app (source custom) from a pasted Compose file and plan its install
+      description: |
+        The Compose file publishes each port as `${HARDY_PORT_<NAME>}` and
+        keeps its data under `${HARDY_APP_DATA}`. Custom apps are sandboxed
+        like uploads; hardyd-priv checks the file when it prepares the app.
+        Install it with `source: custom` and the plan's `package.ref`.
+      tags: [apps]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CustomAppRequest" }
+      responses:
+        "200":
+          description: The install plan
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppPlan" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /apps/{id}/config:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getAppConfig
+      summary: An installed app's settings, ports, shared folders, grants and limits
+      description: Password settings are never returned (`value` is empty, `set` says whether one exists).
+      tags: [apps]
+      responses:
+        "200":
+          description: The configuration
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppConfig" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Failed" }
+    patch:
+      operationId: reconfigureApp
+      summary: Change an installed app (runs as a job, then restarts it)
+      description: |
+        Omitted fields keep their values; a password left empty keeps its
+        value. A share choice with `share: ""` removes that shared folder.
+        `grants` replaces the app's extra permissions (non-catalog apps; each
+        change is audited).
+      tags: [apps]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppConfigUpdate" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /apps/{id}/access:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getAppAccess
+      summary: Who may use an app (empty = everyone signed in)
+      tags: [apps]
+      responses:
+        "200":
+          description: The access list
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppAccess" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      operationId: setAppAccess
+      summary: Choose who may use an app (administrators always may)
+      tags: [apps]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppAccess" }
+      responses:
+        "200":
+          description: The stored access list
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppAccess" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /apps/{id}/snapshots:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: listAppSnapshots
+      summary: Snapshots of an app's dataset, newest first (to roll back to)
+      tags: [apps]
+      responses:
+        "200":
+          description: Snapshots
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppSnapshots" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Failed" }
+  /apps/{id}/rollback:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: rollbackApp
+      summary: Put an app back to one of its snapshots (runs as a job; later changes are lost)
+      tags: [apps]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppRollbackRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /apps/{id}/open:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: openApp
+      summary: Where to open an app's web page, for a desktop window or a new tab
+      description: |
+        Anyone who may use the app. With the window proxy running, the URL is
+        the app's HTTPS proxy port with a single-use token valid for a minute;
+        ask again for every window or tab.
+      tags: [apps]
+      responses:
+        "200":
+          description: The address
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppOpen" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  # ---- end of App Store v2 apps API ----
   /installer:
     get:
       operationId: getInstallerStatus
@@ -3316,8 +3533,19 @@ components:
           additionalProperties: { type: string }
     App:
       type: object
-      required: [id, name, version, summary, publisher, website, icon, dataset, state, containers, ports, web, installedAt, updatedAt]
+      required: [id, name, version, summary, publisher, website, icon, dataset, state, containers, ports, web, installedAt, updatedAt,
+        source, sourceName, uid, shares, grants, limits, permissions]
       properties:
+        source: { $ref: "#/components/schemas/AppSource" }
+        sourceName: { type: string, description: The imported catalog's name (source imported) }
+        uid: { type: integer, description: The app's own Linux user ID (30000-30999) }
+        shares:
+          type: array
+          description: "Every shared folder the app declares; an empty share = none chosen"
+          items: { $ref: "#/components/schemas/AppShare" }
+        grants: { type: array, items: { type: string }, description: Extra permissions an administrator allowed }
+        limits: { $ref: "#/components/schemas/AppLimits" }
+        permissions: { type: array, items: { type: string }, description: What the app may do beyond a plain container, in plain words }
         id: { type: string }
         name: { type: string }
         version: { type: string }
@@ -3362,10 +3590,21 @@ components:
         updatedAt: { type: string, format: date-time }
     AppPackage:
       type: object
-      required: [source, ref, id, name, version, summary, description, publisher, website, icon, minMemoryMB, ports, settings, permissions, images]
+      required: [source, ref, sourceName, id, name, version, summary, description, publisher, website, icon, minMemoryMB, ports, settings, permissions,
+        grants, shares, fixedPorts, images]
       properties:
-        source: { type: string, enum: [catalog, upload] }
-        ref: { type: string, description: The app id (catalog) or the package's SHA-256 (upload) }
+        source: { $ref: "#/components/schemas/AppSource" }
+        ref: { type: string, description: The app id (catalog) or the package's SHA-256 (upload, imported, custom) }
+        sourceName: { type: string, description: The imported catalog's name (source imported) }
+        grants:
+          type: array
+          description: |
+            Extra permissions the package asks for. Catalog apps get them by
+            declaring them; any other source needs each one in the install's
+            `grants`.
+          items: { $ref: "#/components/schemas/AppEntryGrant" }
+        shares: { type: array, items: { $ref: "#/components/schemas/AppShareMount" } }
+        fixedPorts: { type: boolean, description: The app uses the host network, so its ports can't change }
         id: { type: string }
         name: { type: string }
         version: { type: string }
@@ -3409,7 +3648,7 @@ components:
       type: object
       required: [source, ref]
       properties:
-        source: { type: string, enum: [catalog, upload] }
+        source: { $ref: "#/components/schemas/AppSource" }
         ref: { type: string }
     AppPlan:
       type: object
@@ -3431,7 +3670,7 @@ components:
       type: object
       required: [source, ref]
       properties:
-        source: { type: string, enum: [catalog, upload] }
+        source: { $ref: "#/components/schemas/AppSource" }
         ref: { type: string }
         pool: { type: string, description: The pool for Docker and every app; only needed the first time }
         ports:
@@ -3440,9 +3679,204 @@ components:
         settings:
           type: object
           additionalProperties: { type: string }
+        shares:
+          type: object
+          description: The shared folder for each of the package's shares, by share name
+          additionalProperties: { $ref: "#/components/schemas/AppShareChoice" }
+        grants:
+          type: array
+          description: Extra permissions an administrator ticked (non-catalog apps only; each is audited)
+          items: { type: string }
+        limits: { $ref: "#/components/schemas/AppLimits" }
+        access:
+          type: array
+          description: Who may use the app; omitted or empty = everyone signed in
+          items: { $ref: "#/components/schemas/AppPrincipal" }
     AppRemoveRequest:
       type: object
       required: [confirm]
       properties:
         confirm: { type: string, description: The app's name, typed to confirm }
         deleteData: { type: boolean, description: Delete the app's files and database too }
+    # ---- App Store v2 schemas (apps API and web) ----
+    AppSource:
+      type: string
+      enum: [catalog, upload, imported, custom]
+      description: "Where a package came from: HardyOS's catalog, an upload, an imported catalog, or made from a Compose file"
+    AppShareMount:
+      type: object
+      required: [name, label, access]
+      properties:
+        name: { type: string, description: "MEDIA: the Compose file binds ${HARDY_SHARE_MEDIA}" }
+        label: { type: string }
+        help: { type: string }
+        access: { type: string, enum: [read, write], description: The most the app gets }
+        suggest: { type: string, description: Shared folder id to preselect }
+        required: { type: boolean }
+    AppShareChoice:
+      type: object
+      required: [share]
+      properties:
+        share: { type: string, description: "Shared folder id; empty = none" }
+        path: { type: string, description: "Always empty: apps get whole shared folders (a subfolder could be swapped for a link)" }
+        access: { type: string, enum: [read, write] }
+    AppShare:
+      type: object
+      required: [name, label, share, path, access]
+      properties:
+        name: { type: string }
+        label: { type: string }
+        share: { type: string }
+        path: { type: string }
+        access: { type: string }
+    AppLimits:
+      type: object
+      required: [memoryMB, cpus]
+      properties:
+        memoryMB: { type: integer, description: 0 = no limit }
+        cpus: { type: number, description: 0 = no limit }
+    AppEntryGrant:
+      type: object
+      required: [grant, label]
+      properties:
+        grant: { type: string, description: "hostNetwork, gpu, device:/dev/... or cap:NAME" }
+        label: { type: string }
+    AppPrincipal:
+      type: object
+      required: [kind, name]
+      properties:
+        kind: { type: string, enum: [user, group, everyone] }
+        name: { type: string, description: "alice (HardyOS), HOME\\alice (domain user), HOME\\Family (domain group); empty for everyone" }
+    AppAccess:
+      type: object
+      required: [principals]
+      properties:
+        principals: { type: array, items: { $ref: "#/components/schemas/AppPrincipal" } }
+    AppSettingValue:
+      type: object
+      required: [env, value, set]
+      properties:
+        env: { type: string }
+        value: { type: string, description: Empty for passwords }
+        set: { type: boolean }
+    AppConfig:
+      type: object
+      required: [id, source, sourceName, uid, manifest, ports, settings, shares, grants, limits, package]
+      properties:
+        id: { type: string }
+        source: { $ref: "#/components/schemas/AppSource" }
+        sourceName: { type: string }
+        uid: { type: integer }
+        manifest: { type: object, additionalProperties: true, description: The installed hardyapp.json }
+        ports: { type: object, additionalProperties: { type: integer } }
+        settings: { type: array, items: { $ref: "#/components/schemas/AppSettingValue" } }
+        shares: { type: array, items: { $ref: "#/components/schemas/AppShare" } }
+        grants: { type: array, items: { type: string } }
+        limits: { $ref: "#/components/schemas/AppLimits" }
+        package: { $ref: "#/components/schemas/AppPackage" }
+    AppConfigUpdate:
+      type: object
+      properties:
+        ports: { type: object, additionalProperties: { type: integer } }
+        settings: { type: object, additionalProperties: { type: string } }
+        shares: { type: object, additionalProperties: { $ref: "#/components/schemas/AppShareChoice" } }
+        grants: { type: array, items: { type: string } }
+        limits: { $ref: "#/components/schemas/AppLimits" }
+    AppUpdateRequest:
+      type: object
+      properties:
+        source: { $ref: "#/components/schemas/AppSource" }
+        ref: { type: string }
+        grants: { type: array, items: { type: string }, description: Replaces the app's extra permissions (when the new version asks for more) }
+    AppGrantsNeeded:
+      allOf:
+        - { $ref: "#/components/schemas/Error" }
+        - type: object
+          properties:
+            grants: { type: array, items: { $ref: "#/components/schemas/AppEntryGrant" } }
+    AppSnapshot:
+      type: object
+      required: [name, created, version]
+      properties:
+        name: { type: string }
+        created: { type: string, format: date-time }
+        version: { type: string, description: The app's version when the snapshot was taken }
+    AppSnapshots:
+      type: object
+      required: [snapshots]
+      properties:
+        snapshots: { type: array, items: { $ref: "#/components/schemas/AppSnapshot" } }
+    AppRollbackRequest:
+      type: object
+      required: [snapshot, confirm]
+      properties:
+        snapshot: { type: string }
+        confirm: { type: string, description: The app's name, typed to confirm }
+    AppOpen:
+      type: object
+      required: [url, proxied]
+      properties:
+        url: { type: string }
+        proxied: { type: boolean, description: Through HardyOS's HTTPS window proxy (can be shown in a desktop window) }
+    AppCatalogApp:
+      type: object
+      required: [id, name, version, summary, url, sha256, icon]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        version: { type: string }
+        summary: { type: string }
+        url: { type: string }
+        sha256: { type: string, description: Install with source imported and this as ref }
+        icon: { type: string, description: "A data URL, or empty" }
+    AppCatalog:
+      type: object
+      required: [id, url, name, addedAt, addedBy, fetchedAt, lastError, apps]
+      properties:
+        id: { type: integer, format: int64 }
+        url: { type: string }
+        name: { type: string }
+        addedAt: { type: string, format: date-time }
+        addedBy: { type: string }
+        fetchedAt: { type: string, format: date-time, nullable: true }
+        lastError: { type: string }
+        apps: { type: array, items: { $ref: "#/components/schemas/AppCatalogApp" } }
+    AppCatalogRequest:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string, description: "https:// address of the catalog's index.json" }
+    AppCatalogRemoveRequest:
+      type: object
+      required: [id]
+      properties:
+        id: { type: integer, format: int64 }
+    CustomAppPort:
+      type: object
+      required: [name, label, default]
+      properties:
+        name: { type: string, description: "WEB: published as ${HARDY_PORT_WEB}" }
+        label: { type: string }
+        default: { type: integer }
+        protocol: { type: string, enum: [tcp, udp] }
+    CustomAppFolder:
+      type: object
+      required: [path]
+      properties:
+        path: { type: string, description: "Inside ${HARDY_APP_DATA}" }
+        owner: { type: string, description: "uid:gid" }
+        mode: { type: string, description: "Octal, like 0755" }
+    CustomAppRequest:
+      type: object
+      required: [id, name, compose, ports]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        version: { type: string, description: Default 1.0.0 }
+        summary: { type: string }
+        compose: { type: string }
+        ports: { type: array, items: { $ref: "#/components/schemas/CustomAppPort" } }
+        webPort: { type: string, description: The port with the app's web page }
+        webPath: { type: string }
+        folders: { type: array, items: { $ref: "#/components/schemas/CustomAppFolder" } }
+    # ---- end of App Store v2 schemas ----

@@ -88,6 +88,16 @@ func (c *Context) Progress(pct float64, msg string) {
 	c.m.publish(&snapshot)
 }
 
+// FailedWith is an error that still carries a result, for a job that failed
+// part way and has something to report (e.g. the snapshot to roll back to).
+type FailedWith struct {
+	Err    error
+	Result any
+}
+
+func (f *FailedWith) Error() string { return f.Err.Error() }
+func (f *FailedWith) Unwrap() error { return f.Err }
+
 // RunFunc does the work of a job kind. Return a JSON-encodable result or an error.
 type RunFunc func(jc *Context) (any, error)
 
@@ -302,6 +312,12 @@ func (m *Manager) run(parent context.Context, id string) {
 		j.State, j.Error = Cancelled, "cancelled"
 	default:
 		j.State, j.Error = Failed, runErr.Error()
+		var fw *FailedWith
+		if errors.As(runErr, &fw) && fw.Result != nil {
+			if raw, err := json.Marshal(fw.Result); err == nil {
+				j.Result = raw
+			}
+		}
 	}
 	m.save(context.Background(), j)
 	m.publish(j)

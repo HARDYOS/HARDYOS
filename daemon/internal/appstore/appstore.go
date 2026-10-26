@@ -5,38 +5,72 @@
 package appstore
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 
 	"github.com/hardyos/hardyos/daemon/internal/apps"
+	"github.com/hardyos/hardyos/daemon/internal/store"
 )
 
 // Default locations.
 const (
 	DefaultCatalogDir = "/usr/share/hardyos/apps"
 	DefaultUploadDir  = "/var/lib/hardyos/app-packages"
+	DefaultImportDir  = "/var/lib/hardyos/app-imports"
 )
 
-// Sources of a package.
+// Sources of a package (the same words as apps.Source).
 const (
-	SourceCatalog = "catalog"
-	SourceUpload  = "upload"
+	SourceCatalog  = string(apps.SourceCatalog)
+	SourceUpload   = string(apps.SourceUpload)
+	SourceImported = string(apps.SourceImported)
+	SourceCustom   = string(apps.SourceCustom)
 )
 
-// Store finds packages.
+// Store finds packages and keeps the App Store's own records (who may use
+// each app, imported catalogs, window proxy ports) in hardyd's database.
 type Store struct {
 	CatalogDir string // packages that ship with HardyOS (*.hardyapp)
-	UploadDir  string // packages people uploaded, named <sha256>.hardyapp
+	UploadDir  string // packages people uploaded or built, named <sha256>.hardyapp
+	// ImportDir caches packages from imported catalogs, named <sha256>.hardyapp.
+	ImportDir string
+	// DB holds app access, imported catalogs and proxy ports; nil disables them.
+	DB *store.DB
+	// Client fetches imported catalogs; nil uses a client with timeouts.
+	Client *http.Client
+}
+
+func (s *Store) importDir() string {
+	if s.ImportDir != "" {
+		return s.ImportDir
+	}
+	return DefaultImportDir
+}
+
+// ErrNoDB means the store was built without a database.
+var ErrNoDB = errors.New("the App Store database isn't available")
+
+func (s *Store) db() (*store.DB, error) {
+	if s.DB == nil {
+		return nil, ErrNoDB
+	}
+	return s.DB, nil
 }
 
 // Entry is a package as the App Store shows it.
 type Entry struct {
-	Source      string         `json:"source"`
-	Ref         string         `json:"ref"` // the app id (catalog) or the package's hash (upload)
+	Source string `json:"source"`
+	// Ref is the app id (catalog) or the package's SHA-256 (upload, imported, custom).
+	Ref string `json:"ref"`
+	// SourceName is the imported catalog's name ("" otherwise).
+	SourceName  string         `json:"sourceName"`
 	ID          string         `json:"id"`
 	Name        string         `json:"name"`
 	Version     string         `json:"version"`
@@ -50,7 +84,22 @@ type Entry struct {
 	Settings    []EntrySetting `json:"settings"`
 	// Permissions in plain words; empty for a plain container app.
 	Permissions []string `json:"permissions"`
-	Images      []string `json:"images"`
+	// Grants are the extra permissions the package asks for, one per grant
+	// string. Catalog apps get them by declaring them; for any other source
+	// an administrator must tick each one (apps.PrepareArgs.Grants).
+	Grants []EntryGrant `json:"grants"`
+	// Shares are the shared folders the app can be given.
+	Shares []apps.ShareMount `json:"shares"`
+	// FixedPorts: the app uses the host network, so its ports are what the
+	// manifest says and can't be changed.
+	FixedPorts bool     `json:"fixedPorts"`
+	Images     []string `json:"images"`
+}
+
+// EntryGrant is one extra permission, as a grant string and in plain words.
+type EntryGrant struct {
+	Grant string `json:"grant"`
+	Label string `json:"label"`
 }
 
 // EntryPort is a port the app wants.
@@ -91,6 +140,10 @@ func EntryOf(source, ref string, p *apps.Package) Entry {
 		Description: m.Description, Publisher: m.Publisher, Website: m.Website,
 		Icon: apps.IconDataURL(m.Icon, p.Icon), MinMemoryMB: m.MinMemoryMB,
 		Ports: []EntryPort{}, Settings: []EntrySetting{}, Permissions: apps.DescribePermissions(m), Images: []string{},
+		Grants: GrantsOf(m), Shares: m.Shares, FixedPorts: m.Permissions.HostNetwork,
+	}
+	if e.Shares == nil {
+		e.Shares = []apps.ShareMount{}
 	}
 	for _, pt := range m.Ports {
 		proto := pt.Protocol
@@ -159,6 +212,10 @@ func (s *Store) Catalog() ([]Entry, error) {
 
 // Save checks an uploaded package and keeps it for installing.
 func (s *Store) Save(raw []byte) (*Entry, error) {
+	return s.save(raw, SourceUpload)
+}
+
+func (s *Store) save(raw []byte, source string) (*Entry, error) {
 	p, err := apps.ReadPackage(raw)
 	if err != nil {
 		return nil, err
@@ -170,15 +227,15 @@ func (s *Store) Save(raw []byte) (*Entry, error) {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		return nil, err
 	}
-	s.prune(path)
-	e := EntryOf(SourceUpload, p.SHA256, p)
+	s.pruneDir(s.UploadDir, path, 10)
+	e := EntryOf(source, p.SHA256, p)
 	return &e, nil
 }
 
-// prune keeps the newest few uploads.
-func (s *Store) prune(keep string) {
-	files, _ := filepath.Glob(filepath.Join(s.UploadDir, "*.hardyapp"))
-	if len(files) <= 10 {
+// pruneDir keeps the newest n packages in dir (and always keep).
+func (s *Store) pruneDir(dir, keep string, n int) {
+	files, _ := filepath.Glob(filepath.Join(dir, "*.hardyapp"))
+	if len(files) <= n {
 		return
 	}
 	sort.Slice(files, func(i, j int) bool {
@@ -186,7 +243,7 @@ func (s *Store) prune(keep string) {
 		b, _ := os.Stat(files[j])
 		return a != nil && b != nil && a.ModTime().After(b.ModTime())
 	})
-	for _, f := range files[10:] {
+	for _, f := range files[n:] {
 		if f != keep {
 			_ = os.Remove(f)
 		}
@@ -195,6 +252,13 @@ func (s *Store) prune(keep string) {
 
 // Load finds a package by source and ref.
 func (s *Store) Load(source, ref string) (*apps.Package, error) {
+	return s.LoadContext(context.Background(), source, ref)
+}
+
+// LoadContext finds a package by source and ref. A package from an imported
+// catalog is downloaded (and checked against the catalog's SHA-256) the
+// first time.
+func (s *Store) LoadContext(ctx context.Context, source, ref string) (*apps.Package, error) {
 	switch source {
 	case SourceCatalog:
 		if apps.ValidID(ref) != nil {
@@ -207,17 +271,94 @@ func (s *Store) Load(source, ref string) (*apps.Package, error) {
 			}
 		}
 		return nil, ErrNotFound
-	case SourceUpload:
+	case SourceUpload, SourceCustom:
 		if !shaRE.MatchString(ref) {
 			return nil, ErrNotFound
 		}
 		p, err := readFile(filepath.Join(s.UploadDir, ref+".hardyapp"))
 		if errors.Is(err, os.ErrNotExist) {
+			if source == SourceCustom {
+				return nil, fmt.Errorf("%w: create the app again", ErrNotFound)
+			}
 			return nil, fmt.Errorf("%w: upload the package again", ErrNotFound)
 		}
+		if err == nil && p.SHA256 != ref {
+			return nil, ErrNotFound
+		}
 		return p, err
+	case SourceImported:
+		if !shaRE.MatchString(ref) {
+			return nil, ErrNotFound
+		}
+		return s.loadImported(ctx, ref)
 	}
 	return nil, ErrNotFound
+}
+
+// SourceNameOf is the imported catalog's name for an imported package ref.
+func (s *Store) SourceNameOf(ctx context.Context, source, ref string) string {
+	if source != SourceImported {
+		return ""
+	}
+	if c, _, ok := s.findImported(ctx, ref); ok {
+		return c.Name
+	}
+	return ""
+}
+
+// basicCapabilities are in Docker's default set, so the engine needs no
+// grant for them (the same list as the engine's policy).
+var basicCapabilities = map[string]bool{
+	"CHOWN": true, "DAC_OVERRIDE": true, "FSETID": true, "FOWNER": true, "MKNOD": true, "NET_RAW": true,
+	"SETGID": true, "SETUID": true, "SETPCAP": true, "NET_BIND_SERVICE": true, "SYS_CHROOT": true,
+	"KILL": true, "AUDIT_WRITE": true,
+}
+
+// MissingGrants lists the grants a manifest needs that have doesn't hold.
+func MissingGrants(m apps.Manifest, have []string) []EntryGrant {
+	held := map[string]bool{}
+	for _, g := range have {
+		held[g] = true
+	}
+	out := []EntryGrant{}
+	for _, g := range GrantsOf(m) {
+		if !held[g.Grant] {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+// GrantsOf lists the extra permissions a manifest asks for, as grant strings
+// with plain words (the grants the engine requires from non-catalog apps).
+func GrantsOf(m apps.Manifest) []EntryGrant {
+	out := []EntryGrant{}
+	if m.Permissions.HostNetwork {
+		out = append(out, EntryGrant{Grant: apps.GrantHostNetwork, Label: "Use the server's network directly (host networking): it can reach and listen on every network the server is on"})
+	}
+	if m.Permissions.GPU {
+		out = append(out, EntryGrant{Grant: apps.GrantGPU, Label: "Use the server's graphics card (GPU), for example to convert videos"})
+	}
+	for _, c := range m.Permissions.Capabilities {
+		if basicCapabilities[c] {
+			continue // in Docker's default set: nothing to grant
+		}
+		label := apps.AllowedCapabilities[c]
+		if label == "" {
+			label = c
+		}
+		out = append(out, EntryGrant{Grant: apps.GrantCapability + c, Label: fmt.Sprintf("%s (%s)", label, c)})
+	}
+	for _, d := range m.Permissions.Devices {
+		label := d
+		for _, w := range apps.DescribePermissions(apps.Manifest{Permissions: apps.Permissions{Devices: []string{d}}}) {
+			if strings.Contains(w, d) {
+				label = w
+			}
+		}
+		out = append(out, EntryGrant{Grant: apps.GrantDevice + d, Label: label})
+	}
+	return out
 }
 
 // CatalogVersion is the catalog's version of an app, or "".
