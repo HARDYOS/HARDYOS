@@ -253,3 +253,41 @@ func TestConfirmWhenHealthy(t *testing.T) {
 		t.Fatalf("rollback notifications = %d (%+v)", n, list)
 	}
 }
+
+func TestUpdateCheckAPI(t *testing.T) {
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"tag_name":"v0.2.0","name":"HardyOS 0.2.0","body":"notes","html_url":"https://github.com/x","published_at":"2026-10-26T12:00:00Z",
+			"assets":[{"name":"hardyos-0.2.0-amd64.hupd","browser_download_url":"https://github.com/HARDYOS/HARDYOS/releases/download/v0.2.0/hardyos-0.2.0-amd64.hupd","size":5}]}`))
+	}))
+	defer gh.Close()
+	stub := &stubUpdater{status: update.Status{Managed: true, Running: "hardyos-0.1.1", Versions: []update.Version{}}}
+	env, svc, _ := newUpdatesEnv(t, stub)
+	svc.Current, svc.ReleasesURL, svc.Arch = "0.1.1", gh.URL, "amd64"
+	admin := env.client(t)
+	admin.do("POST", "/api/v1/setup/admin", map[string]string{"username": "cade", "password": "supersecret1"}, nil)
+
+	var st updates.CheckState
+	if code := admin.do("GET", "/api/v1/system/updates/check", nil, &st); code != 200 || st.Available != nil || !st.AutoCheck {
+		t.Fatalf("initial = %d %+v", code, st)
+	}
+	var e ErrorResponse
+	if code := admin.do("POST", "/api/v1/system/updates/install-available", nil, &e); code != 409 {
+		t.Fatalf("install with nothing found = %d", code)
+	}
+	if code := admin.do("POST", "/api/v1/system/updates/check", nil, &st); code != 200 || st.Available == nil || st.Available.Version != "0.2.0" {
+		t.Fatalf("check = %d %+v", code, st)
+	}
+	var acc struct {
+		Job map[string]any `json:"job"`
+	}
+	if code := admin.do("POST", "/api/v1/system/updates/install-available", nil, &acc); code != 202 {
+		t.Fatalf("install = %d", code)
+	}
+	params := acc.Job["params"].(map[string]any)
+	if params["url"] != "https://github.com/HARDYOS/HARDYOS/releases/download/v0.2.0/hardyos-0.2.0-amd64.hupd" || !strings.Contains(acc.Job["title"].(string), "0.2.0") {
+		t.Fatalf("job = %v", acc.Job)
+	}
+	if code := admin.do("PUT", "/api/v1/system/updates/check", map[string]bool{"autoCheck": false}, &st); code != 200 || st.AutoCheck {
+		t.Fatalf("turn off = %d %+v", code, st)
+	}
+}

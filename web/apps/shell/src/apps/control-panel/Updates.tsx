@@ -1,14 +1,18 @@
-import type { InstalledVersion, UpdateStatus } from "@hardy/api-client";
+import type { InstalledVersion, UpdateCheck, UpdateStatus } from "@hardy/api-client";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ChangeEvent, type DragEvent, useRef, useState } from "react";
 import { ApiFailure, api, errorMessage, unwrap } from "../../api";
 import { bytes, dateTime, relativeTime } from "../../format";
-import { RestartIcon, TrashIcon, UploadIcon } from "../../icons";
+import { RefreshIcon, RestartIcon, TrashIcon, UploadIcon } from "../../icons";
 import { Alert, Badge, Button, Card, ErrorBox, Field, IconButton, Loading, PageHeader, Progress, TextInput, Toggle } from "../../ui";
 import { ConfirmDialog, Dialog } from "../../ui/Dialog";
 import { RestartOverlay } from "../../ui/RestartOverlay";
 import { toast } from "../../ui/toasts";
 import { JobProgress } from "../shared";
+
+export function useUpdateCheck() {
+  return useQuery({ queryKey: ["update-check"], queryFn: () => unwrap(api.GET("/system/updates/check")), refetchInterval: 60_000 });
+}
 
 export function useUpdateStatus() {
   return useQuery({ queryKey: ["updates"], queryFn: () => unwrap(api.GET("/system/updates")), refetchInterval: 30_000 });
@@ -72,6 +76,7 @@ export function Updates() {
       {st.pending && st.running !== st.pending.bootEnvironment && (
         <PendingCard st={st} busy={reboot.isPending} error={reboot.error} onRestart={() => reboot.mutate()} onCancelled={refresh} />
       )}
+      {st.managed && !st.pending && <CheckCard busy={jobId !== null} onJob={setJobId} />}
       {st.managed && !st.pending && (
         <InstallCard
           jobId={jobId}
@@ -83,6 +88,76 @@ export function Updates() {
       )}
       {st.managed && <Versions st={st} onChanged={refresh} onRestart={() => reboot.mutate()} />}
     </>
+  );
+}
+
+/** What the automatic check found, with Install, Check now and the daily-check switch. */
+function CheckCard({ busy, onJob }: { busy: boolean; onJob: (id: string) => void }) {
+  const qc = useQueryClient();
+  const check = useUpdateCheck();
+  const set = (data: UpdateCheck) => qc.setQueryData(["update-check"], data);
+  const now = useMutation({ mutationFn: () => unwrap(api.POST("/system/updates/check")), onSuccess: set });
+  const auto = useMutation({
+    mutationFn: (autoCheck: boolean) => unwrap(api.PUT("/system/updates/check", { body: { autoCheck } })),
+    onSuccess: set,
+  });
+  const install = useMutation({
+    mutationFn: () => unwrap(api.POST("/system/updates/install-available")),
+    onSuccess: (r) => onJob((r.job as { id: string }).id),
+  });
+  if (check.isPending) return null;
+  if (check.isError) return <ErrorBox error={check.error} onRetry={() => check.refetch()} />;
+  const c = check.data;
+  const a = c.available;
+  return (
+    <Card className={a ? "update-ready" : ""}>
+      {a ? (
+        <>
+          <div className="row row--between">
+            <div>
+              <h3 style={{ margin: 0 }}>HardyOS {a.version} is available</h3>
+              <p className="small muted" style={{ margin: "4px 0 0" }}>
+                Released {relativeTime(a.publishedAt)} · {bytes(a.size)} download · you have {c.current}
+              </p>
+            </div>
+            <Button variant="primary" busy={install.isPending} disabled={busy} onClick={() => install.mutate()}>
+              Install
+            </Button>
+          </div>
+          {a.notes && <p className="update-notes">{a.notes}</p>}
+          <p className="small muted" style={{ margin: 0 }}>
+            It downloads, is checked against the HardyOS signing key, and installs next to the current version. Nothing changes
+            until you restart.{" "}
+            <a href={a.pageUrl} target="_blank" rel="noreferrer">
+              Release page
+            </a>
+          </p>
+          {install.error != null && <Alert tone="bad">{errorMessage(install.error)}</Alert>}
+        </>
+      ) : (
+        <div className="row row--between">
+          <div>
+            <h3 style={{ margin: 0 }}>{c.lastError ? "Couldn't check for updates" : "HardyOS is up to date"}</h3>
+            <p className="small muted" style={{ margin: "4px 0 0" }}>
+              {c.lastError || (c.lastCheck ? `Checked ${relativeTime(c.lastCheck)}.` : "Not checked yet.")}
+            </p>
+          </div>
+          <Badge tone={c.lastError ? "warn" : "good"}>{c.current}</Badge>
+        </div>
+      )}
+      <div className="row row--between">
+        <Toggle
+          label="Check for updates every day"
+          description="Looks for new HardyOS releases and tells you. Updates are never installed without you."
+          checked={c.autoCheck}
+          disabled={auto.isPending}
+          onChange={(v) => auto.mutate(v)}
+        />
+        <Button size="sm" busy={now.isPending} onClick={() => now.mutate()}>
+          <RefreshIcon size={14} /> Check now
+        </Button>
+      </div>
+    </Card>
   );
 }
 
@@ -205,7 +280,7 @@ function InstallCard({ jobId, onJob, onDone }: { jobId: string | null; onJob: (i
   }
 
   return (
-    <Card title="Install an update">
+    <Card title="Install an update file">
       <p className="small muted" style={{ margin: 0 }}>
         Updates are signed .hupd files. HardyOS checks the signature, installs the new version next to the current one and
         switches on the next restart.

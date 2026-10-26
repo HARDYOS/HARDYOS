@@ -51,6 +51,14 @@ type Service struct {
 	Dir string
 	// HTTP downloads updates (default: http.DefaultClient with a timeout).
 	HTTP *http.Client
+	// Current is the running version (version.Version); the update check
+	// offers only newer ones.
+	Current string
+	// ReleasesURL is where to look for new versions (default: the latest
+	// release of HARDYOS/HARDYOS on GitHub). Arch picks the update file
+	// (default: this build's architecture).
+	ReleasesURL string
+	Arch        string
 }
 
 func (s *Service) dir() string {

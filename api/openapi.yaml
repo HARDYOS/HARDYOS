@@ -935,6 +935,64 @@ paths:
         "400": { $ref: "#/components/responses/Invalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /system/updates/check:
+    get:
+      operationId: getUpdateCheck
+      summary: Automatic update check setting and the newest version found
+      tags: [updates]
+      responses:
+        "200":
+          description: Check state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UpdateCheck" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: checkForUpdates
+      summary: Look for a new version on GitHub now
+      description: A failed check (no internet) still answers 200; lastError says why.
+      tags: [updates]
+      responses:
+        "200":
+          description: Check state after checking
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UpdateCheck" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    put:
+      operationId: setUpdateCheck
+      summary: Turn the daily update check on or off
+      tags: [updates]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [autoCheck]
+              properties:
+                autoCheck: { type: boolean }
+      responses:
+        "200":
+          description: Check state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UpdateCheck" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /system/updates/install-available:
+    post:
+      operationId: installAvailableUpdate
+      summary: Download and install the newer version the last check found
+      description: The update file's signature is checked like any other update.
+      tags: [updates]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /system/versions/{name}/activate:
     post:
       operationId: activateVersion
@@ -1937,3 +1995,25 @@ components:
             synced: { type: boolean }
             source: { type: string }
             offsetSec: { type: number }
+    AvailableUpdate:
+      type: object
+      required: [version, name, notes, url, pageUrl, size, publishedAt]
+      properties:
+        version: { type: string }
+        name: { type: string }
+        notes: { type: string, description: Release notes (Markdown) }
+        url: { type: string, description: The signed update file }
+        pageUrl: { type: string, description: The release page on GitHub }
+        size: { type: integer, format: int64 }
+        publishedAt: { type: string, format: date-time }
+    UpdateCheck:
+      type: object
+      required: [autoCheck, current, lastCheck, lastError, available]
+      properties:
+        autoCheck: { type: boolean, description: Check GitHub for new versions daily }
+        current: { type: string, description: The running version }
+        lastCheck: { type: string, format: date-time, nullable: true }
+        lastError: { type: string, description: Why the last check failed (empty when it worked) }
+        available:
+          nullable: true
+          allOf: [{ $ref: "#/components/schemas/AvailableUpdate" }]
