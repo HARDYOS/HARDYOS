@@ -65,6 +65,8 @@ type Config struct {
 
 	// Files reads and writes files as a person (internal/files); share
 	// links use it. nil: links can't be made and existing ones don't open.
+	// When it's also a files.Service (files.Client is), the File Manager's
+	// /files endpoints are served.
 	Files files.Access
 }
 
@@ -79,6 +81,7 @@ type Server struct {
 	tickets  terminalTickets
 	proxy    *appProxy
 	links    *sharelinks.Store
+	uploads  uploads
 	started  time.Time
 	log      *slog.Logger
 }
@@ -163,6 +166,9 @@ func (s *Server) routes() {
 		}
 		if s.cfg.Backups != nil {
 			s.backupRoutes()
+		}
+		if _, ok := s.cfg.Files.(files.Service); ok {
+			s.fileRoutes()
 		}
 	}
 

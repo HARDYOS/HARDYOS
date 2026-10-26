@@ -1454,7 +1454,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Shared folders the person can open, plus their Home ("~home") */
+        /** The shared folders (and Home) the person can open */
         get: operations["listFileShares"];
         put?: never;
         post?: never;
@@ -1471,8 +1471,25 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** What's in a folder (hidden names left out) */
+        /** A folder's files and folders (links, devices and hidden names aren't listed) */
         get: operations["listFiles"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/files/stat": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One file or folder */
+        get: operations["statFile"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1489,11 +1506,15 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Download a file (Range supported), or folders / several items as a zip
-         * @description One file streams as is, with Range. A folder, or more than one path,
-         *     streams as a zip. snapshot= reads an older version. inline=1 asks for
-         *     Content-Disposition inline (previews); the response must carry
-         *     Content-Security-Policy sandbox so nothing in it can run.
+         * Download a file (with Range support), or folders and several items as a zip
+         * @description One file is sent as is: Range / If-Range requests give 206 partial
+         *     content (video seeking, resumed downloads). With `inline=1` images,
+         *     video, audio, PDFs and text are shown in the browser (text, HTML and
+         *     SVG as plain text); everything else is always an attachment.
+         *     A folder, or several `path`s from the same share, is streamed as a
+         *     zip (stored, not compressed; a folder's contents are at the top of
+         *     the zip, several items each under its own name). Files that can't
+         *     be read are listed in "Files not included.txt" inside the zip.
          */
         get: operations["downloadFiles"];
         put?: never;
@@ -1513,7 +1534,14 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Start a (resumable) upload of one file */
+        /**
+         * Start a resumable upload of one file
+         * @description Makes an empty hidden temporary file next to `path`; send the bytes
+         *     with `PUT /files/upload/{id}`. The file only shows under its name
+         *     once complete, so a half-uploaded file never does. Uploads nobody
+         *     continues for a day are removed (as are all of them when hardyd
+         *     restarts: start again).
+         */
         post: operations["startFileUpload"];
         delete?: never;
         options?: never;
@@ -1530,8 +1558,15 @@ export interface paths {
             };
             cookie?: never;
         };
-        get?: never;
-        /** Send the next chunk (raw bytes) at offset; the last one puts the file in place */
+        /** How far an upload has got */
+        get: operations["getFileUpload"];
+        /**
+         * Send the next chunk (raw bytes) at offset; the chunk that completes the file puts it in place
+         * @description `offset` must be the upload's `received`; otherwise 409 with
+         *     `received` (carry on from there). Bytes past `size` are refused
+         *     (400). The completing chunk (for an empty file: one empty PUT)
+         *     renames the file into place and answers with its `entry`.
+         */
         put: operations["sendFileChunk"];
         post?: never;
         /** Cancel an upload and throw away what arrived */
@@ -1550,7 +1585,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** New folder */
+        /** Make a folder */
         post: operations["makeFolder"];
         delete?: never;
         options?: never;
@@ -1586,7 +1621,11 @@ export interface paths {
         put?: never;
         /**
          * Move items into a folder (within or across shares)
-         * @description Small moves answer 200; bigger ones run as a job (202).
+         * @description Within a share moves are renames, answered at once (200). Into
+         *     another share they're a copy and a delete: up to 5 files (none
+         *     over 256 MB) at once, anything more as a job (202) whose result is
+         *     the same `FileBulkResult`. A single item that fails answers with
+         *     its error.
          */
         post: operations["moveFiles"];
         delete?: never;
@@ -1606,7 +1645,10 @@ export interface paths {
         put?: never;
         /**
          * Copy items into a folder (within or across shares)
-         * @description Small copies answer 200; bigger ones run as a job (202).
+         * @description Up to 5 files (none over 256 MB) are copied at once (200);
+         *     folders and anything more run as a job (202) with progress, its
+         *     result the same `FileBulkResult`. Copies keep modification times.
+         *     A single item that fails answers with its error.
          */
         post: operations["copyFiles"];
         delete?: never;
@@ -1624,7 +1666,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Delete items (to the recycle bin when the folder has one) */
+        /**
+         * Delete items (to the folder's recycle bin when it has one)
+         * @description Up to 5 items at once (200), more as a job (202) whose result is the same `FileBulkResult`. `recycled`: everything deleted went to the recycle bin. Audited.
+         */
         post: operations["deleteFiles"];
         delete?: never;
         options?: never;
@@ -1639,7 +1684,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Older versions of a file or folder (from snapshots) */
+        /**
+         * Older versions of a file or folder, from the automatic snapshots, newest first
+         * @description A file's versions that are the same as the current file or the next newer version are left out.
+         */
         get: operations["listFileVersions"];
         put?: never;
         post?: never;
@@ -1658,7 +1706,13 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Copy an older version back next to the current one */
+        /**
+         * Copy an older version back next to the current one
+         * @description Copied back to its path if nothing is there now, otherwise to
+         *     "name (restored 2026-10-24).ext". Answers when done (200), or with
+         *     `background: true` runs as a job (202 JobAccepted, its result
+         *     this same object) with progress, for big folders. Audited.
+         */
         post: operations["restoreFileVersion"];
         delete?: never;
         options?: never;
@@ -4077,11 +4131,12 @@ export interface components {
             token: string;
         };
         FileShare: {
-            /** @description Shared folder id, or "~home" */
+            /** @description The shared folder's id, or "~home" */
             id: string;
             name: string;
+            /** @description The person may change things at its top */
             writable: boolean;
-            /** @description Deleted files go to its recycle bin */
+            /** @description Deleted items go to its recycle bin */
             recycle: boolean;
         };
         FileEntry: {
@@ -4089,13 +4144,24 @@ export interface components {
             /** @description Inside the share */
             path: string;
             dir: boolean;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description 0 for folders
+             */
             size: number;
             /** Format: date-time */
             modified: string;
+            /** @description The person may change or delete it */
             writable: boolean;
         };
+        FileListing: {
+            folder: components["schemas"]["FileEntry"];
+            entries: components["schemas"]["FileEntry"][];
+            /** @description The folder holds more than 50000 entries; not all are listed */
+            truncated: boolean;
+        };
         FileVersion: {
+            /** @example hardyos-auto-daily_2026-10-24-0000 */
             snapshot: string;
             /** Format: date-time */
             taken: string;
@@ -4103,17 +4169,60 @@ export interface components {
             size: number;
             /** Format: date-time */
             modified: string;
+            dir: boolean;
+        };
+        FileUpload: {
+            id: string;
+            share: string;
+            path: string;
+            /** Format: int64 */
+            size: number;
+            /**
+             * Format: int64
+             * @description Bytes stored so far (the next chunk's offset)
+             */
+            received: number;
+            entry?: components["schemas"]["FileEntry"];
         };
         FilePathRequest: {
             share: string;
             path: string;
         };
+        FilePathResult: {
+            share: string;
+            path: string;
+        };
+        FileItemResult: {
+            path: string;
+            ok: boolean;
+            error?: string;
+            /** @enum {string} */
+            code?: "not_found" | "no_access" | "exists" | "not_allowed" | "full" | "failed";
+            /** @description Copies and moves: where it went */
+            to?: string;
+            /** @description conflict skip: the name was taken */
+            skipped?: boolean;
+            /** @description Deletes: it went to the recycle bin */
+            recycled?: boolean;
+        };
+        FileBulkResult: {
+            done: boolean;
+            results: components["schemas"]["FileItemResult"][];
+            /** @description Deletes: everything deleted went to the recycle bin */
+            recycled: boolean;
+        };
         FileTransferRequest: {
             share: string;
             paths: string[];
+            /** @description Empty for the same share */
             toShare: string;
             /** @description The folder they go into; empty for the share's top */
             toDir: string;
+            /**
+             * @description When a name is taken: rename (default: copies "photo (copy).jpg", moves "photo (2).jpg"), skip, replace (files replaced, folders merged) or fail
+             * @enum {string}
+             */
+            conflict?: "rename" | "skip" | "replace" | "fail";
         };
         FileUploadRequest: {
             share: string;
@@ -4121,15 +4230,13 @@ export interface components {
             path: string;
             /** Format: int64 */
             size: number;
+            /** @description Replace a file that's already there (never a folder) */
             overwrite?: boolean;
-        };
-        FileUpload: {
-            id: string;
-            /** Format: int64 */
-            size: number;
-            /** Format: int64 */
-            received: number;
-            entry?: components["schemas"]["FileEntry"];
+            /**
+             * Format: int64
+             * @description The file's modification time in ms since 1970 (File.lastModified)
+             */
+            modified?: number;
         };
     };
     responses: {
@@ -6584,7 +6691,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Folders */
+            /** @description Home first, then by name */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -6596,6 +6703,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     listFiles: {
@@ -6603,6 +6711,8 @@ export interface operations {
             query: {
                 share: string;
                 path?: string;
+                /** @description List the folder as it was in this automatic snapshot (from /files/versions) */
+                snapshot?: string;
             };
             header?: never;
             path?: never;
@@ -6610,28 +6720,58 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Entries */
+            /** @description The folder and its entries, folders first */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        entries: components["schemas"]["FileEntry"][];
-                    };
+                    "application/json": components["schemas"]["FileListing"];
                 };
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    statFile: {
+        parameters: {
+            query: {
+                share: string;
+                path?: string;
+                snapshot?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The entry */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileEntry"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     downloadFiles: {
         parameters: {
             query: {
                 share: string;
-                path: string[];
+                /** @description Repeat for several items */
+                path?: string[];
+                /** @description Download an older version */
                 snapshot?: string;
+                /** @description 1: show in the browser when the type is safe to */
                 inline?: "1";
             };
             header?: never;
@@ -6640,27 +6780,27 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The file or a zip */
+            /** @description The file, or a zip */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/octet-stream": string;
+                    "application/zip": string;
                 };
             };
-            /** @description Part of the file */
+            /** @description Part of the file (Range) */
             206: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/octet-stream": string;
-                };
+                content?: never;
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     startFileUpload: {
@@ -6691,6 +6831,30 @@ export interface operations {
             409: components["responses"]["Conflict"];
         };
     };
+    getFileUpload: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The upload */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileUpload"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
     sendFileChunk: {
         parameters: {
             query: {
@@ -6717,9 +6881,32 @@ export interface operations {
                     "application/json": components["schemas"]["FileUpload"];
                 };
             };
+            400: components["responses"]["Invalid"];
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
+            /** @description Out of step (wrong_offset), another chunk is being written (busy), or the name was taken meanwhile (exists) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        code: string;
+                        message: string;
+                        /** Format: int64 */
+                        received?: number;
+                        upload?: components["schemas"]["FileUpload"];
+                    };
+                };
+            };
+            /** @description The shared folder is full */
+            507: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     cancelFileUpload: {
@@ -6742,6 +6929,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     makeFolder: {
@@ -6757,7 +6945,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The folder */
+            /** @description The new folder */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -6768,6 +6956,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
         };
     };
@@ -6783,7 +6972,7 @@ export interface operations {
                 "application/json": {
                     share: string;
                     path: string;
-                    /** @description The new name (no slashes) */
+                    /** @description The new name (no slashes); it must be free */
                     name: string;
                 };
             };
@@ -6798,6 +6987,7 @@ export interface operations {
                     "application/json": components["schemas"]["FileEntry"];
                 };
             };
+            400: components["responses"]["Invalid"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
@@ -6823,12 +7013,14 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Record<string, never>;
+                    "application/json": components["schemas"]["FileBulkResult"];
                 };
             };
             202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
         };
     };
@@ -6851,12 +7043,14 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Record<string, never>;
+                    "application/json": components["schemas"]["FileBulkResult"];
                 };
             };
             202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
         };
     };
@@ -6872,25 +7066,27 @@ export interface operations {
                 "application/json": {
                     share: string;
                     paths: string[];
+                    /** @description Skip the recycle bin */
+                    permanent?: boolean;
                 };
             };
         };
         responses: {
-            /** @description Deleted */
+            /** @description Done */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        /** @description They went to the recycle bin */
-                        recycled: boolean;
-                    };
+                    "application/json": components["schemas"]["FileBulkResult"];
                 };
             };
             202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     listFileVersions: {
@@ -6905,7 +7101,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Versions, newest first */
+            /** @description The versions */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -6934,24 +7130,24 @@ export interface operations {
                     share: string;
                     path: string;
                     snapshot: string;
+                    background?: boolean;
                 };
             };
         };
         responses: {
-            /** @description Where it was written ("Report (restored 2026-10-20).docx" if the name was taken) */
+            /** @description Where it was written */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        path: string;
-                    };
+                    "application/json": components["schemas"]["FilePathResult"];
                 };
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     listShareSnapshots: {

@@ -81,6 +81,13 @@ func (c *recycleCleaner) entry(dirfd int, name string, depth int) bool {
 		if depth >= 128 {
 			return false
 		}
+		// A folder moved into the bin whole (File Manager) keeps its files'
+		// old times; its own ctime says when it arrived, so leave the whole
+		// folder until that's old too. (Also true while Samba is still
+		// adding to it: things stay longer, never shorter.)
+		if st.Ctim.Sec >= c.cutoff {
+			return false
+		}
 		fd, err := unix.Openat(dirfd, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		if err != nil {
 			return false
@@ -90,14 +97,17 @@ func (c *recycleCleaner) entry(dirfd int, name string, depth int) bool {
 		}
 		// Only folders that have been there a while: Samba may be about to
 		// move a file into a fresh one.
-		if st.Mtim.Sec >= c.cutoff {
+		if st.Mtim.Sec >= c.cutoff || st.Ctim.Sec >= c.cutoff {
 			return false
 		}
 		return unix.Unlinkat(dirfd, name, unix.AT_REMOVEDIR) == nil
 	default:
 		// Files, links and the rest: the link itself is removed, never
 		// what it points to.
-		if st.Atim.Sec >= c.cutoff {
+		// When it went into the bin: Samba touches it (recycle:touch), and
+		// a move into the bin (the File Manager keeps the file's own
+		// modification time) changes its ctime.
+		if st.Atim.Sec >= c.cutoff || st.Ctim.Sec >= c.cutoff {
 			return false
 		}
 		if unix.Unlinkat(dirfd, name, 0) != nil {

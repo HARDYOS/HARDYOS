@@ -9,6 +9,16 @@ if ! getent passwd hardyd >/dev/null; then
     --shell /usr/sbin/nologin --gecos "HardyOS control plane" hardyd
 fi
 
+# HardyOS administrators read and write files in the File Manager as this
+# user (never root); hardyd-priv gives it access to every shared folder.
+if ! getent group hardyos-files >/dev/null; then
+  addgroup --system --gid 29999 hardyos-files
+fi
+if ! getent passwd hardyos-files >/dev/null; then
+  adduser --system --uid 29999 --ingroup hardyos-files --home /nonexistent --no-create-home \
+    --shell /usr/sbin/nologin --gecos "HardyOS File Manager" hardyos-files
+fi
+
 if [ -d /run/systemd/system ]; then
   systemctl daemon-reload
   systemctl enable hardyos-issue.service hardyd-priv.service hardyd.service >/dev/null

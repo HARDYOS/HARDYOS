@@ -470,26 +470,35 @@ func TestCleanRecycle(t *testing.T) {
 	_ = os.Mkdir(emptyOld, 0o755)
 	_ = os.Chtimes(emptyOld, old, old)
 
+	// Today everything here just arrived in the bin (ctimes are now; old
+	// access/modification times alone don't make something old), so the
+	// nightly run keeps it all.
 	m := newTestManager(t, okFake(), []shares.Share{{ID: "s", Path: share, Mounted: true, Recycle: true}})
 	n, err := m.CleanRecycle(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(oldFile); err == nil {
-		t.Error("old file kept")
+	for _, p := range []string{oldFile, newFile, emptyOld} {
+		if _, err := os.Stat(p); err != nil || n != 0 {
+			t.Errorf("%s removed too early (removed %d)", p, n)
+		}
 	}
-	if _, err := os.Stat(newFile); err != nil {
-		t.Error("new file removed")
+	// Once the cutoff passes their arrival, everything in the bin goes,
+	// and nothing a link points to outside it.
+	n, err = cleanRecycleDir(share, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{oldFile, newFile, emptyOld, link} {
+		if _, err := os.Lstat(p); err == nil {
+			t.Errorf("%s kept after its time", p)
+		}
 	}
 	if _, err := os.Stat(outside); err != nil {
 		t.Error("followed a link out of the recycle bin")
 	}
-	if _, err := os.Stat(emptyOld); err == nil {
-		t.Error("old empty folder kept")
-	}
-	if n != 1 {
-		// the old file; the link's own atime is now, so it stays
-		t.Errorf("removed %d", n)
+	if n != 3 {
+		t.Errorf("removed %d, want the two files and the link", n)
 	}
 }
 

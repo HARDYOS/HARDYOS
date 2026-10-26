@@ -733,6 +733,93 @@ section 3; decisions 65-69, security review 80-82):
   Create an app, and `AppFrame` (an installed app as a desktop window, id
   `os.hardy.appwindow:<app id>`).
 
+## File access as the person
+
+The File Manager, share links and (later) WebDAV read and write files in
+shared folders through one interface, `files.Access` (plus `files.Extended`
+for chunked uploads, copies with progress and permanent deletes;
+`files.Service` is both). hardyd's implementation, `files.Client`, calls the
+`files.*` operations of hardyd-priv; neither daemon ever touches a person's
+files as itself (decisions 92-95).
+
+```
+browser ── /api/v1/files/* ──▶ hardyd (files.Client) ── files.open … ──▶ hardyd-priv
+                                   ▲  fd (SCM_RIGHTS)                        │ fork+exec, already the person
+                                   └─────────────── fd ◀── worker: "hardyd-priv fileworker"
+                                                           openat2 beneath the share root
+```
+
+- **Who.** hardyd looks the person up again on every call (`files.UserLookup`:
+  disabled or deleted accounts stop working, domain groups as of the last
+  refresh, the current role). Domain accounts act as their own Linux user:
+  hardyd-priv asks NSS (winbind) through `/usr/lib/hardyos/hardyos-nss`, a
+  tiny cgo helper that only calls `getpwnam_r` and `getgrouplist` (the
+  rest of hardyd-priv is built without cgo, and Go's pure lookup never
+  reaches winbind). Only IDs in winbind's ranges (3000-7999,
+  100000-999999) are accepted; other groups (root, disk, ...) are dropped.
+  HardyOS administrators (local accounts) act as the `hardyos-files` system
+  user (UID 29999, made by the package's postinst), which hardyd-priv gives
+  `rwX` on every shared folder with the same no-follow ACL walker as app
+  grants (at start-up, every 10 minutes and before an administrator's
+  folders are listed). Family members with HardyOS accounts get no files.
+  Root is never acted as.
+- **The folder's rules** are checked first (`fileworker.Level`: a `none`
+  rule beats everything, otherwise the highest matching level; no match =
+  no access; administrators may use every folder). Read-only folders refuse
+  every change before a worker starts. Then the disk's permissions decide,
+  because the worker *is* the person.
+- **Workers.** For each operation hardyd-priv opens the share root
+  (`O_PATH`), and starts `hardyd-priv fileworker` with the person's
+  credentials set between fork and exec (`setgroups`, `setgid`, `setuid`),
+  so not one instruction runs as root. The worker refuses to run as root or
+  with any capability, sets `PR_SET_NO_NEW_PRIVS` (all threads) and
+  `PR_SET_DUMPABLE 0`, reads one JSON request on stdin (fd 3: a socket back,
+  fd 4+: the roots) and writes one JSON answer. Every path is resolved with
+  `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS)`
+  from the root's descriptor; changes use the `*at` calls on the parent's
+  descriptor (`renameat2(RENAME_NOREPLACE)`, `mkdirat`, `unlinkat`), and
+  recursive deletes walk by descriptor. Links, devices, pipes and sockets
+  are never listed or opened; `..`, `.recycle`, `.zfs` and `.hardyos*` are
+  refused in paths (except an upload's own temporary name). A worker costs
+  about 10 ms.
+- **Files, not bytes.** `files.open`, `files.create` and `files.openwrite`
+  hand the open file to hardyd over SCM_RIGHTS (worker → hardyd-priv →
+  hardyd); hardyd streams it (`http.ServeContent`: Range, If-Range), writes
+  upload chunks into it, or copies between two of them (`copy_file_range`,
+  so ZFS can clone blocks). No file content goes through JSON.
+- **Recycle bin.** Deleting in a folder with the recycle bin on moves the
+  item to `.recycle/<user>/<its folders>/` (`<user>`: the account name
+  without the domain, `hardyos-files` for administrators); a name already
+  there gets " (deleted <date time>)". hardyd-priv makes `.recycle` root's,
+  mode 1777, if missing; each person's bin is theirs, 0700.
+- **Older versions** come from `.zfs/snapshot/hardyos-auto-<kind>_<UTC
+  time>/…` (contract section 2), read only. A file's versions leave out
+  copies equal to the current file or to the next newer version. Restore
+  copies the version back to its path, or to "name (restored
+  2026-10-24).ext" when the name is taken.
+- **Uploads** go to `.hardyos-upload-<id>` next to the target, chunk by
+  chunk at the offset the server has, and are renamed into place (never
+  over a folder; over a file only with `overwrite`). Abandoned ones are
+  dropped after a day by hardyd and removed after two days when their
+  folder is listed.
+- **API** (`handlers_files.go`, `/api/v1/files/*`): shares, list, stat,
+  download (file with Range, or a streamed zip for folders and several
+  items; previews only for safe types, under `sandbox` CSP), upload
+  (start / chunk / status / cancel), mkdir, rename, move, copy, delete,
+  snapshots, restore. Small copies, moves and deletes answer at once;
+  more than five items, folders and big files run as jobs with progress
+  (`files.copy`, `files.move`, `files.delete`, `files.restore`). Deletes,
+  restores, uploads, renames, moves and job-run copies are audited.
+- **Code.** Root side `internal/fileworker` (`server.go`: identity, rules,
+  roots; `spawn_linux.go`: starting workers, receiving descriptors;
+  `worker_linux.go`: the operations), operations in
+  `priv/fileworker_ops.go`, the NSS helper in `cmd/hardyos-nss`, the
+  hardyos-files grant in `shares/filesuser_linux.go`; hardyd side
+  `internal/files` (`client.go`, `copy.go`). Tests run real workers (the
+  test binary re-runs itself as the worker): as root they create files owned
+  by made-up users and check each can do exactly what its user can; without
+  root they run as the test's own user.
+
 ## File Manager and share links
 
 The web desktop's File Manager and web share links (part D of

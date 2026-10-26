@@ -139,3 +139,7 @@ export type FileTransferRequest = S["FileTransferRequest"];
 export type FileServicesStatus = S["FileServicesStatus"];
 export type FileServicesHomes = S["FileServicesHomes"];
 export type FileServicesShare = S["FileServicesShare"];
+export type FileListing = S["FileListing"];
+export type FileBulkResult = S["FileBulkResult"];
+export type FileItemResult = S["FileItemResult"];
+export type FileUploadRequest = S["FileUploadRequest"];

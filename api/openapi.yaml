@@ -1668,16 +1668,22 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
   # ---- end of share links ------------------------------------------------
   # ---- files API (consumed by File Manager; owned by part C) -------------
-  # Written by part D from docs/plans/file-sharing.md section 3 so the File
-  # Manager has a typed client; part C owns these paths and may reshape them.
+  # docs/plans/file-sharing.md section 3.
+  # Files are read and written as the signed-in person (domain accounts as
+  # themselves, HardyOS administrators as hardyos-files). HardyOS accounts
+  # that aren't administrators get 403 no_access. Paths are inside the
+  # share, "/" separated, no leading slash; "" is its top. The share id
+  # "~home" is the person's home folder. Errors: 404 not_found, 403
+  # no_access, 409 exists / not_allowed (links, "..", reserved names such
+  # as .recycle, .zfs, .hardyos*), 507 full.
   /files/shares:
     get:
       operationId: listFileShares
-      summary: Shared folders the person can open, plus their Home ("~home")
+      summary: The shared folders (and Home) the person can open
       tags: [files]
       responses:
         "200":
-          description: Folders
+          description: Home first, then by name
           content:
             application/json:
               schema:
@@ -1686,52 +1692,85 @@ paths:
                 properties:
                   shares: { type: array, items: { $ref: "#/components/schemas/FileShare" } }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /files/list:
     get:
       operationId: listFiles
-      summary: What's in a folder (hidden names left out)
+      summary: A folder's files and folders (links, devices and hidden names aren't listed)
       tags: [files]
       parameters:
         - { name: share, in: query, required: true, schema: { type: string } }
-        - { name: path, in: query, schema: { type: string, default: "" } }
+        - { name: path, in: query, schema: { type: string } }
+        - { name: snapshot, in: query, description: "List the folder as it was in this automatic snapshot (from /files/versions)", schema: { type: string } }
       responses:
         "200":
-          description: Entries
+          description: The folder and its entries, folders first
           content:
             application/json:
-              schema:
-                type: object
-                required: [entries]
-                properties:
-                  entries: { type: array, items: { $ref: "#/components/schemas/FileEntry" } }
+              schema: { $ref: "#/components/schemas/FileListing" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /files/stat:
+    get:
+      operationId: statFile
+      summary: One file or folder
+      tags: [files]
+      parameters:
+        - { name: share, in: query, required: true, schema: { type: string } }
+        - { name: path, in: query, schema: { type: string } }
+        - { name: snapshot, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: The entry
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileEntry" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /files/download:
     get:
       operationId: downloadFiles
-      summary: Download a file (Range supported), or folders / several items as a zip
+      summary: Download a file (with Range support), or folders and several items as a zip
       description: |
-        One file streams as is, with Range. A folder, or more than one path,
-        streams as a zip. snapshot= reads an older version. inline=1 asks for
-        Content-Disposition inline (previews); the response must carry
-        Content-Security-Policy sandbox so nothing in it can run.
+        One file is sent as is: Range / If-Range requests give 206 partial
+        content (video seeking, resumed downloads). With `inline=1` images,
+        video, audio, PDFs and text are shown in the browser (text, HTML and
+        SVG as plain text); everything else is always an attachment.
+        A folder, or several `path`s from the same share, is streamed as a
+        zip (stored, not compressed; a folder's contents are at the top of
+        the zip, several items each under its own name). Files that can't
+        be read are listed in "Files not included.txt" inside the zip.
       tags: [files]
       parameters:
         - { name: share, in: query, required: true, schema: { type: string } }
-        - { name: path, in: query, required: true, style: form, explode: true, schema: { type: array, items: { type: string } } }
-        - { name: snapshot, in: query, schema: { type: string } }
-        - { name: inline, in: query, schema: { type: string, enum: ["1"] } }
+        - { name: path, in: query, description: Repeat for several items, schema: { type: array, items: { type: string } }, style: form, explode: true }
+        - { name: snapshot, in: query, description: Download an older version, schema: { type: string } }
+        - { name: inline, in: query, description: "1: show in the browser when the type is safe to", schema: { type: string, enum: ["1"] } }
       responses:
-        "200": { description: The file or a zip, content: { application/octet-stream: { schema: { type: string, format: binary } } } }
-        "206": { description: Part of the file, content: { application/octet-stream: { schema: { type: string, format: binary } } } }
+        "200":
+          description: The file, or a zip
+          content:
+            application/octet-stream: { schema: { type: string, format: binary } }
+            application/zip: { schema: { type: string, format: binary } }
+        "206": { description: Part of the file (Range) }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /files/upload:
     post:
       operationId: startFileUpload
-      summary: Start a (resumable) upload of one file
+      summary: Start a resumable upload of one file
+      description: |
+        Makes an empty hidden temporary file next to `path`; send the bytes
+        with `PUT /files/upload/{id}`. The file only shows under its name
+        once complete, so a half-uploaded file never does. Uploads nobody
+        continues for a day are removed (as are all of them when hardyd
+        restarts: start again).
       tags: [files]
       requestBody:
         required: true
@@ -1753,7 +1792,12 @@ paths:
       - { name: id, in: path, required: true, schema: { type: string } }
     put:
       operationId: sendFileChunk
-      summary: Send the next chunk (raw bytes) at offset; the last one puts the file in place
+      summary: Send the next chunk (raw bytes) at offset; the chunk that completes the file puts it in place
+      description: |
+        `offset` must be the upload's `received`; otherwise 409 with
+        `received` (carry on from there). Bytes past `size` are refused
+        (400). The completing chunk (for an empty file: one empty PUT)
+        renames the file into place and answers with its `entry`.
       tags: [files]
       parameters:
         - { name: offset, in: query, required: true, schema: { type: integer, format: int64 } }
@@ -1768,9 +1812,35 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/FileUpload" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Out of step (wrong_offset), another chunk is being written (busy), or the name was taken meanwhile (exists)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, message]
+                properties:
+                  code: { type: string }
+                  message: { type: string }
+                  received: { type: integer, format: int64 }
+                  upload: { $ref: "#/components/schemas/FileUpload" }
+        "507": { description: The shared folder is full }
+    get:
+      operationId: getFileUpload
+      summary: How far an upload has got
+      tags: [files]
+      responses:
+        "200":
+          description: The upload
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileUpload" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
-        "409": { $ref: "#/components/responses/Conflict" }
     delete:
       operationId: cancelFileUpload
       summary: Cancel an upload and throw away what arrived
@@ -1779,10 +1849,11 @@ paths:
         "204": { description: Cancelled }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /files/mkdir:
     post:
       operationId: makeFolder
-      summary: New folder
+      summary: Make a folder
       tags: [files]
       requestBody:
         required: true
@@ -1791,12 +1862,13 @@ paths:
             schema: { $ref: "#/components/schemas/FilePathRequest" }
       responses:
         "201":
-          description: The folder
+          description: The new folder
           content:
             application/json:
               schema: { $ref: "#/components/schemas/FileEntry" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
   /files/rename:
     post:
@@ -1813,13 +1885,14 @@ paths:
               properties:
                 share: { type: string }
                 path: { type: string }
-                name: { type: string, description: The new name (no slashes) }
+                name: { type: string, description: The new name (no slashes); it must be free }
       responses:
         "200":
           description: The renamed entry
           content:
             application/json:
               schema: { $ref: "#/components/schemas/FileEntry" }
+        "400": { $ref: "#/components/responses/Invalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -1828,7 +1901,12 @@ paths:
     post:
       operationId: moveFiles
       summary: Move items into a folder (within or across shares)
-      description: Small moves answer 200; bigger ones run as a job (202).
+      description: |
+        Within a share moves are renames, answered at once (200). Into
+        another share they're a copy and a delete: up to 5 files (none
+        over 256 MB) at once, anything more as a job (202) whose result is
+        the same `FileBulkResult`. A single item that fails answers with
+        its error.
       tags: [files]
       requestBody:
         required: true
@@ -1836,16 +1914,26 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/FileTransferRequest" }
       responses:
-        "200": { description: Done, content: { application/json: { schema: { type: object } } } }
+        "200":
+          description: Done
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileBulkResult" }
         "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
   /files/copy:
     post:
       operationId: copyFiles
       summary: Copy items into a folder (within or across shares)
-      description: Small copies answer 200; bigger ones run as a job (202).
+      description: |
+        Up to 5 files (none over 256 MB) are copied at once (200);
+        folders and anything more run as a job (202) with progress, its
+        result the same `FileBulkResult`. Copies keep modification times.
+        A single item that fails answers with its error.
       tags: [files]
       requestBody:
         required: true
@@ -1853,15 +1941,22 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/FileTransferRequest" }
       responses:
-        "200": { description: Done, content: { application/json: { schema: { type: object } } } }
+        "200":
+          description: Done
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileBulkResult" }
         "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
   /files/delete:
     post:
       operationId: deleteFiles
-      summary: Delete items (to the recycle bin when the folder has one)
+      summary: Delete items (to the folder's recycle bin when it has one)
+      description: "Up to 5 items at once (200), more as a job (202) whose result is the same `FileBulkResult`. `recycled`: everything deleted went to the recycle bin. Audited."
       tags: [files]
       requestBody:
         required: true
@@ -1872,31 +1967,32 @@ paths:
               required: [share, paths]
               properties:
                 share: { type: string }
-                paths: { type: array, items: { type: string } }
+                paths: { type: array, items: { type: string }, maxItems: 1000 }
+                permanent: { type: boolean, description: Skip the recycle bin }
       responses:
         "200":
-          description: Deleted
+          description: Done
           content:
             application/json:
-              schema:
-                type: object
-                required: [recycled]
-                properties:
-                  recycled: { type: boolean, description: They went to the recycle bin }
+              schema: { $ref: "#/components/schemas/FileBulkResult" }
         "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /files/snapshots:
     get:
       operationId: listFileVersions
-      summary: Older versions of a file or folder (from snapshots)
+      summary: Older versions of a file or folder, from the automatic snapshots, newest first
+      description: A file's versions that are the same as the current file or the next newer version are left out.
       tags: [files]
       parameters:
         - { name: share, in: query, required: true, schema: { type: string } }
         - { name: path, in: query, required: true, schema: { type: string } }
       responses:
         "200":
-          description: Versions, newest first
+          description: The versions
           content:
             application/json:
               schema:
@@ -1911,6 +2007,11 @@ paths:
     post:
       operationId: restoreFileVersion
       summary: Copy an older version back next to the current one
+      description: |
+        Copied back to its path if nothing is there now, otherwise to
+        "name (restored 2026-10-24).ext". Answers when done (200), or with
+        `background: true` runs as a job (202 JobAccepted, its result
+        this same object) with progress, for big folders. Audited.
       tags: [files]
       requestBody:
         required: true
@@ -1923,19 +2024,17 @@ paths:
                 share: { type: string }
                 path: { type: string }
                 snapshot: { type: string }
+                background: { type: boolean }
       responses:
         "200":
-          description: Where it was written ("Report (restored 2026-10-20).docx" if the name was taken)
+          description: Where it was written
           content:
             application/json:
-              schema:
-                type: object
-                required: [path]
-                properties:
-                  path: { type: string }
+              schema: { $ref: "#/components/schemas/FilePathResult" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
   # ---- end of files API (part C) -----------------------------------------
   # ---- Shared folder snapshots and NFS (file sharing part B) --------------
   /shares/{id}/snapshots:
@@ -4648,10 +4747,10 @@ components:
       type: object
       required: [id, name, writable, recycle]
       properties:
-        id: { type: string, description: 'Shared folder id, or "~home"' }
+        id: { type: string, description: 'The shared folder''s id, or "~home"' }
         name: { type: string }
-        writable: { type: boolean }
-        recycle: { type: boolean, description: Deleted files go to its recycle bin }
+        writable: { type: boolean, description: The person may change things at its top }
+        recycle: { type: boolean, description: Deleted items go to its recycle bin }
     FileEntry:
       type: object
       required: [name, path, dir, size, modified, writable]
@@ -4659,31 +4758,77 @@ components:
         name: { type: string }
         path: { type: string, description: Inside the share, no leading slash }
         dir: { type: boolean }
-        size: { type: integer, format: int64 }
+        size: { type: integer, format: int64, description: 0 for folders }
         modified: { type: string, format: date-time }
-        writable: { type: boolean }
+        writable: { type: boolean, description: The person may change or delete it }
+    FileListing:
+      type: object
+      required: [folder, entries, truncated]
+      properties:
+        folder: { $ref: "#/components/schemas/FileEntry" }
+        entries: { type: array, items: { $ref: "#/components/schemas/FileEntry" } }
+        truncated: { type: boolean, description: The folder holds more than 50000 entries; not all are listed }
     FileVersion:
       type: object
-      required: [snapshot, taken, size, modified]
+      required: [snapshot, taken, size, modified, dir]
       properties:
-        snapshot: { type: string }
+        snapshot: { type: string, examples: ["hardyos-auto-daily_2026-10-24-0000"] }
         taken: { type: string, format: date-time }
         size: { type: integer, format: int64 }
         modified: { type: string, format: date-time }
+        dir: { type: boolean }
+    FileUpload:
+      type: object
+      required: [id, share, path, size, received]
+      properties:
+        id: { type: string }
+        share: { type: string }
+        path: { type: string }
+        size: { type: integer, format: int64 }
+        received: { type: integer, format: int64, description: Bytes stored so far (the next chunk's offset) }
+        entry: { $ref: "#/components/schemas/FileEntry" }
     FilePathRequest:
       type: object
       required: [share, path]
       properties:
         share: { type: string }
         path: { type: string }
+    FilePathResult:
+      type: object
+      required: [share, path]
+      properties:
+        share: { type: string }
+        path: { type: string }
+    FileItemResult:
+      type: object
+      required: [path, ok]
+      properties:
+        path: { type: string }
+        ok: { type: boolean }
+        error: { type: string }
+        code: { type: string, enum: [not_found, no_access, exists, not_allowed, full, failed] }
+        to: { type: string, description: "Copies and moves: where it went" }
+        skipped: { type: boolean, description: "conflict skip: the name was taken" }
+        recycled: { type: boolean, description: "Deletes: it went to the recycle bin" }
+    FileBulkResult:
+      type: object
+      required: [done, results, recycled]
+      properties:
+        done: { type: boolean }
+        results: { type: array, items: { $ref: "#/components/schemas/FileItemResult" } }
+        recycled: { type: boolean, description: "Deletes: everything deleted went to the recycle bin" }
     FileTransferRequest:
       type: object
       required: [share, paths, toShare, toDir]
       properties:
         share: { type: string }
-        paths: { type: array, items: { type: string } }
-        toShare: { type: string }
+        paths: { type: array, items: { type: string }, maxItems: 1000 }
+        toShare: { type: string, description: Empty for the same share }
         toDir: { type: string, description: The folder they go into; empty for the share's top }
+        conflict:
+          type: string
+          enum: [rename, skip, replace, fail]
+          description: "When a name is taken: rename (default: copies \"photo (copy).jpg\", moves \"photo (2).jpg\"), skip, replace (files replaced, folders merged) or fail"
     FileUploadRequest:
       type: object
       required: [share, path, size]
@@ -4691,13 +4836,6 @@ components:
         share: { type: string }
         path: { type: string, description: Where the file goes, name included }
         size: { type: integer, format: int64 }
-        overwrite: { type: boolean }
-    FileUpload:
-      type: object
-      required: [id, size, received]
-      properties:
-        id: { type: string }
-        size: { type: integer, format: int64 }
-        received: { type: integer, format: int64 }
-        entry: { $ref: "#/components/schemas/FileEntry" }
+        overwrite: { type: boolean, description: Replace a file that's already there (never a folder) }
+        modified: { type: integer, format: int64, description: The file's modification time in ms since 1970 (File.lastModified) }
     # ---- end of files API schemas (part C) ----
