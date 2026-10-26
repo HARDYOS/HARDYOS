@@ -80,7 +80,9 @@ func (e *testEnv) client(t *testing.T) *client {
 func (c *client) do(method, path string, body any, out any) int {
 	c.t.Helper()
 	var r io.Reader
-	if body != nil {
+	if raw, ok := body.([]byte); ok {
+		r = bytes.NewReader(raw) // sent as is (uploads)
+	} else if body != nil {
 		b, _ := json.Marshal(body)
 		r = bytes.NewReader(b)
 	}

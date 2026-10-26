@@ -19,6 +19,8 @@ recommends:
   - smartmontools
   - samba-ad-dc
   - iputils-arping
+  - docker.io
+  - docker-compose
 contents:
   - src: ../dist/bin/hardyd
     dst: /usr/bin/hardyd
@@ -31,6 +33,10 @@ contents:
     file_info: { mode: 0755 }
   - src: ../web/apps/shell/dist/
     dst: /usr/share/hardyos/web/
+    type: tree
+  # One-click apps that ship with HardyOS (built by `make build-apps`).
+  - src: ../dist/apps/
+    dst: /usr/share/hardyos/apps/
     type: tree
   - src: ./systemd/hardyd.service
     dst: /lib/systemd/system/hardyd.service

@@ -57,9 +57,8 @@ export const APPS: AppDef[] = [
     icon: "bag",
     color: "#7C5CF5",
     glyph: (s) => <BagIcon size={s} />,
-    component: ComingSoon,
-    comingIn: "the platform phase (Docker apps and the app store)",
-    defaultSize: { width: 560, height: 360 },
+    component: lazy(() => import("./apps/store/AppStore")),
+    defaultSize: { width: 1040, height: 700 },
   },
   {
     id: "os.hardy.terminal",

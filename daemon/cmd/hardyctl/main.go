@@ -47,6 +47,11 @@ Boot (run as root):
   boot-sync [--reinstall]    copy kernels to the boot disks and rewrite the boot menu
                              (runs automatically after kernel and initramfs updates)
 
+Apps:
+  app-pack [-o file] <folder>  build a .hardyapp package from a folder (hardyapp.json,
+                               compose.yaml, icon); see docs/apps.md
+  app-check <file|folder>      check a package and show what installing it asks for
+
 Flags:
 `
 
@@ -77,6 +82,10 @@ func main() {
 		err = recovery(*dbPath, args, *pwStdin, false)
 	case "create-admin":
 		err = recovery(*dbPath, args, *pwStdin, true)
+	case "app-pack":
+		err = appPack(args)
+	case "app-check":
+		err = appCheck(args)
 	case "boot-list":
 		err = bootList()
 	case "boot-sync":
