@@ -40,5 +40,7 @@ large changes.
 
 - Work on a branch and open a pull request; CI must pass before merge.
 - Style: `gofmt`, `go vet`; TypeScript strict mode.
-- UI follows the mockups: dark glass panels, blue accent `#3B7BFF`,
-  Plus Jakarta Sans for UI text, JetBrains Mono for numbers.
+- UI follows the mockups: dark glass panels, the logo's cyan-to-violet
+  (`#00F0FF` to `#8B5CFF`; solid accent `#22D3EE`, primary buttons use the
+  gradient with near-black text), Plus Jakarta Sans for UI text, JetBrains
+  Mono for numbers. Brand assets are in `brand/`.

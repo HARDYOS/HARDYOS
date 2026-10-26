@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { usePools } from "../../hooks/queries";
+import { useDataPools } from "../../hooks/queries";
 import { CalendarIcon, CameraIcon, DiskIcon, GridIcon, LayersIcon, PlusIcon } from "../../icons";
 import type { AppProps } from "../../shell";
 import { AppLayout, Dot, type NavItem, SideNav } from "../../ui";
@@ -16,7 +16,7 @@ export function healthTone(h: string) {
 }
 
 export default function StorageManager({ args }: AppProps) {
-  const pools = usePools();
+  const pools = useDataPools();
   const [section, setSection] = useState(args?.pool ? `pool:${args.pool}` : "overview");
 
   const items: NavItem[] = [

@@ -19,10 +19,18 @@
   --hos-text-muted: #a3acbd;
   --hos-text-faint: #8f98aa;
 
-  --hos-accent: #3b7bff;
-  --hos-accent-hover: #5b91ff;
-  --hos-accent-soft: rgba(76, 141, 255, 0.18);
-  --hos-accent-text: #8fb8ff;
+  /* Brand: the logo's cyan-to-violet. Cyan is the solid accent (focus rings,
+     toggles, charts, progress); the gradient marks primary actions. Text on
+     accent fills is near-black: white fails contrast on cyan. */
+  --hos-brand-cyan: #00f0ff;
+  --hos-brand-violet: #8b5cff;
+  --hos-accent: #22d3ee;
+  --hos-accent-hover: #67e8f9;
+  --hos-accent-soft: rgba(34, 211, 238, 0.13);
+  --hos-accent-text: #7ff4ff;
+  --hos-on-accent: #05070f;
+  --hos-accent-gradient: linear-gradient(120deg, #00e5ff 0%, #9873ff 100%);
+  --hos-accent-gradient-hover: linear-gradient(120deg, #5cf0ff 0%, #ab8cff 100%);
   --hos-good: #34d399;
   --hos-good-soft: rgba(52, 211, 153, 0.14);
   --hos-good-text: #6ee7b7;

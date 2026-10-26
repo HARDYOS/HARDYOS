@@ -1,0 +1,9 @@
+#!/bin/sh
+# HardyOS: copy new kernels and initramfs images to every boot disk and
+# rewrite the boot menu. Installed as a kernel postinst/postrm hook and an
+# initramfs post-update hook. A failure warns but never breaks package updates;
+# the previous kernels stay bootable.
+if [ -x /usr/bin/hardyctl ]; then
+  /usr/bin/hardyctl boot-sync >&2 || echo "WARNING: hardyctl boot-sync failed; the boot disks still have the previous kernel" >&2
+fi
+exit 0

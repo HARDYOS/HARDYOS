@@ -20,6 +20,8 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/api"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/events"
+	"github.com/hardyos/hardyos/daemon/internal/install"
+	"github.com/hardyos/hardyos/daemon/internal/installer"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/metrics"
 	"github.com/hardyos/hardyos/daemon/internal/notify"
@@ -75,6 +77,15 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 
 	broker := events.NewBroker()
 	pc := priv.NewClient(privSocket)
+	live := install.IsLive("/")
+	if !live {
+		// First boot after an install: create the administrator chosen in the installer.
+		if u, err := installer.ApplySeed(ctx, &auth.Users{DB: db}, install.SeedFile); err != nil {
+			log.Error("could not create the administrator from the installer", "err", err)
+		} else if u != nil {
+			log.Info("created the administrator chosen in the installer", "user", u.Username)
+		}
+	}
 
 	jobCtx, cancelJobs := context.WithCancel(context.Background())
 	manager := &jobs.Manager{DB: db, Events: broker, Logger: log, Workers: 4}
@@ -83,6 +94,12 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 	stor := &storage.Service{Priv: pc, Jobs: manager, DB: db, Notify: notifications, Log: log}
 	api.RegisterJobKinds(manager, pc)
 	stor.RegisterJobs(manager)
+	var inst *installer.Service
+	if live {
+		inst = &installer.Service{Priv: pc, Jobs: manager, Limiter: auth.NewLoginLimiter()}
+		inst.RegisterJobs(manager)
+		log.Info("live installer mode: serving the web installer")
+	}
 	if err := manager.Start(jobCtx); err != nil {
 		cancelJobs()
 		return fmt.Errorf("start jobs: %w", err)
@@ -92,12 +109,14 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 	handler := api.New(api.Config{
 		DB: db, Jobs: manager, Events: broker, Priv: pc, Logger: log,
 		Storage: stor, Notify: notifications, Metrics: collector,
-		WebRoot: webRoot, Insecure: httpsAddr == "",
+		WebRoot: webRoot, Insecure: httpsAddr == "", Installer: inst,
 	})
 
 	go housekeeping(ctx, log, &auth.Sessions{DB: db})
-	go stor.Run(ctx)      // snapshot, scrub and SMART schedules
 	go collector.Run(ctx) // CPU, memory and network history
+	if !live {
+		go stor.Run(ctx) // snapshot, scrub and SMART schedules
+	}
 
 	var servers []*http.Server
 	errCh := make(chan error, 2)

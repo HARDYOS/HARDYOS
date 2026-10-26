@@ -25,3 +25,9 @@ Settled choices, newest last. Change one by adding a row that supersedes it.
 | 19 | 2026-10-24 | Parse `zpool`/`zfs` text output (-H/-p) rather than JSON output | Works on every OpenZFS 2.x; verified against real ZFS in CI |
 | 20 | 2026-10-24 | Pool encryption via per-pool key files (auto-unlock at boot) | Protects removed disks without a passphrase prompt at every boot; passphrase mode can come later |
 | 21 | 2026-10-24 | Special-vdev parity lower than the data vdevs is a warning, not an error | 2-way special mirrors are common and reasonable; the user decides |
+| 22 | 2026-10-24 | Installer copies the live image (unsquashfs) instead of downloading packages | Installs work offline and install exactly the tested image |
+| 23 | 2026-10-24 | Kernels on each disk's ESP, GRUB never reads ZFS; one grub.cfg entry per boot environment | Full ZFS features on rpool, no bpool, same layout for UEFI and BIOS, every mirror disk boots alone |
+| 24 | 2026-10-24 | `/var/lib/hardyos` is a separate dataset shared by all boot environments | Accounts and settings survive switching boot environments; database migrations stay forward-only |
+| 25 | 2026-10-24 | The installer creates the first admin and passes only the password hash to root | No setup race on first boot; the plain password never leaves hardyd |
+| 26 | 2026-10-24 | Install steps are registered only on the live ISO | An installed system has no API that can repartition boot disks |
+| 27 | 2026-10-25 | Accent colors follow the HardyOS logo: cyan solid accent, cyan-to-violet gradient for primary actions with near-black text | Matches the brand; white text fails contrast on cyan, near-black passes at least 6:1 across the gradient |

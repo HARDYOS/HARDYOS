@@ -1,7 +1,9 @@
 [Unit]
 Description=HardyOS control plane (API and web desktop)
 Documentation=https://github.com/HARDYOS/HARDYOS
-After=network-online.target hardyd-priv.service
+# On installed systems /var/lib/hardyos is a ZFS dataset (rpool/hardyos):
+# start only after ZFS has mounted it, or the database would land underneath.
+After=network-online.target hardyd-priv.service zfs-mount.service
 Wants=network-online.target hardyd-priv.service
 
 [Service]

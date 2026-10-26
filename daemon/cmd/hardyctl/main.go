@@ -21,8 +21,10 @@ import (
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
+	"github.com/hardyos/hardyos/daemon/internal/boot"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/store"
+	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 	"github.com/hardyos/hardyos/daemon/internal/version"
 )
 
@@ -39,6 +41,11 @@ Commands:
 Recovery (run as root on the server; works even if hardyd is down):
   reset-password <username>  set a new password, re-enable the account, sign out its sessions
   create-admin <username>    add a new administrator (if every admin is locked out)
+
+Boot (run as root):
+  boot-list                  list boot environments
+  boot-sync [--reinstall]    copy kernels to the boot disks and rewrite the boot menu
+                             (runs automatically after kernel and initramfs updates)
 
 Flags:
 `
@@ -70,6 +77,10 @@ func main() {
 		err = recovery(*dbPath, args, *pwStdin, false)
 	case "create-admin":
 		err = recovery(*dbPath, args, *pwStdin, true)
+	case "boot-list":
+		err = bootList()
+	case "boot-sync":
+		err = bootSync(args)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		flag.Usage()
@@ -204,4 +215,58 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func bootList() error {
+	cfg, err := boot.LoadConfig(boot.ConfigPath)
+	if err != nil {
+		return err
+	}
+	bes, err := boot.List(context.Background(), boot.Env{Runner: sysexec.Exec{}, Root: "/"}, cfg.Pool)
+	if err != nil {
+		return err
+	}
+	for _, be := range bes {
+		mark := " "
+		if be.Default {
+			mark = "*"
+		}
+		fmt.Printf("%s %-40s %-20s %s\n", mark, be.Name, be.Version, time.Unix(be.Created, 0).Format("2006-01-02 15:04"))
+	}
+	return nil
+}
+
+func bootSync(args []string) error {
+	if os.Geteuid() != 0 {
+		return errors.New("boot-sync must run as root")
+	}
+	cfg, err := boot.LoadConfig(boot.ConfigPath)
+	if errors.Is(err, boot.ErrNoConfig) {
+		// The live ISO, an image build, or a package on plain Debian.
+		fmt.Println("hardyctl boot-sync: not a HardyOS install; nothing to do")
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	opts := boot.SyncOptions{}
+	for _, a := range args {
+		switch a {
+		case "--reinstall":
+			opts.InstallGRUB = true
+		default:
+			return fmt.Errorf("unknown option %q", a)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	entries, err := boot.Sync(ctx, boot.Env{Runner: sysexec.Exec{}, Root: "/"}, cfg, opts)
+	for i, e := range entries {
+		def := ""
+		if i == 0 {
+			def = " (default)"
+		}
+		fmt.Printf("boot entry: %s%s\n", e.Title, def)
+	}
+	return err
 }

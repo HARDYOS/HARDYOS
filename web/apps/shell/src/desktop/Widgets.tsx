@@ -1,6 +1,6 @@
 import type { User } from "@hardy/api-client";
 import { bitsPerSecond, bytes, duration } from "../format";
-import { useMetrics, usePools, useSystemInfo } from "../hooks/queries";
+import { useMetrics, useDataPools, useSystemInfo } from "../hooks/queries";
 import { Badge, Progress } from "../ui";
 import { BarSpark } from "../ui/Chart";
 import { openApp } from "../wm/open";
@@ -14,7 +14,7 @@ export function Widgets({ user }: { user: User }) {
   const isAdmin = user.role === "admin";
   const info = useSystemInfo();
   const metrics = useMetrics(5_000);
-  const pools = usePools(isAdmin);
+  const pools = useDataPools(isAdmin);
   const cur = metrics.data?.current;
   const history = metrics.data?.history ?? [];
 

@@ -1,7 +1,7 @@
 [Unit]
 Description=HardyOS privileged helper
 Documentation=https://github.com/HARDYOS/HARDYOS
-After=local-fs.target
+After=local-fs.target zfs-mount.service
 Before=hardyd.service
 
 [Service]

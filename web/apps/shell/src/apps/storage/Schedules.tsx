@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, errorMessage, unwrap } from "../../api";
 import { relativeTime } from "../../format";
-import { useDatasets, usePools } from "../../hooks/queries";
+import { useDatasets, useDataPools } from "../../hooks/queries";
 import { EditIcon, PlusIcon, TrashIcon } from "../../icons";
 import { Alert, Badge, Button, Card, EmptyState, ErrorBox, Field, IconButton, Loading, PageHeader, Select, TextInput, Toggle } from "../../ui";
 import { ConfirmDialog, Dialog } from "../../ui/Dialog";
@@ -15,7 +15,7 @@ export function Schedules() {
   const qc = useQueryClient();
   const snapPols = useQuery({ queryKey: ["snapshot-policies"], queryFn: () => unwrap(api.GET("/storage/snapshot-policies")) });
   const scrubPols = useQuery({ queryKey: ["scrub-policies"], queryFn: () => unwrap(api.GET("/storage/scrub-policies")) });
-  const pools = usePools();
+  const pools = useDataPools();
   const [editing, setEditing] = useState<SnapshotPolicy | "new" | null>(null);
   const [deleting, setDeleting] = useState<SnapshotPolicy | null>(null);
   const [editingScrub, setEditingScrub] = useState<ScrubPolicy | null>(null);

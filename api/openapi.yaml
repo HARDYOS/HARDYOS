@@ -24,6 +24,7 @@ tags:
   - name: hardware
   - name: storage
   - name: notifications
+  - name: installer
 paths:
   /health:
     get:
@@ -879,12 +880,125 @@ paths:
       tags: [notifications]
       responses:
         "204": { description: Marked read }
+  /installer:
+    get:
+      operationId: getInstallerStatus
+      summary: Whether this server is the live installer, and the install's progress
+      description: |
+        On an installed system this returns `active: false`. On the live ISO
+        the whole API is replaced by the /installer endpoints, which are
+        unlocked with the one-time code shown on the server's console.
+      tags: [installer]
+      security: []
+      responses:
+        "200":
+          description: Installer state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InstallerStatus" }
+  /installer/unlock:
+    post:
+      operationId: unlockInstaller
+      summary: Enter the code shown on the server's console
+      tags: [installer]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string, examples: ["K7QM-4TXP"] }
+      responses:
+        "200":
+          description: Unlocked; sets the `hardyos_installer` cookie
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InstallerStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429":
+          description: Too many wrong codes
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /installer/hardware:
+    get:
+      operationId: getInstallerHardware
+      summary: Disks and network interfaces to choose from
+      tags: [installer]
+      security: [{ installer: [] }]
+      responses:
+        "200":
+          description: Hardware
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InstallerHardware" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /installer/check:
+    post:
+      operationId: checkInstallPlan
+      summary: Validate an install plan against the hardware without changing anything
+      tags: [installer]
+      security: [{ installer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plan]
+              properties:
+                plan: { $ref: "#/components/schemas/InstallPlan" }
+      responses:
+        "200":
+          description: The plan is valid; per-disk warnings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InstallCheck" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /installer/install:
+    post:
+      operationId: startInstall
+      summary: Erase the boot disks and install HardyOS
+      tags: [installer]
+      security: [{ installer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InstallRequest" }
+      responses:
+        "202":
+          description: Install started; follow it on GET /installer
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /installer/reboot:
+    post:
+      operationId: rebootInstaller
+      summary: Restart the server (into the new system once installed)
+      tags: [installer]
+      security: [{ installer: [] }]
+      responses:
+        "202": { description: Restarting }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 components:
   securitySchemes:
     session:
       type: apiKey
       in: cookie
       name: hardyos_session
+    installer:
+      type: apiKey
+      in: cookie
+      name: hardyos_installer
   responses:
     JobAccepted:
       description: Queued as a background job; follow it on /jobs/{id} or the event stream
@@ -1373,6 +1487,81 @@ components:
         current: { $ref: "#/components/schemas/MetricSample" }
         history: { type: array, items: { $ref: "#/components/schemas/MetricSample" } }
         cpus: { type: integer }
+    InstallerStatus:
+      type: object
+      required: [active, unlocked]
+      properties:
+        active: { type: boolean, description: This server is running the live installer }
+        unlocked: { type: boolean, description: This browser entered the console code }
+        version: { type: string, description: The HardyOS version that will be installed }
+        job: { $ref: "#/components/schemas/Job" }
+    InstallerNIC:
+      type: object
+      required: [name, mac, speedMbps, up, driver, addresses]
+      properties:
+        name: { type: string }
+        mac: { type: string }
+        speedMbps: { type: integer }
+        up: { type: boolean }
+        driver: { type: string }
+        addresses: { type: array, items: { type: string }, description: Current addresses in CIDR form }
+    InstallerHardware:
+      type: object
+      required: [disks, nics, memBytes, cpu, virtual, hostname]
+      properties:
+        disks: { type: array, items: { $ref: "#/components/schemas/Disk" } }
+        nics: { type: array, items: { $ref: "#/components/schemas/InstallerNIC" } }
+        memBytes: { type: integer }
+        cpu: { type: string }
+        virtual: { type: boolean }
+        hostname: { type: string }
+    InstallNetwork:
+      type: object
+      required: [mode]
+      properties:
+        mode: { type: string, enum: [dhcp, static] }
+        interface: { type: string }
+        address: { type: string, description: CIDR, like 192.168.1.20/24 }
+        gateway: { type: string }
+        dns: { type: array, items: { type: string } }
+    InstallPlan:
+      type: object
+      required: [disks, hostname, timezone, network]
+      properties:
+        disks:
+          type: array
+          items: { type: string }
+          description: Boot disks (by-id paths); two or more are mirrored
+        hostname: { type: string }
+        timezone: { type: string, examples: ["America/Chicago"] }
+        network: { $ref: "#/components/schemas/InstallNetwork" }
+    InstallCheck:
+      type: object
+      required: [version, bootEnvironment, disks]
+      properties:
+        version: { type: string }
+        bootEnvironment: { type: string }
+        disks:
+          type: array
+          items:
+            type: object
+            required: [disk, warnings]
+            properties:
+              disk: { $ref: "#/components/schemas/Disk" }
+              warnings: { type: array, items: { type: string } }
+    InstallRequest:
+      type: object
+      required: [plan, admin, confirmWipe]
+      properties:
+        plan: { $ref: "#/components/schemas/InstallPlan" }
+        admin:
+          type: object
+          required: [username, password]
+          properties:
+            username: { type: string }
+            displayName: { type: string }
+            password: { type: string, minLength: 10 }
+        confirmWipe: { type: boolean, description: Must be true; the boot disks are erased }
     Error:
       type: object
       description: Body of every non-2xx response

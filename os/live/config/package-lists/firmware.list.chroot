@@ -1,4 +1,6 @@
-# Firmware for common NICs, storage controllers and GPUs.
+# Firmware for common NICs, storage controllers and GPUs. Listed explicitly
+# (live-build's --firmware-chroot pulls every firmware package, including
+# Wi-Fi "installer" packages that download blobs from the internet at build time).
 firmware-linux-free
 firmware-misc-nonfree
 firmware-realtek
@@ -8,3 +10,6 @@ firmware-intel-misc
 firmware-amd-graphics
 intel-microcode
 amd64-microcode
+firmware-qlogic
+firmware-netxen
+firmware-nvidia-graphics

@@ -32,6 +32,13 @@ export type Notification = S["Notification"];
 export type SystemInfo = S["SystemInfo"];
 export type Metrics = S["Metrics"];
 export type MetricSample = S["MetricSample"];
+export type InstallerStatus = S["InstallerStatus"];
+export type InstallerHardware = S["InstallerHardware"];
+export type InstallerNIC = S["InstallerNIC"];
+export type InstallPlan = S["InstallPlan"];
+export type InstallNetwork = S["InstallNetwork"];
+export type InstallCheck = S["InstallCheck"];
+export type InstallRequest = S["InstallRequest"];
 
 /** Header every state-changing request must carry (hardyd's CSRF check). */
 export const CSRF_HEADER = "X-HardyOS-Request";

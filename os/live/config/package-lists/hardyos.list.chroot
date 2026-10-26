@@ -17,6 +17,8 @@ dkms
 zfs-dkms
 zfsutils-linux
 zfs-zed
+# ZFS root support in the initramfs of installed systems
+zfs-initramfs
 smartmontools
 nvme-cli
 hdparm
@@ -27,9 +29,11 @@ dosfstools
 
 # Boot and install
 efibootmgr
+grub2-common
 grub-efi-amd64-bin
 grub-pc-bin
 mmdebstrap
+squashfs-tools
 qrencode
 
 # Hardware and network

@@ -1,8 +1,22 @@
 import { useQuery } from "@tanstack/react-query";
 import { api, unwrap } from "../api";
 
+/** Every imported pool, including the boot pool. */
 export const usePools = (enabled = true) =>
   useQuery({ queryKey: ["pools"], queryFn: () => unwrap(api.GET("/storage/pools")), enabled, refetchInterval: 30_000 });
+
+/** Pools the installer creates for the system itself; they hold no user data. */
+export const isBootPool = (name: string) => name === "rpool" || name === "bpool" || name === "hardyos-boot";
+
+/** Data pools only: what people think of as "storage". */
+export const useDataPools = (enabled = true) =>
+  useQuery({
+    queryKey: ["pools"],
+    queryFn: () => unwrap(api.GET("/storage/pools")),
+    enabled,
+    refetchInterval: 30_000,
+    select: (pools) => pools.filter((p) => !isBootPool(p.name)),
+  });
 
 export const usePoolStatus = (pool: string, running = false) =>
   useQuery({

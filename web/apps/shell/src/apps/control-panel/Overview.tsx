@@ -2,7 +2,7 @@ import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, errorMessage, unwrap } from "../../api";
 import { duration } from "../../format";
-import { useHardware, usePools, useSystemInfo } from "../../hooks/queries";
+import { isBootPool, useHardware, usePools, useSystemInfo } from "../../hooks/queries";
 import { CpuIcon, ShieldIcon, StorageIcon, UsersIcon } from "../../icons";
 import { useShell } from "../../shell";
 import { Alert, Button, Card, PageHeader, Stat } from "../../ui";
@@ -19,8 +19,9 @@ export function Overview({ onNavigate }: { onNavigate: (section: string) => void
     onSuccess: (job) => setJobId(job.id),
   });
 
-  const poolList = pools.data ?? [];
-  const unhealthy = poolList.filter((p) => p.health !== "ONLINE");
+  // Count data pools, but a degraded boot mirror needs attention too.
+  const poolList = (pools.data ?? []).filter((p) => !isBootPool(p.name));
+  const unhealthy = (pools.data ?? []).filter((p) => p.health !== "ONLINE");
   const advisories = hw.data?.capabilities.advisories ?? [];
 
   return (

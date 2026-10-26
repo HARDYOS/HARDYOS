@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, errorMessage, unwrap } from "../../api";
 import { bytes } from "../../format";
-import { usePools } from "../../hooks/queries";
+import { isBootPool, usePools } from "../../hooks/queries";
 import { StorageIcon } from "../../icons";
 import { Alert, Badge, Button, Card, EmptyState, ErrorBox, Loading, PageHeader, Progress } from "../../ui";
 import { toast } from "../../ui/toasts";
@@ -22,7 +22,8 @@ export function PoolsOverview({ onOpenPool, onCreate }: { onOpenPool: (p: string
 
   if (pools.isPending) return <Loading />;
   if (pools.isError) return <ErrorBox error={pools.error} onRetry={() => pools.refetch()} />;
-  const list = pools.data;
+  const list = pools.data.filter((p) => !isBootPool(p.name));
+  const system = pools.data.filter((p) => isBootPool(p.name));
 
   return (
     <>
@@ -63,6 +64,21 @@ export function PoolsOverview({ onOpenPool, onCreate }: { onOpenPool: (p: string
           ))}
         </div>
       )}
+
+      {system.map((p) => (
+        <Card key={p.name} title="System pool">
+          <div className="row row--between">
+            <span className="small muted">
+              <span className="mono">{p.name}</span> holds HardyOS itself on the boot disks. It's managed by updates, not here.
+            </span>
+            <Badge tone={healthTone(p.health)}>{p.health.toLowerCase()}</Badge>
+          </div>
+          <Progress value={p.capacityPct} label={`${p.name} ${p.capacityPct}% full`} tone={p.capacityPct > 85 ? "warn" : "accent"} />
+          <span className="small muted">
+            {bytes(p.allocBytes)} used of {bytes(p.sizeBytes)}
+          </span>
+        </Card>
+      ))}
 
       {importable.data && importable.data.length > 0 && (
         <Card title="Pools found on disks">

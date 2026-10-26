@@ -47,20 +47,41 @@ Create a new VM ("Custom" wizard):
 | CPU | 4 cores; tick "Virtualize Intel VT-x/EPT or AMD-V/RVI" for testing VMs later |
 | Memory | 8 GB (ZFS likes RAM; 4 GB minimum) |
 | Network | Bridged, so the VM gets an address on your home network |
-| Disk 1 | 32 GB NVMe (boot drive) |
-| Disks 2-5 | 4 × 20 GB SATA or SCSI (data pool) |
-| Disks 6-7 | optional: 2 × 8 GB NVMe to test special vdev / SLOG |
+| Disks 1-2 | 2 × 32 GB NVMe (mirrored boot drives) |
+| Disks 3-6 | 4 × 20 GB **SATA** (data pool) |
+| Disks 7-8 | optional: 2 × 8 GB NVMe to test special vdev / SLOG |
 | CD/DVD | the HardyOS ISO |
 
-Boot the VM. The console shows an address like `https://192.168.1.57`.
-Open it in a browser on the laptop. The browser warns about the certificate
-the first time (HardyOS makes its own); accept it to reach the web desktop.
+Use SATA or NVMe for the virtual disks. VMware's SCSI disks have no serial
+number unless you add `disk.EnableUUID = "TRUE"` to the .vmx file, so they get
+no stable `/dev/disk/by-id` name and storage pools can't use them.
+
+### Install
+
+1. Boot the VM from the ISO. The console shows an address like
+   `https://192.168.1.57` and a code like `K7QM-4TXP`.
+2. Open the address in a browser on the laptop. The browser warns about the
+   certificate the first time (HardyOS makes its own); accept it.
+3. Enter the code, then follow the installer: it suggests the two NVMe disks
+   as a mirror. Choose a name, time zone and network, create the
+   administrator, type ERASE and install.
+4. When it finishes, disconnect the CD/DVD (VM settings) and click
+   **Restart now**. The page switches to the sign-in screen when the
+   installed system is up.
+
+The installed system boots from GRUB on every boot disk (UEFI and BIOS), with
+a menu entry per boot environment. The serial console is enabled too, which
+helps with headless servers.
 
 Locked out? On the VM console (or over SSH) as root:
 `hardyctl reset-password <username>` or `hardyctl create-admin <username>`.
 
 Tip: take a VMware snapshot right after creating the VM (before first boot)
 so you can reset it between installer test runs.
+
+Boot problems? `hardyctl boot-list` shows the boot environments and
+`hardyctl boot-sync --reinstall` rewrites the boot loader and kernels on every
+boot disk.
 
 ## 4. Fast loop without an ISO
 
