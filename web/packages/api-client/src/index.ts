@@ -97,3 +97,10 @@ export type AppPackage = S["AppPackage"];
 export type AppPackageRef = S["AppPackageRef"];
 export type AppPlan = S["AppPlan"];
 export type AppInstallRequest = S["AppInstallRequest"];
+// Shared folders
+export type Share = S["Share"];
+export type ShareRule = S["ShareRule"];
+export type ShareAppGrant = S["ShareAppGrant"];
+export type ShareCreateRequest = S["ShareCreateRequest"];
+export type ShareUpdateRequest = S["ShareUpdateRequest"];
+export type ShareStarterRequest = S["ShareStarterRequest"];

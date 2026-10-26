@@ -1303,6 +1303,97 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/shares": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Every shared folder on every pool
+         * @description Everyone signed in may list them. Access rules, apps and storage
+         *     details (pool, dataset) are shown to administrators only.
+         */
+        get: operations["listShares"];
+        put?: never;
+        /** Create a shared folder (runs as a job) */
+        post: operations["createShare"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/shares/starter": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create the starter shared folders on a pool (runs as a job): Media with Movies, TV, Music and Photos, and Backups
+         * @description Folders that already exist are skipped.
+         */
+        post: operations["createStarterShares"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/shares/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** One shared folder */
+        get: operations["getShare"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete a shared folder and every file in it (runs as a job)
+         * @description Refused while an app uses it (409, naming the apps).
+         */
+        delete: operations["deleteShare"];
+        options?: never;
+        head?: never;
+        /**
+         * Change a shared folder's name, description, quota, flags or access rules (runs as a job)
+         * @description Fields left out keep their values.
+         */
+        patch: operations["updateShare"];
+        trace?: never;
+    };
+    "/shares/{id}/folders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Subfolders of a folder inside a shared folder (for pickers)
+         * @description Hidden folders and links aren't listed; paths can't leave the shared folder.
+         */
+        get: operations["listShareFolders"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/domain": {
         parameters: {
             query?: never;
@@ -2558,6 +2649,82 @@ export interface components {
         };
         Enabled: {
             enabled: boolean;
+        };
+        ShareRule: {
+            /** @enum {string} */
+            kind: "user" | "group" | "everyone";
+            /** @description HOME\alice, HOME\Family or a HardyOS account; empty for everyone */
+            name?: string;
+            /** @enum {string} */
+            level: "read" | "write" | "none";
+        };
+        ShareAppGrant: {
+            app: string;
+            /** @description The app's own Linux user ID */
+            uid: number;
+            /** @enum {string} */
+            level: "read" | "write";
+        };
+        Share: {
+            id: string;
+            name: string;
+            description: string;
+            pool: string;
+            dataset: string;
+            /** @description Where it is on the server */
+            path: string;
+            mounted: boolean;
+            /**
+             * Format: int64
+             * @description 0 for no quota
+             */
+            quotaBytes: number;
+            /** Format: int64 */
+            usedBytes: number;
+            /** @description Deleted files go to a recycle bin (with file sharing) */
+            recycle: boolean;
+            /** @description Guests may read it without signing in (with file sharing) */
+            guest: boolean;
+            /** @description Who may use it; empty means administrators only. Enforced with file sharing. */
+            access: components["schemas"]["ShareRule"][];
+            apps: components["schemas"]["ShareAppGrant"][];
+            /** Format: date-time */
+            createdAt: string;
+        };
+        ShareCreateRequest: {
+            pool: string;
+            /** @description 1-40 letters, digits, spaces and . - _ ( ) ' & */
+            name: string;
+            /** @description Defaults to one made from the name (Media -> media) */
+            id?: string;
+            description?: string;
+            /**
+             * Format: int64
+             * @description 0 for no quota
+             */
+            quotaBytes?: number;
+            recycle?: boolean;
+            guest?: boolean;
+            access?: components["schemas"]["ShareRule"][];
+            subfolders?: string[];
+        };
+        ShareUpdateRequest: {
+            name?: string;
+            description?: string;
+            /**
+             * Format: int64
+             * @description 0 removes the quota
+             */
+            quotaBytes?: number;
+            recycle?: boolean;
+            guest?: boolean;
+            access?: components["schemas"]["ShareRule"][];
+        };
+        ShareStarterRequest: {
+            pool: string;
+            /** @description Media with Movies */
+            media: boolean;
+            backups: boolean;
         };
         DomainConfig: {
             /** @example home.hardynetworks.net */
@@ -4999,6 +5166,173 @@ export interface operations {
                 content?: never;
             };
             403: components["responses"]["Forbidden"];
+        };
+    };
+    listShares: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Shared folders, by name */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        shares: components["schemas"]["Share"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    createShare: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ShareCreateRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    createStarterShares: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ShareStarterRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    getShare: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The shared folder */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Share"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteShare: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description The shared folder's name, typed to confirm */
+                    confirm: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    updateShare: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ShareUpdateRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listShareFolders: {
+        parameters: {
+            query?: {
+                /** @description A folder inside the share, like Movies/Kids; empty for the share itself */
+                path?: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Folder names */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        folders: string[];
+                    };
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
         };
     };
     getDomain: {
