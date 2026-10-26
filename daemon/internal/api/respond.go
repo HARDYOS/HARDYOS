@@ -15,6 +15,8 @@ func parseFloat(s string) (float64, error) { return strconv.ParseFloat(s, 64) }
 type ErrorResponse struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	// Details lists every problem when a form has several (optional).
+	Details []string `json:"details,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

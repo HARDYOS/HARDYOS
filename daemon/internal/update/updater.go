@@ -255,6 +255,7 @@ func (u *Updater) Status(ctx context.Context) (*Status, error) {
 var carryOver = []string{
 	"etc/hostname", "etc/hosts", "etc/hostid", "etc/timezone", "etc/localtime", "etc/fstab",
 	"etc/machine-id", "etc/network/interfaces", "etc/resolv.conf",
+	"etc/chrony/chrony.conf", "etc/dhcp/dhclient-enter-hooks.d/hardyos-dns",
 	"etc/zfs/zpool.cache", "etc/modprobe.d/hardyos-zfs.conf",
 }
 

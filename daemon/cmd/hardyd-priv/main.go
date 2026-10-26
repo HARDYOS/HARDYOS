@@ -17,6 +17,7 @@ import (
 
 	"github.com/hardyos/hardyos/daemon/internal/hw"
 	"github.com/hardyos/hardyos/daemon/internal/install"
+	"github.com/hardyos/hardyos/daemon/internal/network"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 	"github.com/hardyos/hardyos/daemon/internal/update"
@@ -74,6 +75,10 @@ func main() {
 		updater.OnBoot(ctx)
 		priv.RegisterSystem(s, sysexec.Exec{}, updater.BeforeReboot)
 		priv.RegisterUpdates(s, updater)
+		// Undo a network change that wasn't confirmed before a restart.
+		netm := &network.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log}
+		netm.OnStart(ctx)
+		priv.RegisterNetwork(s, netm)
 		if len(updater.Keys()) == 0 {
 			log.Warn("no trusted release key: updates can't be installed until one is added")
 		}

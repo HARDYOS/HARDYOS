@@ -142,6 +142,38 @@ operation per pool at a time). Progress streams to the browser over the
   before the running version was installed (applied at boot, before hardyd
   starts).
 
+## Network and time
+
+Network settings live in Control Panel > Network and are stored in
+`/var/lib/hardyos/network/settings.json` (on the shared dataset, so every
+version uses them). hardyd-priv renders them into ifupdown's
+`/etc/network/interfaces` (bonds through `ifenslave`, VLANs through `vlan`),
+`/etc/resolv.conf`, `/etc/hosts` and `/etc/hostname`. Servers set up before
+this existed have their installer-written files imported on first use.
+
+Applying is the one place a settings change can cut the server off, so it has
+a safety net:
+
+1. The current files are saved into `pending.json` before anything changes.
+2. Interfaces that ifupdown has up are taken down under their old
+   definitions, the new files are written, and interfaces come up under the
+   new ones. DHCP ports start in the background so an unplugged port doesn't
+   hold things up.
+3. The change must be confirmed (Keep settings) within 3 minutes, from any
+   browser that can still reach the server. Otherwise hardyd-priv restores
+   the saved files and restarts the network the same way. A restart while a
+   change is waiting counts as not confirmed once the deadline passes.
+
+The desktop shows the keep-or-undo prompt to administrators, so a change of
+address can be confirmed right after signing in at the new one.
+
+Date & Time sets the time zone (`/etc/localtime`, `/etc/timezone`) and
+chrony (`/etc/chrony/chrony.conf`): automatic time with the Debian pool or
+chosen servers, or a clock set by hand. Clock changes can't cut the server
+off, so they apply at once. Both files carry over to new versions with
+updates; the automatic-time on/off choice is re-applied when hardyd-priv
+starts.
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly

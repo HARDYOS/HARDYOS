@@ -26,6 +26,7 @@ tags:
   - name: notifications
   - name: installer
   - name: updates
+  - name: network
 paths:
   /health:
     get:
@@ -987,6 +988,116 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/Failed" }
+  /network:
+    get:
+      operationId: getNetwork
+      summary: Network settings, live interfaces and any change waiting for confirmation
+      tags: [network]
+      responses:
+        "200":
+          description: Network state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NetworkStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    put:
+      operationId: applyNetwork
+      summary: Apply new network settings
+      description: |
+        Runs as a job. The new settings are undone automatically unless
+        POST /network/confirm arrives before the deadline in /network's
+        pending field, so a mistake can't lock anyone out. A 400 lists every
+        problem in details.
+      tags: [network]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NetworkConfig" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /network/confirm:
+    post:
+      operationId: confirmNetwork
+      summary: Keep the network change that's waiting
+      tags: [network]
+      responses:
+        "200":
+          description: The settings now saved
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NetworkConfig" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /network/revert:
+    post:
+      operationId: revertNetwork
+      summary: Undo the network change that's waiting
+      tags: [network]
+      responses:
+        "204": { description: The previous settings are back }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /system/time:
+    get:
+      operationId: getTime
+      summary: Time zone, automatic time and clock sync state
+      tags: [network]
+      responses:
+        "200":
+          description: Clock state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TimeStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    put:
+      operationId: setTime
+      summary: Set the time zone and automatic time (NTP)
+      tags: [network]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TimeConfig" }
+      responses:
+        "200":
+          description: Clock state after the change
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TimeStatus" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /system/time/clock:
+    post:
+      operationId: setClock
+      summary: Set the date and time by hand (automatic time must be off)
+      tags: [network]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [time]
+              properties:
+                time: { type: string, format: date-time }
+      responses:
+        "200":
+          description: Clock state after the change
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TimeStatus" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /installer:
     get:
       operationId: getInstallerStatus
@@ -1723,3 +1834,106 @@ components:
       properties:
         code: { type: string, description: Stable machine-readable error code }
         message: { type: string, description: Human-readable explanation }
+        details:
+          type: array
+          items: { type: string }
+          description: Every problem, when a form has several
+    NetworkAddressing:
+      type: object
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          enum: [dhcp, static, "off", member]
+          description: member is set by the server for bond members
+        address: { type: string, description: "Static only: CIDR, like 192.168.1.20/24" }
+        gateway: { type: string, description: Static only, optional }
+        mtu: { type: integer, description: 0 or absent for the default 1500 }
+    NetworkInterface:
+      allOf:
+        - $ref: "#/components/schemas/NetworkAddressing"
+        - type: object
+          required: [name]
+          properties:
+            name: { type: string }
+    NetworkBond:
+      allOf:
+        - $ref: "#/components/schemas/NetworkAddressing"
+        - type: object
+          required: [name, members, policy]
+          properties:
+            name: { type: string, description: bond0 to bond99 }
+            members: { type: array, items: { type: string } }
+            policy: { type: string, enum: [active-backup, 802.3ad, balance-alb] }
+    NetworkVLAN:
+      allOf:
+        - $ref: "#/components/schemas/NetworkAddressing"
+        - type: object
+          required: [parent, id]
+          properties:
+            parent: { type: string, description: Port or bond }
+            id: { type: integer, minimum: 1, maximum: 4094 }
+    NetworkConfig:
+      type: object
+      required: [hostname, dns, search, interfaces, bonds, vlans]
+      properties:
+        hostname: { type: string }
+        dns: { type: array, items: { type: string } }
+        search: { type: array, items: { type: string } }
+        interfaces: { type: array, items: { $ref: "#/components/schemas/NetworkInterface" } }
+        bonds: { type: array, items: { $ref: "#/components/schemas/NetworkBond" } }
+        vlans: { type: array, items: { $ref: "#/components/schemas/NetworkVLAN" } }
+    LiveInterface:
+      type: object
+      required: [name, kind, mac, up, carrier, speedMbps, addresses]
+      properties:
+        name: { type: string }
+        kind: { type: string, enum: [port, bond, vlan, other] }
+        mac: { type: string }
+        up: { type: boolean }
+        carrier: { type: boolean, description: A cable is connected and the link is up }
+        speedMbps: { type: integer }
+        addresses: { type: array, items: { type: string } }
+    NetworkPending:
+      type: object
+      required: [appliedAt, deadline, addresses]
+      properties:
+        appliedAt: { type: string, format: date-time }
+        deadline: { type: string, format: date-time, description: Undone automatically after this unless confirmed }
+        addresses: { type: array, items: { type: string }, description: Fixed addresses the server will have }
+    NetworkStatus:
+      type: object
+      required: [config, ports, live, pending, gateway, dns, lastRevert]
+      properties:
+        config: { $ref: "#/components/schemas/NetworkConfig" }
+        ports: { type: array, items: { type: string } }
+        live: { type: array, items: { $ref: "#/components/schemas/LiveInterface" } }
+        pending:
+          nullable: true
+          allOf: [{ $ref: "#/components/schemas/NetworkPending" }]
+        gateway: { type: string }
+        dns: { type: array, items: { type: string } }
+        lastRevert:
+          nullable: true
+          type: object
+          required: [at, reason]
+          properties:
+            at: { type: string, format: date-time }
+            reason: { type: string }
+    TimeConfig:
+      type: object
+      required: [timezone, ntp, ntpServers]
+      properties:
+        timezone: { type: string, description: "IANA name, like America/Denver" }
+        ntp: { type: boolean, description: Keep the clock right over the network }
+        ntpServers: { type: array, items: { type: string }, description: Empty uses the Debian pool }
+    TimeStatus:
+      allOf:
+        - $ref: "#/components/schemas/TimeConfig"
+        - type: object
+          required: [now, synced, source, offsetSec]
+          properties:
+            now: { type: string, format: date-time }
+            synced: { type: boolean }
+            source: { type: string }
+            offsetSec: { type: number }

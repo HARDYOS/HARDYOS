@@ -35,3 +35,5 @@ Settled choices, newest last. Change one by adding a row that supersedes it.
 | 29 | 2026-10-25 | The release signing key stays on Cade's release computer; servers trust compiled-in public keys | Matches building releases locally; a GitHub account compromise can't ship updates |
 | 30 | 2026-10-25 | New versions boot once via GRUB `next_entry` and become the default only after hardyd confirms health | A version that can't start falls back by itself, even after a kernel panic or power cycle |
 | 31 | 2026-10-25 | Settings are snapshotted right before restarting into an update and restored if it fails | The old version never meets a database migrated by a version that didn't work |
+| 32 | 2026-10-25 | Network settings stay on ifupdown (no NetworkManager or systemd-networkd), rendered from one settings file | Debian's default for servers, already used by the installer; plain files are easy to inspect and restore |
+| 33 | 2026-10-25 | Network changes undo themselves unless confirmed within 3 minutes | A wrong address or gateway can't lock anyone out of a headless server |
