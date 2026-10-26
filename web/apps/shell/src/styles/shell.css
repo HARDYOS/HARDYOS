@@ -564,3 +564,19 @@ button {
 .lock-card__brand {
   align-self: center;
 }
+
+/* A prompt that needs an answer soon (a network change to keep), above the windows. */
+.desktop-banner {
+  position: fixed;
+  top: 44px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(720px, calc(100vw - 32px));
+  z-index: 900;
+  box-shadow: var(--hos-shadow-lg, 0 18px 50px rgb(0 0 0 / 45%));
+  border-radius: 14px;
+}
+.desktop-banner .alert {
+  margin: 0;
+  backdrop-filter: blur(18px);
+}

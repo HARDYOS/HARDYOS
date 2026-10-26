@@ -894,6 +894,99 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/network": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Network settings, live interfaces and any change waiting for confirmation */
+        get: operations["getNetwork"];
+        /**
+         * Apply new network settings
+         * @description Runs as a job. The new settings are undone automatically unless
+         *     POST /network/confirm arrives before the deadline in /network's
+         *     pending field, so a mistake can't lock anyone out. A 400 lists every
+         *     problem in details.
+         */
+        put: operations["applyNetwork"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/network/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Keep the network change that's waiting */
+        post: operations["confirmNetwork"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/network/revert": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Undo the network change that's waiting */
+        post: operations["revertNetwork"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system/time": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Time zone, automatic time and clock sync state */
+        get: operations["getTime"];
+        /** Set the time zone and automatic time (NTP) */
+        put: operations["setTime"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system/time/clock": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Set the date and time by hand (automatic time must be off) */
+        post: operations["setClock"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/installer": {
         parameters: {
             query?: never;
@@ -1520,6 +1613,94 @@ export interface components {
             code: string;
             /** @description Human-readable explanation */
             message: string;
+            /** @description Every problem, when a form has several */
+            details?: string[];
+        };
+        NetworkAddressing: {
+            /**
+             * @description member is set by the server for bond members
+             * @enum {string}
+             */
+            mode: "dhcp" | "static" | "off" | "member";
+            /** @description Static only: CIDR, like 192.168.1.20/24 */
+            address?: string;
+            /** @description Static only */
+            gateway?: string;
+            /** @description 0 or absent for the default 1500 */
+            mtu?: number;
+        };
+        NetworkInterface: components["schemas"]["NetworkAddressing"] & {
+            name: string;
+        };
+        NetworkBond: components["schemas"]["NetworkAddressing"] & {
+            /** @description bond0 to bond99 */
+            name: string;
+            members: string[];
+            /** @enum {string} */
+            policy: "active-backup" | "802.3ad" | "balance-alb";
+        };
+        NetworkVLAN: components["schemas"]["NetworkAddressing"] & {
+            /** @description Port or bond */
+            parent: string;
+            id: number;
+        };
+        NetworkConfig: {
+            hostname: string;
+            dns: string[];
+            search: string[];
+            interfaces: components["schemas"]["NetworkInterface"][];
+            bonds: components["schemas"]["NetworkBond"][];
+            vlans: components["schemas"]["NetworkVLAN"][];
+        };
+        LiveInterface: {
+            name: string;
+            /** @enum {string} */
+            kind: "port" | "bond" | "vlan" | "other";
+            mac: string;
+            up: boolean;
+            /** @description A cable is connected and the link is up */
+            carrier: boolean;
+            speedMbps: number;
+            addresses: string[];
+        };
+        NetworkPending: {
+            /** Format: date-time */
+            appliedAt: string;
+            /**
+             * Format: date-time
+             * @description Undone automatically after this unless confirmed
+             */
+            deadline: string;
+            /** @description Fixed addresses the server will have */
+            addresses: string[];
+        };
+        NetworkStatus: {
+            config: components["schemas"]["NetworkConfig"];
+            ports: string[];
+            live: components["schemas"]["LiveInterface"][];
+            pending: components["schemas"]["NetworkPending"] | null;
+            gateway: string;
+            dns: string[];
+            lastRevert: {
+                /** Format: date-time */
+                at: string;
+                reason: string;
+            } | null;
+        };
+        TimeConfig: {
+            /** @description IANA name, like America/Denver */
+            timezone: string;
+            /** @description Keep the clock right over the network */
+            ntp: boolean;
+            /** @description Empty uses the Debian pool */
+            ntpServers: string[];
+        };
+        TimeStatus: components["schemas"]["TimeConfig"] & {
+            /** Format: date-time */
+            now: string;
+            synced: boolean;
+            source: string;
+            offsetSec: number;
         };
     };
     responses: {
@@ -3052,6 +3233,170 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             422: components["responses"]["Failed"];
+        };
+    };
+    getNetwork: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Network state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NetworkStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    applyNetwork: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NetworkConfig"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    confirmNetwork: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The settings now saved */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NetworkConfig"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    revertNetwork: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The previous settings are back */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    getTime: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Clock state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimeStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    setTime: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TimeConfig"];
+            };
+        };
+        responses: {
+            /** @description Clock state after the change */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimeStatus"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    setClock: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Format: date-time */
+                    time: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Clock state after the change */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimeStatus"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     getInstallerStatus: {

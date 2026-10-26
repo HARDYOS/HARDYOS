@@ -10,6 +10,8 @@ export class ApiFailure extends Error {
     public readonly status: number,
     public readonly code: string,
     message: string,
+    /** Every problem, when a form has several. */
+    public readonly details: string[] = [],
   ) {
     super(message);
     this.name = "ApiFailure";
@@ -32,7 +34,7 @@ export async function unwrap<T>(call: Promise<FetchResult<T>>): Promise<T> {
   }
   if (!r.response.ok) {
     const e = (r.error ?? {}) as Partial<ApiError>;
-    throw new ApiFailure(r.response.status, e.code ?? "error", e.message ?? r.response.statusText);
+    throw new ApiFailure(r.response.status, e.code ?? "error", e.message ?? r.response.statusText, e.details ?? []);
   }
   return r.data as T;
 }

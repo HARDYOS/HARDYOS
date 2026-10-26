@@ -34,6 +34,7 @@ const JobKindSelfTest = "system.selftest"
 
 // RegisterJobKinds adds the job kinds the API submits. Call before starting the manager.
 func RegisterJobKinds(m *jobs.Manager, pc *priv.Client) {
+	registerNetworkJobs(m, pc)
 	m.Register(jobs.Kind{
 		Name:      JobKindSelfTest,
 		AdminOnly: true,

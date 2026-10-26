@@ -118,7 +118,9 @@ func (s *Server) routes() {
 		s.storageRoutes()
 		s.notifyRoutes()
 		if s.cfg.Updates != nil {
+			// Installed systems only, like updates (the live installer has neither).
 			s.updateRoutes()
+			s.networkRoutes()
 		}
 	}
 

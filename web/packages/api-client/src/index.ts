@@ -42,6 +42,16 @@ export type InstallerNIC = S["InstallerNIC"];
 export type InstallPlan = S["InstallPlan"];
 export type InstallNetwork = S["InstallNetwork"];
 export type InstallCheck = S["InstallCheck"];
+export type NetworkAddressing = S["NetworkAddressing"];
+export type NetworkInterface = S["NetworkInterface"];
+export type NetworkBond = S["NetworkBond"];
+export type NetworkVLAN = S["NetworkVLAN"];
+export type NetworkConfig = S["NetworkConfig"];
+export type NetworkStatus = S["NetworkStatus"];
+export type NetworkPending = S["NetworkPending"];
+export type LiveInterface = S["LiveInterface"];
+export type TimeConfig = S["TimeConfig"];
+export type TimeStatus = S["TimeStatus"];
 export type InstallRequest = S["InstallRequest"];
 
 /** Header every state-changing request must carry (hardyd's CSRF check). */

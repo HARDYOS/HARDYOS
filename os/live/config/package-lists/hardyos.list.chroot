@@ -43,6 +43,8 @@ ethtool
 iproute2
 nftables
 ifupdown
+ifenslave
+vlan
 isc-dhcp-client
 
 # Live system

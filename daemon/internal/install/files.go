@@ -31,7 +31,7 @@ func renderResolv(dns []string) string {
 // the others stay on DHCP.
 func RenderInterfaces(n Network, nics []string) string {
 	var b strings.Builder
-	b.WriteString("# Written by the HardyOS installer. Network settings will move to the\n# Control Panel; until then edit this file and run \"systemctl restart networking\".\n\n")
+	b.WriteString("# Written by the HardyOS installer. Change these settings in Control Panel > Network;\n# edits made here are replaced the next time settings are saved there.\n\n")
 	b.WriteString("source /etc/network/interfaces.d/*\n\nauto lo\niface lo inet loopback\n")
 	staticDone := false
 	for _, nic := range nics {

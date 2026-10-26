@@ -1,5 +1,6 @@
 import type { User } from "@hardy/api-client";
 import { useEffect } from "react";
+import { PendingNetwork, useNetworkStatus } from "../apps/control-panel/Network";
 import { useEvents } from "../hooks/useEvents";
 import { visibleApps } from "../shell";
 import { Toasts } from "../ui/toasts";
@@ -36,10 +37,25 @@ export function Desktop({ user }: { user: User }) {
           </button>
         ))}
       </div>
+      {user.role === "admin" && <NetworkBanner />}
       <Widgets user={user} />
       <WindowLayer user={user} />
       <Dock user={user} />
       <Toasts />
+    </div>
+  );
+}
+
+/** A network change waiting to be kept shows on the desktop, so it can be
+ * confirmed right after signing in at the server's new address. */
+function NetworkBanner() {
+  const net = useNetworkStatus();
+  // The Control Panel's Network page shows the same prompt.
+  const panelOpen = useWM((s) => s.windows.some((w) => w.appId === "os.hardy.control"));
+  if (!net.data?.pending || panelOpen) return null;
+  return (
+    <div className="desktop-banner">
+      <PendingNetwork pending={net.data.pending} />
     </div>
   );
 }
