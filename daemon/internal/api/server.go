@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hardyos/hardyos/daemon/internal/appstore"
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/backups"
@@ -42,7 +43,9 @@ type Config struct {
 	// Updates enables the update and version endpoints (nil disables them).
 	Updates *updates.Service
 	// Backups enables settings backups (nil disables them).
-	Backups  *backups.Service
+	Backups *backups.Service
+	// Apps finds Docker app packages; nil uses the default folders.
+	Apps     *appstore.Store
 	Root     fs.FS // filesystem rooted at "/" for system info; nil uses the real one
 	Logger   *slog.Logger
 	WebRoot  string // directory with the built web desktop; empty disables static serving
@@ -128,6 +131,7 @@ func (s *Server) routes() {
 			s.bootRoutes()
 			s.terminalRoutes()
 			s.domainRoutes()
+			s.appRoutes()
 		}
 		if s.cfg.Backups != nil {
 			s.backupRoutes()

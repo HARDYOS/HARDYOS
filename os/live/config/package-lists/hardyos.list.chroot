@@ -61,6 +61,12 @@ smbclient
 krb5-user
 ldb-tools
 
+# Apps: Docker Engine and Compose v2 for one-click apps (.hardyapp). The
+# engine is started by hardyd-priv once the apps pool is mounted, with its
+# data on that pool.
+docker.io
+docker-compose
+
 # Live system
 live-boot
 live-config

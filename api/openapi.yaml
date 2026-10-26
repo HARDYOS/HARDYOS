@@ -30,6 +30,7 @@ tags:
   - name: backups
   - name: terminal
   - name: domain
+  - name: apps
 paths:
   /health:
     get:
@@ -1734,6 +1735,181 @@ paths:
         "400": { $ref: "#/components/responses/Invalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /apps:
+    get:
+      operationId: listApps
+      summary: Installed Docker apps and how they're doing
+      description: |
+        Everyone signed in sees the installed apps so they can open them.
+        Containers, datasets, kept data and updates are shown to
+        administrators only.
+      tags: [apps]
+      responses:
+        "200":
+          description: The App Store's main view
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppsOverview" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /apps/catalog:
+    get:
+      operationId: listAppCatalog
+      summary: Apps that ship with HardyOS, ready to install
+      tags: [apps]
+      responses:
+        "200":
+          description: Catalog packages
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/AppPackage" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /apps/packages:
+    post:
+      operationId: uploadAppPackage
+      summary: Upload a .hardyapp package (at most 512 KB) to install it
+      description: |
+        The package is checked and kept by its SHA-256, which is the `ref`
+        to plan and install it with (`source: upload`).
+      tags: [apps]
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: The package
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppPackage" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413":
+          description: The package is too big
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /apps/plan:
+    post:
+      operationId: planAppInstall
+      summary: "What the install dialog needs: free ports, pools, and whether this replaces an installed copy"
+      tags: [apps]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppPackageRef" }
+      responses:
+        "200":
+          description: The plan
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppPlan" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /apps/install:
+    post:
+      operationId: installApp
+      summary: Install an app (runs as a job; downloads its images and starts it)
+      description: |
+        Password settings are handed to the job in memory, never stored with
+        it. Installing an app that's already installed reinstalls it with the
+        given settings, keeping its data and generated passwords.
+      tags: [apps]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppInstallRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /apps/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    delete:
+      operationId: removeApp
+      summary: Remove an app (runs as a job), keeping or deleting its data
+      tags: [apps]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppRemoveRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /apps/{id}/update:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: updateApp
+      summary: Update an app to the catalog's version, or to an uploaded package (runs as a job)
+      description: The app keeps its data, ports and settings, and downloads newer images.
+      tags: [apps]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppPackageRef" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /apps/{id}/{action}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: action, in: path, required: true, schema: { type: string, enum: [start, stop, restart] } }
+    post:
+      operationId: appAction
+      summary: Start, stop or restart an app
+      tags: [apps]
+      responses:
+        "200":
+          description: The app
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/App" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Failed" }
+  /apps/{id}/logs:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getAppLogs
+      summary: The app's recent output, every container together
+      tags: [apps]
+      parameters:
+        - { name: lines, in: query, schema: { type: integer, minimum: 1, maximum: 5000, default: 300 } }
+      responses:
+        "200":
+          description: Logs
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [logs]
+                properties:
+                  logs: { type: string }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /installer:
     get:
       operationId: getInstallerStatus
@@ -2783,3 +2959,160 @@ components:
         description: { type: string }
         members: { type: array, items: { type: string } }
         builtin: { type: boolean }
+    AppsOverview:
+      type: object
+      required: [available, configured, pool, engineRunning, engineVersion, problem, apps, keptData, updates]
+      properties:
+        available: { type: boolean, description: False when this build has no Docker }
+        configured: { type: boolean, description: Docker has been set up on a pool }
+        pool: { type: string, description: The pool holding Docker and every app }
+        engineRunning: { type: boolean }
+        engineVersion: { type: string }
+        problem: { type: string, description: Why the apps can't run right now, if they can't }
+        apps: { type: array, items: { $ref: "#/components/schemas/App" } }
+        keptData:
+          type: array
+          description: Apps removed with their data kept; installing again picks it back up
+          items:
+            type: object
+            required: [id, name, dataset]
+            properties:
+              id: { type: string }
+              name: { type: string }
+              dataset: { type: string }
+        updates:
+          type: object
+          description: Newer catalog versions, by app id
+          additionalProperties: { type: string }
+    App:
+      type: object
+      required: [id, name, version, summary, publisher, website, icon, dataset, state, containers, ports, web, installedAt, updatedAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        version: { type: string }
+        summary: { type: string }
+        publisher: { type: string }
+        website: { type: string }
+        icon: { type: string, description: A data URL }
+        dataset: { type: string }
+        state:
+          type: string
+          enum: [running, starting, unhealthy, partial, stopped, restarting, not-created]
+        containers:
+          type: array
+          items:
+            type: object
+            required: [service, state, health, status, image]
+            properties:
+              service: { type: string }
+              state: { type: string }
+              health: { type: string }
+              status: { type: string }
+              image: { type: string }
+        ports:
+          type: array
+          items:
+            type: object
+            required: [name, label, port, protocol]
+            properties:
+              name: { type: string }
+              label: { type: string }
+              port: { type: integer }
+              protocol: { type: string, enum: [tcp, udp] }
+        web:
+          nullable: true
+          type: object
+          required: [port, path, scheme]
+          properties:
+            port: { type: integer }
+            path: { type: string }
+            scheme: { type: string, enum: [http, https] }
+        installedAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    AppPackage:
+      type: object
+      required: [source, ref, id, name, version, summary, description, publisher, website, icon, minMemoryMB, ports, settings, permissions, images]
+      properties:
+        source: { type: string, enum: [catalog, upload] }
+        ref: { type: string, description: The app id (catalog) or the package's SHA-256 (upload) }
+        id: { type: string }
+        name: { type: string }
+        version: { type: string }
+        summary: { type: string }
+        description: { type: string }
+        publisher: { type: string }
+        website: { type: string }
+        icon: { type: string, description: A data URL }
+        minMemoryMB: { type: integer }
+        ports:
+          type: array
+          items:
+            type: object
+            required: [name, label, default, protocol, web]
+            properties:
+              name: { type: string }
+              label: { type: string }
+              default: { type: integer }
+              protocol: { type: string, enum: [tcp, udp] }
+              web: { type: boolean, description: The app's web page is on this port }
+        settings:
+          type: array
+          description: Settings the install form asks for (generated passwords aren't listed)
+          items:
+            type: object
+            required: [env, label, help, type, default, options, required]
+            properties:
+              env: { type: string }
+              label: { type: string }
+              help: { type: string }
+              type: { type: string, enum: [text, number, boolean, select, password] }
+              default: { type: string }
+              options: { type: array, items: { type: string } }
+              required: { type: boolean }
+        permissions:
+          type: array
+          description: What the app may do beyond a plain container, in plain words
+          items: { type: string }
+        images: { type: array, items: { type: string } }
+    AppPackageRef:
+      type: object
+      required: [source, ref]
+      properties:
+        source: { type: string, enum: [catalog, upload] }
+        ref: { type: string }
+    AppPlan:
+      type: object
+      required: [package, ports, pools, enginePool, installed, installedVersion, keptData, available, problem]
+      properties:
+        package: { $ref: "#/components/schemas/AppPackage" }
+        ports:
+          type: object
+          description: A free port for each of the app's ports
+          additionalProperties: { type: integer }
+        pools: { type: array, items: { type: string }, description: Pools to choose from the first time (when enginePool is empty) }
+        enginePool: { type: string }
+        installed: { type: boolean }
+        installedVersion: { type: string }
+        keptData: { type: boolean, description: The app's data was kept when it was removed and will be picked back up }
+        available: { type: boolean }
+        problem: { type: string }
+    AppInstallRequest:
+      type: object
+      required: [source, ref]
+      properties:
+        source: { type: string, enum: [catalog, upload] }
+        ref: { type: string }
+        pool: { type: string, description: The pool for Docker and every app; only needed the first time }
+        ports:
+          type: object
+          additionalProperties: { type: integer }
+        settings:
+          type: object
+          additionalProperties: { type: string }
+    AppRemoveRequest:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: string, description: The app's name, typed to confirm }
+        deleteData: { type: boolean, description: Delete the app's files and database too }

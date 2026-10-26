@@ -16,12 +16,19 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
 
 .PHONY: build
-build: build-daemon build-web ## Build Go binaries and the web desktop
+build: build-daemon build-web build-apps ## Build Go binaries, the web desktop and the app catalog
 
 .PHONY: build-daemon
 build-daemon: ## Build hardyd, hardyd-priv and hardyctl into dist/bin
 	@mkdir -p $(DIST)/bin
 	cd daemon && CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -trimpath -ldflags "$(LDFLAGS)" -o $(DIST)/bin/ ./cmd/...
+
+.PHONY: build-apps
+build-apps: ## Pack every app in apps/catalog into dist/apps/<id>.hardyapp
+	@mkdir -p $(DIST)/apps
+	cd daemon && for d in ../apps/catalog/*/; do \
+		go run ./cmd/hardyctl app-pack -o $(DIST)/apps/$$(basename $$d).hardyapp $$d || exit 1; \
+	done
 
 .PHONY: build-web
 build-web: web/node_modules ## Build the web desktop into web/apps/shell/dist

@@ -1475,6 +1475,185 @@ export interface paths {
         patch: operations["updateDomainGroup"];
         trace?: never;
     };
+    "/apps": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Installed Docker apps and how they're doing
+         * @description Everyone signed in sees the installed apps so they can open them.
+         *     Containers, datasets, kept data and updates are shown to
+         *     administrators only.
+         */
+        get: operations["listApps"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/apps/catalog": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Apps that ship with HardyOS, ready to install */
+        get: operations["listAppCatalog"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/apps/packages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload a .hardyapp package (at most 512 KB) to install it
+         * @description The package is checked and kept by its SHA-256, which is the `ref`
+         *     to plan and install it with (`source: upload`).
+         */
+        post: operations["uploadAppPackage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/apps/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** What the install dialog needs: free ports, pools, and whether this replaces an installed copy */
+        post: operations["planAppInstall"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/apps/install": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Install an app (runs as a job; downloads its images and starts it)
+         * @description Password settings are handed to the job in memory, never stored with
+         *     it. Installing an app that's already installed reinstalls it with the
+         *     given settings, keeping its data and generated passwords.
+         */
+        post: operations["installApp"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/apps/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Remove an app (runs as a job), keeping or deleting its data */
+        delete: operations["removeApp"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/apps/{id}/update": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Update an app to the catalog's version, or to an uploaded package (runs as a job)
+         * @description The app keeps its data, ports and settings, and downloads newer images.
+         */
+        post: operations["updateApp"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/apps/{id}/{action}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                action: "start" | "stop" | "restart";
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start, stop or restart an app */
+        post: operations["appAction"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/apps/{id}/logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** The app's recent output, every container together */
+        get: operations["getAppLogs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/installer": {
         parameters: {
             query?: never;
@@ -2392,6 +2571,145 @@ export interface components {
             description: string;
             members: string[];
             builtin: boolean;
+        };
+        AppsOverview: {
+            /** @description False when this build has no Docker */
+            available: boolean;
+            /** @description Docker has been set up on a pool */
+            configured: boolean;
+            /** @description The pool holding Docker and every app */
+            pool: string;
+            engineRunning: boolean;
+            engineVersion: string;
+            /** @description Why the apps can't run right now */
+            problem: string;
+            apps: components["schemas"]["App"][];
+            /** @description Apps removed with their data kept; installing again picks it back up */
+            keptData: {
+                id: string;
+                name: string;
+                dataset: string;
+            }[];
+            /** @description Newer catalog versions, by app id */
+            updates: {
+                [key: string]: string;
+            };
+        };
+        App: {
+            id: string;
+            name: string;
+            version: string;
+            summary: string;
+            publisher: string;
+            website: string;
+            /** @description A data URL */
+            icon: string;
+            dataset: string;
+            /** @enum {string} */
+            state: "running" | "starting" | "unhealthy" | "partial" | "stopped" | "restarting" | "not-created";
+            containers: {
+                service: string;
+                state: string;
+                health: string;
+                status: string;
+                image: string;
+            }[];
+            ports: {
+                name: string;
+                label: string;
+                port: number;
+                /** @enum {string} */
+                protocol: "tcp" | "udp";
+            }[];
+            web: {
+                port: number;
+                path: string;
+                /** @enum {string} */
+                scheme: "http" | "https";
+            } | null;
+            /** Format: date-time */
+            installedAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        AppPackage: {
+            /** @enum {string} */
+            source: "catalog" | "upload";
+            /** @description The app id (catalog) or the package's SHA-256 (upload) */
+            ref: string;
+            id: string;
+            name: string;
+            version: string;
+            summary: string;
+            description: string;
+            publisher: string;
+            website: string;
+            /** @description A data URL */
+            icon: string;
+            minMemoryMB: number;
+            ports: {
+                name: string;
+                label: string;
+                default: number;
+                /** @enum {string} */
+                protocol: "tcp" | "udp";
+                /** @description The app's web page is on this port */
+                web: boolean;
+            }[];
+            /** @description Settings the install form asks for (generated passwords aren't listed) */
+            settings: {
+                env: string;
+                label: string;
+                help: string;
+                /** @enum {string} */
+                type: "text" | "number" | "boolean" | "select" | "password";
+                default: string;
+                options: string[];
+                required: boolean;
+            }[];
+            /** @description What the app may do beyond a plain container, in plain words */
+            permissions: string[];
+            images: string[];
+        };
+        AppPackageRef: {
+            /** @enum {string} */
+            source: "catalog" | "upload";
+            ref: string;
+        };
+        AppPlan: {
+            package: components["schemas"]["AppPackage"];
+            /** @description A free port for each of the app's ports */
+            ports: {
+                [key: string]: number;
+            };
+            /** @description Pools to choose from the first time (when enginePool is empty) */
+            pools: string[];
+            enginePool: string;
+            installed: boolean;
+            installedVersion: string;
+            /** @description The app's data was kept when it was removed and will be picked back up */
+            keptData: boolean;
+            available: boolean;
+            problem: string;
+        };
+        AppInstallRequest: {
+            /** @enum {string} */
+            source: "catalog" | "upload";
+            ref: string;
+            /** @description The pool for Docker and every app; only needed the first time */
+            pool?: string;
+            ports?: {
+                [key: string]: number;
+            };
+            settings?: {
+                [key: string]: string;
+            };
+        };
+        AppRemoveRequest: {
+            /** @description The app's name */
+            confirm: string;
+            /** @description Delete the app's files and database too */
+            deleteData?: boolean;
         };
     };
     responses: {
@@ -4972,6 +5290,235 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DomainGroup"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    listApps: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The App Store's main view */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppsOverview"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listAppCatalog: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Catalog packages */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppPackage"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    uploadAppPackage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/octet-stream": string;
+            };
+        };
+        responses: {
+            /** @description The package */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppPackage"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description The package is too big */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    planAppInstall: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AppPackageRef"];
+            };
+        };
+        responses: {
+            /** @description The plan */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppPlan"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    installApp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AppInstallRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    removeApp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AppRemoveRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateApp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["AppPackageRef"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    appAction: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                action: "start" | "stop" | "restart";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The app */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["App"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["Failed"];
+        };
+    };
+    getAppLogs: {
+        parameters: {
+            query?: {
+                lines?: number;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Logs */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        logs: string;
+                    };
                 };
             };
             400: components["responses"]["Invalid"];

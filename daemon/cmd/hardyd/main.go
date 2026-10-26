@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/api"
+	"github.com/hardyos/hardyos/daemon/internal/appstore"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/backups"
 	"github.com/hardyos/hardyos/daemon/internal/events"
@@ -106,6 +107,10 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		bk = &backups.Service{DB: db, Priv: pc, Jobs: manager, Notify: notifications, Log: log, Current: version.Version}
 		bk.RegisterJobs(manager)
 	}
+	appStore := &appstore.Store{CatalogDir: appstore.DefaultCatalogDir, UploadDir: appstore.DefaultUploadDir}
+	if !live {
+		api.RegisterAppJobs(manager, pc, appStore)
+	}
 	var inst *installer.Service
 	if live {
 		inst = &installer.Service{Priv: pc, Jobs: manager, Limiter: auth.NewLoginLimiter()}
@@ -122,6 +127,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		DB: db, Jobs: manager, Events: broker, Priv: pc, Logger: log,
 		Storage: stor, Notify: notifications, Metrics: collector,
 		WebRoot: webRoot, Insecure: httpsAddr == "", Installer: inst, Updates: upd, Backups: bk,
+		Apps: appStore,
 	})
 
 	go housekeeping(ctx, log, &auth.Sessions{DB: db})
