@@ -1406,6 +1406,320 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sharelinks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Links I've shared, or everyone's (administrators, scope=all) */
+        get: operations["listShareLinks"];
+        put?: never;
+        /**
+         * Make a link to a file or folder
+         * @description Allowed for administrators and for anyone who may change the file or
+         *     folder. The token is in the answer once; only its hash is stored.
+         */
+        post: operations["createShareLink"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sharelinks/{id}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Turn a link off for good (its creator or an administrator) */
+        post: operations["revokeShareLink"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/files/shares": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The shared folders (and Home) the person can open */
+        get: operations["listFileShares"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/files/list": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** A folder's files and folders (links, devices and hidden names aren't listed) */
+        get: operations["listFiles"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/files/stat": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One file or folder */
+        get: operations["statFile"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/files/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download a file (with Range support), or folders and several items as a zip
+         * @description One file is sent as is: Range / If-Range requests give 206 partial
+         *     content (video seeking, resumed downloads). With `inline=1` images,
+         *     video, audio, PDFs and text are shown in the browser (text, HTML and
+         *     SVG as plain text); everything else is always an attachment.
+         *     A folder, or several `path`s from the same share, is streamed as a
+         *     zip (stored, not compressed; a folder's contents are at the top of
+         *     the zip, several items each under its own name). Files that can't
+         *     be read are listed in "Files not included.txt" inside the zip.
+         */
+        get: operations["downloadFiles"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/files/upload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start a resumable upload of one file
+         * @description Makes an empty hidden temporary file next to `path`; send the bytes
+         *     with `PUT /files/upload/{id}`. The file only shows under its name
+         *     once complete, so a half-uploaded file never does. Uploads nobody
+         *     continues for a day are removed (as are all of them when hardyd
+         *     restarts: start again).
+         */
+        post: operations["startFileUpload"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/files/upload/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** How far an upload has got */
+        get: operations["getFileUpload"];
+        /**
+         * Send the next chunk (raw bytes) at offset; the chunk that completes the file puts it in place
+         * @description `offset` must be the upload's `received`; otherwise 409 with
+         *     `received` (carry on from there). Bytes past `size` are refused
+         *     (400). The completing chunk (for an empty file: one empty PUT)
+         *     renames the file into place and answers with its `entry`.
+         */
+        put: operations["sendFileChunk"];
+        post?: never;
+        /** Cancel an upload and throw away what arrived */
+        delete: operations["cancelFileUpload"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/files/mkdir": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Make a folder */
+        post: operations["makeFolder"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/files/rename": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Rename one file or folder in place */
+        post: operations["renameFile"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/files/move": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Move items into a folder (within or across shares)
+         * @description Within a share moves are renames, answered at once (200). Into
+         *     another share they're a copy and a delete: up to 5 files (none
+         *     over 256 MB) at once, anything more as a job (202) whose result is
+         *     the same `FileBulkResult`. A single item that fails answers with
+         *     its error.
+         */
+        post: operations["moveFiles"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/files/copy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Copy items into a folder (within or across shares)
+         * @description Up to 5 files (none over 256 MB) are copied at once (200);
+         *     folders and anything more run as a job (202) with progress, its
+         *     result the same `FileBulkResult`. Copies keep modification times.
+         *     A single item that fails answers with its error.
+         */
+        post: operations["copyFiles"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/files/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Delete items (to the folder's recycle bin when it has one)
+         * @description Up to 5 items at once (200), more as a job (202) whose result is the same `FileBulkResult`. `recycled`: everything deleted went to the recycle bin. Audited.
+         */
+        post: operations["deleteFiles"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/files/snapshots": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Older versions of a file or folder, from the automatic snapshots, newest first
+         * @description A file's versions that are the same as the current file or the next newer version are left out.
+         */
+        get: operations["listFileVersions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/files/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Copy an older version back next to the current one
+         * @description Copied back to its path if nothing is there now, otherwise to
+         *     "name (restored 2026-10-24).ext". Answers when done (200), or with
+         *     `background: true` runs as a job (202 JobAccepted, its result
+         *     this same object) with progress, for big folders. Audited.
+         */
+        post: operations["restoreFileVersion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/domain": {
         parameters: {
             query?: never;
@@ -2138,243 +2452,6 @@ export interface paths {
         put?: never;
         /** Restart the server (into the new system once installed) */
         post: operations["rebootInstaller"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/files/shares": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** The shared folders (and Home) the person can open */
-        get: operations["listFileShares"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/files/list": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** A folder's files and folders (links, devices and hidden names aren't listed) */
-        get: operations["listFiles"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/files/stat": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** One file or folder */
-        get: operations["statFile"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/files/download": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Download a file (with Range support), or folders and several items as a zip
-         * @description One file is sent as is: Range / If-Range requests give 206 partial
-         *     content (video seeking, resumed downloads). With `inline=1` images,
-         *     video, audio, PDFs and text are shown in the browser (text, HTML and
-         *     SVG as plain text); everything else is always an attachment.
-         *     A folder, or several `path`s from the same share, is streamed as a
-         *     zip (stored, not compressed; a folder's contents are at the top of
-         *     the zip, several items each under its own name). Files that can't
-         *     be read are listed in "Files not included.txt" inside the zip.
-         */
-        get: operations["downloadFiles"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/files/upload": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** How far a chunked upload has got */
-        get: operations["getFileUpload"];
-        /**
-         * Upload a file, whole or in chunks (resumable)
-         * @description The body is the file's bytes (any Content-Type). It's written to a
-         *     hidden temporary file next to `path` and renamed into place when
-         *     complete, so a half-uploaded file never shows.
-         *
-         *     Whole file: no Content-Range; answers 201.
-         *
-         *     In chunks (large files): send `Content-Range: bytes <start>-<end>/<total>`.
-         *     The first chunk (start 0, no uploadId) answers 200 with an
-         *     `uploadId`; send the next chunks with it, each starting where the
-         *     last ended (`received`). A chunk at the wrong offset answers 409
-         *     `wrong_offset` with the upload's status; `GET /files/upload` tells
-         *     where to go on after a dropped connection. The last chunk answers
-         *     201 with `done` and the new file's entry. Uploads nobody continues
-         *     for a day are removed (and on restarting hardyd: start again).
-         */
-        put: operations["uploadFile"];
-        post?: never;
-        /** Cancel a chunked upload and remove what was uploaded */
-        delete: operations["cancelFileUpload"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/files/mkdir": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Make a folder */
-        post: operations["makeFolder"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/files/rename": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Rename or move one file or folder
-         * @description Within a share it's done at once (200); the name must be free.
-         *     Into another share it's a copy and a delete, run as a job (202).
-         */
-        post: operations["renameFile"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/files/copy": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Copy or move items into a folder
-         * @description Up to 5 files (none over 256 MB) are copied at once (200 with
-         *     per-item results; a single failed item answers with its error),
-         *     and moves within one share are always done at once; anything else
-         *     runs as a job (202) with progress, its result the same
-         *     `FileBulkResult`. Copies keep modification times.
-         */
-        post: operations["copyFiles"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/files/delete": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Delete items (to the folder's recycle bin when it has one)
-         * @description Up to 5 items at once (200), more as a job (202). Audited.
-         */
-        post: operations["deleteFiles"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/files/versions": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Older versions of a file or folder, from the automatic snapshots, newest first
-         * @description A file's versions that are the same as the current file or the next newer version are left out.
-         */
-        get: operations["listFileVersions"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/files/restore": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Restore an older version next to the current one
-         * @description Copied back to its path if nothing is there now, otherwise to
-         *     "name (restored 2026-10-24).ext". A file is restored at once (200);
-         *     a folder or a file over 256 MB as a job (202). Audited.
-         */
-        post: operations["restoreFile"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3739,6 +3816,53 @@ export interface components {
             webPath?: string;
             folders?: components["schemas"]["CustomAppFolder"][];
         };
+        ShareLink: {
+            /** Format: int64 */
+            id: number;
+            /** @description Shared folder id, or "~home" */
+            share: string;
+            /** @description Inside the share; empty for all of it */
+            path: string;
+            /** @description The file or folder's name; empty for a whole share */
+            name: string;
+            dir: boolean;
+            /** Format: int64 */
+            createdById: number;
+            /** @description Who made it: alice or HOME\alice */
+            createdBy: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            expiresAt: string;
+            hasPassword: boolean;
+            allowUpload: boolean;
+            /** @description 0 for no limit */
+            maxDownloads: number;
+            downloadCount: number;
+            /** Format: date-time */
+            lastUsedAt: string | null;
+            revoked: boolean;
+            /** @enum {string} */
+            status: "active" | "expired" | "revoked" | "used-up";
+        };
+        ShareLinkRequest: {
+            share: string;
+            path: string;
+            /** @description Default 7 */
+            expiresInDays?: number;
+            /** @description At least 6 characters; leave out for none */
+            password?: string;
+            /** @description Visitors may add files (folders only) */
+            allowUpload?: boolean;
+            /** @description 0 for no limit */
+            maxDownloads?: number;
+        };
+        ShareLinkCreated: {
+            link: components["schemas"]["ShareLink"];
+            /** @description "/s/<token>" on this server; shown once */
+            url: string;
+            token: string;
+        };
         FileShare: {
             /** @description The shared folder's id, or "~home" */
             id: string;
@@ -3780,18 +3904,17 @@ export interface components {
             modified: string;
             dir: boolean;
         };
-        FileUploadStatus: {
-            uploadId: string;
+        FileUpload: {
+            id: string;
             share: string;
             path: string;
+            /** Format: int64 */
+            size: number;
             /**
              * Format: int64
-             * @description Bytes stored so far (the next chunk starts here)
+             * @description Bytes stored so far (the next chunk's offset)
              */
             received: number;
-            /** Format: int64 */
-            total: number;
-            done: boolean;
             entry?: components["schemas"]["FileEntry"];
         };
         FilePathRequest: {
@@ -3818,6 +3941,35 @@ export interface components {
         FileBulkResult: {
             done: boolean;
             results: components["schemas"]["FileItemResult"][];
+            /** @description Deletes: everything deleted went to the recycle bin */
+            recycled: boolean;
+        };
+        FileTransferRequest: {
+            share: string;
+            paths: string[];
+            /** @description Empty for the same share */
+            toShare: string;
+            /** @description The folder they go into; empty for the share's top */
+            toDir: string;
+            /**
+             * @description When a name is taken: rename (default: copies "photo (copy).jpg", moves "photo (2).jpg"), skip, replace (files replaced, folders merged) or fail
+             * @enum {string}
+             */
+            conflict?: "rename" | "skip" | "replace" | "fail";
+        };
+        FileUploadRequest: {
+            share: string;
+            /** @description Where the file goes */
+            path: string;
+            /** Format: int64 */
+            size: number;
+            /** @description Replace a file that's already there (never a folder) */
+            overwrite?: boolean;
+            /**
+             * Format: int64
+             * @description The file's modification time in ms since 1970 (File.lastModified)
+             */
+            modified?: number;
         };
     };
     responses: {
@@ -6184,6 +6336,553 @@ export interface operations {
             404: components["responses"]["NotFound"];
         };
     };
+    listShareLinks: {
+        parameters: {
+            query?: {
+                scope?: "mine" | "all";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Links, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        links: components["schemas"]["ShareLink"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    createShareLink: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ShareLinkRequest"];
+            };
+        };
+        responses: {
+            /** @description The new link */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShareLinkCreated"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    revokeShareLink: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The link, now revoked */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShareLink"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listFileShares: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Home first, then by name */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        shares: components["schemas"]["FileShare"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    listFiles: {
+        parameters: {
+            query: {
+                share: string;
+                path?: string;
+                /** @description List the folder as it was in this automatic snapshot (from /files/versions) */
+                snapshot?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The folder and its entries, folders first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileListing"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    statFile: {
+        parameters: {
+            query: {
+                share: string;
+                path?: string;
+                snapshot?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The entry */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileEntry"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    downloadFiles: {
+        parameters: {
+            query: {
+                share: string;
+                /** @description Repeat for several items */
+                path?: string[];
+                /** @description Download an older version */
+                snapshot?: string;
+                /** @description 1: show in the browser when the type is safe to */
+                inline?: "1";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The file, or a zip */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": string;
+                    "application/zip": string;
+                };
+            };
+            /** @description Part of the file (Range) */
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    startFileUpload: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FileUploadRequest"];
+            };
+        };
+        responses: {
+            /** @description The upload, to send chunks to */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileUpload"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    getFileUpload: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The upload */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileUpload"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    sendFileChunk: {
+        parameters: {
+            query: {
+                offset: number;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/octet-stream": string;
+            };
+        };
+        responses: {
+            /** @description How much has arrived (and the file once complete) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileUpload"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Out of step (wrong_offset), another chunk is being written (busy), or the name was taken meanwhile (exists) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        code: string;
+                        message: string;
+                        /** Format: int64 */
+                        received?: number;
+                        upload?: components["schemas"]["FileUpload"];
+                    };
+                };
+            };
+            /** @description The shared folder is full */
+            507: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    cancelFileUpload: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Cancelled */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    makeFolder: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FilePathRequest"];
+            };
+        };
+        responses: {
+            /** @description The new folder */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileEntry"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    renameFile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    share: string;
+                    path: string;
+                    /** @description The new name (no slashes); it must be free */
+                    name: string;
+                };
+            };
+        };
+        responses: {
+            /** @description The renamed entry */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileEntry"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    moveFiles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FileTransferRequest"];
+            };
+        };
+        responses: {
+            /** @description Done */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileBulkResult"];
+                };
+            };
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    copyFiles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FileTransferRequest"];
+            };
+        };
+        responses: {
+            /** @description Done */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileBulkResult"];
+                };
+            };
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    deleteFiles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    share: string;
+                    paths: string[];
+                    /** @description Skip the recycle bin */
+                    permanent?: boolean;
+                };
+            };
+        };
+        responses: {
+            /** @description Done */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileBulkResult"];
+                };
+            };
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listFileVersions: {
+        parameters: {
+            query: {
+                share: string;
+                path: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The versions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        versions: components["schemas"]["FileVersion"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    restoreFileVersion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    share: string;
+                    path: string;
+                    snapshot: string;
+                    background?: boolean;
+                };
+            };
+        };
+        responses: {
+            /** @description Where it was written */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FilePathResult"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
     getDomain: {
         parameters: {
             query?: never;
@@ -7372,446 +8071,6 @@ export interface operations {
                 content?: never;
             };
             401: components["responses"]["Unauthorized"];
-        };
-    };
-    listFileShares: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Home first, then by name */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        shares: components["schemas"]["FileShare"][];
-                    };
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-        };
-    };
-    listFiles: {
-        parameters: {
-            query: {
-                share: string;
-                path?: string;
-                /** @description List the folder as it was in this automatic snapshot (from /files/versions) */
-                snapshot?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The folder and its entries, folders first */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["FileListing"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-        };
-    };
-    statFile: {
-        parameters: {
-            query: {
-                share: string;
-                path?: string;
-                snapshot?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The entry */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["FileEntry"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-        };
-    };
-    downloadFiles: {
-        parameters: {
-            query: {
-                share: string;
-                /** @description Repeat for several items */
-                path?: string[];
-                /** @description Download an older version */
-                snapshot?: string;
-                /** @description 1: show in the browser when the type is safe to */
-                inline?: "1";
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The file, or a zip */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/octet-stream": string;
-                    "application/zip": string;
-                };
-            };
-            /** @description Part of the file (Range) */
-            206: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-        };
-    };
-    getFileUpload: {
-        parameters: {
-            query: {
-                uploadId: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The upload */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["FileUploadStatus"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-        };
-    };
-    uploadFile: {
-        parameters: {
-            query: {
-                share: string;
-                /** @description Where the file goes */
-                path: string;
-                /** @description 1: replace a file that's already there (never a folder) */
-                overwrite?: "1" | "true";
-                /** @description The file's modification time: milliseconds since 1970 (File.lastModified) or RFC 3339 */
-                modified?: string;
-                /** @description Continue this chunked upload */
-                uploadId?: string;
-            };
-            header?: {
-                "Content-Range"?: string;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/octet-stream": string;
-            };
-        };
-        responses: {
-            /** @description Chunk stored; send the next one */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["FileUploadStatus"];
-                };
-            };
-            /** @description Upload complete */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["FileUploadStatus"];
-                };
-            };
-            400: components["responses"]["Invalid"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            /** @description The name is taken (exists), another chunk is being written (busy) or the chunk starts at the wrong offset (wrong_offset, with `upload`) */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        code: string;
-                        message: string;
-                        upload?: components["schemas"]["FileUploadStatus"];
-                    };
-                };
-            };
-            /** @description The shared folder is full */
-            507: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    cancelFileUpload: {
-        parameters: {
-            query: {
-                uploadId: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Cancelled */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-        };
-    };
-    makeFolder: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["FilePathRequest"];
-            };
-        };
-        responses: {
-            /** @description The new folder */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["FileEntry"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-        };
-    };
-    renameFile: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": {
-                    share: string;
-                    path: string;
-                    /** @description Default the same share */
-                    toShare?: string;
-                    /** @description The new path */
-                    to: string;
-                };
-            };
-        };
-        responses: {
-            /** @description Renamed */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["FilePathResult"];
-                };
-            };
-            202: components["responses"]["JobAccepted"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-        };
-    };
-    copyFiles: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": {
-                    share: string;
-                    paths: string[];
-                    /** @description Default the same share */
-                    toShare?: string;
-                    /** @description The folder they go into ("" = the top) */
-                    toFolder: string;
-                    move?: boolean;
-                    /**
-                     * @description When a name is taken: rename (default; "photo (copy).jpg", moves "photo (2).jpg"), skip, replace (files replaced, folders merged) or fail
-                     * @enum {string}
-                     */
-                    conflict?: "rename" | "skip" | "replace" | "fail";
-                };
-            };
-        };
-        responses: {
-            /** @description Done */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["FileBulkResult"];
-                };
-            };
-            202: components["responses"]["JobAccepted"];
-            400: components["responses"]["Invalid"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-        };
-    };
-    deleteFiles: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": {
-                    share: string;
-                    paths: string[];
-                    /** @description Skip the recycle bin */
-                    permanent?: boolean;
-                };
-            };
-        };
-        responses: {
-            /** @description Done */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["FileBulkResult"];
-                };
-            };
-            202: components["responses"]["JobAccepted"];
-            400: components["responses"]["Invalid"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-        };
-    };
-    listFileVersions: {
-        parameters: {
-            query: {
-                share: string;
-                path: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The versions */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        versions: components["schemas"]["FileVersion"][];
-                    };
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-        };
-    };
-    restoreFile: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": {
-                    share: string;
-                    path: string;
-                    snapshot: string;
-                };
-            };
-        };
-        responses: {
-            /** @description Where it was restored to */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["FilePathResult"];
-                };
-            };
-            202: components["responses"]["JobAccepted"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
         };
     };
 }

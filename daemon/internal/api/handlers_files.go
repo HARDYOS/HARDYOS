@@ -44,20 +44,26 @@ const syncItems = 5
 // maxItems bounds one bulk request.
 const maxItems = 1000
 
+// files is Config.Files as the File Manager uses it (fileRoutes is only
+// registered when it is one).
+func (s *Server) files() files.Service { return s.cfg.Files.(files.Service) }
+
 func (s *Server) fileRoutes() {
 	m := s.mux
 	m.Handle("GET /api/v1/files/shares", s.authed(s.handleFilesShares))
 	m.Handle("GET /api/v1/files/list", s.authed(s.handleFilesList))
 	m.Handle("GET /api/v1/files/stat", s.authed(s.handleFilesStat))
 	m.Handle("GET /api/v1/files/download", s.authed(s.handleFilesDownload))
-	m.Handle("PUT /api/v1/files/upload", s.authed(s.handleFilesUpload))
-	m.Handle("GET /api/v1/files/upload", s.authed(s.handleFilesUploadStatus))
-	m.Handle("DELETE /api/v1/files/upload", s.authed(s.handleFilesUploadCancel))
+	m.Handle("POST /api/v1/files/upload", s.authed(s.handleFilesUploadStart))
+	m.Handle("PUT /api/v1/files/upload/{id}", s.authed(s.handleFilesUploadChunk))
+	m.Handle("GET /api/v1/files/upload/{id}", s.authed(s.handleFilesUploadStatus))
+	m.Handle("DELETE /api/v1/files/upload/{id}", s.authed(s.handleFilesUploadCancel))
 	m.Handle("POST /api/v1/files/mkdir", s.authed(s.handleFilesMkdir))
 	m.Handle("POST /api/v1/files/rename", s.authed(s.handleFilesRename))
 	m.Handle("POST /api/v1/files/copy", s.authed(s.handleFilesCopy))
+	m.Handle("POST /api/v1/files/move", s.authed(s.handleFilesMove))
 	m.Handle("POST /api/v1/files/delete", s.authed(s.handleFilesDelete))
-	m.Handle("GET /api/v1/files/versions", s.authed(s.handleFilesVersions))
+	m.Handle("GET /api/v1/files/snapshots", s.authed(s.handleFilesVersions))
 	m.Handle("POST /api/v1/files/restore", s.authed(s.handleFilesRestore))
 }
 
@@ -109,7 +115,7 @@ func (s *Server) handleFilesShares(w http.ResponseWriter, r *http.Request, u *au
 	if !ok {
 		return
 	}
-	l, err := s.cfg.Files.Shares(r.Context(), who)
+	l, err := s.files().Shares(r.Context(), who)
 	if err != nil {
 		s.writeFilesError(w, err)
 		return
@@ -126,7 +132,7 @@ func (s *Server) handleFilesList(w http.ResponseWriter, r *http.Request, u *auth
 		return
 	}
 	q := r.URL.Query()
-	l, err := s.cfg.Files.ListDir(r.Context(), who, q.Get("share"), q.Get("path"), q.Get("snapshot"))
+	l, err := s.files().ListDir(r.Context(), who, q.Get("share"), q.Get("path"), q.Get("snapshot"))
 	if err != nil {
 		s.writeFilesError(w, err)
 		return
@@ -140,7 +146,7 @@ func (s *Server) handleFilesStat(w http.ResponseWriter, r *http.Request, u *auth
 		return
 	}
 	q := r.URL.Query()
-	e, err := s.cfg.Files.StatVersion(r.Context(), who, q.Get("share"), q.Get("path"), q.Get("snapshot"))
+	e, err := s.files().StatVersion(r.Context(), who, q.Get("share"), q.Get("path"), q.Get("snapshot"))
 	if err != nil {
 		s.writeFilesError(w, err)
 		return
@@ -159,7 +165,7 @@ func (s *Server) handleFilesVersions(w http.ResponseWriter, r *http.Request, u *
 		return
 	}
 	q := r.URL.Query()
-	l, err := s.cfg.Files.Versions(r.Context(), who, q.Get("share"), q.Get("path"))
+	l, err := s.files().Versions(r.Context(), who, q.Get("share"), q.Get("path"))
 	if err != nil {
 		s.writeFilesError(w, err)
 		return
@@ -233,7 +239,7 @@ func (s *Server) handleFilesDownload(w http.ResponseWriter, r *http.Request, u *
 		return
 	}
 	ctx := r.Context()
-	fs := s.cfg.Files
+	fs := s.files()
 	if len(paths) == 1 {
 		e, err := fs.StatVersion(ctx, who, share, paths[0], snap)
 		if err != nil {
@@ -400,10 +406,10 @@ func (z *zipper) add(ctx context.Context, p string, e *files.Entry, name string,
 
 // ---- uploads ----------------------------------------------------------------
 
-// Uploads in progress: one temporary file each, next to where the file
-// goes, named .hardyos-upload-<id> (hidden). A chunk (PUT with
-// Content-Range) is written at its offset; the last one renames the
-// temporary file into place.
+// Uploads in progress: POST /files/upload starts one (an empty temporary
+// file next to where the file goes, named .hardyos-upload-<id>, hidden);
+// each PUT /files/upload/{id}?offset=N appends the next chunk; the chunk
+// that completes it renames the temporary file into place.
 type uploads struct {
 	mu sync.Mutex
 	m  map[string]*upload
@@ -411,12 +417,11 @@ type uploads struct {
 
 type upload struct {
 	ID        string
-	Principal string
 	Who       files.Who
 	Share     string
 	Path      string // where the file goes
 	Tmp       string // its temporary path
-	Total     int64
+	Size      int64
 	Received  int64
 	Overwrite bool
 	Modified  time.Time
@@ -430,19 +435,28 @@ const (
 	maxUploadsEach = 50
 )
 
-// FilesUploadStatus is an upload in progress (or just finished: Entry set).
-type FilesUploadStatus struct {
-	UploadID string       `json:"uploadId"`
+// FilesUploadRequest starts an upload.
+type FilesUploadRequest struct {
+	Share     string `json:"share"`
+	Path      string `json:"path"` // where the file goes, name included
+	Size      int64  `json:"size"`
+	Overwrite bool   `json:"overwrite,omitempty"`
+	// Modified: the file's modification time (File.lastModified, ms since 1970).
+	Modified int64 `json:"modified,omitempty"`
+}
+
+// FilesUpload is an upload in progress; Entry is set once it's complete.
+type FilesUpload struct {
+	ID       string       `json:"id"`
 	Share    string       `json:"share"`
 	Path     string       `json:"path"`
+	Size     int64        `json:"size"`
 	Received int64        `json:"received"`
-	Total    int64        `json:"total"`
-	Done     bool         `json:"done"`
 	Entry    *files.Entry `json:"entry,omitempty"`
 }
 
-func (up *upload) status() FilesUploadStatus {
-	return FilesUploadStatus{UploadID: up.ID, Share: up.Share, Path: up.Path, Received: up.Received, Total: up.Total}
+func (up *upload) status() FilesUpload {
+	return FilesUpload{ID: up.ID, Share: up.Share, Path: up.Path, Size: up.Size, Received: up.Received}
 }
 
 func newUploadID() string {
@@ -451,7 +465,7 @@ func newUploadID() string {
 	return hex.EncodeToString(b)
 }
 
-// sweep drops uploads nobody has continued for a day (and their files).
+// sweepUploads drops uploads nobody has continued for a day (and their files).
 func (s *Server) sweepUploads() {
 	s.uploads.mu.Lock()
 	var gone []*upload
@@ -463,264 +477,211 @@ func (s *Server) sweepUploads() {
 	}
 	s.uploads.mu.Unlock()
 	for _, up := range gone {
-		go func(up *upload) {
-			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-			defer cancel()
-			_, _ = s.cfg.Files.DeleteItem(ctx, up.Who, up.Share, up.Tmp, true)
-		}(up)
+		go s.removeUploadFile(up)
 	}
 }
 
-// contentRange parses "bytes 0-1048575/52428800".
-func contentRange(h string) (start, end, total int64, ok bool) {
-	rest, found := strings.CutPrefix(strings.TrimSpace(h), "bytes ")
-	if !found {
-		return 0, 0, 0, false
-	}
-	rng, tot, found := strings.Cut(rest, "/")
-	if !found {
-		return 0, 0, 0, false
-	}
-	a, b, found := strings.Cut(rng, "-")
-	if !found {
-		return 0, 0, 0, false
-	}
-	var err1, err2, err3 error
-	start, err1 = strconv.ParseInt(a, 10, 64)
-	end, err2 = strconv.ParseInt(b, 10, 64)
-	total, err3 = strconv.ParseInt(tot, 10, 64)
-	if err1 != nil || err2 != nil || err3 != nil || start < 0 || end < start || total <= end {
-		return 0, 0, 0, false
-	}
-	return start, end, total, true
+func (s *Server) removeUploadFile(up *upload) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	_, _ = s.files().DeleteItem(ctx, up.Who, up.Share, up.Tmp, true)
 }
 
-func parseModified(v string) (time.Time, bool) {
-	if v == "" {
-		return time.Time{}, true
-	}
-	if ms, err := strconv.ParseInt(v, 10, 64); err == nil {
-		return time.UnixMilli(ms).UTC(), true
-	}
-	t, err := time.Parse(time.RFC3339Nano, v)
-	return t.UTC(), err == nil
-}
-
-func (s *Server) handleFilesUpload(w http.ResponseWriter, r *http.Request, u *auth.User) {
+func (s *Server) handleFilesUploadStart(w http.ResponseWriter, r *http.Request, u *auth.User) {
 	who, ok := s.filesWho(w, u)
 	if !ok {
 		return
 	}
 	s.sweepUploads()
-	q := r.URL.Query()
-	ctx := r.Context()
-	fs := s.cfg.Files
-	share, p := q.Get("share"), strings.Trim(q.Get("path"), "/")
-	overwrite := q.Get("overwrite") == "1" || q.Get("overwrite") == "true"
-	modified, ok := parseModified(q.Get("modified"))
-	if !ok {
-		writeError(w, http.StatusBadRequest, "invalid", "modified must be milliseconds since 1970 or an RFC 3339 time")
+	var req FilesUploadRequest
+	if !decodeJSON(w, r, &req) {
 		return
 	}
+	p := strings.Trim(req.Path, "/")
 	dir, name := path.Split(p)
 	if err := fileworker.CleanName(name); err != nil || name == "" {
 		writeError(w, http.StatusBadRequest, "invalid", "give the file a valid name")
 		return
 	}
-	var start, end, total int64
-	chunked := r.Header.Get("Content-Range") != ""
-	if chunked {
-		var ok bool
-		if start, end, total, ok = contentRange(r.Header.Get("Content-Range")); !ok {
-			writeError(w, http.StatusBadRequest, "invalid", "Content-Range must look like bytes 0-1048575/52428800")
-			return
-		}
-		if r.ContentLength >= 0 && r.ContentLength != end-start+1 {
-			writeError(w, http.StatusBadRequest, "invalid", "the chunk's length doesn't match its Content-Range")
-			return
-		}
+	if req.Size < 0 {
+		writeError(w, http.StatusBadRequest, "invalid", "the size can't be negative")
+		return
 	}
-
-	var up *upload
-	if id := q.Get("uploadId"); id != "" {
-		s.uploads.mu.Lock()
-		up = s.uploads.m[id]
-		switch {
-		case up == nil || !strings.EqualFold(up.Principal, who.Principal):
-			s.uploads.mu.Unlock()
-			writeError(w, http.StatusNotFound, "not_found", "that upload isn't in progress any more; start it again")
-			return
-		case up.Share != share || up.Path != p:
-			s.uploads.mu.Unlock()
-			writeError(w, http.StatusBadRequest, "invalid", "that upload is for another file")
-			return
-		case up.busy:
-			s.uploads.mu.Unlock()
-			writeError(w, http.StatusConflict, "busy", "another part of this upload is still being written")
-			return
-		case !chunked || total != up.Total:
-			s.uploads.mu.Unlock()
-			writeError(w, http.StatusBadRequest, "invalid", "continue an upload with Content-Range chunks of the same total size")
-			return
-		case start != up.Received:
-			st := up.status()
-			s.uploads.mu.Unlock()
-			writeJSON(w, http.StatusConflict, map[string]any{"code": "wrong_offset", "message": fmt.Sprintf("the next part starts at byte %d", st.Received), "upload": st})
+	ctx := r.Context()
+	fs := s.files()
+	// Fail early if the name is taken (the final rename checks again).
+	if e, err := fs.Stat(ctx, who, req.Share, p); err == nil {
+		if e.Dir || !req.Overwrite {
+			writeError(w, http.StatusConflict, "exists", name+" is already there")
 			return
 		}
-		up.busy, up.touched = true, time.Now()
-		s.uploads.mu.Unlock()
-	} else {
-		if chunked && start != 0 {
-			writeError(w, http.StatusBadRequest, "invalid", "a new upload starts at byte 0; pass uploadId to continue one")
-			return
-		}
-		// Fail early if the name is taken (the final rename checks again).
-		if e, err := fs.Stat(ctx, who, share, p); err == nil {
-			if e.Dir || !overwrite {
-				writeError(w, http.StatusConflict, "exists", name+" is already there")
-				return
-			}
-		} else if !errors.Is(err, files.ErrNotFound) {
-			s.writeFilesError(w, err)
-			return
-		}
-		up = &upload{ID: newUploadID(), Principal: who.Principal, Who: who, Share: share, Path: p,
-			Total: total, Overwrite: overwrite, Modified: modified, touched: time.Now(), busy: true}
-		up.Tmp = dir + fileworker.UploadPrefix + up.ID
-		if chunked {
-			s.uploads.mu.Lock()
-			n := 0
-			for _, o := range s.uploads.m {
-				if strings.EqualFold(o.Principal, who.Principal) {
-					n++
-				}
-			}
-			if n >= maxUploadsEach {
-				s.uploads.mu.Unlock()
-				writeError(w, http.StatusTooManyRequests, "too_many", "too many uploads at once; finish or cancel some")
-				return
-			}
-			if s.uploads.m == nil {
-				s.uploads.m = map[string]*upload{}
-			}
-			s.uploads.m[up.ID] = up
-			s.uploads.mu.Unlock()
-		}
-		f, err := fs.Create(ctx, who, share, up.Tmp, false)
-		if err != nil {
-			s.dropUpload(up, false)
-			s.writeFilesError(w, err)
-			return
-		}
-		f.Close()
-	}
-	release := func() {
-		s.uploads.mu.Lock()
-		up.busy, up.touched = false, time.Now()
-		s.uploads.mu.Unlock()
-	}
-
-	f, _, err := fs.OpenWrite(ctx, who, share, up.Tmp)
-	if err != nil {
-		release()
+	} else if !errors.Is(err, files.ErrNotFound) {
 		s.writeFilesError(w, err)
+		return
+	}
+	up := &upload{ID: newUploadID(), Who: who, Share: req.Share, Path: p, Size: req.Size, Overwrite: req.Overwrite, touched: time.Now()}
+	if req.Modified > 0 {
+		up.Modified = time.UnixMilli(req.Modified).UTC()
+	}
+	up.Tmp = dir + fileworker.UploadPrefix + up.ID
+	s.uploads.mu.Lock()
+	n := 0
+	for _, o := range s.uploads.m {
+		if strings.EqualFold(o.Who.Principal, who.Principal) {
+			n++
+		}
+	}
+	if n >= maxUploadsEach {
+		s.uploads.mu.Unlock()
+		writeError(w, http.StatusTooManyRequests, "too_many", "too many uploads at once; finish or cancel some")
+		return
+	}
+	s.uploads.mu.Unlock()
+	f, err := fs.Create(ctx, who, req.Share, up.Tmp, false)
+	if err != nil {
+		s.writeFilesError(w, err)
+		return
+	}
+	f.Close()
+	s.uploads.mu.Lock()
+	if s.uploads.m == nil {
+		s.uploads.m = map[string]*upload{}
+	}
+	s.uploads.m[up.ID] = up
+	s.uploads.mu.Unlock()
+	writeJSON(w, http.StatusCreated, up.status())
+}
+
+// claimUpload finds the person's upload and marks it busy (one chunk at a
+// time); it answers itself when it can't.
+func (s *Server) claimUpload(w http.ResponseWriter, r *http.Request, who files.Who) *upload {
+	s.uploads.mu.Lock()
+	defer s.uploads.mu.Unlock()
+	up := s.uploads.m[r.PathValue("id")]
+	if up == nil || !strings.EqualFold(up.Who.Principal, who.Principal) {
+		writeError(w, http.StatusNotFound, "not_found", "that upload isn't in progress any more; start it again")
+		return nil
+	}
+	if up.busy {
+		writeJSON(w, http.StatusConflict, map[string]any{"code": "busy", "message": "another part of this upload is still being written", "received": up.Received})
+		return nil
+	}
+	up.busy, up.touched = true, time.Now()
+	return up
+}
+
+func (s *Server) releaseUpload(up *upload) {
+	s.uploads.mu.Lock()
+	up.busy, up.touched = false, time.Now()
+	s.uploads.mu.Unlock()
+}
+
+func (s *Server) handleFilesUploadChunk(w http.ResponseWriter, r *http.Request, u *auth.User) {
+	who, ok := s.filesWho(w, u)
+	if !ok {
+		return
+	}
+	offset, err := strconv.ParseInt(r.URL.Query().Get("offset"), 10, 64)
+	if err != nil || offset < 0 {
+		writeError(w, http.StatusBadRequest, "invalid", "offset must be the byte the chunk starts at")
+		return
+	}
+	up := s.claimUpload(w, r, who)
+	if up == nil {
+		return
+	}
+	if offset != up.Received {
+		st := up.status()
+		s.releaseUpload(up)
+		writeJSON(w, http.StatusConflict, map[string]any{"code": "wrong_offset", "message": fmt.Sprintf("the next part starts at byte %d", st.Received),
+			"received": st.Received, "upload": st})
+		return
+	}
+	ctx := r.Context()
+	fs := s.files()
+	left := up.Size - offset
+	if r.ContentLength > left {
+		s.releaseUpload(up)
+		writeError(w, http.StatusBadRequest, "too_big", "that's more than the file's size")
 		return
 	}
 	var n int64
-	if chunked {
-		if _, err = f.Seek(start, io.SeekStart); err == nil {
-			n, err = io.CopyN(f, r.Body, end-start+1)
+	if left > 0 {
+		f, _, err := fs.OpenWrite(ctx, who, up.Share, up.Tmp)
+		if err != nil {
+			s.releaseUpload(up)
+			s.writeFilesError(w, err)
+			return
 		}
-	} else {
-		n, err = io.Copy(f, r.Body)
-	}
-	if err == nil {
-		if !chunked || start+n == up.Total {
+		if _, err = f.Seek(offset, io.SeekStart); err == nil {
+			// One byte more than is left tells a too-long body apart.
+			n, err = io.Copy(f, io.LimitReader(r.Body, left+1))
+		}
+		if err == nil && n > left {
+			_ = f.Truncate(up.Size)
+			n, err = left, errTooBig
+		}
+		if err == nil && offset+n == up.Size {
 			err = f.Sync()
 		}
-	}
-	cerr := f.Close()
-	if err == nil {
-		err = cerr
-	}
-	if err != nil {
-		if !chunked {
-			s.dropUpload(up, true)
-		} else {
-			// Keep what was written: the client asks where to go on from.
-			s.uploads.mu.Lock()
-			up.Received = start + n
-			s.uploads.mu.Unlock()
-			release()
+		if cerr := f.Close(); err == nil {
+			err = cerr
 		}
-		if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
-			writeError(w, http.StatusBadRequest, "incomplete", "the upload was cut off; continue it from where it stopped")
-			return
-		}
-		s.writeFilesError(w, err)
-		return
-	}
-	if chunked {
 		s.uploads.mu.Lock()
-		up.Received = end + 1
+		up.Received = offset + n // what was written stays: go on from there
 		s.uploads.mu.Unlock()
-		if up.Received < up.Total {
-			release()
-			writeJSON(w, http.StatusOK, up.status())
+		if err != nil {
+			s.releaseUpload(up)
+			if errors.Is(err, errTooBig) {
+				writeError(w, http.StatusBadRequest, "too_big", "that's more than the file's size")
+				return
+			}
+			s.writeFilesError(w, err)
 			return
 		}
-	} else {
-		up.Total, up.Received = n, n
+	}
+	if up.Received < up.Size {
+		st := up.status()
+		s.releaseUpload(up)
+		writeJSON(w, http.StatusOK, st)
+		return
 	}
 
 	// Complete: put it in place.
 	if up.Overwrite {
-		err = fs.Replace(ctx, who, share, up.Tmp, up.Path)
+		err = fs.Replace(ctx, who, up.Share, up.Tmp, up.Path)
 	} else {
-		err = fs.Rename(ctx, who, share, up.Tmp, share, up.Path)
+		err = fs.Rename(ctx, who, up.Share, up.Tmp, up.Share, up.Path)
 	}
 	if err != nil {
-		s.dropUpload(up, true)
+		s.dropUpload(up)
 		s.writeFilesError(w, err)
 		return
 	}
-	s.dropUpload(up, false)
-	if !up.Modified.IsZero() {
-		if err := fs.SetModified(ctx, who, share, up.Path, up.Modified); err != nil {
-			s.log.Warn("upload: setting the modified time", "err", err)
-		}
-	}
-	s.record(r, u, "files.upload", share+":/"+up.Path, audit.Success, fmt.Sprintf("%d bytes", up.Total))
-	st := up.status()
-	st.Done = true
-	if e, err := fs.Stat(ctx, who, share, up.Path); err == nil {
-		st.Entry = e
-	}
-	writeJSON(w, http.StatusCreated, st)
-}
-
-// dropUpload forgets an upload and, if removeFile, deletes its temporary file.
-func (s *Server) dropUpload(up *upload, removeFile bool) {
 	s.uploads.mu.Lock()
 	delete(s.uploads.m, up.ID)
 	s.uploads.mu.Unlock()
-	if removeFile {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		defer cancel()
-		_, _ = s.cfg.Files.DeleteItem(ctx, up.Who, up.Share, up.Tmp, true)
+	if !up.Modified.IsZero() {
+		if err := fs.SetModified(ctx, who, up.Share, up.Path, up.Modified); err != nil {
+			s.log.Warn("upload: setting the modified time", "err", err)
+		}
 	}
+	s.record(r, u, "files.upload", up.Share+":/"+up.Path, audit.Success, fmt.Sprintf("%d bytes", up.Size))
+	st := up.status()
+	if e, err := fs.Stat(ctx, who, up.Share, up.Path); err == nil {
+		st.Entry = e
+	}
+	writeJSON(w, http.StatusOK, st)
 }
 
-func (s *Server) findUpload(w http.ResponseWriter, r *http.Request, who files.Who) *upload {
+var errTooBig = errors.New("more than the file's size")
+
+// dropUpload forgets an upload and deletes its temporary file.
+func (s *Server) dropUpload(up *upload) {
 	s.uploads.mu.Lock()
-	defer s.uploads.mu.Unlock()
-	up := s.uploads.m[r.URL.Query().Get("uploadId")]
-	if up == nil || !strings.EqualFold(up.Principal, who.Principal) {
-		writeError(w, http.StatusNotFound, "not_found", "that upload isn't in progress any more; start it again")
-		return nil
-	}
-	return up
+	delete(s.uploads.m, up.ID)
+	s.uploads.mu.Unlock()
+	s.removeUploadFile(up)
 }
 
 func (s *Server) handleFilesUploadStatus(w http.ResponseWriter, r *http.Request, u *auth.User) {
@@ -728,12 +689,14 @@ func (s *Server) handleFilesUploadStatus(w http.ResponseWriter, r *http.Request,
 	if !ok {
 		return
 	}
-	if up := s.findUpload(w, r, who); up != nil {
-		s.uploads.mu.Lock()
-		st := up.status()
-		s.uploads.mu.Unlock()
-		writeJSON(w, http.StatusOK, st)
+	s.uploads.mu.Lock()
+	defer s.uploads.mu.Unlock()
+	up := s.uploads.m[r.PathValue("id")]
+	if up == nil || !strings.EqualFold(up.Who.Principal, who.Principal) {
+		writeError(w, http.StatusNotFound, "not_found", "that upload isn't in progress any more; start it again")
+		return
 	}
+	writeJSON(w, http.StatusOK, up.status())
 }
 
 func (s *Server) handleFilesUploadCancel(w http.ResponseWriter, r *http.Request, u *auth.User) {
@@ -741,18 +704,11 @@ func (s *Server) handleFilesUploadCancel(w http.ResponseWriter, r *http.Request,
 	if !ok {
 		return
 	}
-	up := s.findUpload(w, r, who)
+	up := s.claimUpload(w, r, who)
 	if up == nil {
 		return
 	}
-	s.uploads.mu.Lock()
-	busy := up.busy
-	s.uploads.mu.Unlock()
-	if busy {
-		writeError(w, http.StatusConflict, "busy", "a part of this upload is still being written")
-		return
-	}
-	s.dropUpload(up, true)
+	s.dropUpload(up)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -773,11 +729,11 @@ func (s *Server) handleFilesMkdir(w http.ResponseWriter, r *http.Request, u *aut
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := s.cfg.Files.Mkdir(r.Context(), who, req.Share, req.Path); err != nil {
+	if err := s.files().Mkdir(r.Context(), who, req.Share, req.Path); err != nil {
 		s.writeFilesError(w, err)
 		return
 	}
-	e, err := s.cfg.Files.Stat(r.Context(), who, req.Share, req.Path)
+	e, err := s.files().Stat(r.Context(), who, req.Share, req.Path)
 	if err != nil {
 		s.writeFilesError(w, err)
 		return
@@ -785,13 +741,11 @@ func (s *Server) handleFilesMkdir(w http.ResponseWriter, r *http.Request, u *aut
 	writeJSON(w, http.StatusCreated, e)
 }
 
-// FilesRenameRequest renames or moves one item: To is its new path, in
-// ToShare (default: the same share).
+// FilesRenameRequest renames one item in place.
 type FilesRenameRequest struct {
-	Share   string `json:"share"`
-	Path    string `json:"path"`
-	ToShare string `json:"toShare,omitempty"`
-	To      string `json:"to"`
+	Share string `json:"share"`
+	Path  string `json:"path"`
+	Name  string `json:"name"` // the new name, no slashes
 }
 
 // FilesPathResponse says where something ended up.
@@ -809,37 +763,38 @@ func (s *Server) handleFilesRename(w http.ResponseWriter, r *http.Request, u *au
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.ToShare == "" {
-		req.ToShare = req.Share
-	}
-	if req.ToShare != req.Share {
-		// Between shared folders it's a copy: a job.
-		e, err := s.cfg.Files.Stat(r.Context(), who, req.Share, req.Path)
-		if err != nil {
-			s.writeFilesError(w, err)
-			return
-		}
-		folder, name := path.Split(strings.Trim(req.To, "/"))
-		p := filesBulk{Who: who, Share: req.Share, Paths: []string{req.Path}, ToShare: req.ToShare, ToFolder: strings.Trim(folder, "/"),
-			Names: []string{name}, Move: true, Conflict: files.ConflictFail}
-		s.submit(w, r, u, JobKindFilesMove, "Move "+e.Name, p, "files.move", req.Share+":/"+strings.Trim(req.Path, "/"), nil)
+	if err := fileworker.CleanName(req.Name); err != nil || req.Name == "" {
+		writeError(w, http.StatusBadRequest, "invalid", "give it a valid name (no slashes)")
 		return
 	}
-	if err := s.cfg.Files.Rename(r.Context(), who, req.Share, req.Path, req.ToShare, req.To); err != nil {
+	from := strings.Trim(req.Path, "/")
+	if from == "" {
+		writeError(w, http.StatusConflict, "not_allowed", "the top of a shared folder can't be renamed")
+		return
+	}
+	dir, _ := path.Split(from)
+	to := dir + req.Name
+	ctx := r.Context()
+	if err := s.files().Rename(ctx, who, req.Share, from, req.Share, to); err != nil {
 		s.writeFilesError(w, err)
 		return
 	}
-	s.record(r, u, "files.rename", req.Share+":/"+strings.Trim(req.Path, "/"), audit.Success, "to /"+strings.Trim(req.To, "/"))
-	writeJSON(w, http.StatusOK, FilesPathResponse{Share: req.ToShare, Path: strings.Trim(req.To, "/")})
+	s.record(r, u, "files.rename", req.Share+":/"+from, audit.Success, "to "+req.Name)
+	e, err := s.files().Stat(ctx, who, req.Share, to)
+	if err != nil {
+		s.writeFilesError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, e)
 }
 
-// FilesCopyRequest copies (or moves) items into a folder.
+// FilesCopyRequest copies or moves items into a folder.
 type FilesCopyRequest struct {
-	Share    string   `json:"share"`
-	Paths    []string `json:"paths"`
-	ToShare  string   `json:"toShare,omitempty"`
-	ToFolder string `json:"toFolder"`
-	Move     bool   `json:"move,omitempty"`
+	Share   string   `json:"share"`
+	Paths   []string `json:"paths"`
+	ToShare string   `json:"toShare,omitempty"`
+	// ToDir is the folder they go into ("" = the share's top).
+	ToDir string `json:"toDir"`
 	// Conflict: rename (default), skip, replace or fail.
 	Conflict files.Conflict `json:"conflict,omitempty"`
 }
@@ -876,6 +831,8 @@ type FilesItemResult struct {
 type FilesBulkResult struct {
 	Done    bool              `json:"done"`
 	Results []FilesItemResult `json:"results"`
+	// Recycled (deletes): everything deleted went to the recycle bin.
+	Recycled bool `json:"recycled"`
 }
 
 func errCode(err error) string {
@@ -1027,6 +984,15 @@ func runDelete(ctx context.Context, fs files.Service, p filesBulk, progress func
 		}
 		res.Results = append(res.Results, FilesItemResult{Path: item, OK: true, Recycled: recycled})
 	}
+	res.Recycled = true
+	any := false
+	for _, r := range res.Results {
+		if r.OK {
+			any = true
+			res.Recycled = res.Recycled && r.Recycled
+		}
+	}
+	res.Recycled = res.Recycled && any
 	return res
 }
 
@@ -1079,6 +1045,14 @@ func (s *Server) singleError(w http.ResponseWriter, res FilesBulkResult) bool {
 }
 
 func (s *Server) handleFilesCopy(w http.ResponseWriter, r *http.Request, u *auth.User) {
+	s.copyOrMove(w, r, u, false)
+}
+
+func (s *Server) handleFilesMove(w http.ResponseWriter, r *http.Request, u *auth.User) {
+	s.copyOrMove(w, r, u, true)
+}
+
+func (s *Server) copyOrMove(w http.ResponseWriter, r *http.Request, u *auth.User, move bool) {
 	who, ok := s.filesWho(w, u)
 	if !ok {
 		return
@@ -1099,13 +1073,13 @@ func (s *Server) handleFilesCopy(w http.ResponseWriter, r *http.Request, u *auth
 	if req.ToShare == "" {
 		req.ToShare = req.Share
 	}
-	p := filesBulk{Who: who, Share: req.Share, Paths: paths, ToShare: req.ToShare, ToFolder: strings.Trim(req.ToFolder, "/"), Move: req.Move, Conflict: conflict}
+	p := filesBulk{Who: who, Share: req.Share, Paths: paths, ToShare: req.ToShare, ToFolder: strings.Trim(req.ToDir, "/"), Move: move, Conflict: conflict}
 	ctx := r.Context()
 	// Quick ones at once: a few files, or moves within a folder's share.
 	quick := len(paths) <= syncItems
-	if quick && !(req.Move && req.ToShare == req.Share) {
+	if quick && !(move && req.ToShare == req.Share) {
 		for _, it := range paths {
-			e, err := s.cfg.Files.Stat(ctx, who, req.Share, it)
+			e, err := s.files().Stat(ctx, who, req.Share, it)
 			if err != nil {
 				if len(paths) == 1 {
 					s.writeFilesError(w, err)
@@ -1120,7 +1094,7 @@ func (s *Server) handleFilesCopy(w http.ResponseWriter, r *http.Request, u *auth
 	}
 	action, verb := "files.copy", "Copy"
 	kind := JobKindFilesCopy
-	if req.Move {
+	if move {
 		action, verb, kind = "files.move", "Move", JobKindFilesMove
 	}
 	target := req.Share + ":/" + strings.Join(paths, ", /")
@@ -1135,8 +1109,8 @@ func (s *Server) handleFilesCopy(w http.ResponseWriter, r *http.Request, u *auth
 		s.submit(w, r, u, kind, title, p, action, target, nil)
 		return
 	}
-	res := runCopy(ctx, s.cfg.Files, p, nil)
-	if req.Move {
+	res := runCopy(ctx, s.files(), p, nil)
+	if move {
 		s.record(r, u, action, target, audit.Success, "to "+req.ToShare+":/"+p.ToFolder)
 	}
 	if s.singleError(w, res) {
@@ -1175,7 +1149,7 @@ func (s *Server) handleFilesDelete(w http.ResponseWriter, r *http.Request, u *au
 			fmt.Sprintf("%s: %d items", req.Share, len(paths)), nil)
 		return
 	}
-	res := runDelete(r.Context(), s.cfg.Files, p, nil)
+	res := runDelete(r.Context(), s.files(), p, nil)
 	var done []string
 	for _, it := range res.Results {
 		if it.OK {
@@ -1196,6 +1170,9 @@ type FilesRestoreRequest struct {
 	Share    string `json:"share"`
 	Path     string `json:"path"`
 	Snapshot string `json:"snapshot"`
+	// Background: run it as a job with progress (202) instead of answering
+	// when it's done (big folders).
+	Background bool `json:"background,omitempty"`
 }
 
 func (s *Server) handleFilesRestore(w http.ResponseWriter, r *http.Request, u *auth.User) {
@@ -1208,18 +1185,18 @@ func (s *Server) handleFilesRestore(w http.ResponseWriter, r *http.Request, u *a
 		return
 	}
 	req.Path = strings.Trim(req.Path, "/")
-	e, err := s.cfg.Files.StatVersion(r.Context(), who, req.Share, req.Path, req.Snapshot)
+	e, err := s.files().StatVersion(r.Context(), who, req.Share, req.Path, req.Snapshot)
 	if err != nil {
 		s.writeFilesError(w, err)
 		return
 	}
 	target := req.Share + ":/" + req.Path
-	if e.Dir || e.Size > 256<<20 {
+	if req.Background {
 		p := filesBulk{Who: who, Share: req.Share, Paths: []string{req.Path}, Snapshot: req.Snapshot}
 		s.submit(w, r, u, JobKindFilesRestore, "Restore "+e.Name, p, "files.restore", target, nil)
 		return
 	}
-	to, err := s.cfg.Files.Restore(r.Context(), who, req.Share, req.Path, req.Snapshot)
+	to, err := s.files().Restore(r.Context(), who, req.Share, req.Path, req.Snapshot)
 	if err != nil {
 		s.writeFilesError(w, err)
 		return

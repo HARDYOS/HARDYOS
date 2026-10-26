@@ -203,7 +203,7 @@ func TestFilesAPIReading(t *testing.T) {
 	}
 
 	var vs FilesVersionsResponse
-	if code := admin.do("GET", "/api/v1/files/versions?"+q("share", "media", "path", "notes.txt"), nil, &vs); code != 200 || len(vs.Versions) != 1 || vs.Versions[0].Size != 9 {
+	if code := admin.do("GET", "/api/v1/files/snapshots?"+q("share", "media", "path", "notes.txt"), nil, &vs); code != 200 || len(vs.Versions) != 1 || vs.Versions[0].Size != 9 {
 		t.Errorf("versions = %d %+v", code, vs)
 	}
 }
@@ -223,98 +223,113 @@ func TestFilesAPIUploads(t *testing.T) {
 		m, _ := filepath.Glob(filepath.Join(media, "Photos", ".hardyos-upload-*"))
 		return m
 	}
-
-	// One request.
-	mod := time.Date(2024, 2, 3, 4, 5, 6, 0, time.UTC)
-	res, body := admin.send("PUT", "/api/v1/files/upload?"+q("share", "media", "path", "Photos/a.jpg", "modified", fmt.Sprint(mod.UnixMilli())), []byte("AAAA"), nil)
-	var st FilesUploadStatus
-	json.Unmarshal(body, &st)
-	if res.StatusCode != 201 || !st.Done || st.Entry == nil || st.Entry.Size != 4 || read("Photos/a.jpg") != "AAAA" {
-		t.Fatalf("upload = %d %s", res.StatusCode, body)
+	start := func(c *client, req FilesUploadRequest) (int, FilesUpload) {
+		var up FilesUpload
+		code := c.do("POST", "/api/v1/files/upload", req, &up)
+		return code, up
 	}
-	if fi, _ := os.Stat(filepath.Join(media, "Photos/a.jpg")); !fi.ModTime().Equal(mod) {
-		t.Errorf("modified = %v", fi.ModTime())
-	}
-	if res, _ := admin.send("PUT", "/api/v1/files/upload?"+q("share", "media", "path", "Photos/a.jpg"), []byte("B"), nil); res.StatusCode != 409 {
-		t.Errorf("upload over a file = %d", res.StatusCode)
-	}
-	if res, _ := admin.send("PUT", "/api/v1/files/upload?"+q("share", "media", "path", "Photos/a.jpg", "overwrite", "1"), []byte("B"), nil); res.StatusCode != 201 || read("Photos/a.jpg") != "B" {
-		t.Errorf("overwrite = %d %q", res.StatusCode, read("Photos/a.jpg"))
-	}
-	if res, _ := admin.send("PUT", "/api/v1/files/upload?"+q("share", "media", "path", "Photos"), []byte("B"), nil); res.StatusCode != 409 {
-		t.Errorf("upload over a folder = %d", res.StatusCode)
-	}
-	if res, _ := admin.send("PUT", "/api/v1/files/upload?"+q("share", "docs", "path", "x.txt"), []byte("B"), nil); res.StatusCode != 403 {
-		t.Errorf("upload to a read-only folder = %d", res.StatusCode)
-	}
-	for bad, want := range map[string]int{"": 400, "Photos/.hardyos-x": 400, ".recycle/x": 409, "../x": 409} {
-		if res, _ := admin.send("PUT", "/api/v1/files/upload?"+q("share", "media", "path", bad), []byte("B"), nil); res.StatusCode != want {
-			t.Errorf("upload to %q = %d, want %d", bad, res.StatusCode, want)
-		}
+	chunk := func(c *client, id string, offset int, data string) (int, FilesUpload, []byte) {
+		res, body := c.send("PUT", fmt.Sprintf("/api/v1/files/upload/%s?offset=%d", id, offset), []byte(data),
+			map[string]string{"Content-Type": "application/octet-stream"})
+		var up FilesUpload
+		json.Unmarshal(body, &up)
+		return res.StatusCode, up, body
 	}
 
 	// In chunks, resumed after a wrong offset.
-	chunk := func(id string, data string, start, total int) (int, FilesUploadStatus, []byte) {
-		args := []string{"share", "media", "path", "Photos/big.bin"}
-		if id != "" {
-			args = append(args, "uploadId", id)
-		}
-		res, body := admin.send("PUT", "/api/v1/files/upload?"+q(args...), []byte(data),
-			map[string]string{"Content-Range": fmt.Sprintf("bytes %d-%d/%d", start, start+len(data)-1, total)})
-		var st FilesUploadStatus
-		json.Unmarshal(body, &st)
-		return res.StatusCode, st, body
+	mod := time.Date(2024, 2, 3, 4, 5, 6, 0, time.UTC)
+	code, up := start(admin, FilesUploadRequest{Share: "media", Path: "Photos/big.bin", Size: 12, Modified: mod.UnixMilli()})
+	if code != 201 || up.ID == "" || up.Size != 12 || up.Received != 0 || len(temps()) != 1 {
+		t.Fatalf("start = %d %+v", code, up)
 	}
-	code, st, body := chunk("", "01234", 0, 12)
-	if code != 200 || st.UploadID == "" || st.Received != 5 || st.Total != 12 || st.Done || len(temps()) != 1 {
+	id := up.ID
+	if code, up, body := chunk(admin, id, 0, "01234"); code != 200 || up.Received != 5 || up.Entry != nil {
 		t.Fatalf("first chunk = %d %s", code, body)
 	}
-	id := st.UploadID
 	if read("Photos/big.bin") != "<missing>" {
 		t.Fatal("the file appeared before the upload finished")
 	}
-	if code, _, body := chunk(id, "zzz", 9, 12); code != 409 || !strings.Contains(string(body), `"received":5`) {
+	if code, _, body := chunk(admin, id, 9, "zzz"); code != 409 || !strings.Contains(string(body), `"received":5`) {
 		t.Errorf("wrong offset = %d %s", code, body)
 	}
-	var cur FilesUploadStatus
-	if code := admin.do("GET", "/api/v1/files/upload?"+q("uploadId", id), nil, &cur); code != 200 || cur.Received != 5 || cur.Path != "Photos/big.bin" {
+	var cur FilesUpload
+	if code := admin.do("GET", "/api/v1/files/upload/"+id, nil, &cur); code != 200 || cur.Received != 5 || cur.Path != "Photos/big.bin" {
 		t.Errorf("status = %d %+v", code, cur)
 	}
-	if code, _, _ := chunk(id, "56789", 5, 99); code != 400 {
-		t.Errorf("other total = %d", code)
+	if code, _, _ := chunk(admin, id, 5, "56789abcdef"); code != 400 {
+		t.Errorf("too long = %d", code)
 	}
-	if code, st, _ := chunk(id, "56789", 5, 12); code != 200 || st.Received != 10 {
-		t.Fatalf("second chunk = %d %+v", code, st)
+	if code := admin.do("GET", "/api/v1/files/upload/"+id, nil, &cur); cur.Received != 5 {
+		t.Errorf("after a too-long chunk = %d %+v", code, cur)
 	}
-	if code, st, body := chunk(id, "ab", 10, 12); code != 201 || !st.Done || st.Entry.Size != 12 {
+	if code, up, _ := chunk(admin, id, 5, "56789"); code != 200 || up.Received != 10 {
+		t.Fatalf("second chunk = %d %+v", code, up)
+	}
+	code, up, body := chunk(admin, id, 10, "ab")
+	if code != 200 || up.Entry == nil || up.Entry.Size != 12 || up.Received != 12 {
 		t.Fatalf("last chunk = %d %s", code, body)
 	}
 	if read("Photos/big.bin") != "0123456789ab" || len(temps()) != 0 {
 		t.Fatalf("assembled %q, temps %v", read("Photos/big.bin"), temps())
 	}
-	if code := admin.do("GET", "/api/v1/files/upload?"+q("uploadId", id), nil, nil); code != 404 {
+	if fi, _ := os.Stat(filepath.Join(media, "Photos/big.bin")); !fi.ModTime().Equal(mod) {
+		t.Errorf("modified = %v", fi.ModTime())
+	}
+	if code := admin.do("GET", "/api/v1/files/upload/"+id, nil, nil); code != 404 {
 		t.Errorf("finished upload still known: %d", code)
 	}
-	if code, _, _ := chunk("", "x", 3, 12); code != 400 {
-		t.Errorf("new upload not at 0 = %d", code)
+
+	// An empty file is one empty chunk.
+	code, up = start(admin, FilesUploadRequest{Share: "media", Path: "Photos/empty.txt", Size: 0})
+	if code != 201 {
+		t.Fatal(code)
+	}
+	if code, up, body := chunk(admin, up.ID, 0, ""); code != 200 || up.Entry == nil || read("Photos/empty.txt") != "" {
+		t.Fatalf("empty = %d %s", code, body)
+	}
+
+	// Names taken, overwriting, bad names and read-only folders.
+	var e ErrorResponse
+	if code := admin.do("POST", "/api/v1/files/upload", FilesUploadRequest{Share: "media", Path: "Photos/keep.jpg", Size: 1}, &e); code != 409 {
+		t.Errorf("upload over a file = %d", code)
+	}
+	if code := admin.do("POST", "/api/v1/files/upload", FilesUploadRequest{Share: "media", Path: "Photos", Size: 1, Overwrite: true}, &e); code != 409 {
+		t.Errorf("upload over a folder = %d", code)
+	}
+	code, up = start(admin, FilesUploadRequest{Share: "media", Path: "Photos/keep.jpg", Size: 1, Overwrite: true})
+	if code != 201 {
+		t.Fatal(code)
+	}
+	if code, _, _ := chunk(admin, up.ID, 0, "K"); code != 200 || read("Photos/keep.jpg") != "K" {
+		t.Errorf("overwrite = %d %q", code, read("Photos/keep.jpg"))
+	}
+	if code := admin.do("POST", "/api/v1/files/upload", FilesUploadRequest{Share: "docs", Path: "x.txt", Size: 1}, &e); code != 403 {
+		t.Errorf("upload to a read-only folder = %d", code)
+	}
+	for bad, want := range map[string]int{"": 400, "Photos/.hardyos-x": 400, ".recycle/x": 409, "../x": 409} {
+		if code := admin.do("POST", "/api/v1/files/upload", FilesUploadRequest{Share: "media", Path: bad, Size: 1}, &e); code != want {
+			t.Errorf("upload to %q = %d, want %d", bad, code, want)
+		}
 	}
 
 	// Cancelling removes the temporary file; someone else can't touch it.
-	os.Remove(filepath.Join(media, "Photos/big.bin"))
-	code, st, _ = chunk("", "01", 0, 12)
-	if code != 200 {
+	code, up = start(admin, FilesUploadRequest{Share: "media", Path: "Photos/c.bin", Size: 10})
+	if code != 201 {
 		t.Fatal(code)
 	}
 	admin.do("POST", "/api/v1/users", map[string]string{"username": "ann", "password": "annpassword1", "role": "admin"}, nil)
 	other := env.client(t)
 	other.do("POST", "/api/v1/auth/login", map[string]string{"username": "ann", "password": "annpassword1"}, nil)
-	if code := other.do("GET", "/api/v1/files/upload?"+q("uploadId", st.UploadID), nil, nil); code != 404 {
+	if code := other.do("GET", "/api/v1/files/upload/"+up.ID, nil, nil); code != 404 {
 		t.Errorf("another person saw the upload: %d", code)
 	}
-	if res, _ := other.send("DELETE", "/api/v1/files/upload?"+q("uploadId", st.UploadID), nil, nil); res.StatusCode != 404 {
+	if code, _, _ := chunk(other, up.ID, 0, "x"); code != 404 {
+		t.Errorf("another person wrote to the upload: %d", code)
+	}
+	if res, _ := other.send("DELETE", "/api/v1/files/upload/"+up.ID, nil, nil); res.StatusCode != 404 {
 		t.Errorf("another person cancelled the upload: %d", res.StatusCode)
 	}
-	if res, _ := admin.send("DELETE", "/api/v1/files/upload?"+q("uploadId", st.UploadID), nil, nil); res.StatusCode != 204 || len(temps()) != 0 {
+	if res, _ := admin.send("DELETE", "/api/v1/files/upload/"+up.ID, nil, nil); res.StatusCode != 204 || len(temps()) != 0 {
 		t.Errorf("cancel = %d %v", res.StatusCode, temps())
 	}
 
@@ -344,6 +359,7 @@ func TestFilesAPIChanges(t *testing.T) {
 	var e ErrorResponse
 
 	var en files.Entry
+	var br FilesBulkResult
 	if code := admin.do("POST", "/api/v1/files/mkdir", FilesPathRequest{Share: "media", Path: "Archive"}, &en); code != 201 || !en.Dir || en.Name != "Archive" {
 		t.Fatalf("mkdir = %d %+v", code, en)
 	}
@@ -354,36 +370,41 @@ func TestFilesAPIChanges(t *testing.T) {
 		t.Errorf("mkdir read-only = %d", code)
 	}
 	var pr FilesPathResponse
-	if code := admin.do("POST", "/api/v1/files/rename", FilesRenameRequest{Share: "media", Path: "Inbox/f0.txt", To: "Archive/zero.txt"}, &pr); code != 200 || pr.Path != "Archive/zero.txt" || !exists("Archive/zero.txt") {
-		t.Fatalf("rename = %d %+v", code, pr)
+	if code := admin.do("POST", "/api/v1/files/rename", FilesRenameRequest{Share: "media", Path: "Inbox/f0.txt", Name: "zero.txt"}, &en); code != 200 || en.Path != "Inbox/zero.txt" || !exists("Inbox/zero.txt") {
+		t.Fatalf("rename = %d %+v", code, en)
 	}
-	if code := admin.do("POST", "/api/v1/files/rename", FilesRenameRequest{Share: "media", Path: "Inbox/f1.txt", To: "Archive/zero.txt"}, &e); code != 409 {
+	if code := admin.do("POST", "/api/v1/files/rename", FilesRenameRequest{Share: "media", Path: "Inbox/f1.txt", Name: "zero.txt"}, &e); code != 409 {
 		t.Errorf("rename onto a file = %d", code)
+	}
+	if code := admin.do("POST", "/api/v1/files/rename", FilesRenameRequest{Share: "media", Path: "Inbox/f1.txt", Name: "a/b"}, &e); code != 400 {
+		t.Errorf("rename with a slash = %d", code)
+	}
+	if code := admin.do("POST", "/api/v1/files/move", FilesCopyRequest{Share: "media", Paths: []string{"Inbox/zero.txt"}, ToDir: "Archive"}, &br); code != 200 || !exists("Archive/zero.txt") {
+		t.Fatalf("move = %d %+v", code, br)
 	}
 
 	// A few files: done at once.
-	var br FilesBulkResult
-	if code := admin.do("POST", "/api/v1/files/copy", FilesCopyRequest{Share: "media", Paths: []string{"Inbox/f1.txt", "Inbox/f2.txt"}, ToFolder: "Archive"}, &br); code != 200 || !br.Done || len(br.Results) != 2 || !br.Results[0].OK || br.Results[0].To != "Archive/f1.txt" {
+	if code := admin.do("POST", "/api/v1/files/copy", FilesCopyRequest{Share: "media", Paths: []string{"Inbox/f1.txt", "Inbox/f2.txt"}, ToDir: "Archive"}, &br); code != 200 || !br.Done || len(br.Results) != 2 || !br.Results[0].OK || br.Results[0].To != "Archive/f1.txt" {
 		t.Fatalf("copy = %d %+v", code, br)
 	}
 	// Again: the names are taken, so copies get " (copy)".
-	if code := admin.do("POST", "/api/v1/files/copy", FilesCopyRequest{Share: "media", Paths: []string{"Inbox/f1.txt"}, ToFolder: "Archive"}, &br); code != 200 || br.Results[0].To != "Archive/f1 (copy).txt" {
+	if code := admin.do("POST", "/api/v1/files/copy", FilesCopyRequest{Share: "media", Paths: []string{"Inbox/f1.txt"}, ToDir: "Archive"}, &br); code != 200 || br.Results[0].To != "Archive/f1 (copy).txt" {
 		t.Errorf("copy again = %d %+v", code, br)
 	}
-	if code := admin.do("POST", "/api/v1/files/copy", FilesCopyRequest{Share: "media", Paths: []string{"Inbox/f1.txt"}, ToFolder: "Archive", Conflict: "fail"}, &e); code != 409 {
+	if code := admin.do("POST", "/api/v1/files/copy", FilesCopyRequest{Share: "media", Paths: []string{"Inbox/f1.txt"}, ToDir: "Archive", Conflict: "fail"}, &e); code != 409 {
 		t.Errorf("copy with fail = %d", code)
 	}
-	if code := admin.do("POST", "/api/v1/files/copy", FilesCopyRequest{Share: "media", Paths: []string{"Inbox/f1.txt"}, ToFolder: "Archive", Conflict: "bogus"}, &e); code != 400 {
+	if code := admin.do("POST", "/api/v1/files/copy", FilesCopyRequest{Share: "media", Paths: []string{"Inbox/f1.txt"}, ToDir: "Archive", Conflict: "bogus"}, &e); code != 400 {
 		t.Errorf("bad conflict = %d", code)
 	}
-	if code := admin.do("POST", "/api/v1/files/copy", FilesCopyRequest{Share: "media", Paths: []string{""}, ToFolder: "Archive"}, &e); code != 409 {
+	if code := admin.do("POST", "/api/v1/files/copy", FilesCopyRequest{Share: "media", Paths: []string{""}, ToDir: "Archive"}, &e); code != 409 {
 		t.Errorf("copy the top = %d", code)
 	}
-	if code := admin.do("POST", "/api/v1/files/copy", FilesCopyRequest{Share: "media", Paths: []string{"Inbox/f3.txt"}, ToShare: "docs", ToFolder: ""}, &e); code != 403 {
+	if code := admin.do("POST", "/api/v1/files/copy", FilesCopyRequest{Share: "media", Paths: []string{"Inbox/f3.txt"}, ToShare: "docs", ToDir: ""}, &e); code != 403 {
 		t.Errorf("copy into read-only = %d %+v", code, e)
 	}
 	// A move within the share is a rename, even for many items.
-	if code := admin.do("POST", "/api/v1/files/copy", FilesCopyRequest{Share: "media", Paths: []string{"Inbox/f3.txt"}, ToFolder: "Archive", Move: true}, &br); code != 200 || exists("Inbox/f3.txt") || !exists("Archive/f3.txt") {
+	if code := admin.do("POST", "/api/v1/files/move", FilesCopyRequest{Share: "media", Paths: []string{"Inbox/f3.txt"}, ToDir: "Archive"}, &br); code != 200 || exists("Inbox/f3.txt") || !exists("Archive/f3.txt") {
 		t.Errorf("move = %d %+v", code, br)
 	}
 
@@ -393,7 +414,7 @@ func TestFilesAPIChanges(t *testing.T) {
 			ID string `json:"id"`
 		} `json:"job"`
 	}
-	if code := admin.do("POST", "/api/v1/files/copy", FilesCopyRequest{Share: "media", Paths: []string{"Inbox"}, ToFolder: "Archive"}, &acc); code != 202 {
+	if code := admin.do("POST", "/api/v1/files/copy", FilesCopyRequest{Share: "media", Paths: []string{"Inbox"}, ToDir: "Archive"}, &acc); code != 202 {
 		t.Fatalf("folder copy = %d", code)
 	}
 	j := waitJobDone(t, admin, acc.Job.ID)
@@ -402,7 +423,7 @@ func TestFilesAPIChanges(t *testing.T) {
 	}
 
 	// Deletes: a few at once, many as a job; all audited.
-	if code := admin.do("POST", "/api/v1/files/delete", FilesDeleteRequest{Share: "media", Paths: []string{"Inbox/f4.txt"}}, &br); code != 200 || !br.Results[0].Recycled || exists("Inbox/f4.txt") {
+	if code := admin.do("POST", "/api/v1/files/delete", FilesDeleteRequest{Share: "media", Paths: []string{"Inbox/f4.txt"}}, &br); code != 200 || !br.Recycled || !br.Results[0].Recycled || exists("Inbox/f4.txt") {
 		t.Fatalf("delete = %d %+v", code, br)
 	}
 	if code := admin.do("POST", "/api/v1/files/delete", FilesDeleteRequest{Share: "media", Paths: []string{"Inbox/ghost"}}, &e); code != 404 {
@@ -434,7 +455,7 @@ func TestFilesAPIChanges(t *testing.T) {
 	for _, a := range audit {
 		seen[fmt.Sprint(a["action"])]++
 	}
-	if seen["files.delete"] != 2 || seen["files.restore"] != 1 || seen["files.rename"] != 1 || seen["files.copy"] != 1 || seen["files.move"] != 1 {
+	if seen["files.delete"] != 2 || seen["files.restore"] != 1 || seen["files.rename"] != 1 || seen["files.copy"] != 1 || seen["files.move"] != 2 {
 		t.Errorf("audit = %v", seen)
 	}
 }

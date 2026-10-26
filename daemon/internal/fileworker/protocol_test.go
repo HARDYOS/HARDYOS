@@ -9,14 +9,14 @@ import (
 
 func TestCleanPath(t *testing.T) {
 	good := map[string]string{
-		"":                  "",
-		"/":                 "",
-		"Photos":            "Photos",
-		"/Photos/2026/":     "Photos/2026",
-		"a b/c.d":           "a b/c.d",
-		".bashrc":           ".bashrc",
-		"Music/.hidden":     "Music/.hidden",
-		`back\slash`:        `back\slash`,
+		"":              "",
+		"/":             "",
+		"Photos":        "Photos",
+		"/Photos/2026/": "Photos/2026",
+		"a b/c.d":       "a b/c.d",
+		".bashrc":       ".bashrc",
+		"Music/.hidden": "Music/.hidden",
+		`back\slash`:    `back\slash`,
 		"x/.hardyos-upload-0123456789abcdef01234567": "x/.hardyos-upload-0123456789abcdef01234567",
 	}
 	for in, want := range good {
