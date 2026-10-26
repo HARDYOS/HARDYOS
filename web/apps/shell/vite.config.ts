@@ -10,6 +10,8 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/api": { target: daemon, changeOrigin: true, ws: true },
+      // Share link pages, served by hardyd outside the desktop.
+      "/s/": { target: daemon, changeOrigin: true },
     },
   },
   build: {
