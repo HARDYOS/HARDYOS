@@ -26,6 +26,8 @@ lsscsi
 gdisk
 parted
 dosfstools
+# Shared folder permissions: setfacl/getfacl (POSIX ACLs for apps on shared folders)
+acl
 
 # Boot and install
 efibootmgr

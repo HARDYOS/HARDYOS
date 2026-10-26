@@ -30,6 +30,7 @@ tags:
   - name: backups
   - name: terminal
   - name: domain
+  - name: shares
   - name: apps
 paths:
   /health:
@@ -1456,6 +1457,136 @@ paths:
       responses:
         "101": { description: Switching to the WebSocket protocol }
         "403": { $ref: "#/components/responses/Forbidden" }
+  # ---- Shared folders (docs/shares.md) ------------------------------------
+  /shares:
+    get:
+      operationId: listShares
+      summary: Every shared folder on every pool
+      description: |
+        Everyone signed in may list them. Access rules, apps and storage
+        details (pool, dataset) are shown to administrators only.
+      tags: [shares]
+      responses:
+        "200":
+          description: Shared folders, by name
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [shares]
+                properties:
+                  shares: { type: array, items: { $ref: "#/components/schemas/Share" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    post:
+      operationId: createShare
+      summary: Create a shared folder (runs as a job)
+      tags: [shares]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ShareCreateRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /shares/starter:
+    post:
+      operationId: createStarterShares
+      summary: "Create the starter shared folders on a pool (runs as a job): Media with Movies, TV, Music and Photos, and Backups"
+      description: Folders that already exist are skipped.
+      tags: [shares]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ShareStarterRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /shares/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getShare
+      summary: One shared folder
+      tags: [shares]
+      responses:
+        "200":
+          description: The shared folder
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Share" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      operationId: updateShare
+      summary: Change a shared folder's name, description, quota, flags or access rules (runs as a job)
+      description: Fields left out keep their values.
+      tags: [shares]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ShareUpdateRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      operationId: deleteShare
+      summary: Delete a shared folder and every file in it (runs as a job)
+      description: Refused while an app uses it (409, naming the apps).
+      tags: [shares]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { type: string, description: "The shared folder's name, typed to confirm" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /shares/{id}/folders:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: listShareFolders
+      summary: Subfolders of a folder inside a shared folder (for pickers)
+      description: Hidden folders and links aren't listed; paths can't leave the shared folder.
+      tags: [shares]
+      parameters:
+        - { name: path, in: query, schema: { type: string, default: "" }, description: "A folder inside the share, like Movies/Kids; empty for the share itself" }
+      responses:
+        "200":
+          description: Folder names
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [folders]
+                properties:
+                  folders: { type: array, items: { type: string } }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  # ---- end of shared folders ---------------------------------------------
   /domain:
     get:
       operationId: getDomain
@@ -2964,6 +3095,72 @@ components:
       required: [enabled]
       properties:
         enabled: { type: boolean }
+    # ---- Shared folders ----------------------------------------------------
+    ShareRule:
+      type: object
+      required: [kind, level]
+      properties:
+        kind: { type: string, enum: [user, group, everyone] }
+        name: { type: string, description: "HOME\\alice, HOME\\Family or a HardyOS account; empty for everyone" }
+        level: { type: string, enum: [read, write, none] }
+    ShareAppGrant:
+      type: object
+      required: [app, uid, level]
+      properties:
+        app: { type: string }
+        uid: { type: integer, description: The app's own Linux user ID }
+        level: { type: string, enum: [read, write] }
+    Share:
+      type: object
+      required: [id, name, description, pool, dataset, path, mounted, quotaBytes, usedBytes, recycle, guest, access, apps, createdAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        pool: { type: string }
+        dataset: { type: string }
+        path: { type: string, description: Where it is on the server }
+        mounted: { type: boolean }
+        quotaBytes: { type: integer, format: int64, description: 0 for no quota }
+        usedBytes: { type: integer, format: int64 }
+        recycle: { type: boolean, description: Deleted files go to a recycle bin (with file sharing) }
+        guest: { type: boolean, description: Guests may read it without signing in (with file sharing) }
+        access:
+          type: array
+          description: Who may use it; empty means administrators only. Enforced with file sharing.
+          items: { $ref: "#/components/schemas/ShareRule" }
+        apps: { type: array, items: { $ref: "#/components/schemas/ShareAppGrant" } }
+        createdAt: { type: string, format: date-time }
+    ShareCreateRequest:
+      type: object
+      required: [pool, name]
+      properties:
+        pool: { type: string }
+        name: { type: string, description: "1-40 letters, digits, spaces and . - _ ( ) ' &" }
+        id: { type: string, description: "Defaults to one made from the name (Media -> media)" }
+        description: { type: string }
+        quotaBytes: { type: integer, format: int64, description: 0 for no quota }
+        recycle: { type: boolean }
+        guest: { type: boolean }
+        access: { type: array, items: { $ref: "#/components/schemas/ShareRule" } }
+        subfolders: { type: array, items: { type: string } }
+    ShareUpdateRequest:
+      type: object
+      properties:
+        name: { type: string }
+        description: { type: string }
+        quotaBytes: { type: integer, format: int64, description: 0 removes the quota }
+        recycle: { type: boolean }
+        guest: { type: boolean }
+        access: { type: array, items: { $ref: "#/components/schemas/ShareRule" } }
+    ShareStarterRequest:
+      type: object
+      required: [pool, media, backups]
+      properties:
+        pool: { type: string }
+        media: { type: boolean, description: Media with Movies, TV, Music and Photos }
+        backups: { type: boolean }
+    # ---- end of shared folders ---------------------------------------------
     DomainConfig:
       type: object
       required: [domain, realm, netbios, dcName, address, gateway, parent, mac, forwarders, enabled, createdAt]
