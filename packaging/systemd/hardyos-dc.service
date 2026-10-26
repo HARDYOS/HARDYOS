@@ -14,6 +14,10 @@ Type=notify
 NotifyAccess=all
 NetworkNamespacePath=/run/netns/hardyos-dc
 BindPaths=/var/lib/hardyos-dc/run:/run/samba
+# A DC looks names up through itself first, then its partners, and uses its
+# own Kerberos settings.
+BindReadOnlyPaths=/var/lib/hardyos-dc/resolv.conf:/etc/resolv.conf
+BindReadOnlyPaths=/var/lib/hardyos-dc/krb5.conf:/etc/krb5.conf
 ExecStart=/usr/sbin/samba --foreground --no-process-group -s /var/lib/hardyos-dc/etc/smb.conf
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure

@@ -24,7 +24,7 @@ const (
 )
 
 // NetworkPaths are the files Render owns.
-var NetworkPaths = []string{InterfacesPath, ResolvPath, HostsPath, HostnamePath, DNSHookPath}
+var NetworkPaths = []string{InterfacesPath, ResolvPath, HostsPath, HostnamePath, DNSHookPath, DomainHookPath}
 
 const header = "# Written by HardyOS. Change these settings in Control Panel > Network;\n# edits made here are replaced the next time settings are saved.\n"
 

@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -112,7 +114,7 @@ func (m *Manager) lan(ctx context.Context, want string, in netip.Prefix) (dev st
 	}
 	find := func(name string) (netip.Prefix, bool) {
 		for _, a := range list {
-			if a.IfName == name && a.IfName != ShimLink {
+			if a.IfName == name && a.IfName != m.shim() {
 				if v := a.ipv4(); len(v) > 0 {
 					return v[0], true
 				}
@@ -127,7 +129,7 @@ func (m *Manager) lan(ctx context.Context, want string, in netip.Prefix) (dev st
 	}
 	if in.IsValid() {
 		for _, a := range list {
-			if a.IfName == ShimLink || strings.HasPrefix(a.IfName, "docker") || strings.HasPrefix(a.IfName, "veth") {
+			if a.IfName == m.shim() || strings.HasPrefix(a.IfName, "docker") || strings.HasPrefix(a.IfName, "veth") {
 				continue
 			}
 			for _, p := range a.ipv4() {
@@ -226,21 +228,8 @@ func (m *Manager) addressFree(ctx context.Context, dev string, a netip.Addr) boo
 	return err == nil && res.ExitCode == 0
 }
 
-// ShimAddr is the NAS's address on its side of the shim. It's link-local and
-// used for nothing else, so the shim answers ARP for it normally without
-// ever claiming the NAS's LAN address (which would confuse other devices).
-const ShimAddr = "169.254.250.1"
-
-// lastParent remembers which LAN interface the DC was attached to, so a
-// network change that moves the NAS to another interface (a new bond, say)
-// moves the DC too.
-var lastParent struct {
-	sync.Mutex
-	name string
-}
-
 func (m *Manager) nsExists() bool {
-	_, err := os.Stat(m.path(filepath.Join("/run/netns", Namespace)))
+	_, err := os.Stat(m.path(filepath.Join("/run/netns", m.ns())))
 	return err == nil
 }
 
@@ -261,20 +250,18 @@ func (m *Manager) SetupNetwork(ctx context.Context, c *Config) error {
 	if err != nil {
 		return err
 	}
-	lastParent.Lock()
-	moved := lastParent.name != "" && lastParent.name != parent
-	lastParent.name = parent
-	lastParent.Unlock()
+	moved := m.lastParent != "" && m.lastParent != parent
+	m.lastParent = parent
 
 	if !m.nsExists() {
-		if err := m.run(ctx, "ip", "netns", "add", Namespace); err != nil {
+		if err := m.run(ctx, "ip", "netns", "add", m.ns()); err != nil {
 			return fmt.Errorf("creating the domain controller's network: %w", err)
 		}
 	}
 	ns := func(args ...string) error {
-		return m.run(ctx, "ip", append([]string{"-n", Namespace}, args...)...)
+		return m.run(ctx, "ip", append([]string{"-n", m.ns()}, args...)...)
 	}
-	_, linkErr := m.addrs(ctx, "-n", Namespace, "addr", "show", "dev", DCLink)
+	_, linkErr := m.addrs(ctx, "-n", m.ns(), "addr", "show", "dev", DCLink)
 	if linkErr == nil && moved {
 		_ = ns("link", "del", DCLink)
 		linkErr = errors.New("moved")
@@ -284,8 +271,8 @@ func (m *Manager) SetupNetwork(ctx context.Context, c *Config) error {
 		_, _ = m.Runner.Run(ctx, nil, "ip", "link", "del", tmp)
 		steps := [][]string{
 			{"ip", "link", "add", tmp, "link", parent, "address", c.MAC, "type", "macvlan", "mode", "bridge"},
-			{"ip", "link", "set", tmp, "netns", Namespace},
-			{"ip", "-n", Namespace, "link", "set", tmp, "name", DCLink},
+			{"ip", "link", "set", tmp, "netns", m.ns()},
+			{"ip", "-n", m.ns(), "link", "set", tmp, "name", DCLink},
 		}
 		for _, s := range steps {
 			if err := m.run(ctx, s[0], s[1:]...); err != nil {
@@ -298,7 +285,21 @@ func (m *Manager) SetupNetwork(ctx context.Context, c *Config) error {
 		{"addr", "replace", c.Address, "dev", DCLink},
 		{"link", "set", DCLink, "up"},
 	} {
-		if err := ns(s...); err != nil {
+		// A namespace deleted moments ago (the domain was just deleted or left)
+		// is torn down by the kernel in the background; until then its macvlan
+		// still holds the DC's MAC address and bringing the new one up fails.
+		var err error
+		for try := 0; try < 10; try++ {
+			if err = ns(s...); err == nil || !strings.Contains(err.Error(), "Address already in use") {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Second):
+			}
+		}
+		if err != nil {
 			return fmt.Errorf("setting up the domain controller's address: %w", err)
 		}
 	}
@@ -308,30 +309,36 @@ func (m *Manager) SetupNetwork(ctx context.Context, c *Config) error {
 		}
 	}
 	// Replies to the NAS go back through the shim.
-	if err := ns("route", "replace", ShimAddr+"/32", "dev", DCLink); err != nil {
+	if err := ns("route", "replace", m.shimAddr()+"/32", "dev", DCLink); err != nil {
 		return fmt.Errorf("setting the route back to the NAS: %w", err)
 	}
-	return m.setupShim(ctx, parent, dcAddr.Addr(), moved)
+	if err := m.setupShim(ctx, parent, dcAddr.Addr(), moved); err != nil {
+		return err
+	}
+	if c.Domain != "" {
+		return m.writeResolv(c)
+	}
+	return nil
 }
 
 // setupShim lets the NAS reach the DC: the NAS can't talk to a macvlan child
 // through the parent port, so a second macvlan on the same port carries a
 // private address and a host route to the DC.
 func (m *Manager) setupShim(ctx context.Context, parent string, dcIP netip.Addr, moved bool) error {
-	list, err := m.addrs(ctx, "-d", "addr", "show", "dev", ShimLink)
+	list, err := m.addrs(ctx, "-d", "addr", "show", "dev", m.shim())
 	if err == nil && (moved || len(list) == 0 || (list[0].Link != "" && list[0].Link != parent)) {
-		_ = m.run(ctx, "ip", "link", "del", ShimLink)
+		_ = m.run(ctx, "ip", "link", "del", m.shim())
 		err = errors.New("recreate")
 	}
 	if err != nil {
-		if err := m.run(ctx, "ip", "link", "add", ShimLink, "link", parent, "type", "macvlan", "mode", "bridge"); err != nil {
+		if err := m.run(ctx, "ip", "link", "add", m.shim(), "link", parent, "type", "macvlan", "mode", "bridge"); err != nil {
 			return fmt.Errorf("creating the route to the domain controller: %w", err)
 		}
 		list = nil
 	}
 	// Strict reverse-path filtering would drop the DC's replies.
-	_ = m.run(ctx, "sysctl", "-q", "-w", "net.ipv4.conf."+ShimLink+".rp_filter=2")
-	want := netip.MustParsePrefix(ShimAddr + "/32")
+	_ = m.run(ctx, "sysctl", "-q", "-w", "net.ipv4.conf."+m.shim()+".rp_filter=2")
+	want := netip.MustParsePrefix(m.shimAddr() + "/32")
 	have := false
 	if len(list) > 0 {
 		for _, p := range list[0].inet() {
@@ -341,15 +348,15 @@ func (m *Manager) setupShim(ctx context.Context, parent string, dcIP netip.Addr,
 		}
 	}
 	if !have {
-		_ = m.run(ctx, "ip", "addr", "flush", "dev", ShimLink)
-		if err := m.run(ctx, "ip", "addr", "add", want.String(), "dev", ShimLink, "scope", "link"); err != nil {
+		_ = m.run(ctx, "ip", "addr", "flush", "dev", m.shim())
+		if err := m.run(ctx, "ip", "addr", "add", want.String(), "dev", m.shim(), "scope", "link"); err != nil {
 			return fmt.Errorf("setting up the route to the domain controller: %w", err)
 		}
 	}
-	if err := m.run(ctx, "ip", "link", "set", ShimLink, "up"); err != nil {
+	if err := m.run(ctx, "ip", "link", "set", m.shim(), "up"); err != nil {
 		return err
 	}
-	return m.run(ctx, "ip", "route", "replace", dcIP.String()+"/32", "dev", ShimLink, "src", ShimAddr)
+	return m.run(ctx, "ip", "route", "replace", dcIP.String()+"/32", "dev", m.shim(), "src", m.shimAddr())
 }
 
 // networkProblem says what's wrong with the DC's network, or "".
@@ -357,7 +364,7 @@ func (m *Manager) networkProblem(ctx context.Context, c *Config) string {
 	if !m.nsExists() {
 		return "The domain controller's network isn't set up yet."
 	}
-	list, err := m.addrs(ctx, "-n", Namespace, "addr", "show", "dev", DCLink)
+	list, err := m.addrs(ctx, "-n", m.ns(), "addr", "show", "dev", DCLink)
 	if err != nil || len(list) == 0 || !list[0].up() {
 		return "The domain controller isn't connected to the network. Check the NAS's network settings."
 	}
@@ -370,17 +377,61 @@ func (m *Manager) networkProblem(ctx context.Context, c *Config) string {
 	return "The domain controller's address isn't set."
 }
 
+// writeResolv gives the DC its own name settings, as a DC should have:
+// resolv.conf with itself first, then the domain's other DCs; and krb5.conf
+// mapping the domain to its realm (without it, Kerberos asks DNS which realm
+// a host is in, walking up to the internet, and replication stalls whenever
+// the internet is down). The unit binds both over /etc; files in
+// /etc/netns/<namespace>/ do the same for commands HardyOS runs there.
+func (m *Manager) writeResolv(c *Config) error {
+	var r strings.Builder
+	r.WriteString("# Written by HardyOS for the domain controller.\n")
+	for _, s := range c.DNSServers() {
+		fmt.Fprintf(&r, "nameserver %s\n", s)
+	}
+	fmt.Fprintf(&r, "search %s\n", c.Domain)
+	k := fmt.Sprintf(`# Written by HardyOS for the domain controller.
+[libdefaults]
+	default_realm = %[1]s
+	dns_lookup_realm = false
+	dns_lookup_kdc = true
+	rdns = false
+
+[domain_realm]
+	.%[2]s = %[1]s
+	%[2]s = %[1]s
+`, c.Realm, c.Domain)
+	files := map[string][]byte{"resolv.conf": []byte(r.String()), "krb5.conf": []byte(k)}
+	for name, want := range files {
+		for _, p := range []string{m.dataPath(name), m.path(filepath.Join("/etc/netns", m.ns(), name))} {
+			if cur, err := os.ReadFile(p); err == nil && bytes.Equal(cur, want) {
+				continue
+			}
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(p, want, 0o644); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // TeardownNetwork removes the DC's namespace and the NAS's shim.
 func (m *Manager) TeardownNetwork(ctx context.Context) {
 	if m.nsExists() {
-		if err := m.run(ctx, "ip", "netns", "del", Namespace); err != nil {
+		// Delete the macvlan first: a namespace lingers while any process is
+		// still inside it, and its macvlan would keep holding the DC's MAC
+		// (a new DC with that MAC then can't come up).
+		_, _ = m.Runner.Run(ctx, nil, "ip", "-n", m.ns(), "link", "del", DCLink)
+		if err := m.run(ctx, "ip", "netns", "del", m.ns()); err != nil {
 			m.log().Warn("removing the domain controller's network", "err", err)
 		}
 	}
-	_, _ = m.Runner.Run(ctx, nil, "ip", "link", "del", ShimLink)
-	lastParent.Lock()
-	lastParent.name = ""
-	lastParent.Unlock()
+	_, _ = m.Runner.Run(ctx, nil, "ip", "link", "del", m.shim())
+	m.lastParent = ""
+	_ = os.RemoveAll(m.path(filepath.Join("/etc/netns", m.ns())))
 }
 
 // Watch keeps the domain controller attached and running: network changes
@@ -397,6 +448,9 @@ func (m *Manager) Watch(ctx context.Context) {
 		case <-t.C:
 		}
 		next := 30 * time.Second
+		// The NAS's resolver follows the domain (dhclient may have rewritten
+		// it, or the domain came or went).
+		m.dnsChanged(ctx)
 		if err := m.Ensure(ctx); err != nil {
 			failures++
 			// Say it once, then quietly keep trying.
@@ -422,9 +476,77 @@ func (m *Manager) Ensure(ctx context.Context) error {
 		return err
 	}
 	if !m.serviceActive(ctx) {
-		if err := m.run(ctx, "systemctl", "start", Service); err != nil {
+		if err := m.run(ctx, "systemctl", "start", m.service()); err != nil {
 			return fmt.Errorf("starting the domain controller: %w", err)
+		}
+		return nil
+	}
+	if time.Since(m.othersChecked) > 5*time.Minute {
+		m.othersChecked = time.Now()
+		if m.refreshOthers(ctx, c) {
+			m.dnsChanged(ctx)
 		}
 	}
 	return nil
+}
+
+// refreshOthers updates the list of the domain's other DCs from DNS and
+// reports whether it changed.
+func (m *Manager) refreshOthers(ctx context.Context, c *Config) bool {
+	dig := func(args ...string) []string {
+		res, err := m.Runner.Run(ctx, nil, "dig", append([]string{"+short", "+time=2", "+tries=1", "@" + c.IP()}, args...)...)
+		if err != nil || res.ExitCode != 0 {
+			return nil
+		}
+		return strings.Split(strings.TrimSpace(string(res.Stdout)), "\n")
+	}
+	srv := dig("SRV", "_ldap._tcp.dc._msdcs."+c.Domain)
+	if srv == nil {
+		return false // DNS isn't answering: keep what we know
+	}
+	var others []DC
+	for _, line := range srv {
+		f := strings.Fields(line)
+		if len(f) != 4 {
+			continue
+		}
+		name := strings.TrimSuffix(strings.ToLower(f[3]), ".")
+		if name == strings.ToLower(c.DCName) {
+			continue
+		}
+		dc := DC{Name: name}
+		for _, a := range dig("A", name) {
+			if ip, err := netip.ParseAddr(strings.TrimSpace(a)); err == nil && ip.Is4() {
+				dc.Address = ip.String()
+				break
+			}
+		}
+		others = append(others, dc)
+	}
+	sort.Slice(others, func(i, j int) bool { return others[i].Name < others[j].Name })
+	if equalDCs(others, c.Others) {
+		return false
+	}
+	c.Others = others
+	if err := m.save(c); err != nil {
+		m.log().Warn("saving the list of domain controllers", "err", err)
+		return false
+	}
+	if err := m.writeResolv(c); err != nil {
+		m.log().Warn("updating the domain controller's DNS settings", "err", err)
+	}
+	m.log().Info("domain controllers changed", "others", others)
+	return true
+}
+
+func equalDCs(a, b []DC) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

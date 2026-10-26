@@ -300,6 +300,22 @@ class Directory:
         return {"ok": True}
 
 
+def restore_unmark(d, a):
+    """A restored copy of this DC's own offline backup: drop the markers that
+    stop Samba starting from a backup (what samba-tool's restore does)."""
+    markers = ["sidForRestore", "backupRename", "backupDate", "backupType"]
+    res = d.db.search(base=ldb.Dn(d.db, "@SAMBA_DSDB"), scope=ldb.SCOPE_BASE, attrs=markers)
+    msg = ldb.Message(res[0].dn)
+    removed = []
+    for attr in markers:
+        if attr in res[0]:
+            msg[attr] = ldb.MessageElement([], ldb.FLAG_MOD_DELETE, attr)
+            removed.append(attr)
+    if removed:
+        d.db.modify(msg)
+    return {"removed": removed}
+
+
 def password_error(e):
     text = str(e.args[1] if len(e.args) > 1 else e)
     if "CONSTRAINT" in text.upper() or "password" in text.lower():
@@ -320,6 +336,7 @@ COMMANDS = {
     "group.update": Directory.group_update,
     "group.delete": Directory.group_delete,
     "policy": Directory.policy,
+    "restore.unmark": restore_unmark,
 }
 
 

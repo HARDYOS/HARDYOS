@@ -22,6 +22,9 @@ import (
 const (
 	JobKindDomainProvision = "domain.provision"
 	JobKindDomainDestroy   = "domain.destroy"
+	JobKindDomainJoin      = "domain.join"
+	JobKindDomainLeave     = "domain.leave"
+	JobKindDomainRemove    = "domain.remove_dead"
 )
 
 // jobSecrets hands a password from a request to the job it starts without
@@ -77,6 +80,17 @@ type domainDestroyParams struct {
 	Domain string `json:"domain"`
 }
 
+// domainJoinParams: the join request without its password.
+type domainJoinParams struct {
+	domain.JoinArgs
+	PasswordRef string `json:"passwordRef"`
+}
+
+type domainLeaveParams struct {
+	Domain      string `json:"domain"`
+	PasswordRef string `json:"passwordRef"`
+}
+
 func registerDomainJobs(m *jobs.Manager, pc *priv.Client) {
 	m.Register(jobs.Kind{
 		Name:      JobKindDomainProvision,
@@ -124,6 +138,76 @@ func registerDomainJobs(m *jobs.Manager, pc *priv.Client) {
 	})
 }
 
+func registerDomainMoreJobs(m *jobs.Manager, pc *priv.Client) {
+	lost := errors.New("the Administrator password was lost (HardyOS restarted); try again")
+	m.Register(jobs.Kind{
+		Name:      JobKindDomainJoin,
+		AdminOnly: true,
+		LockKey:   func(json.RawMessage) string { return "domain" },
+		Run: func(jc *jobs.Context) (any, error) {
+			var p domainJoinParams
+			if err := jc.Params(&p); err != nil {
+				return nil, err
+			}
+			pw, ok := jobSecrets.take(p.PasswordRef)
+			if !ok {
+				return nil, lost
+			}
+			args := p.JoinArgs
+			args.AdminPassword = pw
+			jc.Progress(10, "Copying the domain from "+args.Existing+" (about a minute)")
+			ctx, cancel := context.WithTimeout(jc, 15*time.Minute)
+			defer cancel()
+			var c domain.Config
+			if err := pc.Call(ctx, priv.OpDomainJoin, args, &c); err != nil {
+				return nil, err
+			}
+			jc.Progress(100, c.DCName+" is running")
+			return c, nil
+		},
+	})
+	m.Register(jobs.Kind{
+		Name:      JobKindDomainLeave,
+		AdminOnly: true,
+		LockKey:   func(json.RawMessage) string { return "domain" },
+		Run: func(jc *jobs.Context) (any, error) {
+			var p domainLeaveParams
+			if err := jc.Params(&p); err != nil {
+				return nil, err
+			}
+			pw, ok := jobSecrets.take(p.PasswordRef)
+			if !ok {
+				return nil, lost
+			}
+			jc.Progress(20, "Handing over to the other domain controllers")
+			ctx, cancel := context.WithTimeout(jc, 10*time.Minute)
+			defer cancel()
+			if err := pc.Call(ctx, priv.OpDomainLeave, priv.DomainLeaveArgs{AdminPassword: pw}, nil); err != nil {
+				return nil, err
+			}
+			return map[string]string{"left": p.Domain}, nil
+		},
+	})
+	m.Register(jobs.Kind{
+		Name:      JobKindDomainRemove,
+		AdminOnly: true,
+		LockKey:   func(json.RawMessage) string { return "domain" },
+		Run: func(jc *jobs.Context) (any, error) {
+			var p priv.DomainRemoveDeadArgs
+			if err := jc.Params(&p); err != nil {
+				return nil, err
+			}
+			jc.Progress(20, "Taking over from "+p.Name)
+			ctx, cancel := context.WithTimeout(jc, 10*time.Minute)
+			defer cancel()
+			if err := pc.Call(ctx, priv.OpDomainRemoveDead, p, nil); err != nil {
+				return nil, err
+			}
+			return map[string]string{"removed": p.Name}, nil
+		},
+	})
+}
+
 func (s *Server) domainRoutes() {
 	m := s.mux
 	m.Handle("GET /api/v1/domain", s.admin(s.handleDomainStatus))
@@ -131,6 +215,10 @@ func (s *Server) domainRoutes() {
 	m.Handle("POST /api/v1/domain", s.admin(s.handleDomainProvision))
 	m.Handle("DELETE /api/v1/domain", s.admin(s.handleDomainDestroy))
 	m.Handle("PUT /api/v1/domain/enabled", s.admin(s.handleDomainEnable))
+	m.Handle("POST /api/v1/domain/join", s.admin(s.handleDomainJoin))
+	m.Handle("POST /api/v1/domain/leave", s.admin(s.handleDomainLeave))
+	m.Handle("POST /api/v1/domain/controllers/remove", s.admin(s.handleDomainRemoveDead))
+	m.Handle("PUT /api/v1/domain/forwarders", s.admin(s.handleDomainForwarders))
 
 	m.Handle("GET /api/v1/domain/users", s.admin(s.handleDomainUsers))
 	m.Handle("POST /api/v1/domain/users", s.admin(s.handleDomainUserCreate))
@@ -365,4 +453,119 @@ func (s *Server) handleDomainGroupUpdate(w http.ResponseWriter, r *http.Request,
 func (s *Server) handleDomainGroupDelete(w http.ResponseWriter, r *http.Request, u *auth.User) {
 	name := r.PathValue("name")
 	s.domainCall(w, r, u, priv.OpDomainGroupDelete, "domain.group.delete", name, priv.DomainGroupRef{Name: name}, nil, 0)
+}
+
+func (s *Server) domainStatus(w http.ResponseWriter, r *http.Request) (*domain.Status, bool) {
+	var st domain.Status
+	if err := s.cfg.Priv.Call(r.Context(), priv.OpDomainStatus, nil, &st); err != nil {
+		s.writePrivError(w, err)
+		return nil, false
+	}
+	return &st, true
+}
+
+func (s *Server) handleDomainJoin(w http.ResponseWriter, r *http.Request, u *auth.User) {
+	var a domain.JoinArgs
+	if !decodeJSON(w, r, &a) {
+		return
+	}
+	d, err := domain.NormalizeDomain(a.Domain)
+	if err == nil && a.AdminPassword == "" {
+		err = errors.New("enter the domain's Administrator password")
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
+	st, ok := s.domainStatus(w, r)
+	if !ok {
+		return
+	}
+	if !st.Available {
+		writeError(w, http.StatusConflict, "unavailable", "this HardyOS build doesn't include the domain controller")
+		return
+	}
+	if st.Provisioned {
+		writeError(w, http.StatusConflict, "exists", "this server already has the domain "+st.Config.Domain)
+		return
+	}
+	p := domainJoinParams{JoinArgs: a, PasswordRef: jobSecrets.put(a.AdminPassword)}
+	p.AdminPassword = ""
+	p.Domain = d
+	s.submit(w, r, u, JobKindDomainJoin, "Join the domain "+d, p, "domain.join", d+" via "+a.Existing, nil)
+}
+
+type domainLeaveRequest struct {
+	AdminPassword string `json:"adminPassword"`
+}
+
+func (s *Server) handleDomainLeave(w http.ResponseWriter, r *http.Request, u *auth.User) {
+	var req domainLeaveRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	st, ok := s.domainStatus(w, r)
+	if !ok {
+		return
+	}
+	if !st.Provisioned {
+		writeError(w, http.StatusNotFound, "not_found", domain.ErrNotProvisioned.Error())
+		return
+	}
+	if len(st.Config.Others) == 0 {
+		writeError(w, http.StatusConflict, "only_dc", "this is the domain's only domain controller: delete the domain instead")
+		return
+	}
+	if req.AdminPassword == "" {
+		writeError(w, http.StatusBadRequest, "invalid", "enter the domain's Administrator password")
+		return
+	}
+	s.submit(w, r, u, JobKindDomainLeave, "Remove "+st.Config.DCName+" from the domain",
+		domainLeaveParams{Domain: st.Config.Domain, PasswordRef: jobSecrets.put(req.AdminPassword)}, "domain.leave", st.Config.DCName, nil)
+}
+
+func (s *Server) handleDomainRemoveDead(w http.ResponseWriter, r *http.Request, u *auth.User) {
+	var req priv.DomainRemoveDeadArgs
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	st, ok := s.domainStatus(w, r)
+	if !ok {
+		return
+	}
+	if !st.Provisioned {
+		writeError(w, http.StatusNotFound, "not_found", domain.ErrNotProvisioned.Error())
+		return
+	}
+	known := false
+	for _, o := range st.Config.Others {
+		known = known || (o.Name != "" && strings.EqualFold(o.Name, req.Name))
+	}
+	if !known {
+		writeError(w, http.StatusBadRequest, "invalid", req.Name+" isn't one of the domain's other domain controllers")
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(req.Confirm), req.Name) {
+		writeError(w, http.StatusBadRequest, "confirm_required", "type "+req.Name+" to confirm")
+		return
+	}
+	s.submit(w, r, u, JobKindDomainRemove, "Remove "+req.Name+" (gone for good)", req, "domain.remove_dead", req.Name, nil)
+}
+
+func (s *Server) handleDomainForwarders(w http.ResponseWriter, r *http.Request, u *auth.User) {
+	var req priv.DomainForwardersArgs
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+	defer cancel()
+	var st domain.Status
+	target := strings.Join(req.Forwarders, " ")
+	if err := s.cfg.Priv.Call(ctx, priv.OpDomainForwarders, req, &st); err != nil {
+		s.record(r, u, "domain.forwarders", target, audit.Failure, err.Error())
+		s.writePrivError(w, err)
+		return
+	}
+	s.record(r, u, "domain.forwarders", target, audit.Success, "")
+	writeJSON(w, http.StatusOK, st)
 }

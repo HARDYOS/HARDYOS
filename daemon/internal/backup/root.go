@@ -28,6 +28,15 @@ type Root struct {
 	UID, GID int
 	Network  *network.Manager
 	Now      func() time.Time
+	// Domain adds the domain controller's settings and databases to
+	// backups and restores them (nil: no domain support).
+	Domain DomainArchiver
+}
+
+// DomainArchiver is the domain controller's part of a backup.
+type DomainArchiver interface {
+	BackupFiles(ctx context.Context) (config, archive []byte, err error)
+	RestoreFiles(ctx context.Context, config, archive []byte) (note string, err error)
 }
 
 // Paths relative to Root.
@@ -52,8 +61,11 @@ func (r *Root) now() time.Time {
 }
 
 // Collect reads the system files a backup holds. Secrets (storage keys, SSH
-// host keys) are included only when asked for.
-func (r *Root) Collect(secrets bool) ([]File, error) {
+// host keys) are included only when asked for. The domain (accounts,
+// groups, joined computers) is always included: every download has a
+// password, and nightly backups exist so a reinstall keeps the family's
+// accounts.
+func (r *Root) Collect(ctx context.Context, secrets bool) ([]File, error) {
 	var out []File
 	add := func(rel string) error {
 		fi, err := os.Lstat(r.p(rel))
@@ -78,6 +90,17 @@ func (r *Root) Collect(secrets bool) ([]File, error) {
 	} {
 		if err := add(rel); err != nil {
 			return nil, err
+		}
+	}
+	if r.Domain != nil {
+		cfg, archive, err := r.Domain.BackupFiles(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if cfg != nil {
+			out = append(out,
+				File{Path: domainConfigPath, Mode: 0o600, Data: cfg},
+				File{Path: domainArchivePath, Mode: 0o600, Data: archive})
 		}
 	}
 	if secrets {
@@ -425,6 +448,7 @@ func (r *Root) ApplyPending(ctx context.Context) *Result {
 
 	var netCfg *network.Config
 	var timeCfg *network.TimeConfig
+	var domainCfg, domainArchive []byte
 	_ = filepath.WalkDir(filepath.Join(pending, "files"), func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
@@ -451,6 +475,12 @@ func (r *Root) ApplyPending(ctx context.Context) *Result {
 				timeCfg = &t
 			}
 			return nil
+		case domainConfigPath:
+			domainCfg = b
+			return nil
+		case domainArchivePath:
+			domainArchive = b
+			return nil
 		}
 		fi, _ := d.Info()
 		mode := os.FileMode(0o600)
@@ -473,6 +503,15 @@ func (r *Root) ApplyPending(ctx context.Context) *Result {
 			res.Notes = append(res.Notes, "Network settings were not restored because they don't work on this server ("+err.Error()+"). The current network settings stay.")
 		} else if err := r.Network.WriteNow(*netCfg); err != nil {
 			res.Notes = append(res.Notes, "Network settings couldn't be applied: "+err.Error())
+		}
+	}
+	if domainCfg != nil && r.Domain != nil {
+		note, err := r.Domain.RestoreFiles(ctx, domainCfg, domainArchive)
+		switch {
+		case err != nil:
+			res.Notes = append(res.Notes, "The domain couldn't be restored: "+err.Error())
+		case note != "":
+			res.Notes = append(res.Notes, note)
 		}
 	}
 	if timeCfg != nil && r.Network != nil {

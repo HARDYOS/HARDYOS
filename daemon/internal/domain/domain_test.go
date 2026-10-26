@@ -183,7 +183,7 @@ func TestSmbConf(t *testing.T) {
 func TestSetupNetworkCreatesEverything(t *testing.T) {
 	f := &sysexec.Fake{}
 	m := testManager(t, f)
-	lastParent.name = ""
+	m.lastParent = ""
 	c := &Config{Address: "192.168.1.20/24", Gateway: "192.168.1.1", Parent: "enp1s0", MAC: "02:11:22:33:44:55"}
 	// Namespace and links don't exist yet.
 	f.OnPrefix("ip -j -n hardyos-dc addr show dev hdc0", sysexec.Result{ExitCode: 1, Stderr: []byte("does not exist")})
@@ -215,9 +215,9 @@ func TestSetupNetworkCreatesEverything(t *testing.T) {
 func TestSetupNetworkLeavesWorkingSetupAlone(t *testing.T) {
 	f := &sysexec.Fake{}
 	m := testManager(t, f)
-	lastParent.name = "enp1s0"
+	m.lastParent = "enp1s0"
 	_ = os.MkdirAll(filepath.Join(m.Root, "run/netns"), 0o755)
-	_ = os.WriteFile(filepath.Join(m.Root, "run/netns", Namespace), nil, 0o644)
+	_ = os.WriteFile(filepath.Join(m.Root, "run/netns", DefaultNamespace), nil, 0o644)
 	c := &Config{Address: "192.168.1.20/24", Gateway: "192.168.1.1", Parent: "enp1s0", MAC: "02:11:22:33:44:55"}
 	f.On("ip -j -n hardyos-dc addr show dev hdc0", `[{"ifname":"hdc0","flags":["UP"],"addr_info":[{"family":"inet","local":"192.168.1.20","prefixlen":24,"scope":"global"}]}]`)
 	f.On("ip -j -d addr show dev hdc-shim", `[{"ifname":"hdc-shim","link":"enp1s0","flags":["UP"],"addr_info":[{"family":"inet","local":"169.254.250.1","prefixlen":32,"scope":"link"}]}]`)

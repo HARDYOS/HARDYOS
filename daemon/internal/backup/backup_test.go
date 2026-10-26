@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hardyos/hardyos/daemon/internal/domain"
 	"github.com/hardyos/hardyos/daemon/internal/network"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 )
@@ -162,7 +163,7 @@ func newRoot(t *testing.T) (*Root, *sysexec.Fake, string) {
 
 func TestCollect(t *testing.T) {
 	r, _, _ := newRoot(t)
-	files, err := r.Collect(false)
+	files, err := r.Collect(context.Background(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +177,7 @@ func TestCollect(t *testing.T) {
 	if len(files) != 4 {
 		t.Fatalf("plain backup = %v", names)
 	}
-	files, _ = r.Collect(true)
+	files, _ = r.Collect(context.Background(), true)
 	secrets := 0
 	for _, f := range files {
 		if f.Secret {
@@ -191,7 +192,7 @@ func TestCollect(t *testing.T) {
 func TestStoreListFetchStageApply(t *testing.T) {
 	r, _, root := newRoot(t)
 	ctx := context.Background()
-	files, _ := r.Collect(false)
+	files, _ := r.Collect(context.Background(), false)
 	c := sample()
 	c.Files = files
 	b, _ := Pack(c, "")
@@ -276,7 +277,7 @@ func TestStoreListFetchStageApply(t *testing.T) {
 func TestApplySkipsNetworkForOtherHardware(t *testing.T) {
 	r, _, root := newRoot(t)
 	r.Network.Ports = func() []string { return []string{"enp7s0"} } // new machine
-	files, _ := r.Collect(false)
+	files, _ := r.Collect(context.Background(), false)
 	c := sample()
 	c.Files = files
 	b, _ := Pack(c, "")
@@ -292,5 +293,69 @@ func TestApplySkipsNetworkForOtherHardware(t *testing.T) {
 	}
 	if after, _ := os.ReadFile(filepath.Join(root, "etc/network/interfaces")); string(after) != string(before) {
 		t.Fatal("network files changed for hardware they don't fit")
+	}
+}
+
+// fakeDomain stands in for the domain controller.
+type fakeDomain struct {
+	restoredCfg, restoredArchive []byte
+}
+
+func (f *fakeDomain) BackupFiles(context.Context) ([]byte, []byte, error) {
+	return []byte(`{"domain":"home.example.net"}`), []byte("BZh91AY&SY pretend archive"), nil
+}
+
+func (f *fakeDomain) RestoreFiles(_ context.Context, cfg, archive []byte) (string, error) {
+	f.restoredCfg, f.restoredArchive = cfg, archive
+	return "The domain home.example.net was restored.", nil
+}
+
+func TestDomainInBackups(t *testing.T) {
+	if domainConfigPath != domain.BackupConfigPath || domainArchivePath != domain.BackupArchivePath {
+		t.Fatal("backup and domain disagree about where the domain's files go")
+	}
+	r, _, root := newRoot(t)
+	fd := &fakeDomain{}
+	r.Domain = fd
+	ctx := context.Background()
+	files, err := r.Collect(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	for _, f := range files {
+		paths = append(paths, f.Path)
+		if strings.HasPrefix(f.Path, "var/lib/hardyos-dc/") && f.Secret {
+			t.Errorf("%s is marked secret, so nightly backups would drop the family's accounts", f.Path)
+		}
+	}
+	if !strings.Contains(strings.Join(paths, " "), domainArchivePath) {
+		t.Fatalf("the domain isn't in the backup: %v", paths)
+	}
+	// It goes on a pool like the rest, and restores through the domain manager,
+	// never by writing into the DC's folder directly.
+	c := sample()
+	c.Files = files
+	b, err := Pack(c, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(root, WorkDir, "made-2.hbak")
+	_ = os.WriteFile(src, b, 0o640)
+	if _, err := r.Store(ctx, "tank", src, 3); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Stage(src, ""); err != nil {
+		t.Fatal(err)
+	}
+	res := r.ApplyPending(ctx)
+	if !res.OK || !strings.Contains(strings.Join(res.Notes, " "), "home.example.net was restored") {
+		t.Fatalf("result = %+v", res)
+	}
+	if string(fd.restoredArchive) != "BZh91AY&SY pretend archive" || !strings.Contains(string(fd.restoredCfg), "home.example.net") {
+		t.Fatalf("restored %q %q", fd.restoredCfg, fd.restoredArchive)
+	}
+	if _, err := os.Stat(filepath.Join(root, domainArchivePath)); err == nil {
+		t.Fatal("the archive was written into the DC's folder as a plain file")
 	}
 }

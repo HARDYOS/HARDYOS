@@ -296,6 +296,27 @@ for the domain controller and sets the domain Administrator's password.
   in-memory reference, never its stored parameters. Built-in accounts and
   groups can't be deleted, and passwords don't expire by default.
 
+- **More than one DC.** A second HardyOS server joins the domain from its
+  own Domain page (`samba-tool domain join`, run inside its namespace with
+  the existing DC as its DNS) and becomes dc2; accounts, groups and DNS
+  replicate both ways. Each DC lists its partners from the domain's DNS
+  (refreshed every 5 minutes) and uses them in its own `resolv.conf`, after
+  itself. Leaving demotes cleanly (roles move to a partner); a DC that's gone
+  for good is removed from a survivor, which seizes its roles. Deleting the
+  domain is refused while partners exist.
+- **Name settings.** Each DC has its own `resolv.conf` and `krb5.conf`
+  (the domain mapped to its realm) in its folder, bound over `/etc` by the
+  unit and mirrored in `/etc/netns/<namespace>/` for commands run there.
+- **The NAS's own DNS.** hardyd-priv keeps the NAS's `resolv.conf` listing
+  the domain's DCs first (with a dhclient hook when DNS comes from DHCP),
+  and the Domain page tells you what to put in the router's DHCP settings.
+- **Backups.** Settings backups include the DC's settings and an offline
+  backup of its databases. Restoring at start-up unpacks plain files and
+  folders only (no links or escaping paths), puts group policies back,
+  removes Samba's backup marker and lets the watcher start the DC. A domain
+  already on the server is kept, and a DC that had partners isn't restored
+  (it rejoins instead).
+
 The local HardyOS accounts (Control Panel > Users & Groups) stay separate for
 now; the local admin remains the break-glass account. Shares (Phase 2) use
 the domain's users and groups, and Authentik (Phase 3) signs apps in with

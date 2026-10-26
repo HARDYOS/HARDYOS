@@ -79,8 +79,6 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq samba samba-ad-dc samba-ad-provision samba-dsdb-modules winbind smbclient iputils-arping bind9-dnsutils
           sudo systemctl stop smbd nmbd winbind samba-ad-dc 2>/dev/null || true
           sudo install -D -m 0755 packaging/domain/hardyos-dc-admin /usr/lib/hardyos/hardyos-dc-admin
-          sudo install -m 0644 packaging/systemd/hardyos-dc.service /etc/systemd/system/hardyos-dc.service
-          sudo systemctl daemon-reload
           # A private LAN for the DC: cloud networks answer ARP for every address.
           sudo ip link add lan0 type dummy
           sudo ip addr add 10.123.0.1/24 dev lan0
@@ -88,15 +86,14 @@ jobs:
       - name: build test binary
         working-directory: daemon
         run: go test -c -o "$RUNNER_TEMP/domain.test" ./internal/domain
-      - name: provision, manage and delete a real domain
+      - name: two domain controllers - create, join, replicate, leave, back up, restore, take over
         run: |
-          sudo HARDYOS_DC_INTEGRATION=1 HARDYOS_DC_TEST_ADDRESS=10.123.0.20/24 HARDYOS_DC_TEST_GATEWAY=10.123.0.1 \
-            "$RUNNER_TEMP/domain.test" -test.run TestDCIntegration -test.v
+          sudo HARDYOS_DC_INTEGRATION=1 HARDYOS_DC_TEST_ADDRESS=10.123.0.20/24 HARDYOS_DC_TEST_ADDRESS2=10.123.0.21/24 \
+            HARDYOS_DC_TEST_GATEWAY=10.123.0.1 "$RUNNER_TEMP/domain.test" -test.run TestDCIntegration -test.v -test.timeout 30m
       - name: domain controller logs
         if: failure()
         run: |
-          sudo journalctl -u hardyos-dc --no-pager | tail -100 || true
-          sudo sh -c 'tail -50 /var/lib/hardyos-dc/log/log.* 2>/dev/null' || true
+          sudo sh -c 'tail -60 /var/lib/hardyos-dc/log/log.* /var/lib/hardyos-dc2/log/log.* 2>/dev/null' || true
 
   apps:
     name: Docker apps (KinCast)
