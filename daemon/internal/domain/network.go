@@ -41,6 +41,17 @@ func (a ipAddr) ipv4() []netip.Prefix {
 	return out
 }
 
+// inet lists every IPv4 address, whatever its scope.
+func (a ipAddr) inet() []netip.Prefix {
+	var out []netip.Prefix
+	for _, ai := range a.AddrInfo {
+		if ad, err := netip.ParseAddr(ai.Local); err == nil && ai.Family == "inet" {
+			out = append(out, netip.PrefixFrom(ad, ai.PrefixLen))
+		}
+	}
+	return out
+}
+
 func (a ipAddr) up() bool {
 	for _, f := range a.Flags {
 		if f == "UP" {
@@ -215,6 +226,11 @@ func (m *Manager) addressFree(ctx context.Context, dev string, a netip.Addr) boo
 	return err == nil && res.ExitCode == 0
 }
 
+// ShimAddr is the NAS's address on its side of the shim. It's link-local and
+// used for nothing else, so the shim answers ARP for it normally without
+// ever claiming the NAS's LAN address (which would confuse other devices).
+const ShimAddr = "169.254.250.1"
+
 // lastParent remembers which LAN interface the DC was attached to, so a
 // network change that moves the NAS to another interface (a new bond, say)
 // moves the DC too.
@@ -241,7 +257,7 @@ func (m *Manager) SetupNetwork(ctx context.Context, c *Config) error {
 	if err != nil {
 		return fmt.Errorf("the domain controller's address %q isn't valid", c.Address)
 	}
-	parent, host, err := m.lan(ctx, c.Parent, dcAddr)
+	parent, _, err := m.lan(ctx, c.Parent, dcAddr)
 	if err != nil {
 		return err
 	}
@@ -291,12 +307,17 @@ func (m *Manager) SetupNetwork(ctx context.Context, c *Config) error {
 			return fmt.Errorf("setting the domain controller's gateway: %w", err)
 		}
 	}
-	return m.setupShim(ctx, parent, host.Addr(), dcAddr.Addr(), moved)
+	// Replies to the NAS go back through the shim.
+	if err := ns("route", "replace", ShimAddr+"/32", "dev", DCLink); err != nil {
+		return fmt.Errorf("setting the route back to the NAS: %w", err)
+	}
+	return m.setupShim(ctx, parent, dcAddr.Addr(), moved)
 }
 
-// setupShim lets the NAS reach the DC: a macvlan on the same port carrying
-// the NAS's own address (never answering ARP for it) and a host route.
-func (m *Manager) setupShim(ctx context.Context, parent string, hostIP, dcIP netip.Addr, moved bool) error {
+// setupShim lets the NAS reach the DC: the NAS can't talk to a macvlan child
+// through the parent port, so a second macvlan on the same port carries a
+// private address and a host route to the DC.
+func (m *Manager) setupShim(ctx context.Context, parent string, dcIP netip.Addr, moved bool) error {
 	list, err := m.addrs(ctx, "-d", "addr", "show", "dev", ShimLink)
 	if err == nil && (moved || len(list) == 0 || (list[0].Link != "" && list[0].Link != parent)) {
 		_ = m.run(ctx, "ip", "link", "del", ShimLink)
@@ -308,14 +329,12 @@ func (m *Manager) setupShim(ctx context.Context, parent string, hostIP, dcIP net
 		}
 		list = nil
 	}
-	// The NAS's address lives on the real port; the shim never claims it.
-	for _, kv := range []string{"arp_ignore=8", "arp_announce=2"} {
-		_ = m.run(ctx, "sysctl", "-q", "-w", "net.ipv4.conf."+ShimLink+"."+kv)
-	}
-	want := netip.PrefixFrom(hostIP, 32)
+	// Strict reverse-path filtering would drop the DC's replies.
+	_ = m.run(ctx, "sysctl", "-q", "-w", "net.ipv4.conf."+ShimLink+".rp_filter=2")
+	want := netip.MustParsePrefix(ShimAddr + "/32")
 	have := false
 	if len(list) > 0 {
-		for _, p := range list[0].ipv4() {
+		for _, p := range list[0].inet() {
 			if p == want {
 				have = true
 			}
@@ -323,14 +342,14 @@ func (m *Manager) setupShim(ctx context.Context, parent string, hostIP, dcIP net
 	}
 	if !have {
 		_ = m.run(ctx, "ip", "addr", "flush", "dev", ShimLink)
-		if err := m.run(ctx, "ip", "addr", "add", want.String(), "dev", ShimLink); err != nil {
+		if err := m.run(ctx, "ip", "addr", "add", want.String(), "dev", ShimLink, "scope", "link"); err != nil {
 			return fmt.Errorf("setting up the route to the domain controller: %w", err)
 		}
 	}
 	if err := m.run(ctx, "ip", "link", "set", ShimLink, "up"); err != nil {
 		return err
 	}
-	return m.run(ctx, "ip", "route", "replace", dcIP.String()+"/32", "dev", ShimLink, "src", hostIP.String())
+	return m.run(ctx, "ip", "route", "replace", dcIP.String()+"/32", "dev", ShimLink, "src", ShimAddr)
 }
 
 // networkProblem says what's wrong with the DC's network, or "".

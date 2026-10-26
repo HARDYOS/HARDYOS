@@ -251,6 +251,56 @@ person types into it, but no API call can run a command through it.
 Control Panel > Security has the on/off switch (`terminal.enabled`, on by
 default).
 
+## Domain controller
+
+HardyOS can run an Active Directory domain (Samba 4) so every family member
+has one account for Windows PCs, the NAS's shares and, later, every app. It
+is set up from Control Panel > Domain, which asks for the domain name (a
+subdomain of a domain the owner has, never `.local`), suggests a free address
+for the domain controller and sets the domain Administrator's password.
+
+```
+            LAN (192.168.1.0/24)
+   ─────────────┬──────────────────────┬───────────
+                │ enp1s0 (NAS .105)    │ hdc0 (DC .20, own MAC)
+         ┌──────┴─────────┐     ┌──────┴──────────────────────┐
+         │ NAS            │     │ netns hardyos-dc            │
+         │ hdc-shim       │────▶│ samba (hardyos-dc.service)  │
+         │ 169.254.250.1  │     │ /run/samba -> its run dir   │
+         └────────────────┘     └─────────────────────────────┘
+```
+
+- **Its own address.** The DC lives in the network namespace `hardyos-dc`
+  on a macvlan (`hdc0`) of the NAS's LAN port, with a fixed, locally
+  administered MAC. Its DNS (port 53), Kerberos and SMB never collide with
+  the NAS's own services, and Samba's recommended "DC is not the file server"
+  layout holds on one box.
+- **The NAS reaching it.** A macvlan can't talk to its parent port, so a
+  second macvlan on the host (`hdc-shim`) carries the link-local address
+  169.254.250.1 and a route to the DC; the DC has the matching route back.
+  The shim never claims the NAS's LAN address, so other devices see exactly
+  one answer when they look the NAS up.
+- **Its data.** Everything is in `/var/lib/hardyos-dc` (the dataset
+  `rpool/hardyos-dc`, shared by all boot environments): Samba's databases,
+  the `smb.conf` HardyOS writes, logs, and the run folder that the unit binds
+  over `/run/samba` so the DC's winbind socket is its own.
+- **Keeping it running.** hardyd-priv checks every 30 seconds that the
+  namespace, `hdc0`, the shim and the service are in place and repairs what
+  isn't: a network change that recreates the LAN port, or a crash, heals by
+  itself. `GET /domain` reports `responding` only when a DNS query from the
+  NAS for the domain's LDAP record gets an answer.
+- **Accounts.** Users and groups are managed through `hardyos-dc-admin`, a
+  small helper using Samba's Python API that reads its arguments, passwords
+  included, from stdin. Creating and deleting the domain are jobs; the
+  Administrator password reaches the provision job through a one-time
+  in-memory reference, never its stored parameters. Built-in accounts and
+  groups can't be deleted, and passwords don't expire by default.
+
+The local HardyOS accounts (Control Panel > Users & Groups) stay separate for
+now; the local admin remains the break-glass account. Shares (Phase 2) use
+the domain's users and groups, and Authentik (Phase 3) signs apps in with
+them.
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly

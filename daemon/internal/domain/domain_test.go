@@ -201,10 +201,10 @@ func TestSetupNetworkCreatesEverything(t *testing.T) {
 		"ip -n hardyos-dc link set hdc-new name hdc0",
 		"ip -n hardyos-dc addr replace 192.168.1.20/24 dev hdc0",
 		"ip -n hardyos-dc route replace default via 192.168.1.1 dev hdc0",
+		"ip -n hardyos-dc route replace 169.254.250.1/32 dev hdc0",
 		"ip link add hdc-shim link enp1s0 type macvlan mode bridge",
-		"sysctl -q -w net.ipv4.conf.hdc-shim.arp_ignore=8",
-		"ip addr add 192.168.1.105/32 dev hdc-shim",
-		"ip route replace 192.168.1.20/32 dev hdc-shim src 192.168.1.105",
+		"ip addr add 169.254.250.1/32 dev hdc-shim scope link",
+		"ip route replace 192.168.1.20/32 dev hdc-shim src 169.254.250.1",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
@@ -220,7 +220,7 @@ func TestSetupNetworkLeavesWorkingSetupAlone(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(m.Root, "run/netns", Namespace), nil, 0o644)
 	c := &Config{Address: "192.168.1.20/24", Gateway: "192.168.1.1", Parent: "enp1s0", MAC: "02:11:22:33:44:55"}
 	f.On("ip -j -n hardyos-dc addr show dev hdc0", `[{"ifname":"hdc0","flags":["UP"],"addr_info":[{"family":"inet","local":"192.168.1.20","prefixlen":24,"scope":"global"}]}]`)
-	f.On("ip -j -d addr show dev hdc-shim", `[{"ifname":"hdc-shim","link":"enp1s0","flags":["UP"],"addr_info":[{"family":"inet","local":"192.168.1.105","prefixlen":32,"scope":"global"}]}]`)
+	f.On("ip -j -d addr show dev hdc-shim", `[{"ifname":"hdc-shim","link":"enp1s0","flags":["UP"],"addr_info":[{"family":"inet","local":"169.254.250.1","prefixlen":32,"scope":"link"}]}]`)
 	f.OnPrefix("ip ", sysexec.Result{})
 	f.OnPrefix("sysctl ", sysexec.Result{})
 	if err := m.SetupNetwork(context.Background(), c); err != nil {

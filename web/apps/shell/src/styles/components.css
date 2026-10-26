@@ -1123,3 +1123,69 @@
 .terminal-host .xterm {
   height: 100%;
 }
+
+/* Tabs inside a page (segmented control). */
+.tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--hos-radius-sm);
+  background: var(--hos-surface);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  align-self: flex-start;
+}
+.tabs__tab {
+  border: 0;
+  background: none;
+  color: var(--hos-text-2);
+  font-size: 13px;
+  padding: 6px 14px;
+  border-radius: 7px;
+}
+.tabs__tab:hover {
+  color: var(--hos-text);
+}
+.tabs__tab[aria-selected="true"] {
+  background: var(--hos-accent-soft);
+  color: var(--hos-text);
+  font-weight: 600;
+}
+.tabs__tab:focus-visible {
+  outline: 2px solid var(--hos-accent);
+  outline-offset: 1px;
+}
+
+/* A list of checkboxes (group members, groups of a user). */
+.check-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 6px 14px;
+  max-height: 220px;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: var(--hos-radius-sm);
+  background: var(--hos-surface);
+}
+.check-list label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  min-width: 0;
+}
+.check-list label span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.check-list input {
+  accent-color: var(--hos-accent);
+}
+.steps {
+  margin: 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--hos-text-2);
+}

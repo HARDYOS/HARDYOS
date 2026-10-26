@@ -8,7 +8,9 @@
 #   3. sign in as the administrator chosen in the installer
 #   4. create a storage pool from the recommendation
 #   5. back up the settings onto the pool
-#   6. with an update file: install it, restart, check it's confirmed
+#   6. create a domain, a domain user and a group; the DC must answer
+#   7. with an update file: install it, restart, check it's confirmed and
+#      that the domain carried over
 #
 # Usage: os/smoke-test.sh <hardyos.iso> [update.hupd]
 # Needs qemu-system-x86_64, OVMF, bsdtar, curl and jq; KVM makes it fast.
@@ -201,7 +203,28 @@ job=$(api POST /system/backups/run '{}') || fail "start backup"
 wait_job "$(jq -r .job.id <<<"$job")" 300 > /dev/null
 api GET /system/backups | jq -e '.backups | length == 1' > /dev/null || fail "no backup on the pool"
 
-# --- 4. an update ------------------------------------------------------------------
+# --- 4. the domain controller ------------------------------------------------------
+
+wait_domain() { # wait_domain SECONDS: until the DC answers from the NAS
+  local deadline=$((SECONDS + $1)) st
+  until st=$(api GET /domain) && jq -e '.running and .responding' > /dev/null <<<"$st"; do
+    [ $SECONDS -lt $deadline ] || fail "the domain controller isn't answering: $st"
+    sleep 5
+  done
+}
+
+log "Creating a domain"
+sug=$(api GET /domain/suggest) || fail "domain suggestion"
+addr=$(jq -r .address <<<"$sug")
+[ -n "$addr" ] || fail "no free address for the domain controller: $sug"
+job=$(api POST /domain "$(jq -nc --arg a "$addr" '{domain:"home.hardyos-smoke.net", adminPassword:"Smoke-Adm1n-Pass", address:$a}')") || fail "create the domain"
+wait_job "$(jq -r .job.id <<<"$job")" 600 > /dev/null
+wait_domain 120
+api POST /domain/users '{"username":"alice","givenName":"Alice","surname":"Hardy","password":"Al1ce-Passw0rd!"}' > /dev/null || fail "create a domain user"
+api POST /domain/groups '{"name":"Family","members":["alice"]}' > /dev/null || fail "create a domain group"
+api GET /domain/users | jq -e '.users | map(select(.username=="alice" and (.groups | index("Family")))) | length == 1' > /dev/null || fail "alice isn't in Family"
+
+# --- 5. an update ------------------------------------------------------------------
 
 if [ -n "$UPDATE" ]; then
   log "Installing $(basename "$UPDATE")"
@@ -224,6 +247,9 @@ if [ -n "$UPDATE" ]; then
   running=$(api GET /system/updates | jq -r '.versions[] | select(.running) | .version')
   [ "$running" = "$want" ] || fail "running $running, expected $want"
   api GET /storage/pools | jq -e 'map(select(.name=="tank")) | length == 1' > /dev/null || fail "pool tank missing after the update"
+  # The domain lives outside the boot environment, so it carries over.
+  wait_domain 180
+  api GET /domain/users | jq -e '.users | map(select(.username=="alice")) | length == 1' > /dev/null || fail "alice is missing after the update"
 fi
 
 log "All smoke tests passed"

@@ -23,6 +23,10 @@ import (
 //
 //	sudo HARDYOS_DC_INTEGRATION=1 go test ./internal/domain -run TestDCIntegration -v
 //
+// HARDYOS_DC_TEST_ADDRESS and HARDYOS_DC_TEST_GATEWAY put the DC on a
+// network of the test's choosing (CI uses a dummy interface, because cloud
+// networks answer ARP for every address and nothing looks free).
+//
 // With systemd, packaging/systemd/hardyos-dc.service must be installed.
 // Without it (containers), the test runs Samba the same way the unit does.
 func TestDCIntegration(t *testing.T) {
@@ -49,24 +53,35 @@ func TestDCIntegration(t *testing.T) {
 		}
 	})
 
-	sug, err := m.Suggest(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("suggestion: %+v", sug)
-	if sug.Address == "" {
-		t.Fatal("no free address found for the DC")
+	addr, gw := os.Getenv("HARDYOS_DC_TEST_ADDRESS"), os.Getenv("HARDYOS_DC_TEST_GATEWAY")
+	if addr == "" {
+		sug, err := m.Suggest(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("suggestion: %+v", sug)
+		if sug.Address == "" {
+			t.Fatal("no free address found for the DC")
+		}
+		addr = sug.Address
 	}
 
 	const pw = "Ci-Admin-Passw0rd!"
 	start := time.Now()
-	c, err := m.Provision(ctx, ProvisionArgs{Domain: "home.hardyos-ci.net", AdminPassword: pw, Address: sug.Address})
+	c, err := m.Provision(ctx, ProvisionArgs{Domain: "home.hardyos-ci.net", AdminPassword: pw, Address: addr, Gateway: gw, Forwarders: []string{"9.9.9.9"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("provisioned %s at %s in %s", c.Domain, c.Address, time.Since(start).Round(time.Second))
 
 	waitResponding(t, m)
+	// Still answering once the DC has forgotten the NAS's hardware address
+	// (an expired ARP entry): replies must find their way back.
+	_ = exec.Command("ip", "-n", Namespace, "neigh", "flush", "all").Run()
+	_ = exec.Command("ip", "neigh", "flush", "dev", ShimLink).Run()
+	if st, _ := m.Status(ctx); !st.Responding {
+		t.Fatalf("the DC stopped answering after its ARP cache was cleared: %+v", st)
+	}
 
 	// The admin password set through stdin works.
 	smbOK(t, c.IP(), "HOME", "Administrator", pw)
