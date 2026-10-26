@@ -115,6 +115,7 @@ func registerDomainJobs(m *jobs.Manager, pc *priv.Client) {
 			if err := pc.Call(ctx, priv.OpDomainProvision, args, &c); err != nil {
 				return nil, err
 			}
+			joinFileServer(jc, pc, pw)
 			jc.Progress(100, "The domain controller is running")
 			return c, nil
 		},
@@ -134,6 +135,7 @@ func registerDomainJobs(m *jobs.Manager, pc *priv.Client) {
 			if err := pc.Call(ctx, priv.OpDomainDestroy, priv.DomainDestroyArgs{Confirm: p.Domain}, nil); err != nil {
 				return nil, err
 			}
+			leaveFileServer(jc, pc, p.Domain)
 			return map[string]string{"deleted": p.Domain}, nil
 		},
 	})
@@ -163,6 +165,7 @@ func registerDomainMoreJobs(m *jobs.Manager, pc *priv.Client) {
 			if err := pc.Call(ctx, priv.OpDomainJoin, args, &c); err != nil {
 				return nil, err
 			}
+			joinFileServer(jc, pc, pw)
 			jc.Progress(100, c.DCName+" is running")
 			return c, nil
 		},

@@ -1474,6 +1474,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/files": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The SMB file server's status, settings and how to connect
+         * @description Everyone signed in may read it (to see how to connect); settings, problems and per-folder notes are for administrators.
+         */
+        get: operations["getFileServices"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/files/join": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Make this server a member of the domain so its accounts can use the shared folders (runs as a job)
+         * @description The password goes to the job through a one-time in-memory reference and to Samba on stdin; it's never stored. Leave domain out to join this server's own DC's domain.
+         */
+        post: operations["joinFileServices"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/files/leave": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Take this server out of the domain (runs as a job)
+         * @description Needs confirm true. With the Administrator password the computer account is deleted from the domain too; without it this server only forgets the domain.
+         */
+        post: operations["leaveFileServices"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/files/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Turn SMB sharing on or off and set up home folders (runs as a job)
+         * @description Fields left out keep their values.
+         */
+        patch: operations["updateFileServicesSettings"];
+        trace?: never;
+    };
     "/domain": {
         parameters: {
             query?: never;
@@ -3089,6 +3169,93 @@ export interface components {
             running: boolean;
             /** @description The last NFS sync's error */
             problem?: string;
+        };
+        FileServicesDomain: {
+            /** @example home.hardynetworks.net */
+            domain: string;
+            realm: string;
+            /** @example HOME */
+            netbios: string;
+            /** @description Domain controllers used first (this server's own) */
+            dcs?: string[];
+            adminsGroupSid?: string;
+        };
+        FileServicesHomes: {
+            /** @description A home folder for every domain account */
+            enabled: boolean;
+            /** @description Where they're kept (<pool>/homes) */
+            pool: string;
+            /**
+             * Format: int64
+             * @description Each home folder's quota; 0 for none
+             */
+            quotaBytes: number;
+        };
+        FileServicesSettings: {
+            smbEnabled: boolean;
+            homes: components["schemas"]["FileServicesHomes"];
+        };
+        FileServicesShare: {
+            id: string;
+            name: string;
+            smb: boolean;
+            timeMachine: boolean;
+            previousVersions: boolean;
+            recycle: boolean;
+            guest: boolean;
+            /** @description Offered over SMB right now */
+            available: boolean;
+            /** @description Access rules that can't apply here (a HardyOS account, another domain's name) */
+            skipped: string[];
+        };
+        FileServicesStatus: {
+            /** @description This build has the SMB file server */
+            available: boolean;
+            /** @description This server is a member of the domain */
+            joined: boolean;
+            domain: components["schemas"]["FileServicesDomain"] | null;
+            /** @description The domain this server's own DC runs (empty: none) */
+            localDomain: string;
+            /**
+             * @description Its name on the network
+             * @example HARDYOS
+             */
+            serverName: string;
+            /** @example hardyos.home.hardynetworks.net */
+            hostName: string;
+            /** @description The SMB server is running */
+            running: boolean;
+            /** @description The domain answers (accounts can sign in) */
+            winbind: boolean;
+            problem: string;
+            settings: components["schemas"]["FileServicesSettings"];
+            shares: components["schemas"]["FileServicesShare"][];
+            /** @description This server's LAN addresses */
+            addresses: string[];
+            /** Format: date-time */
+            joinedAt?: string;
+        };
+        FileServicesJoinRequest: {
+            /** @description The domain's DNS name; leave out for this server's own domain */
+            domain?: string;
+            /** @description Defaults to Administrator */
+            adminUser?: string;
+            /** Format: password */
+            adminPassword: string;
+        };
+        FileServicesLeaveRequest: {
+            /** @description Must be true */
+            confirm: boolean;
+            adminUser?: string;
+            /**
+             * Format: password
+             * @description With it, the computer account is deleted from the domain too
+             */
+            adminPassword?: string;
+        };
+        FileServicesSettingsRequest: {
+            smbEnabled?: boolean;
+            homes?: components["schemas"]["FileServicesHomes"];
         };
         DomainConfig: {
             /** @example home.hardynetworks.net */
@@ -6067,6 +6234,86 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    getFileServices: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The file server */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileServicesStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    joinFileServices: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FileServicesJoinRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    leaveFileServices: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FileServicesLeaveRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    updateFileServicesSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FileServicesSettingsRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     getDomain: {

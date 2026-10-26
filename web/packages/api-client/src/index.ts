@@ -126,3 +126,6 @@ export type AppOpen = S["AppOpen"];
 export type AppCatalog = S["AppCatalog"];
 export type AppCatalogApp = S["AppCatalogApp"];
 export type CustomAppRequest = S["CustomAppRequest"];
+export type FileServicesStatus = S["FileServicesStatus"];
+export type FileServicesHomes = S["FileServicesHomes"];
+export type FileServicesShare = S["FileServicesShare"];

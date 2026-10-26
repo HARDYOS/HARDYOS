@@ -26,6 +26,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/nfs"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/shares"
+	"github.com/hardyos/hardyos/daemon/internal/smb"
 	"github.com/hardyos/hardyos/daemon/internal/snapshots"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 	"github.com/hardyos/hardyos/daemon/internal/update"
@@ -116,8 +117,12 @@ func main() {
 		shm := &shares.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log}
 		// NFS follows every shared folder change; automatic snapshots tick each minute.
 		nfsm := &nfs.Manager{Runner: sysexec.Exec{}, Shares: shm, Root: "/", Log: log}
-		priv.RegisterShares(s, shm, priv.RegisterNFS(s, nfsm))
+		// SMB file server: the host's Samba as a member of the domain.
+		fsm := &smb.Manager{Runner: sysexec.Exec{}, Log: log, Shares: shm, LocalDomain: localSMBDomain(dc),
+			Addresses: func(ctx context.Context) []string { return smb.LANAddresses(ctx, sysexec.Exec{}) }}
+		priv.RegisterShares(s, shm, priv.RegisterNFS(s, nfsm), priv.RegisterFiles(s, fsm))
 		go nfsm.Watch(ctx)
+		go fsm.Watch(ctx)
 		snaps := &snapshots.Manager{Runner: sysexec.Exec{}, Shares: shm, Log: log}
 		priv.RegisterSnapshots(s, snaps)
 		go snaps.Run(ctx)
@@ -160,5 +165,17 @@ func main() {
 	if err := s.ListenAndServe(ctx, *socket, 0o660, gid); err != nil {
 		log.Error("serve failed", "err", err)
 		os.Exit(1)
+	}
+}
+
+// localSMBDomain tells the file server about the domain this server's own
+// DC runs (its DCs, this one first, and the HardyOS Admins group).
+func localSMBDomain(dc *domain.Manager) func() *smb.Domain {
+	return func() *smb.Domain {
+		c, err := dc.Load()
+		if err != nil || c == nil || c.NetBIOS == "" {
+			return nil
+		}
+		return &smb.Domain{Domain: c.Domain, Realm: c.Realm, NetBIOS: c.NetBIOS, DCs: c.DNSServers(), AdminsGroupSID: c.AdminsGroupSID}
 	}
 }

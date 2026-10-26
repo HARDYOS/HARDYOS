@@ -1689,6 +1689,71 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
   # ---- end of shared folder snapshots and NFS -----------------------------
+  # ---- File Services: SMB file server (file sharing part A) ---------------
+  /files:
+    get:
+      operationId: getFileServices
+      summary: The SMB file server's status, settings and how to connect
+      description: Everyone signed in may read it (to see how to connect); settings, problems and per-folder notes are for administrators.
+      tags: [files]
+      responses:
+        "200":
+          description: The file server
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileServicesStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /files/join:
+    post:
+      operationId: joinFileServices
+      summary: Make this server a member of the domain so its accounts can use the shared folders (runs as a job)
+      description: The password goes to the job through a one-time in-memory reference and to Samba on stdin; it's never stored. Leave domain out to join this server's own DC's domain.
+      tags: [files]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FileServicesJoinRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /files/leave:
+    post:
+      operationId: leaveFileServices
+      summary: Take this server out of the domain (runs as a job)
+      description: Needs confirm true. With the Administrator password the computer account is deleted from the domain too; without it this server only forgets the domain.
+      tags: [files]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FileServicesLeaveRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /files/settings:
+    patch:
+      operationId: updateFileServicesSettings
+      summary: Turn SMB sharing on or off and set up home folders (runs as a job)
+      description: Fields left out keep their values.
+      tags: [files]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FileServicesSettingsRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  # ---- end of File Services ------------------------------------------------
   /domain:
     get:
       operationId: getDomain
@@ -3602,6 +3667,81 @@ components:
         running: { type: boolean, description: The NFS server runs }
         problem: { type: string, description: The last NFS sync's error, if any }
     # ---- end of shared folder snapshots and NFS -----------------------------
+    # ---- File Services: SMB file server (file sharing part A) -------------
+    FileServicesDomain:
+      type: object
+      required: [domain, realm, netbios]
+      properties:
+        domain: { type: string, example: home.hardynetworks.net }
+        realm: { type: string }
+        netbios: { type: string, example: HOME }
+        dcs: { type: array, items: { type: string }, description: "Domain controllers used first (this server's own)" }
+        adminsGroupSid: { type: string }
+    FileServicesHomes:
+      type: object
+      required: [enabled, pool, quotaBytes]
+      properties:
+        enabled: { type: boolean, description: A home folder for every domain account }
+        pool: { type: string, description: "Where they're kept (<pool>/homes)" }
+        quotaBytes: { type: integer, format: int64, description: "Each home folder's quota; 0 for none" }
+    FileServicesSettings:
+      type: object
+      required: [smbEnabled, homes]
+      properties:
+        smbEnabled: { type: boolean }
+        homes: { $ref: "#/components/schemas/FileServicesHomes" }
+    FileServicesShare:
+      type: object
+      required: [id, name, smb, timeMachine, previousVersions, recycle, guest, available, skipped]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        smb: { type: boolean }
+        timeMachine: { type: boolean }
+        previousVersions: { type: boolean }
+        recycle: { type: boolean }
+        guest: { type: boolean }
+        available: { type: boolean, description: Offered over SMB right now }
+        skipped: { type: array, items: { type: string }, description: "Access rules that can't apply here (a HardyOS account, another domain's name)" }
+    FileServicesStatus:
+      type: object
+      required: [available, joined, domain, localDomain, serverName, hostName, running, winbind, problem, settings, shares, addresses]
+      properties:
+        available: { type: boolean, description: This build has the SMB file server }
+        joined: { type: boolean, description: This server is a member of the domain }
+        domain:
+          nullable: true
+          allOf: [{ $ref: "#/components/schemas/FileServicesDomain" }]
+        localDomain: { type: string, description: "The domain this server's own DC runs (empty: none)" }
+        serverName: { type: string, example: HARDYOS, description: "Its name on the network" }
+        hostName: { type: string, example: hardyos.home.hardynetworks.net }
+        running: { type: boolean, description: The SMB server is running }
+        winbind: { type: boolean, description: "The domain answers (accounts can sign in)" }
+        problem: { type: string }
+        settings: { $ref: "#/components/schemas/FileServicesSettings" }
+        shares: { type: array, items: { $ref: "#/components/schemas/FileServicesShare" } }
+        addresses: { type: array, items: { type: string }, description: "This server's LAN addresses" }
+        joinedAt: { type: string, format: date-time }
+    FileServicesJoinRequest:
+      type: object
+      required: [adminPassword]
+      properties:
+        domain: { type: string, description: "The domain's DNS name; leave out for this server's own domain" }
+        adminUser: { type: string, description: Defaults to Administrator }
+        adminPassword: { type: string, format: password }
+    FileServicesLeaveRequest:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: boolean, description: Must be true }
+        adminUser: { type: string }
+        adminPassword: { type: string, format: password, description: "With it, the computer account is deleted from the domain too" }
+    FileServicesSettingsRequest:
+      type: object
+      properties:
+        smbEnabled: { type: boolean }
+        homes: { $ref: "#/components/schemas/FileServicesHomes" }
+    # ---- end of File Services ------------------------------------------------
     DomainConfig:
       type: object
       required: [domain, realm, netbios, dcName, address, gateway, parent, mac, forwarders, enabled, createdAt]

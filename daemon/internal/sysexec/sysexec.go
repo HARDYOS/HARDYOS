@@ -102,6 +102,8 @@ type prefixResp struct {
 type Call struct {
 	Line  string
 	Stdin []byte
+	// Env holds the extra environment variables of a RunEnv call.
+	Env []string
 }
 
 // On sets the result for an exact command line.
