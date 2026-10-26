@@ -16,6 +16,10 @@ systemctl mask samba-ad-dc.service >/dev/null 2>&1 || true
 # environment), so hardyd-priv starts it once that pool is mounted.
 systemctl disable docker.service docker.socket containerd.service >/dev/null 2>&1 || true
 
+# The NFS server (and rpcbind, which it starts when needed) stays off until
+# a shared folder is shared over NFS; hardyd-priv enables it then.
+systemctl disable nfs-server.service rpcbind.service rpcbind.socket >/dev/null 2>&1 || true
+
 # Load the zfs module at boot so pools can be imported right away.
 echo zfs > /etc/modules-load.d/zfs.conf
 

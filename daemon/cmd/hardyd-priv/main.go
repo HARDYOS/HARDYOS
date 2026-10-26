@@ -23,8 +23,10 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/hw"
 	"github.com/hardyos/hardyos/daemon/internal/install"
 	"github.com/hardyos/hardyos/daemon/internal/network"
+	"github.com/hardyos/hardyos/daemon/internal/nfs"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/shares"
+	"github.com/hardyos/hardyos/daemon/internal/snapshots"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 	"github.com/hardyos/hardyos/daemon/internal/update"
 	"github.com/hardyos/hardyos/daemon/internal/version"
@@ -112,7 +114,13 @@ func main() {
 		// Docker apps: Docker stays off at boot until hardyd-priv has pointed
 		// it at its dataset on the pool, then the apps come back by themselves.
 		shm := &shares.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log}
-		priv.RegisterShares(s, shm)
+		// NFS follows every shared folder change; automatic snapshots tick each minute.
+		nfsm := &nfs.Manager{Runner: sysexec.Exec{}, Shares: shm, Root: "/", Log: log}
+		priv.RegisterShares(s, shm, priv.RegisterNFS(s, nfsm))
+		go nfsm.Watch(ctx)
+		snaps := &snapshots.Manager{Runner: sysexec.Exec{}, Shares: shm, Log: log}
+		priv.RegisterSnapshots(s, snaps)
+		go snaps.Run(ctx)
 		am := &apps.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log, Shares: shm}
 		priv.RegisterApps(s, am)
 		go am.OnStart(ctx)

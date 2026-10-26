@@ -64,6 +64,32 @@ jobs:
       - name: settings backups on a pool
         run: sudo HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/backup.test" -test.run TestZFSBackupIntegration -test.v
 
+  nfs:
+    name: NFS (loopback)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache: false
+      - name: install ZFS and the NFS server
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zfsutils-linux acl nfs-kernel-server
+          sudo modprobe zfs
+          sudo systemctl disable --now nfs-server.service || true
+      - name: build test binary
+        working-directory: daemon
+        run: go test -c -o "$RUNNER_TEMP/priv.test" ./internal/priv
+      - name: shared folders over NFS, mounted over loopback
+        run: sudo HARDYOS_ZFS_INTEGRATION=1 HARDYOS_NFS_INTEGRATION=1 "$RUNNER_TEMP/priv.test" -test.run TestNFSIntegration -test.v
+      - name: NFS server logs
+        if: failure()
+        run: |
+          sudo journalctl -u nfs-server -u nfs-mountd -u rpcbind --no-pager -n 80 || true
+          sudo cat /etc/exports.d/hardyos.exports || true
+
   domain:
     name: Domain controller (Samba)
     runs-on: ubuntu-24.04

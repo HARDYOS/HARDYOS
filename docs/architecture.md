@@ -429,6 +429,76 @@ developer notes in [shares.md](shares.md)).
   these same datasets and enforces the access rules; home folders arrive
   with it.
 
+## Shared folder snapshots and NFS
+
+File sharing part B ([plans/file-sharing.md](plans/file-sharing.md)
+section 2; user notes in [shares.md](shares.md)).
+
+- **Automatic snapshots.** `internal/snapshots` runs inside hardyd-priv
+  (`Manager.Run`, wired in `cmd/hardyd-priv/main.go`): a tick at start and a
+  couple of seconds after every minute, in UTC. For every mounted shared
+  folder and every kind kept by `services.snapshots` it takes the snapshot
+  of the kind's current slot (hourly at :00, daily 00:00, weekly Monday
+  00:00, monthly the 1st 00:00) if it's missing, named
+  `<dataset>@hardyos-auto-<kind>_<YYYY-MM-DD-HHMM>` after the slot, all kinds
+  due together in one `zfs snapshot` (one transaction group). Then each
+  kind is pruned to its count by slot time, oldest first. Only labels that
+  parse exactly as an automatic snapshot of a real slot are ever pruned:
+  manual snapshots, app snapshots and anything else are never touched.
+  Missed slots are not back-filled; a server that was off gets one
+  snapshot per kind for the newest slot. A per-dataset memory of the plan
+  last carried out (slots and counts) makes an idle minute one `zfs list`
+  of the shares; folders that are unmounted (locked or exported pools) are
+  skipped, a folder deleted mid-tick only logs, failures are retried next
+  minute.
+- **Manual snapshots.** Root ops `snapshots.list {share}`,
+  `snapshots.create {share, name}` (name checked, `hardyos-auto-` refused,
+  marked `org.hardyos:snapshot=manual`), `snapshots.delete {share,
+  snapshot, confirm}` (confirm = the name; `zfs destroy` of that one
+  snapshot, never `-r`). API `GET /shares/{id}/snapshots` for admins and
+  anyone the folder's rules let in (a matching `none` rule wins; 404
+  otherwise); `POST /shares/{id}/snapshots` and
+  `DELETE /shares/{id}/snapshots/{snapshot}` are admin jobs
+  (`snapshots.create`, `snapshots.delete`, on the shares lock), audited as
+  `shares.snapshot.create` / `shares.snapshot.delete`. Restoring files is
+  the File Manager's (part C), read-only from `.zfs/snapshot/<name>`.
+- **NFS.** `internal/nfs` (hardyd-priv) renders
+  `/etc/exports.d/hardyos.exports` from every mounted folder with NFS on:
+  one line per folder, clients most specific first (addresses, then
+  networks by prefix length), `rw`/`ro` per client plus
+  `sync,no_subtree_check,all_squash,anonuid=<uid>,anongid=<uid>,sec=sys,insecure`.
+  The uid is the folder's own NFS identity from 31000-31999 in
+  `org.hardyos:nfs-uid` (allocated lowest free when NFS is first turned on,
+  kept while the dataset exists, clashes from imported pools resolved in
+  favour of folders with NFS on). It gets `r-X` or `rwX` (write if any
+  client writes) as access and default ACL entries through the shares
+  walker (`shares.GrantNFS` / `RevokeNFS`, root at once, below in the
+  background), before the folder is exported. Clients are re-validated with
+  `shares.CheckServices`, paths must be plain absolute names, and the whole
+  file is checked again (`nfs.Validate`) before an atomic write; then
+  `exportfs -ra`, and if that fails the previous file is put back.
+  `nfs-server.service` is enabled and started (`--no-block`) while
+  anything is exported and disabled and stopped when nothing is.
+- **Staying in sync.** `priv.RegisterShares` takes `ShareHook`s:
+  `RegisterNFS` returns one whose `BeforeDelete` withdraws the folder's
+  export (a file system nfsd holds can't be unmounted) and whose `Changed`
+  re-syncs after every create, update, delete and starter set. `Watch`
+  also syncs at start and every 2 minutes (pools imported or unlocked
+  later). Ops `nfs.status` and `nfs.apply`; API `GET /shares/{id}/nfs`
+  (admin: path, uid, server running, last problem).
+- **Web.** The shared folder dialog's `ShareSnapshotsSection.tsx`
+  (retention counts, list, take now, delete with confirmation) and
+  `ShareNFSSection.tsx` (on/off, clients with read/write, the mount
+  commands for Linux, fstab and macOS). Each saves only its part of
+  `services`, re-reading the folder first (`shareServices.ts`).
+- **Tests.** Unit tests with `sysexec.Fake` (slots across hour, day, week,
+  month and year boundaries, UTC only; pruning; idempotent ticks;
+  catch-up; exports rendering including IPv6; uid allocation).
+  `TestZFSIntegrationSnapshots` runs the scheduler on a file-backed pool in
+  CI's ZFS job; `TestNFSIntegration` (CI's "NFS (loopback)" job,
+  `HARDYOS_NFS_INTEGRATION=1`) mounts real exports over 127.0.0.1 with
+  NFSv3 and v4.
+
 ## Apps
 
 One-click Docker apps install from `.hardyapp` packages (format in

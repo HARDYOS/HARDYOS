@@ -63,6 +63,11 @@ smbclient
 krb5-user
 ldb-tools
 
+# File sharing: NFS server for shared folders shared over NFS. Kept off until
+# a folder turns NFS on; hardyd-priv enables it then and writes
+# /etc/exports.d/hardyos.exports.
+nfs-kernel-server
+
 # Apps: Docker Engine and Compose v2 for one-click apps (.hardyapp). The
 # engine is started by hardyd-priv once the apps pool is mounted, with its
 # data on that pool.

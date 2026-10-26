@@ -1406,6 +1406,74 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/shares/{id}/snapshots": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * A shared folder's snapshots, newest first
+         * @description For administrators and anyone the folder's access rules let use it (404 for others). Automatic snapshots are named hardyos-auto-<kind>_<YYYY-MM-DD-HHMM> (UTC, the slot they stand for).
+         */
+        get: operations["listShareSnapshots"];
+        put?: never;
+        /**
+         * Take a snapshot now (runs as a job)
+         * @description Manual snapshots are never deleted by the automatic pruning.
+         */
+        post: operations["createShareSnapshot"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/shares/{id}/snapshots/{snapshot}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                snapshot: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete one snapshot (runs as a job) */
+        delete: operations["deleteShareSnapshot"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/shares/{id}/nfs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * How a shared folder is reached over NFS (for the mount command)
+         * @description NFS is turned on and its clients chosen in the folder's services (PATCH /shares/{id}).
+         */
+        get: operations["getShareNFS"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/domain": {
         parameters: {
             query?: never;
@@ -2989,6 +3057,38 @@ export interface components {
             /** @description Media with Movies */
             media: boolean;
             backups: boolean;
+        };
+        ShareSnapshot: {
+            /** @example hardyos-auto-daily_2026-10-26-0000 */
+            name: string;
+            /**
+             * @description Automatic kind, manual (taken from HardyOS) or other (made outside HardyOS)
+             * @enum {string}
+             */
+            kind: "hourly" | "daily" | "weekly" | "monthly" | "manual" | "other";
+            /** Format: date-time */
+            createdAt: string;
+            /**
+             * Format: int64
+             * @description Space only this snapshot holds (freed by deleting it)
+             */
+            usedBytes: number;
+            /**
+             * Format: int64
+             * @description Size of the folder as it was
+             */
+            referBytes: number;
+        };
+        ShareNFS: {
+            enabled: boolean;
+            /** @description The path to mount */
+            path: string;
+            /** @description The folder's NFS identity (31000-31999); every client acts as it. 0 until NFS is first turned on */
+            uid: number;
+            /** @description The NFS server runs */
+            running: boolean;
+            /** @description The last NFS sync's error */
+            problem?: string;
         };
         DomainConfig: {
             /** @example home.hardynetworks.net */
@@ -5862,6 +5962,108 @@ export interface operations {
                 };
             };
             400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listShareSnapshots: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Snapshots */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        snapshots: components["schemas"]["ShareSnapshot"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    createShareSnapshot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description Letters, digits and . _ : - (up to 64); empty for manual-<YYYY-MM-DD-HHMM>. Names starting with hardyos-auto- are refused. */
+                    name?: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteShareSnapshot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                snapshot: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description The snapshot's name, to confirm */
+                    confirm: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getShareNFS: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description NFS details */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShareNFS"];
+                };
+            };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];

@@ -150,6 +150,7 @@ func (s *Server) routes() {
 			s.domainRoutes()
 			s.appRoutes()
 			s.shareRoutes()
+			s.snapshotRoutes()
 		}
 		if s.cfg.Backups != nil {
 			s.backupRoutes()

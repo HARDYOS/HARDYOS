@@ -1603,6 +1603,92 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
   # ---- end of shared folders ---------------------------------------------
+  # ---- Shared folder snapshots and NFS (file sharing part B) --------------
+  /shares/{id}/snapshots:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: listShareSnapshots
+      summary: A shared folder's snapshots, newest first
+      description: >-
+        For administrators and anyone the folder's access rules let use it
+        (404 for others). Automatic snapshots are named
+        hardyos-auto-<kind>_<YYYY-MM-DD-HHMM> (UTC, the slot they stand for).
+      tags: [shares]
+      responses:
+        "200":
+          description: Snapshots
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [snapshots]
+                properties:
+                  snapshots: { type: array, items: { $ref: "#/components/schemas/ShareSnapshot" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      operationId: createShareSnapshot
+      summary: Take a snapshot now (runs as a job)
+      description: Manual snapshots are never deleted by the automatic pruning.
+      tags: [shares]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: "Letters, digits and . _ : - (up to 64); empty for manual-<YYYY-MM-DD-HHMM>. Names starting with hardyos-auto- are refused."
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /shares/{id}/snapshots/{snapshot}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: snapshot, in: path, required: true, schema: { type: string } }
+    delete:
+      operationId: deleteShareSnapshot
+      summary: Delete one snapshot (runs as a job)
+      tags: [shares]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { type: string, description: "The snapshot's name, to confirm" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /shares/{id}/nfs:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getShareNFS
+      summary: How a shared folder is reached over NFS (for the mount command)
+      description: NFS is turned on and its clients chosen in the folder's services (PATCH /shares/{id}).
+      tags: [shares]
+      responses:
+        "200":
+          description: NFS details
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ShareNFS" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  # ---- end of shared folder snapshots and NFS -----------------------------
   /domain:
     get:
       operationId: getDomain
@@ -3493,6 +3579,29 @@ components:
         media: { type: boolean, description: Media with Movies, TV, Music and Photos }
         backups: { type: boolean }
     # ---- end of shared folders ---------------------------------------------
+    # ---- Shared folder snapshots and NFS (file sharing part B) --------------
+    ShareSnapshot:
+      type: object
+      required: [name, kind, createdAt, usedBytes, referBytes]
+      properties:
+        name: { type: string, example: hardyos-auto-daily_2026-10-26-0000 }
+        kind:
+          type: string
+          enum: [hourly, daily, weekly, monthly, manual, other]
+          description: Automatic kind, manual (taken from HardyOS) or other (made outside HardyOS)
+        createdAt: { type: string, format: date-time }
+        usedBytes: { type: integer, format: int64, description: Space only this snapshot holds (freed by deleting it) }
+        referBytes: { type: integer, format: int64, description: Size of the folder as it was }
+    ShareNFS:
+      type: object
+      required: [enabled, path, uid, running]
+      properties:
+        enabled: { type: boolean }
+        path: { type: string, description: The path to mount, like /mnt/tank/shares/media }
+        uid: { type: integer, description: "The folder's NFS identity (31000-31999); every client acts as it. 0 until NFS is first turned on" }
+        running: { type: boolean, description: The NFS server runs }
+        problem: { type: string, description: The last NFS sync's error, if any }
+    # ---- end of shared folder snapshots and NFS -----------------------------
     DomainConfig:
       type: object
       required: [domain, realm, netbios, dcName, address, gateway, parent, mac, forwarders, enabled, createdAt]
