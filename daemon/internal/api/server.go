@@ -16,11 +16,13 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/backups"
 	"github.com/hardyos/hardyos/daemon/internal/events"
+	"github.com/hardyos/hardyos/daemon/internal/files"
 	"github.com/hardyos/hardyos/daemon/internal/installer"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/metrics"
 	"github.com/hardyos/hardyos/daemon/internal/notify"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
+	"github.com/hardyos/hardyos/daemon/internal/sharelinks"
 	"github.com/hardyos/hardyos/daemon/internal/storage"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 	"github.com/hardyos/hardyos/daemon/internal/updates"
@@ -60,6 +62,10 @@ type Config struct {
 	// DomainInfoTTL is how long the domain's realm and DCs are cached for
 	// sign-in (default 30 s; tests use less).
 	DomainInfoTTL time.Duration
+
+	// Files reads and writes files as a person (internal/files); share
+	// links use it. nil: links can't be made and existing ones don't open.
+	Files files.Access
 }
 
 // Server is hardyd's HTTP handler.
@@ -72,6 +78,7 @@ type Server struct {
 	mux      *http.ServeMux
 	tickets  terminalTickets
 	proxy    *appProxy
+	links    *sharelinks.Store
 	started  time.Time
 	log      *slog.Logger
 }
@@ -129,6 +136,7 @@ func (s *Server) routes() {
 		m.Handle("GET /api/v1/events", s.authed(s.handleEvents))
 		m.Handle("GET /api/v1/system/info", s.authed(s.handleSystemInfo))
 		m.Handle("GET /api/v1/system/metrics", s.authed(s.handleMetrics))
+		s.shareLinkRoutes() // includes the public /s/<token> pages
 
 		// Admin
 		m.Handle("GET /api/v1/users", s.admin(s.handleListUsers))

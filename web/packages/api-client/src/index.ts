@@ -124,3 +124,13 @@ export type AppOpen = S["AppOpen"];
 export type AppCatalog = S["AppCatalog"];
 export type AppCatalogApp = S["AppCatalogApp"];
 export type CustomAppRequest = S["CustomAppRequest"];
+// Share links (part D)
+export type ShareLink = S["ShareLink"];
+export type ShareLinkRequest = S["ShareLinkRequest"];
+export type ShareLinkCreated = S["ShareLinkCreated"];
+// Files API as the File Manager consumes it (owned by part C)
+export type FileShare = S["FileShare"];
+export type FileEntry = S["FileEntry"];
+export type FileVersion = S["FileVersion"];
+export type FileUpload = S["FileUpload"];
+export type FileTransferRequest = S["FileTransferRequest"];
