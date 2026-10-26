@@ -1,0 +1,36 @@
+# AdGuard Home for HardyOS. It uses the server's network
+# (permissions.hostNetwork): DNS on port 53 of the server's address, the
+# admin website on the declared WEB port.
+#
+# DNS port 53 isn't in the manifest's ports yet because manifests accept
+# ports 1024-65535 only; see apps/catalog/README.md.
+services:
+  adguardhome:
+    image: docker.io/adguard/adguardhome:v0.107.79
+    # The binary carries the cap_net_bind_service file capability, so it can
+    # listen on port 53 without running as root (no no-new-privileges here:
+    # it would drop that file capability).
+    user: "${HARDY_UID}:${HARDY_GID}"
+    network_mode: host
+    # The image's default arguments, plus --web-addr: it overrides the port
+    # chosen in the setup wizard, so the website always stays where HardyOS
+    # opens it (the wizard suggests port 80, which HardyOS uses itself).
+    command:
+      - --no-check-update
+      - -c
+      - /opt/adguardhome/conf/AdGuardHome.yaml
+      - -w
+      - /opt/adguardhome/work
+      - --web-addr
+      - 0.0.0.0:${HARDY_PORT_WEB}
+    environment:
+      TZ: ${HARDY_TZ}
+    volumes:
+      - ${HARDY_APP_DATA}/conf:/opt/adguardhome/conf
+      - ${HARDY_APP_DATA}/work:/opt/adguardhome/work
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:${HARDY_PORT_WEB}/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3

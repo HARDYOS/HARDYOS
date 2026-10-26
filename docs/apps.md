@@ -138,6 +138,25 @@ Every step is a named operation in `hardyd-priv` (`apps.prepare`,
 `apps.pull`, `apps.up`, ...) with checked arguments. There is no way to run
 an arbitrary compose file or command.
 
+## The catalog
+
+The apps shipped with HardyOS are in `apps/catalog/<id>/`, with an overview
+of each app's shared folders and permissions in
+[apps/README.md](../apps/README.md). Media server, photo, home, network,
+password, document and download apps: Jellyfin, Plex, Immich, Home
+Assistant, AdGuard Home, Vaultwarden, Paperless-ngx, Sonarr, Radarr,
+Prowlarr, qBittorrent, Bazarr and Seerr (Jellyseerr), plus KinCast and Apex
+RMM.
+
+- Image versions are pinned in each `compose.yaml` and the package version
+  follows the app's own version, so **Update** in the App Store is how an
+  app moves to a new version (decision 70).
+- Media apps see the same folders at the same paths: the Media library at
+  `/media`, Downloads at `/downloads` (decision 71). Apps reach each other
+  at `host.docker.internal:<port>` or the server's address.
+- Only catalog apps get `gpu` (Jellyfin, Plex, Immich) and `hostNetwork`
+  (Home Assistant, AdGuard Home) just by declaring them.
+
 ## Screens
 
 ![My apps](images/app-store/my-apps.png)

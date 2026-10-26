@@ -1,0 +1,21 @@
+{
+  "format": 1,
+  "id": "home-assistant",
+  "name": "Home Assistant",
+  "version": "2026.10.4",
+  "summary": "Control your lights, heating, cameras and smart devices from one place, with automations.",
+  "description": "Home Assistant brings thousands of smart home devices and services together: lights, plugs, thermostats, door locks, cameras, speakers, energy meters and more. Build dashboards for the family and automations like \"turn the porch light on at sunset\". It runs entirely on this server and keeps working without the internet.\n\nHome Assistant uses this server's own network connection (not a private app network) so it can find devices on your network by itself. That's why its port can't be moved: it is always 8123.\n\nAfter installing, open Home Assistant and create the owner account; it then lists the devices it found. Zigbee/Z-Wave USB sticks and Bluetooth aren't connected to the app in this version; network-based devices and hubs work.",
+  "publisher": "Home Assistant project (packaged by HardyOS)",
+  "website": "https://www.home-assistant.io",
+  "icon": "icon.svg",
+  "arch": ["amd64", "arm64"],
+  "minMemoryMB": 1024,
+  "web": { "port": "WEB", "path": "/" },
+  "ports": [
+    { "name": "WEB", "label": "Website and phone app (fixed: uses the server's network)", "default": 8123 }
+  ],
+  "folders": [
+    { "path": "config", "mode": "0750" }
+  ],
+  "permissions": { "hostNetwork": true }
+}

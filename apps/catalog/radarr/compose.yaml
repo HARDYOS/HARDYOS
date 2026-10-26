@@ -1,0 +1,25 @@
+# Radarr for HardyOS (LinuxServer.io image). Paths shared with the other
+# media apps: /media (Media library) and /downloads (Downloads).
+services:
+  radarr:
+    image: lscr.io/linuxserver/radarr:6.4.4
+    environment:
+      # The image starts as root, then runs Radarr as this user and group.
+      PUID: ${HARDY_UID}
+      PGID: ${HARDY_GID}
+      TZ: ${HARDY_TZ}
+    ports:
+      - "${HARDY_PORT_WEB}:7878"
+    volumes:
+      - ${HARDY_APP_DATA}/config:/config
+      - ${HARDY_SHARE_MEDIA}:/media
+      - ${HARDY_SHARE_DOWNLOADS}:/downloads
+    extra_hosts:
+      # Reach qBittorrent, Prowlarr and the others through the server.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:7878/ping"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3

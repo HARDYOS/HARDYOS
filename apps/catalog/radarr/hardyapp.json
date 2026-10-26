@@ -1,0 +1,36 @@
+{
+  "format": 1,
+  "id": "radarr",
+  "name": "Radarr",
+  "version": "6.4.4",
+  "summary": "Keeps your movie collection organised: fetches the films on your list and files them in your Media library.",
+  "description": "Radarr keeps a list of the movies you want. When one becomes available it asks your download app (such as qBittorrent) to fetch it, then renames it and files it in your Movies folder so Jellyfin or Plex show it right away. It can also tidy up the movies you already have.\n\nInside Radarr your Media folder is /media and your Downloads folder is /downloads, the same paths qBittorrent, Sonarr, Bazarr, Jellyfin and Plex use in HardyOS, so no path mapping is needed. After installing, open Radarr, set up its sign-in, add /media/Movies as a root folder, add qBittorrent under Settings > Download Clients (host: host.docker.internal or this server's address), and connect Prowlarr for search sources.",
+  "publisher": "Radarr project, image by LinuxServer.io (packaged by HardyOS)",
+  "website": "https://radarr.video",
+  "icon": "icon.svg",
+  "arch": ["amd64", "arm64"],
+  "minMemoryMB": 512,
+  "web": { "port": "WEB", "path": "/" },
+  "ports": [
+    { "name": "WEB", "label": "Website", "default": 7878 }
+  ],
+  "folders": [
+    { "path": "config", "mode": "0750" }
+  ],
+  "shares": [
+    {
+      "name": "MEDIA",
+      "label": "Media library",
+      "help": "Where your movies are filed (Radarr renames and moves them here). In Radarr it's /media; add /media/Movies as a root folder.",
+      "access": "write",
+      "suggest": "media"
+    },
+    {
+      "name": "DOWNLOADS",
+      "label": "Downloads",
+      "help": "The same folder you give qBittorrent. Radarr picks finished movies up from here. In Radarr it's /downloads.",
+      "access": "write",
+      "suggest": "downloads"
+    }
+  ]
+}

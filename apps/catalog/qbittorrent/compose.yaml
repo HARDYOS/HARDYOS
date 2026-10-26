@@ -1,0 +1,26 @@
+# qBittorrent for HardyOS (LinuxServer.io image).
+services:
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:5.3.0
+    environment:
+      # The image starts as root, then runs qBittorrent as this user and group.
+      PUID: ${HARDY_UID}
+      PGID: ${HARDY_GID}
+      TZ: ${HARDY_TZ}
+      WEBUI_PORT: "8080"
+      # qBittorrent tells other peers which port to connect to, so it listens
+      # inside the container on the same number the server publishes.
+      TORRENTING_PORT: ${HARDY_PORT_TORRENT}
+    ports:
+      - "${HARDY_PORT_WEB}:8080"
+      - "${HARDY_PORT_TORRENT}:${HARDY_PORT_TORRENT}"
+      - "${HARDY_PORT_TORRENT_UDP}:${HARDY_PORT_TORRENT}/udp"
+    volumes:
+      - ${HARDY_APP_DATA}/config:/config
+      - ${HARDY_SHARE_DOWNLOADS}:/downloads
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3

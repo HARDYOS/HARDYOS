@@ -1,0 +1,39 @@
+{
+  "format": 1,
+  "id": "plex",
+  "name": "Plex Media Server",
+  "version": "1.43.5.11079",
+  "summary": "Stream your movies, shows and music to the Plex apps on every TV and phone.",
+  "description": "Plex Media Server organises the movies, TV shows and music on this server and streams them to the Plex apps on smart TVs, streaming sticks, consoles, phones and the web, at home or away. It needs a free Plex account.\n\nBefore installing, sign in at https://www.plex.tv/claim and copy the claim code into the Plex claim code box: it links this server to your Plex account. Codes stop working after 4 minutes, so get one just before you click Install. Then open Plex, name the server and add libraries, for example /media/Movies and /media/TV. Plex only reads your Media folder.\n\nTo watch away from home, forward the Plex port on your router to this server. Hardware transcoding with the graphics chip needs a Plex Pass.",
+  "publisher": "Plex, Inc. (packaged by HardyOS)",
+  "website": "https://www.plex.tv",
+  "icon": "icon.svg",
+  "arch": ["amd64", "arm64"],
+  "minMemoryMB": 2048,
+  "web": { "port": "WEB", "path": "/web" },
+  "ports": [
+    { "name": "WEB", "label": "Plex apps and website", "default": 32400 }
+  ],
+  "settings": [
+    {
+      "env": "PLEX_CLAIM",
+      "label": "Plex claim code",
+      "help": "From https://www.plex.tv/claim (starts with claim-). It expires 4 minutes after you get it. Once the server is linked it's no longer needed.",
+      "type": "password"
+    }
+  ],
+  "folders": [
+    { "path": "config", "mode": "0750" },
+    { "path": "transcode", "mode": "0750" }
+  ],
+  "shares": [
+    {
+      "name": "MEDIA",
+      "label": "Media library",
+      "help": "The folder with your movies, shows and music. Plex only reads it. Inside Plex it appears as /media.",
+      "access": "read",
+      "suggest": "media"
+    }
+  ],
+  "permissions": { "gpu": true }
+}

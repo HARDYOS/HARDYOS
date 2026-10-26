@@ -1,0 +1,24 @@
+# Bazarr for HardyOS (LinuxServer.io image). /media is the same path
+# Sonarr and Radarr use.
+services:
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:1.6.2
+    environment:
+      # The image starts as root, then runs Bazarr as this user and group.
+      PUID: ${HARDY_UID}
+      PGID: ${HARDY_GID}
+      TZ: ${HARDY_TZ}
+    ports:
+      - "${HARDY_PORT_WEB}:6767"
+    volumes:
+      - ${HARDY_APP_DATA}/config:/config
+      - ${HARDY_SHARE_MEDIA}:/media
+    extra_hosts:
+      # Reach Sonarr and Radarr through the server.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:6767/api/system/ping"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3

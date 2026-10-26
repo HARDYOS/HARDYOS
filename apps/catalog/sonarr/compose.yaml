@@ -1,0 +1,25 @@
+# Sonarr for HardyOS (LinuxServer.io image). Paths shared with the other
+# media apps: /media (Media library) and /downloads (Downloads).
+services:
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:4.0.20
+    environment:
+      # The image starts as root, then runs Sonarr as this user and group.
+      PUID: ${HARDY_UID}
+      PGID: ${HARDY_GID}
+      TZ: ${HARDY_TZ}
+    ports:
+      - "${HARDY_PORT_WEB}:8989"
+    volumes:
+      - ${HARDY_APP_DATA}/config:/config
+      - ${HARDY_SHARE_MEDIA}:/media
+      - ${HARDY_SHARE_DOWNLOADS}:/downloads
+    extra_hosts:
+      # Reach qBittorrent, Prowlarr and the others through the server.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8989/ping"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
