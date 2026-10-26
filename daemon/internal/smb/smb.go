@@ -83,7 +83,10 @@ type Settings struct {
 	// SFTPEnabled offers the folders with SFTP on to domain accounts over
 	// SSH; WebDAVEnabled those with WebDAV on at https://<server>/dav/
 	// (served by hardyd). Both off until turned on.
-	SFTPEnabled   bool `json:"sftpEnabled"`
+	SFTPEnabled bool `json:"sftpEnabled"`
+	// SFTPAdmins lets domain administrators use SFTP too (off: they get
+	// no view, so no SSH sign-in and no password tried for them).
+	SFTPAdmins    bool `json:"sftpAdmins"`
 	WebDAVEnabled bool `json:"webdavEnabled"`
 }
 
@@ -149,6 +152,7 @@ type SettingsArgs struct {
 	SMBEnabled    *bool          `json:"smbEnabled,omitempty"`
 	Homes         *HomesSettings `json:"homes,omitempty"`
 	SFTPEnabled   *bool          `json:"sftpEnabled,omitempty"`
+	SFTPAdmins    *bool          `json:"sftpAdmins,omitempty"`
 	WebDAVEnabled *bool          `json:"webdavEnabled,omitempty"`
 }
 
@@ -209,8 +213,9 @@ type Manager struct {
 	bg        map[string]*bgWalk
 	wg        sync.WaitGroup
 	lastHomes time.Time
-	released  map[string]bool // shares being deleted (m.mu)
-	users     []string        // the domain's turned-on accounts (m.mu)
+	released  map[string]bool   // shares being deleted (m.mu)
+	sftpHeld  map[string]string // share id -> dataset SFTP let go of for a delete (m.mu)
+	users     []string          // the domain's turned-on accounts (m.mu)
 	usersAt   time.Time
 }
 

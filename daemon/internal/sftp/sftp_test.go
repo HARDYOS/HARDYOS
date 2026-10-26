@@ -141,17 +141,36 @@ func TestEditPAM(t *testing.T) {
 		}
 		return -1
 	}
-	ia, iacc := idx("@include common-auth"), idx("@include common-account")
-	wantAuth := "auth\t[success=done default=die]\tpam_winbind.so"
-	wantAcct := "account\t[success=done default=die]\tpam_winbind.so"
-	if a := idx(wantAuth); a < 0 || a != ia-2 || lines[ia-3] != "auth\t[success=ignore default=1]\tpam_succeed_if.so quiet uid >= 100000 uid <= 999999" {
-		t.Errorf("auth block not right before common-auth:\n%s", on)
-	}
-	if a := idx(wantAcct); a < 0 || a != iacc-2 {
-		t.Errorf("account block not right before common-account:\n%s", on)
+	for kind, inc := range map[string]string{"auth": "@include common-auth", "account": "@include common-account", "session": "@include common-session"} {
+		i, b := idx(inc), pamBlock(kind)
+		if i < len(b) || strings.Join(lines[i-len(b):i], "\n") != strings.Join(b, "\n") {
+			t.Errorf("%s block not right before %s:\n%s", kind, inc, on)
+		}
 	}
 	if strings.Count(on, "pam_winbind") != 2 {
 		t.Errorf("winbind used %d times", strings.Count(on, "pam_winbind"))
+	}
+	// The auth block: domain uids only, members of hardyos-sftp only (others
+	// fail before winbind), faillock around winbind; jumps land inside it.
+	wantAuth := []string{
+		"auth\t[success=ignore default=5]\tpam_succeed_if.so quiet uid >= 100000 uid <= 999999",
+		"auth\t[success=ignore default=die]\tpam_succeed_if.so quiet user ingroup hardyos-sftp",
+		"auth\t[success=ignore default=die]\tpam_faillock.so preauth silent deny=10 unlock_time=900",
+		"auth\t[success=1 default=ignore]\tpam_winbind.so",
+		"auth\t[default=die]\tpam_faillock.so authfail deny=10 unlock_time=900",
+		"auth\t[success=done default=die]\tpam_faillock.so authsucc deny=10 unlock_time=900",
+	}
+	if got := pamBlock("auth"); !reflect.DeepEqual(got[1:len(got)-1], wantAuth) {
+		t.Errorf("auth block:\n%s", strings.Join(got, "\n"))
+	}
+	for _, kind := range []string{"auth", "account", "session"} {
+		checkJumps(t, kind, pamBlock(kind))
+	}
+	if acct := strings.Join(pamBlock("account"), "\n"); !strings.Contains(acct, "user ingroup hardyos-sftp") {
+		t.Errorf("account block lets non-members reach winbind:\n%s", acct)
+	}
+	if ses := strings.Join(pamBlock("session"), "\n"); !strings.Contains(ses, "pam_limits.so") || !strings.Contains(ses, "[success=done default=die]\tpam_permit.so") {
+		t.Errorf("session block:\n%s", ses)
 	}
 	// Idempotent, and off restores the original exactly.
 	again, _ := EditPAM(on, true)
@@ -164,6 +183,9 @@ func TestEditPAM(t *testing.T) {
 	}
 	if _, err := EditPAM("auth required pam_unix.so\n", true); err != ErrPAMLayout {
 		t.Errorf("a hand-made file: %v", err)
+	}
+	if _, err := EditPAM("@include common-auth\n@include common-account\n", true); err != ErrPAMLayout {
+		t.Errorf("no common-session: %v", err)
 	}
 	if !WinbindEverywhere("auth [success=2 default=ignore] pam_winbind.so krb5_auth\n") || WinbindEverywhere("# pam_winbind.so\nauth required pam_unix.so\n") {
 		t.Error("WinbindEverywhere")
@@ -219,7 +241,8 @@ func TestParseMountinfo(t *testing.T) {
 	info := `22 1 0:21 / / rw,relatime shared:1 - zfs rpool/ROOT/a rw
 90 22 0:50 / /srv/hardyos/sftp rw,relatime - zfs rpool/ROOT/a rw
 91 90 0:51 / /srv/hardyos/sftp/101103/Media rw,nosuid,nodev,noexec - zfs tank/shares/media rw
-92 90 0:52 / /srv/hardyos/sftp/101103/Kids\040Films ro,nosuid,nodev,noexec - zfs tank/shares/kids rw
+92 90 0:52 / /srv/hardyos/sftp/101103/Kids\040Films ro,nosuid,nodev,noexec shared:7 - zfs tank/shares/kids rw
+94 90 259:3 /sub /srv/hardyos/sftp/101107/Old rw master:3 - ext4 /dev/sda1 rw
 93 22 0:53 / /srv/hardyos/sftpx rw - tmpfs tmpfs rw
 `
 	l, err := parseMountinfo(strings.NewReader(info), "/srv/hardyos/sftp")
@@ -227,8 +250,15 @@ func TestParseMountinfo(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []MountPoint{
-		{Target: "/srv/hardyos/sftp/101103/Media", Source: "tank/shares/media"},
-		{Target: "/srv/hardyos/sftp/101103/Kids Films", Source: "tank/shares/kids", ReadOnly: true},
+		{Target: "/srv/hardyos/sftp/101103/Media", Source: "tank/shares/media", Root: "/", Dev: 51, NoSuid: true, NoDev: true, NoExec: true},
+		{Target: "/srv/hardyos/sftp/101103/Kids Films", Source: "tank/shares/kids", Root: "/", Dev: 52, ReadOnly: true, NoSuid: true, NoDev: true, NoExec: true, Shared: true},
+		{Target: "/srv/hardyos/sftp/101107/Old", Source: "/dev/sda1", Root: "/sub", Dev: mkdev(259, 3), Slave: true},
+	}
+	if !want[0].Restricted() || want[1].Restricted() || want[2].Restricted() {
+		t.Error("Restricted")
+	}
+	if mkdev(259, 3) != 259<<8|3 || mkdev(0, 300) != (300&0xff)|((300&^0xff)<<12) {
+		t.Error("mkdev")
 	}
 	if !reflect.DeepEqual(l, want) {
 		t.Errorf("got %+v", l)
@@ -238,13 +268,21 @@ func TestParseMountinfo(t *testing.T) {
 	}
 }
 
-// fakeMounter keeps mounts in a map.
+// fakeMounter keeps mounts in a map and models what matters about
+// propagation: making the root private (MS_REC) takes every mount below it
+// out of its peer group; unmounting a mount that is still shared would
+// also unmount its peers on the host (recorded in hostUnmounts).
 type fakeMounter struct {
 	mu      sync.Mutex
 	m       map[string]MountPoint
 	private map[string]bool
 	busy    map[string]bool
 	ds      map[string]string // source path -> dataset
+	dev     map[string]uint64 // source path -> device
+	// ops is every MakePrivate, Bind and Unmount in order.
+	ops []string
+	// hostUnmounts: unmounts that would have propagated to the host.
+	hostUnmounts []string
 }
 
 func (f *fakeMounter) List(dir string) ([]MountPoint, error) {
@@ -267,6 +305,13 @@ func (f *fakeMounter) MakePrivate(dir string) error {
 		f.private = map[string]bool{}
 	}
 	f.private[dir] = true
+	for t, m := range f.m {
+		if strings.HasPrefix(t, dir+"/") {
+			m.Shared, m.Slave = false, false
+			f.m[t] = m
+		}
+	}
+	f.ops = append(f.ops, "private "+dir)
 	return nil
 }
 func (f *fakeMounter) Bind(src string, _ uint64, dst string, ro bool) error {
@@ -281,16 +326,28 @@ func (f *fakeMounter) Bind(src string, _ uint64, dst string, ro bool) error {
 	if f.m == nil {
 		f.m = map[string]MountPoint{}
 	}
-	f.m[dst] = MountPoint{Target: dst, Source: f.ds[src], ReadOnly: ro}
+	f.m[dst] = MountPoint{Target: dst, Source: f.ds[src], Root: "/", Dev: f.dev[src], ReadOnly: ro, NoSuid: true, NoDev: true, NoExec: true}
+	f.ops = append(f.ops, "bind "+dst)
 	return nil
 }
+
+// Unmount takes dst away; like MNT_DETACH, mounts inside it go too.
 func (f *fakeMounter) Unmount(dst string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.busy[dst] {
 		return fmt.Errorf("%s is busy", dst)
 	}
+	if m, ok := f.m[dst]; ok && (m.Shared || m.Slave) {
+		f.hostUnmounts = append(f.hostUnmounts, dst)
+	}
+	for t := range f.m {
+		if strings.HasPrefix(t, dst+"/") {
+			delete(f.m, t)
+		}
+	}
 	delete(f.m, dst)
+	f.ops = append(f.ops, "unmount "+dst)
 	return nil
 }
 
@@ -317,6 +374,7 @@ func newTestManager(t *testing.T) (*Manager, *fakeMounter, *sysexec.Fake, string
 	run.On("groupadd --system hardyos-sftp", "")
 	run.OnPrefix("gpasswd -M ", sysexec.Result{})
 	run.On("sshd -t", "")
+	run.On(`sshd -T -C user=HOME\alice,host=x,addr=127.0.0.1`, effectiveOK(filepath.Join(dir, "srv/hardyos/sftp")))
 	run.On("systemctl is-active --quiet ssh.service", "")
 	run.On("systemctl reload ssh.service", "")
 	m := &Manager{Runner: run, Mounter: fm, Root: filepath.Join(dir, "srv/hardyos/sftp"),

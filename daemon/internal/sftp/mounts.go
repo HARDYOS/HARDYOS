@@ -11,8 +11,24 @@ import (
 type MountPoint struct {
 	Target string
 	// Source is the mounted file system (a ZFS dataset's name).
-	Source   string
+	Source string
+	// Root is the folder of that file system the mount shows (mountinfo's
+	// fourth field): "/" for a bind of a dataset's own mount.
+	Root string
+	// Dev is the mount's device (st_dev of everything in it).
+	Dev      uint64
 	ReadOnly bool
+	// NoSuid, NoDev, NoExec: the per-mount restrictions.
+	NoSuid, NoDev, NoExec bool
+	// Shared, Slave: the mount takes part in mount propagation (a peer
+	// group, or receiving from one). A view's binds must be neither.
+	Shared, Slave bool
+}
+
+// Restricted reports whether the mount carries the restrictions every view
+// bind has (nosuid, nodev, noexec, no propagation).
+func (m MountPoint) Restricted() bool {
+	return m.NoSuid && m.NoDev && m.NoExec && !m.Shared && !m.Slave
 }
 
 // Mounter makes and removes the views' bind mounts (the real one uses the
@@ -23,11 +39,16 @@ type Mounter interface {
 	// IsMount reports whether dir is itself a mount point.
 	IsMount(dir string) (bool, error)
 	// MakePrivate makes dir a mount point of its own that shares no mount
-	// events with any other mount namespace.
+	// events with any other mount, and then makes every mount below it
+	// private too (MS_REC): binds made before this version were peers of
+	// the shared folders' own mounts, and unmounting anything inside them
+	// would otherwise unmount it on the host as well.
 	MakePrivate(dir string) error
-	// Bind mounts the folder src on dst (nosuid, nodev, noexec; read-only
-	// when ro), opening both without following links.
-	// src must be the verified mount on dev (shares.OpenRoot).
+	// Bind mounts the folder src on dst: private (in no peer group),
+	// non-recursive (file systems mounted inside src aren't carried into
+	// the view), nosuid, nodev, noexec, read-only when ro; both opened
+	// without following links. src must be the verified mount on dev
+	// (shares.OpenRoot).
 	Bind(src string, dev uint64, dst string, ro bool) error
 	Unmount(dst string) error
 }
@@ -51,6 +72,25 @@ func unescapeMount(s string) string {
 	return b.String()
 }
 
+// mkdev builds a device number the way Linux (and glibc's makedev) encode
+// it, so it compares with st_dev.
+func mkdev(major, minor uint64) uint64 {
+	return (minor & 0xff) | ((major & 0xfff) << 8) | ((minor &^ 0xff) << 12) | ((major &^ 0xfff) << 32)
+}
+
+func parseDev(s string) uint64 {
+	ma, mi, ok := strings.Cut(s, ":")
+	if !ok {
+		return 0
+	}
+	a, err1 := strconv.ParseUint(ma, 10, 32)
+	b, err2 := strconv.ParseUint(mi, 10, 32)
+	if err1 != nil || err2 != nil {
+		return 0
+	}
+	return mkdev(a, b)
+}
+
 // parseMountinfo returns the mounts strictly below dir (no trailing slash).
 func parseMountinfo(r io.Reader, dir string) ([]MountPoint, error) {
 	var out []MountPoint
@@ -72,13 +112,28 @@ func parseMountinfo(r io.Reader, dir string) ([]MountPoint, error) {
 		if !strings.HasPrefix(target, dir+"/") {
 			continue
 		}
-		ro := false
+		mp := MountPoint{Target: target, Source: unescapeMount(f[sep+2]), Root: unescapeMount(f[3]), Dev: parseDev(f[2])}
 		for _, o := range strings.Split(f[5], ",") {
-			if o == "ro" {
-				ro = true
+			switch o {
+			case "ro":
+				mp.ReadOnly = true
+			case "nosuid":
+				mp.NoSuid = true
+			case "nodev":
+				mp.NoDev = true
+			case "noexec":
+				mp.NoExec = true
 			}
 		}
-		out = append(out, MountPoint{Target: target, Source: unescapeMount(f[sep+2]), ReadOnly: ro})
+		for _, o := range f[6:sep] {
+			switch {
+			case strings.HasPrefix(o, "shared:"):
+				mp.Shared = true
+			case strings.HasPrefix(o, "master:"):
+				mp.Slave = true
+			}
+		}
+		out = append(out, mp)
 	}
 	return out, sc.Err()
 }

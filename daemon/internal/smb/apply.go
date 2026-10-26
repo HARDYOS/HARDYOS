@@ -106,7 +106,7 @@ func (m *Manager) Release(ctx context.Context, id string) error {
 			j.cancel()
 			<-j.done
 		}
-		m.releaseSFTP(sh.Dataset)
+		m.releaseSFTP(sh.ID, sh.Dataset)
 		if m.released == nil {
 			m.released = map[string]bool{}
 		}
@@ -415,6 +415,9 @@ func (m *Manager) SetSettings(ctx context.Context, a SettingsArgs) (*Status, err
 	}
 	if a.SFTPEnabled != nil {
 		s.SFTPEnabled = *a.SFTPEnabled
+	}
+	if a.SFTPAdmins != nil {
+		s.SFTPAdmins = *a.SFTPAdmins
 	}
 	if a.WebDAVEnabled != nil {
 		s.WebDAVEnabled = *a.WebDAVEnabled

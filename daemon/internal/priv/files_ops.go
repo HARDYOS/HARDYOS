@@ -26,6 +26,7 @@ const (
 func RegisterFiles(s *Server, m *smb.Manager) ShareHook {
 	hook := ShareHook{
 		BeforeDelete: m.Release,
+		AfterDelete:  m.AfterDelete,
 		Changed: func(ctx context.Context) {
 			if _, err := m.Apply(ctx); err != nil {
 				s.logger().Warn("file sharing: applying a shared folder change", "err", err)
@@ -33,7 +34,7 @@ func RegisterFiles(s *Server, m *smb.Manager) ShareHook {
 		},
 	}
 	registerFilesOps(s, m)
-	s.OnRelease(m.ReleaseDataset)
+	s.OnRelease(m.ReleaseDataset, m.ReleaseDone)
 	return hook
 }
 

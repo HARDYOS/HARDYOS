@@ -4126,6 +4126,7 @@ components:
         smbEnabled: { type: boolean }
         homes: { $ref: "#/components/schemas/FileServicesHomes" }
         sftpEnabled: { type: boolean, description: SFTP for domain accounts (folders with SFTP on, and Home) }
+        sftpAdmins: { type: boolean, description: "Domain administrators (Domain Admins, HardyOS Admins) may use SFTP too; off by default, so they get no view and their passwords are never tried over SSH" }
         webdavEnabled: { type: boolean, description: "WebDAV at https://<server>/dav/ for domain accounts (folders with WebDAV on, and Home)" }
     FileServicesShare:
       type: object
@@ -4182,6 +4183,7 @@ components:
         smbEnabled: { type: boolean }
         homes: { $ref: "#/components/schemas/FileServicesHomes" }
         sftpEnabled: { type: boolean }
+        sftpAdmins: { type: boolean }
         webdavEnabled: { type: boolean }
     # ---- end of File Services ------------------------------------------------
     # ---- SFTP and WebDAV (file sharing part E) ------------------------------

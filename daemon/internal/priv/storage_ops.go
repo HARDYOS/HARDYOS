@@ -241,7 +241,7 @@ func RegisterStorage(s *Server, env StorageEnv) {
 		if err := dataPool(a.Pool); err != nil {
 			return nil, err
 		}
-		st.srv.releaseDataset(ctx, a.Pool)
+		defer st.srv.releaseDataset(ctx, a.Pool)()
 		_, err := st.zpool(ctx, "export", a.Pool)
 		return map[string]string{"exported": a.Pool}, err
 	}))
@@ -594,7 +594,7 @@ func (st *storageOps) destroyPool(ctx context.Context, a PoolDestroyArgs) (any, 
 	if a.ConfirmName != a.Pool {
 		return nil, Errorf(CodeBadArgs, "confirmName must repeat the pool name exactly")
 	}
-	st.srv.releaseDataset(ctx, a.Pool)
+	defer st.srv.releaseDataset(ctx, a.Pool)()
 	if _, err := st.zpool(ctx, "destroy", a.Pool); err != nil {
 		return nil, err
 	}
@@ -690,7 +690,7 @@ func (st *storageOps) destroyDataset(ctx context.Context, a DatasetDestroyArgs) 
 	if a.ConfirmName != a.Name {
 		return nil, Errorf(CodeBadArgs, "confirmName must repeat the dataset name exactly")
 	}
-	st.srv.releaseDataset(ctx, a.Name)
+	defer st.srv.releaseDataset(ctx, a.Name)()
 	args := []string{"destroy"}
 	if a.Recursive {
 		args = append(args, "-r")

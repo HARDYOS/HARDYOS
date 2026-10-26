@@ -15,6 +15,16 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 )
 
+// contains reports whether l has s.
+func contains(l []string, s string) bool {
+	for _, x := range l {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
 // memMounter records bind mounts.
 type memMounter struct {
 	mu sync.Mutex
@@ -40,7 +50,7 @@ func (f *memMounter) Bind(src string, _ uint64, dst string, ro bool) error {
 	if f.m == nil {
 		f.m = map[string]sftp.MountPoint{}
 	}
-	f.m[dst] = sftp.MountPoint{Target: dst, Source: src, ReadOnly: ro}
+	f.m[dst] = sftp.MountPoint{Target: dst, Source: src, Root: "/", ReadOnly: ro, NoSuid: true, NoDev: true, NoExec: true}
 	return nil
 }
 func (f *memMounter) Unmount(dst string) error {
@@ -94,6 +104,9 @@ func TestApplySFTP(t *testing.T) {
 	f.OnPrefix("groupadd ", sysexec.Result{})
 	f.OnPrefix("gpasswd ", sysexec.Result{})
 	f.On("sshd -t", "")
+	f.OnPrefix("sshd -T ", sysexec.Result{Stdout: []byte("forcecommand internal-sftp -d /\nchrootdirectory " + filepath.Join(dir, "views") + "/%U\n" +
+		"disableforwarding yes\nallowgroups hardyos-sftp\nauthenticationmethods password\npubkeyauthentication no\npermittty no\n" +
+		"allowtcpforwarding no\nallowagentforwarding no\nx11forwarding no\npermittunnel no\n")})
 	m := newTestManager(t, f, l)
 	mt := &memMounter{}
 	m.SFTP = &sftp.Manager{Runner: f, Mounter: mt, Root: filepath.Join(dir, "views"), DropIn: filepath.Join(dir, "etc/ssh/sshd_config.d/hardyos-sftp.conf"),
@@ -121,20 +134,34 @@ func TestApplySFTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"100500/Media rw", "100500/Private rw", "101103/Media ro", "101103/Private rw", "101104/Media rw"}
+	// Domain Admins get no view by default (so no SSH sign-in at all).
+	want := []string{"101103/Media ro", "101103/Private rw", "101104/Media rw"}
 	if got := mt.views(m.SFTP.Root); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("views:\n got %v\nwant %v", got, want)
 	}
-	if st.SFTP == nil || !st.SFTP.Enabled || st.SFTP.Users != 3 {
+	if st.SFTP == nil || !st.SFTP.Enabled || st.SFTP.Users != 2 || st.SFTP.Problem != "" {
 		t.Errorf("status %+v", st.SFTP)
 	}
-	found := false
-	for _, ln := range f.Lines() {
-		if ln == `gpasswd -M HOME\administrator,HOME\alice,HOME\bob hardyos-sftp` {
-			found = true
-		}
+	if !contains(f.Lines(), `gpasswd -M HOME\alice,HOME\bob hardyos-sftp`) {
+		t.Errorf("group without the administrator: %v", f.Lines())
 	}
-	if !found {
+	if b, _ := os.ReadFile(m.SFTP.PAMPath); !strings.Contains(string(b), "user ingroup hardyos-sftp") || !strings.Contains(string(b), "pam_faillock.so preauth") {
+		t.Errorf("PAM:\n%s", b)
+	}
+	// With the switch on, they get every folder.
+	f.OnResult("getent group hardyos-sftp", sysexec.Result{Stdout: []byte(`hardyos-sftp:x:998:HOME\alice,HOME\bob` + "\n")})
+	st, err = m.SetSettings(ctx, SettingsArgs{SFTPAdmins: &yes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = []string{"100500/Media rw", "100500/Private rw", "101103/Media ro", "101103/Private rw", "101104/Media rw"}
+	if got := mt.views(m.SFTP.Root); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("views:\n got %v\nwant %v", got, want)
+	}
+	if st.SFTP == nil || !st.SFTP.Enabled || st.SFTP.Users != 3 || !st.Settings.SFTPAdmins {
+		t.Errorf("status %+v", st.SFTP)
+	}
+	if !contains(f.Lines(), `gpasswd -M HOME\administrator,HOME\alice,HOME\bob hardyos-sftp`) {
 		t.Errorf("group: %v", f.Lines())
 	}
 	// A folder being deleted leaves the views first.

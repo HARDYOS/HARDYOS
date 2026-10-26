@@ -133,6 +133,12 @@ func (m *Manager) applySFTP(ctx context.Context, joined bool, set Settings, dom 
 				}
 			}
 		}
+		if u.Admin && !set.SFTPAdmins {
+			// Domain administrators get no view unless File Services allows
+			// them: not in hardyos-sftp, so PAM never asks the domain about
+			// their passwords over SSH.
+			continue
+		}
 		if homes != "" && set.Homes.Pool != "" {
 			hn := HomeName(dom.NetBIOS, a)
 			home, ds := filepath.Join(homes, hn), HomesDataset(set.Homes.Pool)+"/"+hn
@@ -150,13 +156,40 @@ func (m *Manager) applySFTP(ctx context.Context, joined bool, set Settings, dom 
 	}
 }
 
-// releaseSFTP lets go of a shared folder's dataset before it's destroyed.
-func (m *Manager) releaseSFTP(ds string) {
+// releaseSFTP lets go of a shared folder's dataset before it's destroyed
+// and keeps it out of the views until AfterDelete; m.mu is held.
+func (m *Manager) releaseSFTP(id, ds string) {
 	if m.SFTP == nil || ds == "" {
 		return
 	}
+	if m.sftpHeld == nil {
+		m.sftpHeld = map[string]string{}
+	}
+	m.sftpHeld[id] = ds
 	if err := m.SFTP.Release(ds); err != nil {
 		m.log().Warn("sftp: unmounting a shared folder that's going away", "dataset", ds, "err", err)
+	}
+}
+
+// AfterDelete runs once a shared folder's delete is over (whether it
+// worked or not): SFTP may use its dataset again (the next apply binds it
+// if it's still there).
+func (m *Manager) AfterDelete(_ context.Context, id string) error {
+	m.mu.Lock()
+	ds, ok := m.sftpHeld[id]
+	delete(m.sftpHeld, id)
+	m.mu.Unlock()
+	if ok && m.SFTP != nil {
+		m.SFTP.Unhold(ds)
+	}
+	return nil
+}
+
+// ReleaseDone hands a dataset released with ReleaseDataset back (the
+// storage operation is over).
+func (m *Manager) ReleaseDone(ds string) {
+	if m.SFTP != nil {
+		m.SFTP.Unhold(ds)
 	}
 }
 

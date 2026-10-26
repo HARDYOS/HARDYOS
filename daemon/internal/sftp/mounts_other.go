@@ -5,7 +5,7 @@ package sftp
 import "errors"
 
 // SysMounter is the real Mounter (Linux only).
-type SysMounter struct{}
+type SysMounter struct{ NoNewAPI bool }
 
 var errNoMounts = errors.New("bind mounts need Linux")
 

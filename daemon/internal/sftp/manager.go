@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 )
@@ -28,6 +29,10 @@ type Status struct {
 	Problem string `json:"problem"`
 }
 
+// holdMax bounds how long a released dataset is kept out of the views if
+// whoever released it never says it's done (a crash in between).
+const holdMax = 30 * time.Minute
+
 // Manager keeps sshd's settings, sshd's PAM stack, the views and the
 // hardyos-sftp group in step with what Plan says. Safe for concurrent use.
 type Manager struct {
@@ -43,6 +48,10 @@ type Manager struct {
 
 	mu   sync.Mutex
 	last Status
+	// held: datasets (and everything below them) a storage operation or a
+	// shared folder delete is letting go of; no view binds them until
+	// Unhold (or holdMax).
+	held map[string]time.Time
 }
 
 func (m *Manager) log() *slog.Logger {
@@ -79,8 +88,9 @@ func (m *Manager) installed() bool {
 
 // Apply makes SFTP match the plan: with on, the views get exactly binds
 // (users with none get no view, so they can't sign in), the group lists
-// those users, PAM and sshd let them in. With on false (or SFTP off), the
-// views and the group are emptied and domain accounts are refused by sshd.
+// those users, sshd's settings are written and checked as in effect, and
+// only then PAM lets them in. With on false (or SFTP off), the views and
+// the group are emptied and domain accounts are refused by sshd.
 func (m *Manager) Apply(ctx context.Context, on bool, users []User, binds []Bind) (Status, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -129,6 +139,11 @@ func (m *Manager) active(ctx context.Context) bool {
 	return err == nil && res.ExitCode == 0
 }
 
+// errSignInOff wraps anything that keeps domain sign-in off.
+func signInOff(err error) error {
+	return fmt.Errorf("SFTP sign-in for domain accounts is off until this is fixed: %w", err)
+}
+
 func (m *Manager) applyOn(ctx context.Context, users []User, binds []Bind, st *Status) error {
 	// Views first, so nobody is let in before their view is ready.
 	n, err := m.syncViews(binds)
@@ -146,14 +161,51 @@ func (m *Manager) applyOn(ctx context.Context, users []User, binds []Bind, st *S
 			names = append(names, u.Name)
 		}
 	}
+	sort.Strings(names)
 	st.Users = len(names)
 	if err := m.setGroup(ctx, names); err != nil {
 		return err
 	}
-	if err := m.setPAM(true); err != nil {
-		return err
+	// sshd's settings, checked as really in effect for a domain account,
+	// before PAM accepts a single domain password. Any doubt: PAM stays (or
+	// goes) off, so domain accounts can't sign in at all.
+	if err := m.setSSHD(ctx, RenderSSHD(m.root(), true)); err != nil {
+		m.pamOff()
+		return signInOff(err)
 	}
-	return m.setSSHD(ctx, RenderSSHD(m.root(), true))
+	if len(names) == 0 {
+		// Nobody to let in.
+		return m.setPAM(false)
+	}
+	if err := m.verifySSHD(ctx, names[0]); err != nil {
+		m.pamOff()
+		return signInOff(err)
+	}
+	if err := m.setPAM(true); err != nil {
+		m.pamOff()
+		return signInOff(err)
+	}
+	return nil
+}
+
+// pamOff takes HardyOS's PAM lines out (failing closed); a failure is logged.
+func (m *Manager) pamOff() {
+	if err := m.setPAM(false); err != nil {
+		m.log().Error("sftp: taking domain sign-in out of sshd's PAM stack", "err", err)
+	}
+}
+
+// verifySSHD asks sshd which settings a domain account (user, a name NSS
+// knows) really gets, after every file and Match block.
+func (m *Manager) verifySSHD(ctx context.Context, user string) error {
+	res, err := m.Runner.Run(ctx, nil, "sshd", EffectiveArgs(user)...)
+	if err == nil && res.ExitCode != 0 {
+		err = fmt.Errorf("sshd -T failed: %s", strings.TrimSpace(string(res.Stderr)))
+	}
+	if err != nil {
+		return fmt.Errorf("checking the SSH server's settings for %s: %w", user, err)
+	}
+	return CheckEffective(string(res.Stdout), m.root())
 }
 
 func (m *Manager) applyOff(ctx context.Context) error {
@@ -180,48 +232,117 @@ func (m *Manager) applyOff(ctx context.Context) error {
 
 // ---- views -----------------------------------------------------------------
 
-// ensureDir makes a root-owned 0755 folder that isn't a link.
-func (m *Manager) ensureDir(p string) error {
+// errNotOurs: a folder in the views isn't what HardyOS made.
+var errNotOurs = errors.New("isn't a plain root-owned folder")
+
+func devOf(p string) (uint64, error) {
+	var st syscall.Stat_t
+	if err := syscall.Lstat(p, &st); err != nil {
+		return 0, err
+	}
+	return uint64(st.Dev), nil
+}
+
+// ensureDir makes p, root's and 0755, if it isn't there. An existing p is
+// never changed (chown or chmod on something mounted there would change a
+// shared folder's own top): it must be a folder, not a link, and with
+// sameDev on the same file system as its parent (nothing mounted on it).
+// With owned (and NoChown off) it must also be root's and writable by
+// root only, as sshd's ChrootDirectory insists.
+func (m *Manager) ensureDir(p string, sameDev, owned bool) error {
 	fi, err := os.Lstat(p)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		if err := os.Mkdir(p, 0o755); err != nil {
 			return err
 		}
+		if !m.NoChown {
+			if err := os.Lchown(p, 0, 0); err != nil {
+				return err
+			}
+		}
+		return os.Chmod(p, 0o755)
 	case err != nil:
 		return err
 	case fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir():
 		return fmt.Errorf("%s isn't a folder; remove it so SFTP can use the name", p)
 	}
-	if !m.NoChown {
-		if err := os.Lchown(p, 0, 0); err != nil {
+	if sameDev {
+		d, err := devOf(p)
+		if err != nil {
 			return err
 		}
+		pd, err := devOf(filepath.Dir(p))
+		if err != nil {
+			return err
+		}
+		if d != pd {
+			return fmt.Errorf("something is already mounted on %s; it was left alone", p)
+		}
 	}
-	return os.Chmod(p, 0o755)
+	if owned && !m.NoChown {
+		st, ok := fi.Sys().(*syscall.Stat_t)
+		if !ok || st.Uid != 0 || fi.Mode().Perm()&0o022 != 0 {
+			return fmt.Errorf("%s %w (root's, not writable by others), so SFTP can't use it", p, errNotOurs)
+		}
+	}
+	return nil
 }
 
-// syncViews makes the bind mounts below the root exactly binds and removes
-// empty folders nobody needs. Folders are only ever removed with rmdir, so
-// a bind that couldn't be unmounted (and the files behind it) stays.
-// It returns how many binds are in place.
+// managed reports whether target is exactly <root>/<uid>/<name>, the only
+// mounts the views are made of. Anything deeper is never touched.
+func managed(root, target string) bool {
+	rel, ok := strings.CutPrefix(target, root+"/")
+	if !ok {
+		return false
+	}
+	uid, name, ok := strings.Cut(rel, "/")
+	return ok && uid != "" && name != "" && !strings.Contains(name, "/")
+}
+
+// isHeld reports whether ds is (below) a dataset being let go of; m.mu.
+func (m *Manager) isHeld(ds string) bool {
+	if ds == "" {
+		return false
+	}
+	for h, at := range m.held {
+		if time.Since(at) > holdMax {
+			m.log().Warn("sftp: a released dataset was never handed back; views use it again", "dataset", h)
+			delete(m.held, h)
+			continue
+		}
+		if ds == h || strings.HasPrefix(ds, h+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// syncViews makes the bind mounts at <root>/<uid>/<name> exactly binds and
+// removes empty folders nobody needs. Folders are only ever removed with
+// rmdir, so a bind that couldn't be unmounted (and the files behind it)
+// stays. Before anything is unmounted every mount below the root is made
+// private, so no unmount here reaches another mount namespace or the
+// shared folders' own mounts. It returns how many binds are in place.
 func (m *Manager) syncViews(binds []Bind) (int, error) {
 	root := m.root()
 	mt := m.mounter()
 	if len(binds) > 0 {
-		if err := m.ensureDir(filepath.Dir(root)); err != nil {
+		if err := m.ensureDir(filepath.Dir(root), false, true); err != nil {
 			return 0, err
 		}
-		if err := m.ensureDir(root); err != nil {
+		if err := m.ensureDir(root, false, true); err != nil {
 			return 0, err
 		}
-		if err := mt.MakePrivate(root); err != nil {
-			return 0, err
-		}
+	} else if _, err := os.Lstat(root); errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err := mt.MakePrivate(root); err != nil {
+		return 0, err
 	}
 	want := map[string]Bind{}
 	for _, b := range binds {
-		if viewName(b.Name) == "" || b.UID < DomainUIDLow || b.UID > DomainUIDHigh || !filepath.IsAbs(b.Source) {
+		if viewName(b.Name) == "" || b.UID < DomainUIDLow || b.UID > DomainUIDHigh || !filepath.IsAbs(b.Source) || m.isHeld(b.Dataset) {
 			continue
 		}
 		want[filepath.Join(root, strconv.Itoa(b.UID), b.Name)] = b
@@ -230,8 +351,20 @@ func (m *Manager) syncViews(binds []Bind) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	// Deepest first, so nothing is unmounted from under another mount.
-	sort.Slice(cur, func(i, j int) bool { return len(cur[i].Target) > len(cur[j].Target) })
+	// What is mounted inside each managed mount (a view made before binds
+	// were private and non-recursive picked up the shared folders' child
+	// mounts) and how many mounts are stacked on it.
+	inside, stacked := map[string]int{}, map[string]int{}
+	for _, c := range cur {
+		if managed(root, c.Target) {
+			stacked[c.Target]++
+		}
+		for d := filepath.Dir(c.Target); len(d) > len(root); d = filepath.Dir(d) {
+			if managed(root, d) {
+				inside[d]++
+			}
+		}
+	}
 	var first error
 	keep := func(err error) {
 		if err != nil {
@@ -243,12 +376,26 @@ func (m *Manager) syncViews(binds []Bind) (int, error) {
 	}
 	in := map[string]bool{}
 	for _, c := range cur {
+		if !managed(root, c.Target) {
+			continue
+		}
 		b, ok := want[c.Target]
-		if ok && !in[c.Target] && c.ReadOnly == b.ReadOnly && (b.Dataset == "" || c.Source == b.Dataset) {
+		if ok && !in[c.Target] && stacked[c.Target] == 1 && inside[c.Target] == 0 &&
+			c.ReadOnly == b.ReadOnly && c.Restricted() && c.Root == "/" &&
+			(b.Dataset == "" || c.Source == b.Dataset) && (b.Dev == 0 || c.Dev == b.Dev) {
 			in[c.Target] = true
 			continue
 		}
 		keep(mt.Unmount(c.Target))
+	}
+	// A wrong mount that couldn't be taken away is never mounted over.
+	still := map[string]bool{}
+	if now, err := mt.List(root); err == nil {
+		for _, c := range now {
+			still[c.Target] = true
+		}
+	} else {
+		return 0, err
 	}
 	n := 0
 	targets := make([]string, 0, len(want))
@@ -262,11 +409,15 @@ func (m *Manager) syncViews(binds []Bind) (int, error) {
 			continue
 		}
 		b := want[t]
-		if err := m.ensureDir(filepath.Dir(t)); err != nil {
+		if still[t] {
+			keep(fmt.Errorf("%s still has an old mount on it; it'll be tried again", t))
+			continue
+		}
+		if err := m.ensureDir(filepath.Dir(t), true, true); err != nil {
 			keep(err)
 			continue
 		}
-		if err := m.ensureDir(t); err != nil {
+		if err := m.ensureDir(t, true, false); err != nil {
 			keep(err)
 			continue
 		}
@@ -280,7 +431,9 @@ func (m *Manager) syncViews(binds []Bind) (int, error) {
 	mounted := map[string]bool{}
 	if left, err := mt.List(root); err == nil {
 		for _, c := range left {
-			mounted[c.Target] = true
+			for d := c.Target; len(d) > len(root); d = filepath.Dir(d) {
+				mounted[d] = true
+			}
 		}
 	} else {
 		return n, err
@@ -306,7 +459,7 @@ func (m *Manager) syncViews(binds []Bind) (int, error) {
 				}
 			}
 		}
-		if left == 0 {
+		if left == 0 && !mounted[up] {
 			_ = syscall.Rmdir(up)
 		}
 	}
@@ -314,21 +467,45 @@ func (m *Manager) syncViews(binds []Bind) (int, error) {
 }
 
 // Release unmounts every bind of datasets at or below ds (a pool, a shared
-// folder's dataset), so it can be destroyed or exported.
+// folder's dataset), so it can be destroyed or exported, and keeps them
+// out of the views until Unhold(ds): a sync in the meantime (the watch, a
+// shared folder change) must not bind them again.
 func (m *Manager) Release(ds string) error {
+	if ds == "" {
+		return nil
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.held == nil {
+		m.held = map[string]time.Time{}
+	}
+	m.held[ds] = time.Now()
 	return m.release(func(c MountPoint) bool { return c.Source == ds || strings.HasPrefix(c.Source, ds+"/") })
 }
 
+// Unhold lets the views use ds again (the operation that released it is
+// over; the next sync binds what still exists).
+func (m *Manager) Unhold(ds string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.held, ds)
+}
+
 func (m *Manager) release(match func(MountPoint) bool) error {
-	cur, err := m.mounter().List(m.root())
+	root := m.root()
+	if _, err := os.Lstat(root); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err := m.mounter().MakePrivate(root); err != nil {
+		return err
+	}
+	cur, err := m.mounter().List(root)
 	if err != nil {
 		return err
 	}
 	var first error
 	for _, c := range cur {
-		if !match(c) {
+		if !managed(root, c.Target) || !match(c) {
 			continue
 		}
 		if err := m.mounter().Unmount(c.Target); err != nil {
@@ -378,6 +555,9 @@ func (m *Manager) setGroup(ctx context.Context, names []string) error {
 
 // ---- PAM and sshd ----------------------------------------------------------
 
+// setPAM puts HardyOS's blocks in sshd's PAM file (on) or takes them out.
+// With on, the result is checked before it's written: nothing in the
+// session stack a domain account still reaches may start pam_systemd.
 func (m *Manager) setPAM(on bool) error {
 	b, err := os.ReadFile(m.pamPath())
 	if errors.Is(err, os.ErrNotExist) {
@@ -392,6 +572,18 @@ func (m *Manager) setPAM(on bool) error {
 	text, err := EditPAM(string(b), on)
 	if err != nil {
 		return err
+	}
+	if on {
+		dir := filepath.Dir(m.pamPath())
+		read := func(name string) ([]byte, error) {
+			if name == "" || strings.ContainsAny(name, "/\x00") {
+				return nil, os.ErrNotExist
+			}
+			return os.ReadFile(filepath.Join(dir, name))
+		}
+		if err := CheckPAMSession(text, read); err != nil {
+			return err
+		}
 	}
 	if text == string(b) {
 		return nil

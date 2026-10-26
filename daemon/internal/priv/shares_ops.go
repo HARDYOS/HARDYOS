@@ -60,6 +60,7 @@ func RegisterShares(s *Server, m *shares.Manager, hooks ...ShareHook) {
 	s.Handle(OpSharesDelete, typed(func(ctx context.Context, a ShareDeleteArgs) (any, error) {
 		runBeforeDelete(ctx, hooks, a.ID)
 		err := m.Delete(ctx, a.ID, a.Confirm)
+		runAfterDelete(ctx, hooks, a.ID)
 		runChanged(ctx, hooks)
 		return map[string]bool{"deleted": err == nil}, sharesErr(err)
 	}))

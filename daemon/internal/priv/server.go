@@ -30,7 +30,7 @@ type Server struct {
 	ops map[string]HandlerFunc
 
 	relMu     sync.Mutex
-	releasers []func(ctx context.Context, dataset string) error
+	releasers []releaser
 }
 
 // Handle registers an operation. Registering the same name twice panics.
