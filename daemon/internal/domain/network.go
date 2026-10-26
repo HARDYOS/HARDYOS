@@ -421,6 +421,10 @@ func (m *Manager) writeResolv(c *Config) error {
 // TeardownNetwork removes the DC's namespace and the NAS's shim.
 func (m *Manager) TeardownNetwork(ctx context.Context) {
 	if m.nsExists() {
+		// Delete the macvlan first: a namespace lingers while any process is
+		// still inside it, and its macvlan would keep holding the DC's MAC
+		// (a new DC with that MAC then can't come up).
+		_, _ = m.Runner.Run(ctx, nil, "ip", "-n", m.ns(), "link", "del", DCLink)
 		if err := m.run(ctx, "ip", "netns", "del", m.ns()); err != nil {
 			m.log().Warn("removing the domain controller's network", "err", err)
 		}
