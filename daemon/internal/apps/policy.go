@@ -415,6 +415,11 @@ func checkService(p *Problems, name string, svc map[string]any, services map[str
 					}
 				}
 			case "replicas", "restart_policy", "labels":
+			case "placement":
+				// Docker Compose writes an empty placement into every deploy block.
+				if pm, _ := v.(map[string]any); len(pm) > 0 {
+					p.addf("service %s: deploy.placement isn't allowed", name)
+				}
 			default:
 				p.addf("service %s: deploy.%s isn't allowed", name, k)
 			}

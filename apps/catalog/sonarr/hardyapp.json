@@ -1,0 +1,36 @@
+{
+  "format": 1,
+  "id": "sonarr",
+  "name": "Sonarr",
+  "version": "4.0.20",
+  "summary": "Keeps your TV shows organised: tracks new episodes and files them in your Media library.",
+  "description": "Sonarr keeps a list of the TV shows you follow. When a new episode is out it asks your download app (such as qBittorrent) to fetch it, then renames it and files it in your TV folder so Jellyfin or Plex show it right away. It can also tidy up the shows you already have.\n\nInside Sonarr your Media folder is /media and your Downloads folder is /downloads, the same paths qBittorrent, Radarr, Bazarr, Jellyfin and Plex use in HardyOS, so no path mapping is needed. After installing, open Sonarr, set up its sign-in, add /media/TV as a root folder, add qBittorrent under Settings > Download Clients (host: host.docker.internal or this server's address), and connect Prowlarr for search sources.",
+  "publisher": "Sonarr project, image by LinuxServer.io (packaged by HardyOS)",
+  "website": "https://sonarr.tv",
+  "icon": "icon.svg",
+  "arch": ["amd64", "arm64"],
+  "minMemoryMB": 512,
+  "web": { "port": "WEB", "path": "/" },
+  "ports": [
+    { "name": "WEB", "label": "Website", "default": 8989 }
+  ],
+  "folders": [
+    { "path": "config", "mode": "0750" }
+  ],
+  "shares": [
+    {
+      "name": "MEDIA",
+      "label": "Media library",
+      "help": "Where your shows are filed (Sonarr renames and moves episodes here). In Sonarr it's /media; add /media/TV as a root folder.",
+      "access": "write",
+      "suggest": "media"
+    },
+    {
+      "name": "DOWNLOADS",
+      "label": "Downloads",
+      "help": "The same folder you give qBittorrent. Sonarr picks finished episodes up from here. In Sonarr it's /downloads.",
+      "access": "write",
+      "suggest": "downloads"
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "format": 1,
+  "id": "jellyfin",
+  "name": "Jellyfin",
+  "version": "12.3",
+  "summary": "Watch your movies, shows and music on any TV, phone or browser.",
+  "description": "Jellyfin turns the movies, TV shows and music on this server into your own streaming service. It finds posters and descriptions for everything, remembers where each person stopped watching, and plays on smart TVs, phones, tablets and web browsers.\n\nWhen installing, give it your Media folder; Jellyfin only reads it and never changes your files. Then open Jellyfin, create the first account (it becomes the Jellyfin administrator), and add a library for each folder, for example /media/Movies and /media/TV.\n\nIf this server has a graphics chip, Jellyfin can use it to convert videos for devices that can't play them directly: turn it on in Dashboard > Playback > Transcoding.",
+  "publisher": "Jellyfin project (packaged by HardyOS)",
+  "website": "https://jellyfin.org",
+  "icon": "icon.svg",
+  "arch": ["amd64", "arm64"],
+  "minMemoryMB": 2048,
+  "web": { "port": "WEB", "path": "/" },
+  "ports": [
+    { "name": "WEB", "label": "Website and apps", "default": 8096 },
+    { "name": "DISCOVERY", "label": "Lets apps find this server on your network", "default": 7359, "protocol": "udp" }
+  ],
+  "folders": [
+    { "path": "config", "mode": "0750" },
+    { "path": "cache", "mode": "0750" }
+  ],
+  "shares": [
+    {
+      "name": "MEDIA",
+      "label": "Media library",
+      "help": "The folder with your movies, shows and music. Jellyfin only reads it. Inside Jellyfin it appears as /media.",
+      "access": "read",
+      "suggest": "media"
+    }
+  ],
+  "permissions": { "gpu": true }
+}

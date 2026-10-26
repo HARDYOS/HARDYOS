@@ -1,0 +1,29 @@
+{
+  "format": 1,
+  "id": "bazarr",
+  "name": "Bazarr",
+  "version": "1.6.2",
+  "summary": "Finds subtitles in your languages for the movies and shows in your Media library.",
+  "description": "Bazarr works alongside Sonarr and Radarr: for every show and movie they file, it finds subtitles in the languages you pick and saves them next to the video, so Jellyfin and Plex can show them.\n\nInside Bazarr your Media folder is /media, the same path Sonarr and Radarr use, so no path mapping is needed. After installing, open Bazarr, choose your languages under Settings > Languages, add subtitle providers, and connect Sonarr and Radarr under Settings (host: host.docker.internal or this server's address, with each app's API key).",
+  "publisher": "Bazarr project, image by LinuxServer.io (packaged by HardyOS)",
+  "website": "https://www.bazarr.media",
+  "icon": "icon.svg",
+  "arch": ["amd64", "arm64"],
+  "minMemoryMB": 512,
+  "web": { "port": "WEB", "path": "/" },
+  "ports": [
+    { "name": "WEB", "label": "Website", "default": 6767 }
+  ],
+  "folders": [
+    { "path": "config", "mode": "0750" }
+  ],
+  "shares": [
+    {
+      "name": "MEDIA",
+      "label": "Media library",
+      "help": "The same Media folder Sonarr and Radarr use. Bazarr saves subtitle files next to your videos. In Bazarr it's /media.",
+      "access": "write",
+      "suggest": "media"
+    }
+  ]
+}

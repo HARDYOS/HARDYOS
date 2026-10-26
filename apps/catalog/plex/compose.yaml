@@ -1,0 +1,31 @@
+# Plex Media Server for HardyOS (official image, bridge networking).
+services:
+  plex:
+    image: docker.io/plexinc/pms-docker:1.43.5.11079-b3b13e506
+    hostname: hardyos-plex
+    environment:
+      TZ: ${HARDY_TZ}
+      PLEX_CLAIM: ${PLEX_CLAIM}
+      # The image starts as root, then runs Plex as this user and group.
+      PLEX_UID: ${HARDY_UID}
+      PLEX_GID: ${HARDY_GID}
+      # In bridge networking Plex must be told the address devices reach it on.
+      ADVERTISE_IP: http://${HARDY_HOST}:${HARDY_PORT_WEB}/
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+    ports:
+      - "${HARDY_PORT_WEB}:32400"
+    volumes:
+      - ${HARDY_APP_DATA}/config:/config
+      - ${HARDY_APP_DATA}/transcode:/transcode
+      - ${HARDY_SHARE_MEDIA}:/media:ro
+    # Hardware transcoding (permissions.gpu); HardyOS drops what isn't there.
+    devices:
+      - /dev/dri:/dev/dri
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # The image's own health check (/healthcheck.sh) applies.

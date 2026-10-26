@@ -1,0 +1,87 @@
+# Immich for HardyOS, following Immich's own docker-compose.yml (and its
+# rootless variant) for v3.3.5. Every service runs as the app's own user.
+services:
+  immich-server:
+    image: ghcr.io/immich-app/immich-server:v3.3.5
+    user: "${HARDY_UID}:${HARDY_GID}"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - NET_RAW
+    environment:
+      TZ: ${HARDY_TZ}
+      DB_HOSTNAME: database
+      DB_USERNAME: postgres
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_DATABASE_NAME: immich
+      REDIS_HOSTNAME: redis
+    ports:
+      - "${HARDY_PORT_WEB}:2283"
+    volumes:
+      - ${HARDY_SHARE_PHOTOS}:/data
+      - ${HARDY_SHARE_EXISTING}:/mnt/existing:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      database:
+        condition: service_healthy
+    # Hardware video transcoding (permissions.gpu): Quick Sync/VAAPI through
+    # /dev/dri, NVENC through the NVIDIA reservation. HardyOS drops what the
+    # server doesn't have.
+    devices:
+      - /dev/dri:/dev/dri
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # The image's own health check (immich-healthcheck) applies.
+
+  immich-machine-learning:
+    # Runs on the processor. Accelerated variants (-cuda, -openvino) are
+    # separate images, which a package can't choose per server yet.
+    image: ghcr.io/immich-app/immich-machine-learning:v3.3.5
+    user: "${HARDY_UID}:${HARDY_GID}"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - NET_RAW
+    environment:
+      TZ: ${HARDY_TZ}
+    volumes:
+      - ${HARDY_APP_DATA}/model-cache:/cache
+    # The image's own health check (python3 healthcheck.py) applies.
+
+  redis:
+    image: docker.io/valkey/valkey:9@sha256:c123e3715db63d06d4ad6964884037aa0d5d4d703939b9929954112889708e1d
+    user: "${HARDY_UID}:${HARDY_GID}"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - NET_RAW
+    volumes:
+      - ${HARDY_APP_DATA}/redis:/data
+    healthcheck:
+      test: redis-cli ping | grep -q PONG || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  database:
+    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0@sha256:bcf63357191b76a916ae5eb93464d65c07511da41e3bf7a8416db519b40b1c23
+    user: "${HARDY_UID}:${HARDY_GID}"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - NET_RAW
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_USER: postgres
+      POSTGRES_DB: immich
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - ${HARDY_APP_DATA}/postgres:/var/lib/postgresql/data
+    shm_size: 128mb
+    # The image's own health check applies (Immich's compose enables it).

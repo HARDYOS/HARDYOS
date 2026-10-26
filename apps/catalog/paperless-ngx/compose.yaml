@@ -1,0 +1,65 @@
+# Paperless-ngx for HardyOS, following Paperless-ngx's own
+# docker-compose.postgres.yml for v3.3.4.
+services:
+  broker:
+    image: docker.io/valkey/valkey:9-alpine
+    user: "${HARDY_UID}:${HARDY_GID}"
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ${HARDY_APP_DATA}/redis:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  db:
+    image: docker.io/library/postgres:18
+    # The official image supports any user that owns the data folder.
+    user: "${HARDY_UID}:${HARDY_GID}"
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      POSTGRES_DB: paperless
+      POSTGRES_USER: paperless
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      # Postgres 18 keeps its data in a versioned folder below this one.
+      - ${HARDY_APP_DATA}/postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paperless -d paperless"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  webserver:
+    image: ghcr.io/paperless-ngx/paperless-ngx:3.3.4
+    depends_on:
+      db:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+    environment:
+      PAPERLESS_REDIS: redis://broker:6379
+      PAPERLESS_DBENGINE: postgresql
+      PAPERLESS_DBHOST: db
+      PAPERLESS_DBNAME: paperless
+      PAPERLESS_DBUSER: paperless
+      PAPERLESS_DBPASS: ${POSTGRES_PASSWORD}
+      PAPERLESS_SECRET_KEY: ${PAPERLESS_SECRET_KEY}
+      PAPERLESS_ADMIN_USER: ${PAPERLESS_ADMIN_USER}
+      PAPERLESS_ADMIN_PASSWORD: ${PAPERLESS_ADMIN_PASSWORD}
+      PAPERLESS_OCR_LANGUAGE: ${PAPERLESS_OCR_LANGUAGE}
+      PAPERLESS_TIME_ZONE: ${HARDY_TZ}
+      # The image starts as root, then runs Paperless as this user and group.
+      USERMAP_UID: ${HARDY_UID}
+      USERMAP_GID: ${HARDY_GID}
+    ports:
+      - "${HARDY_PORT_WEB}:8000"
+    volumes:
+      - ${HARDY_APP_DATA}/data:/usr/src/paperless/data
+      - ${HARDY_APP_DATA}/export:/usr/src/paperless/export
+      - ${HARDY_SHARE_DOCUMENTS}:/usr/src/paperless/media
+      - ${HARDY_SHARE_CONSUME}:/usr/src/paperless/consume
+    # The image's own health check (curl http://localhost:8000) applies.

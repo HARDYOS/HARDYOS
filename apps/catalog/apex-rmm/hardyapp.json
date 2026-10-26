@@ -2,7 +2,7 @@
   "format": 1,
   "id": "apex-rmm",
   "name": "Apex RMM",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "summary": "Remote monitoring and management for your Windows, Mac and Linux computers.",
   "description": "Apex RMM keeps an eye on every computer you look after: inventory, health and alerts, scripts, a remote terminal, remote control through its own RustDesk server, S3 backups and power reporting.\n\nAfter installing, open Apex RMM and follow its setup wizard. It asks for a one-time setup code, which is in the app's Logs here in the App Store. Then install the agent on your computers from the dashboard. Remote control uses the bundled RustDesk server: enter this server's address under Settings > RustDesk, and forward the RustDesk ports on your router if computers connect from outside your network.",
   "publisher": "Hardy Networks",

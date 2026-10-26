@@ -40,7 +40,7 @@ services:
 
   # RustDesk server: remote control for the computers Apex manages.
   hbbs:
-    image: rustdesk/rustdesk-server:latest
+    image: docker.io/rustdesk/rustdesk-server:1.1.16
     restart: unless-stopped
     command: hbbs
     depends_on: [hbbr]
@@ -53,7 +53,7 @@ services:
       - "${HARDY_PORT_RD_WEB}:21118"
 
   hbbr:
-    image: rustdesk/rustdesk-server:latest
+    image: docker.io/rustdesk/rustdesk-server:1.1.16
     restart: unless-stopped
     command: hbbr
     volumes:

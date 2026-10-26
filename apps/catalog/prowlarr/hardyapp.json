@@ -1,0 +1,20 @@
+{
+  "format": 1,
+  "id": "prowlarr",
+  "name": "Prowlarr",
+  "version": "2.6.5",
+  "summary": "One place to manage the search sources Sonarr and Radarr use.",
+  "description": "Prowlarr manages the indexers (search sources) that Sonarr and Radarr look in, and keeps them in sync, so you set each one up once instead of in every app.\n\nAfter installing, open Prowlarr, set up its sign-in, add your indexers, then add Sonarr and Radarr under Settings > Apps. Use http://host.docker.internal:<port> (or this server's address) for Prowlarr, Sonarr and Radarr, with each app's API key from its Settings > General page. Prowlarr doesn't need any of your shared folders.",
+  "publisher": "Prowlarr project, image by LinuxServer.io (packaged by HardyOS)",
+  "website": "https://prowlarr.com",
+  "icon": "icon.svg",
+  "arch": ["amd64", "arm64"],
+  "minMemoryMB": 256,
+  "web": { "port": "WEB", "path": "/" },
+  "ports": [
+    { "name": "WEB", "label": "Website", "default": 9696 }
+  ],
+  "folders": [
+    { "path": "config", "mode": "0750" }
+  ]
+}

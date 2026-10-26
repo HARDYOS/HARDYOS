@@ -1,0 +1,27 @@
+# Seerr (the merged Jellyseerr/Overseerr project) for HardyOS, following
+# the Seerr docs. The image runs as its own non-root "node" user (1000);
+# running it as another user isn't documented, so the config folder is
+# owned by 1000 (see hardyapp.json).
+services:
+  seerr:
+    image: ghcr.io/seerr-team/seerr:v3.5.1
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      TZ: ${HARDY_TZ}
+      PORT: "5055"
+      LOG_LEVEL: info
+    ports:
+      - "${HARDY_PORT_WEB}:5055"
+    volumes:
+      - ${HARDY_APP_DATA}/config:/app/config
+    extra_hosts:
+      # Reach Jellyfin, Plex, Sonarr and Radarr through the server.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:5055/api/v1/settings/public || exit 1"]
+      interval: 15s
+      timeout: 3s
+      start_period: 20s
+      retries: 3

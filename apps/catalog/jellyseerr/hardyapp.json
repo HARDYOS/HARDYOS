@@ -1,0 +1,20 @@
+{
+  "format": 1,
+  "id": "jellyseerr",
+  "name": "Seerr (Jellyseerr)",
+  "version": "3.5.1",
+  "summary": "Lets the family ask for movies and shows; approved requests go straight to Radarr and Sonarr.",
+  "description": "Seerr (formerly Jellyseerr and Overseerr, now one project) is a friendly place for the family to browse what's popular, see what's already on Jellyfin or Plex, and request new movies and shows. You approve requests (or let trusted people auto-approve) and Seerr hands them to Radarr and Sonarr.\n\nAfter installing, open Seerr and sign in with your Jellyfin or Plex account; it becomes the Seerr administrator. Then connect Jellyfin or Plex, Radarr and Sonarr under Settings, using http://host.docker.internal:<port> (or this server's address) and each app's API key. Family members sign in with their own Jellyfin or Plex accounts.",
+  "publisher": "Seerr project (packaged by HardyOS)",
+  "website": "https://docs.seerr.dev",
+  "icon": "icon.svg",
+  "arch": ["amd64", "arm64"],
+  "minMemoryMB": 512,
+  "web": { "port": "WEB", "path": "/" },
+  "ports": [
+    { "name": "WEB", "label": "Website", "default": 5055 }
+  ],
+  "folders": [
+    { "path": "config", "owner": "1000:1000", "mode": "0750" }
+  ]
+}
