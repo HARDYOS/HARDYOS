@@ -97,7 +97,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 	stor.RegisterJobs(manager)
 	var upd *updates.Service
 	if !live {
-		upd = &updates.Service{Priv: pc, Jobs: manager, Notify: notifications, DB: db, Log: log}
+		upd = &updates.Service{Priv: pc, Jobs: manager, Notify: notifications, DB: db, Log: log, Current: version.Version}
 		upd.RegisterJobs(manager)
 	}
 	var inst *installer.Service
@@ -125,6 +125,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		// After an update, confirm the new version once it has stayed up for
 		// a minute and report the result.
 		go upd.ConfirmWhenHealthy(ctx, time.Minute)
+		go upd.RunChecks(ctx) // look for new versions on GitHub daily
 	}
 
 	var servers []*http.Server

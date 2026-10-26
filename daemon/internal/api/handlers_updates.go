@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 
@@ -19,6 +20,54 @@ func (s *Server) updateRoutes() {
 	m.Handle("POST /api/v1/system/versions/{name}/activate", s.admin(s.handleVersionActivate))
 	m.Handle("POST /api/v1/system/versions/{name}/delete", s.admin(s.handleVersionDelete))
 	m.Handle("POST /api/v1/system/reboot", s.admin(s.handleReboot))
+	m.Handle("GET /api/v1/system/updates/check", s.admin(s.handleUpdateCheckState))
+	m.Handle("POST /api/v1/system/updates/check", s.admin(s.handleUpdateCheckNow))
+	m.Handle("PUT /api/v1/system/updates/check", s.admin(s.handleUpdateCheckSettings))
+	m.Handle("POST /api/v1/system/updates/install-available", s.admin(s.handleInstallAvailable))
+}
+
+func (s *Server) handleUpdateCheckState(w http.ResponseWriter, r *http.Request, _ *auth.User) {
+	writeJSON(w, http.StatusOK, s.cfg.Updates.CheckState(r.Context()))
+}
+
+// handleUpdateCheckNow asks GitHub right away. A failed check (no internet)
+// isn't an API error: the state carries the reason.
+func (s *Server) handleUpdateCheckNow(w http.ResponseWriter, r *http.Request, u *auth.User) {
+	st, err := s.cfg.Updates.CheckNow(r.Context())
+	if err != nil {
+		s.record(r, u, "system.update.check", "", audit.Failure, err.Error())
+	} else {
+		s.record(r, u, "system.update.check", "", audit.Success, "")
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+type checkSettingsRequest struct {
+	AutoCheck bool `json:"autoCheck"`
+}
+
+func (s *Server) handleUpdateCheckSettings(w http.ResponseWriter, r *http.Request, u *auth.User) {
+	var req checkSettingsRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := s.cfg.Updates.SetAutoCheck(r.Context(), req.AutoCheck); err != nil {
+		internalError(s, w, err)
+		return
+	}
+	s.record(r, u, "system.update.autocheck", fmt.Sprint(req.AutoCheck), audit.Success, "")
+	writeJSON(w, http.StatusOK, s.cfg.Updates.CheckState(r.Context()))
+}
+
+// handleInstallAvailable downloads and installs the version the last check
+// found. The file's signature is checked like any other update.
+func (s *Server) handleInstallAvailable(w http.ResponseWriter, r *http.Request, u *auth.User) {
+	url, ver, err := s.cfg.Updates.AvailableURL(r.Context())
+	if err != nil {
+		writeError(w, http.StatusConflict, "nothing_available", err.Error())
+		return
+	}
+	s.submit(w, r, u, updates.JobDownload, "Download and install HardyOS "+ver, map[string]string{"url": url}, "system.update", url, nil)
 }
 
 func (s *Server) handleUpdateStatus(w http.ResponseWriter, r *http.Request, _ *auth.User) {

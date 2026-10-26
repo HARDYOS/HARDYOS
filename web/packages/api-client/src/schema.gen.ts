@@ -843,6 +843,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/system/updates/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Automatic update check setting and the newest version found */
+        get: operations["getUpdateCheck"];
+        /** Turn the daily update check on or off */
+        put: operations["setUpdateCheck"];
+        /**
+         * Look for a new version on GitHub now
+         * @description A failed check (no internet) still answers 200; lastError says why.
+         */
+        post: operations["checkForUpdates"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system/updates/install-available": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Download and install the newer version the last check found
+         * @description The update file's signature is checked like any other update.
+         */
+        post: operations["installAvailableUpdate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/system/versions/{name}/activate": {
         parameters: {
             query?: never;
@@ -1701,6 +1743,31 @@ export interface components {
             synced: boolean;
             source: string;
             offsetSec: number;
+        };
+        AvailableUpdate: {
+            version: string;
+            name: string;
+            /** @description Release notes (Markdown) */
+            notes: string;
+            /** @description The signed update file */
+            url: string;
+            /** @description The release page on GitHub */
+            pageUrl: string;
+            /** Format: int64 */
+            size: number;
+            /** Format: date-time */
+            publishedAt: string;
+        };
+        UpdateCheck: {
+            /** @description Check GitHub for new versions daily */
+            autoCheck: boolean;
+            /** @description The running version */
+            current: string;
+            /** Format: date-time */
+            lastCheck: string | null;
+            /** @description Why the last check failed (empty when it worked) */
+            lastError: string;
+            available: components["schemas"]["AvailableUpdate"] | null;
         };
     };
     responses: {
@@ -3165,6 +3232,93 @@ export interface operations {
             400: components["responses"]["Invalid"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    getUpdateCheck: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Check state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpdateCheck"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    setUpdateCheck: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    autoCheck: boolean;
+                };
+            };
+        };
+        responses: {
+            /** @description Check state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpdateCheck"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    checkForUpdates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Check state after checking */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpdateCheck"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    installAvailableUpdate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
         };
     };
     activateVersion: {

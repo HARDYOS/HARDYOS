@@ -142,6 +142,19 @@ operation per pool at a time). Progress streams to the browser over the
   before the running version was installed (applied at boot, before hardyd
   starts).
 
+### Checking for new versions
+
+hardyd checks the latest release of HARDYOS/HARDYOS on GitHub (stable only:
+drafts and pre-releases are skipped) a few minutes after starting and then
+daily, while the daily check is on (Control Panel > Updates; on by default).
+A release is offered when its version sorts after the running one, using
+Debian's ordering (`0.1.0~ci2 < 0.1.0 < 0.1.0+3.gabc < 0.1.1`), and it has a
+`hardyos-<version>-<arch>.hupd` file. Administrators get one notification
+per version. Install downloads that file through the normal download job,
+so the signature check is the same as for an uploaded file; nothing installs
+by itself. Uploading a file or giving an address still works for manual
+updates.
+
 ## Network and time
 
 Network settings live in Control Panel > Network and are stored in
