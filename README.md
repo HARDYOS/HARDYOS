@@ -14,6 +14,7 @@ macOS-style web desktop, Docker apps, VMs, and one login for everything.
 | `api/` | OpenAPI spec, the single source of truth for the HTTP API |
 | `os/` | Live ISO and installed-system image build (Debian 13 + OpenZFS) |
 | `packaging/` | Debian packages (built with nfpm) and systemd units |
+| `apps/` | `.hardyapp` files: one-click Docker apps for the App Center (see `docs/apps.md`) |
 | `docs/` | Architecture, decisions, and developer setup |
 | `scripts/` | Developer helper scripts |
 
