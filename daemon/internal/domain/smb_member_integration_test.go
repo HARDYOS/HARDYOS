@@ -3,6 +3,7 @@ package domain
 import (
 	"context"
 	"fmt"
+	"golang.org/x/sys/unix"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -110,6 +111,15 @@ func TestSMBMemberIntegration(t *testing.T) {
 		}, Services: sv}
 	guest := shares.Share{ID: "guest", Name: "Guest Box", Dataset: "test/shares/guest", Path: sub("shares/guest"), Mounted: true, Guest: true,
 		Access: []shares.Rule{{Kind: shares.KindGroup, Name: `HOME\Family`, Level: shares.LevelWrite}}, Services: sv}
+	// Real shares are verified ZFS mounts (shares.OpenRoot checks the
+	// device); these folders stand in for them on the test's file system.
+	for _, sh := range []*shares.Share{&docs, &guest} {
+		var st unix.Stat_t
+		if err := unix.Stat(sh.Path, &st); err != nil {
+			t.Fatal(err)
+		}
+		sh.RootDev = uint64(st.Dev)
+	}
 	src := &listShares{l: []shares.Share{docs, guest}}
 
 	conf := sub("smb.conf")
@@ -199,7 +209,7 @@ func TestSMBMemberIntegration(t *testing.T) {
 	}
 	// Deleting goes to the recycle bin.
 	check(try{"Family Docs", "alice", users["alice"], "del alice.txt", true})
-	if _, err := os.Stat(sub("shares/docs/.recycle/alice/alice.txt")); err != nil {
+	if _, err := os.Stat(sub("shares/docs/.recycle/home.alice/alice.txt")); err != nil {
 		matches, _ := filepath.Glob(sub("shares/docs/.recycle/*/*"))
 		t.Errorf("not in the recycle bin: %v (found %v)", err, matches)
 	}
