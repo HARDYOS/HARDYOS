@@ -8,6 +8,7 @@ import { Backup } from "./Backup";
 import { DateTime } from "./DateTime";
 import { Hardware } from "./Hardware";
 import { Network } from "./Network";
+import { TerminalSwitch } from "./TerminalSwitch";
 import { Overview } from "./Overview";
 import { Updates } from "./Updates";
 import { Users } from "./Users";
@@ -57,7 +58,8 @@ export default function ControlPanel({ args }: AppProps) {
       {section === "backup" && <Backup />}
       {section === "security" && (
         <>
-          <PageHeader title="Security" subtitle="Every sign-in and every change to the system, newest first." />
+          <PageHeader title="Security" subtitle="Who can do what, and every sign-in and change to the system, newest first." />
+          <TerminalSwitch />
           <AuditLog />
         </>
       )}
