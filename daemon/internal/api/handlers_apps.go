@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -641,10 +640,9 @@ func checkShares(p *apps.Problems, mf apps.Manifest, shares map[string]apps.Shar
 			*p = append(*p, fmt.Sprintf("%s: %q isn't a shared folder id", sm.Label, c.Share))
 		}
 		if c.Path != "" {
-			clean := path.Clean("/" + c.Path)
-			if strings.Contains(c.Path, "..") || strings.HasPrefix(c.Path, "/") || clean == "/" || len(c.Path) > 255 {
-				*p = append(*p, fmt.Sprintf("%s: the subfolder must be a folder inside the shared folder", sm.Label))
-			}
+			// Whole shared folders only: a container could swap a subfolder
+			// for a link to somewhere else.
+			*p = append(*p, fmt.Sprintf("%s: apps get a whole shared folder, not a subfolder", sm.Label))
 		}
 		switch c.Access {
 		case "", "read":

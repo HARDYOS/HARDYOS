@@ -376,13 +376,17 @@ func TestImportedCatalogsAndCustomApps(t *testing.T) {
 	}
 	req.Grants, req.Limits = []string{"hostNetwork", "device:/dev/dri"}, &apps.Limits{MemoryMB: 1024, CPUs: 2}
 	req.Shares = map[string]apps.ShareChoice{"DOCS": {Share: "documents", Path: "Lab", Access: "read"}}
+	if code := e.admin.do("POST", "/api/v1/apps/install", req, &er); code != 400 || !strings.Contains(er.Message, "whole shared folder") {
+		t.Fatalf("subfolder = %d %+v", code, er)
+	}
+	req.Shares = map[string]apps.ShareChoice{"DOCS": {Share: "documents", Access: "read"}}
 	if j := e.runJob(t, "POST", "/api/v1/apps/install", req); j["state"] != "succeeded" {
 		t.Fatalf("install: %v", j)
 	}
 	e.stub.mu.Lock()
 	got := e.stub.prepared[len(e.stub.prepared)-1]
 	e.stub.mu.Unlock()
-	if got.Source != apps.SourceImported || got.SourceName != "Hardy Labs" || len(got.Grants) != 2 || got.Shares["DOCS"].Path != "Lab" || got.Limits.CPUs != 2 {
+	if got.Source != apps.SourceImported || got.SourceName != "Hardy Labs" || len(got.Grants) != 2 || got.Shares["DOCS"].Share != "documents" || got.Limits.CPUs != 2 {
 		t.Fatalf("prepare got %+v", got)
 	}
 	if a := auditActions(e.admin, "apps.grant"); len(a) != 2 || a[1] != "apps.grant labnotes hostNetwork" {

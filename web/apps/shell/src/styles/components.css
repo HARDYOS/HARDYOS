@@ -1371,3 +1371,204 @@
   margin: 4px 0 0;
   padding-left: 18px;
 }
+
+/* ---------- App Store v2 ---------- */
+.install__steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+  color: var(--hos-text-muted);
+}
+.install__steps li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--hos-surface);
+  border: 1px solid var(--hos-surface-border);
+}
+.install__steps li[aria-current="step"] {
+  color: var(--hos-text);
+  border-color: var(--hos-accent);
+  background: var(--hos-accent-soft);
+  font-weight: 600;
+}
+.install__steps li.is-done {
+  color: var(--hos-text-2);
+}
+.install__advanced {
+  padding: 10px 14px;
+  border-radius: var(--hos-radius);
+  background: var(--hos-surface);
+  border: 1px solid var(--hos-surface-border);
+}
+.install__advanced summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+.install__advanced[open] summary {
+  margin-bottom: 8px;
+}
+.grant-warning {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border-radius: var(--hos-radius-sm);
+  background: var(--hos-bad-soft);
+  border: 1px solid rgba(248, 113, 113, 0.45);
+  color: var(--hos-bad-text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.grant-warning svg {
+  flex: none;
+  margin-top: 2px;
+}
+.grant-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.grant-list label {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 13px;
+  color: var(--hos-text);
+}
+.grant-list input {
+  margin-top: 2px;
+  accent-color: var(--hos-bad);
+}
+.access-group {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.access-extra {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.access-extra li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.access-add {
+  gap: 8px;
+}
+.access-add .select {
+  width: auto;
+}
+.app-details__actions {
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.app-details__facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px 20px;
+  margin: 0;
+  font-size: 13px;
+}
+.app-details__facts dt {
+  color: var(--hos-text-muted);
+  font-size: 12px;
+  margin-bottom: 2px;
+}
+.app-details__facts dd {
+  margin: 0;
+}
+.app-card__name {
+  font: inherit;
+  color: inherit;
+}
+.link-button {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--hos-accent-text);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.link-button:hover {
+  text-decoration: underline;
+}
+.catalog-note {
+  margin-top: 4px;
+  color: var(--hos-warn-text);
+}
+.compose-input {
+  min-height: 220px;
+  resize: vertical;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.custom-row {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 0.8fr auto auto;
+  gap: 8px;
+  align-items: center;
+}
+.custom-row__web {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  white-space: nowrap;
+}
+.custom-row__web input {
+  accent-color: var(--hos-accent);
+}
+.custom-row__error {
+  grid-column: 1 / -1;
+}
+
+/* An installed app in a desktop window. */
+.app-frame {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.app-frame__bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--hos-surface-border);
+  background: var(--hos-surface);
+}
+.app-frame__name {
+  padding-left: 4px;
+}
+.app-frame__body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.app-frame__view {
+  flex: 1;
+  width: 100%;
+  border: 0;
+  background: #fff;
+}
+/* A click on a background window focuses it first (iframes swallow events). */
+.window:not(.is-focused) .app-frame__view {
+  pointer-events: none;
+}

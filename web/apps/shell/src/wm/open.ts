@@ -14,8 +14,10 @@ export function openApp(appId: string, user: User | null | undefined, args?: Rec
     toast("warning", `${app.name} is for administrators`);
     return;
   }
-  useWM.getState().open(app.id, {
-    title: app.name,
+  // Installed apps share one window component; each gets its own window
+  // (keyed by the full id) titled with the app's name.
+  useWM.getState().open(appId, {
+    title: args?.title ?? app.name,
     width: app.defaultSize?.width ?? 900,
     height: app.defaultSize?.height ?? 600,
     multiInstance: app.multiInstance,
