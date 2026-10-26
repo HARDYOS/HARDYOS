@@ -17,6 +17,8 @@ func writeUserError(s *Server, w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "user_exists", err.Error())
 	case errors.Is(err, auth.ErrLastAdmin):
 		writeError(w, http.StatusConflict, "last_admin", err.Error())
+	case errors.Is(err, auth.ErrDomainManaged):
+		writeError(w, http.StatusConflict, "domain_account", err.Error())
 	case isErr(err, auth.ErrInvalidName, auth.ErrWeakPassword, auth.ErrPasswordTooLong, auth.ErrInvalidRole):
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
 	default:
@@ -104,6 +106,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request, me *au
 	}
 	if u.Disabled {
 		_ = s.sessions.RevokeUser(r.Context(), u.ID)
+		s.proxy.endUser(u.ID)
 	}
 	s.record(r, me, "user.update", u.Username, audit.Success, "")
 	writeJSON(w, http.StatusOK, u)
@@ -151,6 +154,7 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request, me 
 		return
 	}
 	_ = s.sessions.RevokeUser(r.Context(), id)
+	s.proxy.endUser(id)
 	s.record(r, me, "user.password.reset", u.Username, audit.Success, "")
 	w.WriteHeader(http.StatusNoContent)
 }

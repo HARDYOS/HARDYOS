@@ -25,7 +25,9 @@ type User struct {
 
 // Group is a domain security group.
 type Group struct {
-	Name        string   `json:"name"`
+	Name string `json:"name"`
+	// SID is the group's objectSid; it stays the same when it's renamed.
+	SID         string   `json:"sid"`
 	Description string   `json:"description"`
 	Members     []string `json:"members"`
 	Builtin     bool     `json:"builtin"`
@@ -164,6 +166,50 @@ func checkNames(names []string, check func(string) error) error {
 }
 
 func cleanName(s string) string { return strings.TrimSpace(s) }
+
+// UserGroups is what desktop sign-in needs about one account.
+type UserGroups struct {
+	// Exists is false when there's no such user (then nothing else is set).
+	Exists      bool   `json:"exists"`
+	Username    string `json:"username"` // as the directory spells it
+	DisplayName string `json:"displayName"`
+	Email       string `json:"email"`
+	Enabled     bool   `json:"enabled"`
+	LockedOut   bool   `json:"lockedOut"`
+	// Expired: the account (not its password) has passed its expiry date.
+	Expired            bool `json:"expired"`
+	MustChangePassword bool `json:"mustChangePassword"`
+	// Groups are every domain group the user is in, nested ones and the
+	// primary group (Domain Users) included, without the domain prefix.
+	Groups []string `json:"groups"`
+	// DomainSID is the domain's SID; GroupSIDs are the objectSids of the
+	// same groups (tokenGroups). The desktop role is decided by these, never
+	// by the names.
+	DomainSID string   `json:"domainSid"`
+	GroupSIDs []string `json:"groupSids"`
+}
+
+// UserGroups looks up an account's state and groups for sign-in.
+func (m *Manager) UserGroups(ctx context.Context, username string) (*UserGroups, error) {
+	if err := m.ready(); err != nil {
+		return nil, err
+	}
+	username = cleanName(username)
+	if err := CheckUsername(username); err != nil {
+		return nil, err
+	}
+	var out UserGroups
+	if err := m.admin(ctx, "user.groups", map[string]any{"username": username}, &out); err != nil {
+		return nil, err
+	}
+	if out.Groups == nil {
+		out.Groups = []string{}
+	}
+	if out.GroupSIDs == nil {
+		out.GroupSIDs = []string{}
+	}
+	return &out, nil
+}
 
 // CreateUser adds an account.
 func (m *Manager) CreateUser(ctx context.Context, u NewUser) (*User, error) {

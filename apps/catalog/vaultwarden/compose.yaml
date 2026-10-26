@@ -1,0 +1,20 @@
+# Vaultwarden for HardyOS. Runs as the app's own user, so it listens on
+# 8080 inside the container (port 80 would need root).
+services:
+  vaultwarden:
+    image: docker.io/vaultwarden/server:1.37.4
+    user: "${HARDY_UID}:${HARDY_GID}"
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      TZ: ${HARDY_TZ}
+      ROCKET_PORT: "8080"
+      DOMAIN: ${DOMAIN:-http://${HARDY_HOST}:${HARDY_PORT_WEB}}
+      SIGNUPS_ALLOWED: ${SIGNUPS_ALLOWED}
+      # Empty = admin page off (Vaultwarden logs a notice and carries on).
+      ADMIN_TOKEN: ${ADMIN_TOKEN}
+    ports:
+      - "${HARDY_PORT_WEB}:8080"
+    volumes:
+      - ${HARDY_APP_DATA}/data:/data
+    # The image's own health check (/healthcheck.sh, reads ROCKET_PORT) applies.

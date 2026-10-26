@@ -1,0 +1,29 @@
+# Jellyfin for HardyOS. HardyOS fills in the HARDY_* variables; the image
+# version is pinned here and changes with the package version.
+services:
+  jellyfin:
+    image: docker.io/jellyfin/jellyfin:12.3
+    user: "${HARDY_UID}:${HARDY_GID}"
+    environment:
+      TZ: ${HARDY_TZ}
+      # The address Jellyfin tells apps on the network to use.
+      JELLYFIN_PublishedServerUrl: http://${HARDY_HOST}:${HARDY_PORT_WEB}
+    ports:
+      - "${HARDY_PORT_WEB}:8096"
+      - "${HARDY_PORT_DISCOVERY}:7359/udp"
+    volumes:
+      - ${HARDY_APP_DATA}/config:/config
+      - ${HARDY_APP_DATA}/cache:/cache
+      - ${HARDY_SHARE_MEDIA}:/media:ro
+    # Hardware transcoding (permissions.gpu): Intel/AMD render nodes and
+    # NVIDIA GPUs. HardyOS drops whichever the server doesn't have.
+    devices:
+      - /dev/dri:/dev/dri
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # The image's own health check (curl http://localhost:8096/health) applies.

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"regexp"
 	"strings"
@@ -22,7 +23,14 @@ const (
 // Valid reports whether r is a known role.
 func (r Role) Valid() bool { return r == RoleAdmin || r == RoleUser }
 
-// User is a HardyOS account.
+// Where an account comes from.
+const (
+	SourceLocal  = "local"
+	SourceDomain = "domain"
+)
+
+// User is a HardyOS account: a local one, or a domain account that signed
+// in to the desktop (see SignIn).
 type User struct {
 	ID          int64      `json:"id"`
 	Username    string     `json:"username"`
@@ -33,8 +41,21 @@ type User struct {
 	BreakGlass  bool       `json:"breakGlass"`
 	CreatedAt   time.Time  `json:"createdAt"`
 	LastLoginAt *time.Time `json:"lastLoginAt"`
+	// Source is SourceLocal or SourceDomain.
+	Source string `json:"source"`
+	// Principal is how access rules name this user: the username for local
+	// accounts, NETBIOS\name for domain accounts (equal to Username).
+	Principal string `json:"principal"`
+	// Groups are a domain account's groups as NETBIOS\group, Domain Users
+	// included; empty for local accounts.
+	Groups []string `json:"groups"`
+	// RoleNote explains a domain account's role when it isn't what its
+	// groups would give: the domain couldn't be asked about them for too
+	// long (see SignIn.Refresh). Empty otherwise.
+	RoleNote string `json:"roleNote,omitempty"`
 
-	passwordHash string
+	passwordHash    string
+	groupsCheckedAt time.Time
 }
 
 // IsAdmin reports whether the user may change system settings.
@@ -47,6 +68,9 @@ var (
 	ErrLastAdmin      = errors.New("can't remove or demote the last active administrator")
 	ErrBadCredentials = errors.New("incorrect username or password")
 	ErrInvalidRole    = errors.New("role must be admin or user")
+	// ErrDomainManaged refuses changes the domain owns: a domain account's
+	// password, role, name and email.
+	ErrDomainManaged = errors.New("this is a domain account: its password, name and groups are managed in Control Panel > Domain > Users")
 )
 
 var usernameRE = regexp.MustCompile(`^[a-z][a-z0-9._-]{1,31}$`)
@@ -79,15 +103,15 @@ type NewUser struct {
 	BreakGlass  bool
 }
 
-const userCols = `id, username, display_name, email, role, password_hash, disabled, break_glass, created_at, last_login_at`
+const userCols = `id, username, display_name, email, role, password_hash, disabled, break_glass, created_at, last_login_at, source, groups, groups_checked_at`
 
 func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	var u User
-	var created string
-	var lastLogin sql.NullString
+	var created, groups string
+	var lastLogin, groupsChecked sql.NullString
 	var disabled, breakGlass int
 	if err := row.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Email, &u.Role, &u.passwordHash,
-		&disabled, &breakGlass, &created, &lastLogin); err != nil {
+		&disabled, &breakGlass, &created, &lastLogin, &u.Source, &groups, &groupsChecked); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, store.ErrNotFound
 		}
@@ -100,13 +124,25 @@ func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 		t := store.ParseTime(lastLogin.String)
 		u.LastLoginAt = &t
 	}
+	u.Principal = u.Username
+	u.Groups = []string{}
+	if u.Source == SourceDomain {
+		_ = json.Unmarshal([]byte(groups), &u.Groups)
+		if u.Groups == nil {
+			u.Groups = []string{}
+		}
+		if groupsChecked.Valid {
+			u.groupsCheckedAt = store.ParseTime(groupsChecked.String)
+		}
+	}
 	return &u, nil
 }
 
-// Count returns the number of accounts.
+// Count returns the number of local accounts. Domain accounts that signed in
+// don't count: setup is about the first local administrator.
 func (s *Users) Count(ctx context.Context) (int, error) {
 	var n int
-	err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&n)
+	err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE source = 'local'`).Scan(&n)
 	return n, err
 }
 
@@ -166,14 +202,16 @@ func (s *Users) Get(ctx context.Context, id int64) (*User, error) {
 	return scanUser(s.DB.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE id = ?`, id))
 }
 
-// GetByName returns the account with the given username.
+// GetByName returns the account with the given username (for a domain
+// account, its principal).
 func (s *Users) GetByName(ctx context.Context, name string) (*User, error) {
 	return scanUser(s.DB.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE username = ?`, strings.ToLower(strings.TrimSpace(name))))
 }
 
-// List returns all accounts ordered by username.
+// List returns all accounts ordered by username: local ones, then domain
+// accounts that have signed in.
 func (s *Users) List(ctx context.Context) ([]*User, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT `+userCols+` FROM users ORDER BY username`)
+	rows, err := s.DB.QueryContext(ctx, `SELECT `+userCols+` FROM users ORDER BY source = 'domain', username`)
 	if err != nil {
 		return nil, err
 	}
@@ -197,7 +235,9 @@ type UserUpdate struct {
 	Disabled    *bool
 }
 
-// Update applies changes, refusing any that would leave no active admin.
+// Update applies changes, refusing any that would leave no active admin. Of
+// a domain account only Disabled (a HardyOS-side switch) can change; the
+// rest comes from the domain and ErrDomainManaged is returned.
 func (s *Users) Update(ctx context.Context, id int64, up UserUpdate) (*User, error) {
 	u, err := s.Get(ctx, id)
 	if err != nil {
@@ -206,7 +246,15 @@ func (s *Users) Update(ctx context.Context, id int64, up UserUpdate) (*User, err
 	if up.Role != nil && !up.Role.Valid() {
 		return nil, ErrInvalidRole
 	}
-	losesAdmin := u.IsAdmin() && ((up.Role != nil && *up.Role != RoleAdmin) || (up.Disabled != nil && *up.Disabled))
+	if u.Source == SourceDomain {
+		changed := func(p *string, cur string) bool { return p != nil && strings.TrimSpace(*p) != cur }
+		if changed(up.DisplayName, u.DisplayName) || changed(up.Email, u.Email) || (up.Role != nil && *up.Role != u.Role) {
+			return nil, ErrDomainManaged
+		}
+		up.DisplayName, up.Email, up.Role = nil, nil, nil
+	}
+	losesAdmin := u.Source == SourceLocal && u.IsAdmin() &&
+		((up.Role != nil && *up.Role != RoleAdmin) || (up.Disabled != nil && *up.Disabled))
 	if losesAdmin {
 		if err := s.ensureOtherAdmin(ctx, id); err != nil {
 			return nil, err
@@ -232,8 +280,16 @@ func (s *Users) Update(ctx context.Context, id int64, up UserUpdate) (*User, err
 	return s.Get(ctx, id)
 }
 
-// SetPassword replaces an account's password.
+// SetPassword replaces a local account's password. A domain account's
+// password lives in the domain: ErrDomainManaged.
 func (s *Users) SetPassword(ctx context.Context, id int64, pw string) error {
+	u, err := s.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if u.Source != SourceLocal {
+		return ErrDomainManaged
+	}
 	if err := ValidatePassword(pw); err != nil {
 		return err
 	}
@@ -241,7 +297,7 @@ func (s *Users) SetPassword(ctx context.Context, id int64, pw string) error {
 	if err != nil {
 		return err
 	}
-	res, err := s.DB.ExecContext(ctx, `UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`, hash, store.Now(), id)
+	res, err := s.DB.ExecContext(ctx, `UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ? AND source = 'local'`, hash, store.Now(), id)
 	if err != nil {
 		return err
 	}
@@ -251,13 +307,15 @@ func (s *Users) SetPassword(ctx context.Context, id int64, pw string) error {
 	return nil
 }
 
-// Delete removes an account, refusing to remove the last active admin.
+// Delete removes an account, refusing to remove the last active admin. For
+// a domain account this only forgets it here (and signs it out); it can
+// sign in again while the domain allows it.
 func (s *Users) Delete(ctx context.Context, id int64) error {
 	u, err := s.Get(ctx, id)
 	if err != nil {
 		return err
 	}
-	if u.IsAdmin() {
+	if u.Source == SourceLocal && u.IsAdmin() {
 		if err := s.ensureOtherAdmin(ctx, id); err != nil {
 			return err
 		}
@@ -266,10 +324,13 @@ func (s *Users) Delete(ctx context.Context, id int64) error {
 	return err
 }
 
+// ensureOtherAdmin checks that a local administrator remains. Domain
+// administrators don't count: the domain can take their role away, and the
+// local break-glass account must always be there.
 func (s *Users) ensureOtherAdmin(ctx context.Context, exceptID int64) error {
 	var n int
 	if err := s.DB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0 AND id != ?`, exceptID).Scan(&n); err != nil {
+		`SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0 AND source = 'local' AND id != ?`, exceptID).Scan(&n); err != nil {
 		return err
 	}
 	if n == 0 {
@@ -278,10 +339,14 @@ func (s *Users) ensureOtherAdmin(ctx context.Context, exceptID int64) error {
 	return nil
 }
 
-// Authenticate checks a username and password. It takes the same time for
-// unknown users and wrong passwords, and returns ErrBadCredentials for both.
+// Authenticate checks a local username and password. It takes the same time
+// for unknown users and wrong passwords, and returns ErrBadCredentials for
+// both. Domain accounts never match here; SignIn handles them.
 func (s *Users) Authenticate(ctx context.Context, name, pw string) (*User, error) {
 	u, err := s.GetByName(ctx, name)
+	if err == nil && u.Source != SourceLocal {
+		err = store.ErrNotFound
+	}
 	if errors.Is(err, store.ErrNotFound) {
 		VerifyPassword(pw, dummyHash)
 		return nil, ErrBadCredentials
@@ -292,8 +357,66 @@ func (s *Users) Authenticate(ctx context.Context, name, pw string) (*User, error
 	if !VerifyPassword(pw, u.passwordHash) || u.Disabled {
 		return nil, ErrBadCredentials
 	}
-	_, _ = s.DB.ExecContext(ctx, `UPDATE users SET last_login_at = ? WHERE id = ?`, store.Now(), u.ID)
+	s.touchLogin(ctx, u.ID)
 	return u, nil
+}
+
+func (s *Users) touchLogin(ctx context.Context, id int64) {
+	_, _ = s.DB.ExecContext(ctx, `UPDATE users SET last_login_at = ? WHERE id = ?`, store.Now(), id)
+}
+
+// DomainUpdate is what the domain says about an account at sign-in or at a
+// group refresh.
+type DomainUpdate struct {
+	Principal   string // NETBIOS\name
+	DisplayName string
+	Email       string
+	Role        Role
+	Groups      []string // NETBIOS\group
+}
+
+// UpsertDomain records a domain account (creating its row the first time it
+// signs in) with its current name, role and groups. It never touches a
+// local account (their names can't contain a backslash anyway).
+func (s *Users) UpsertDomain(ctx context.Context, d DomainUpdate) (*User, error) {
+	if !strings.Contains(d.Principal, `\`) || !d.Role.Valid() {
+		return nil, errors.New("not a domain principal")
+	}
+	groups := d.Groups
+	if groups == nil {
+		groups = []string{}
+	}
+	g, err := json.Marshal(groups)
+	if err != nil {
+		return nil, err
+	}
+	now := store.Now()
+	_, err = s.DB.ExecContext(ctx, `INSERT INTO users
+		(username, display_name, email, role, password_hash, source, groups, groups_checked_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, '', 'domain', ?, ?, ?, ?)
+		ON CONFLICT(username) DO UPDATE SET
+			display_name = excluded.display_name, email = excluded.email, role = excluded.role,
+			groups = excluded.groups, groups_checked_at = excluded.groups_checked_at, updated_at = excluded.updated_at
+		WHERE users.source = 'domain'`,
+		d.Principal, strings.TrimSpace(d.DisplayName), strings.TrimSpace(d.Email), d.Role, string(g), now, now, now)
+	if err != nil {
+		return nil, err
+	}
+	u, err := s.GetByName(ctx, d.Principal)
+	if err != nil {
+		return nil, err
+	}
+	if u.Source != SourceDomain {
+		return nil, ErrUserExists
+	}
+	return u, nil
+}
+
+// holdBackRole makes a domain account a user until its groups can be looked
+// up again (UpsertDomain then sets the role from them).
+func (s *Users) holdBackRole(ctx context.Context, id int64) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE users SET role = 'user', updated_at = ? WHERE id = ? AND source = 'domain' AND role = 'admin'`, store.Now(), id)
+	return err
 }
 
 func boolInt(b bool) int {

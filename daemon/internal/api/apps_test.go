@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http/httptest"
 	"os"
@@ -29,6 +30,13 @@ type stubApps struct {
 	apps     map[string]apps.App
 	prepared []apps.PrepareArgs
 	calls    []string
+	// failUp makes apps.up fail (an update that doesn't start).
+	failUp      bool
+	reconfigs   []apps.ReconfigureArgs
+	snapshots   map[string][]apps.Snapshot
+	rolledBack  []apps.RollbackArgs
+	manifests   map[string]apps.Manifest
+	webPortFrom int // web port to report for installed apps (0: none)
 }
 
 func (d *stubApps) register(ps *priv.Server) {
@@ -72,8 +80,20 @@ func (d *stubApps) register(ps *priv.Server) {
 			d.pool = a.Pool
 		}
 		_, upgrade := d.apps[pkg.Manifest.ID]
-		d.apps[pkg.Manifest.ID] = apps.App{ID: pkg.Manifest.ID, Name: pkg.Manifest.Name, Version: pkg.Manifest.Version,
-			State: "stopped", Dataset: d.pool + "/apps/" + pkg.Manifest.ID, Containers: []apps.Container{{Service: "app", State: "exited"}}}
+		app := apps.App{ID: pkg.Manifest.ID, Name: pkg.Manifest.Name, Version: pkg.Manifest.Version,
+			State: "stopped", Dataset: d.pool + "/apps/" + pkg.Manifest.ID, Containers: []apps.Container{{Service: "app", State: "exited"}},
+			Source: a.Source, SourceName: a.SourceName, Grants: a.Grants}
+		if old, ok := d.apps[pkg.Manifest.ID]; ok && a.Source == "" {
+			app.Source, app.SourceName, app.Grants = old.Source, old.SourceName, old.Grants
+		}
+		if d.webPortFrom != 0 {
+			app.Web = &apps.AppWeb{Port: d.webPortFrom, Path: "/", Scheme: "http"}
+		}
+		d.apps[pkg.Manifest.ID] = app
+		if d.manifests == nil {
+			d.manifests = map[string]apps.Manifest{}
+		}
+		d.manifests[pkg.Manifest.ID] = pkg.Manifest
 		return apps.PrepareResult{ID: pkg.Manifest.ID, Name: pkg.Manifest.Name, Upgrade: upgrade, Warnings: []string{},
 			Services: []apps.ServiceImage{{Service: "db", Image: "postgres:16-alpine"}, {Service: "app", Image: "ghcr.io/x/app:latest"}}}, nil
 	})
@@ -99,7 +119,65 @@ func (d *stubApps) register(ps *priv.Server) {
 			return map[string]bool{"ok": true}, nil
 		}
 	}
-	ps.Handle(priv.OpAppsUp, setState("running"))
+	ps.Handle(priv.OpAppsUp, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		d.mu.Lock()
+		fail := d.failUp
+		d.mu.Unlock()
+		if fail {
+			return nil, priv.Errorf(priv.CodeFailed, "the app didn't start")
+		}
+		return setState("running")(ctx, raw)
+	})
+	ps.Handle(priv.OpAppsSnapshot, func(_ context.Context, raw json.RawMessage) (any, error) {
+		rec("snapshot", raw)
+		var a apps.SnapshotArgs
+		_ = json.Unmarshal(raw, &a)
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		if d.snapshots == nil {
+			d.snapshots = map[string][]apps.Snapshot{}
+		}
+		name := fmt.Sprintf("hardyos-%s-20261026-12000%d", a.Reason, len(d.snapshots[a.ID]))
+		d.snapshots[a.ID] = append([]apps.Snapshot{{Name: name, Version: d.apps[a.ID].Version}}, d.snapshots[a.ID]...)
+		return priv.AppSnapshotResult{Snapshot: name}, nil
+	})
+	ps.Handle(priv.OpAppsSnapshots, func(_ context.Context, raw json.RawMessage) (any, error) {
+		var a priv.AppRef
+		_ = json.Unmarshal(raw, &a)
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return priv.AppSnapshotsResult{Snapshots: d.snapshots[a.ID]}, nil
+	})
+	ps.Handle(priv.OpAppsRollback, func(_ context.Context, raw json.RawMessage) (any, error) {
+		var a apps.RollbackArgs
+		_ = json.Unmarshal(raw, &a)
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		d.rolledBack = append(d.rolledBack, a)
+		return map[string]bool{"ok": true}, nil
+	})
+	ps.Handle(priv.OpAppsReconfigure, func(_ context.Context, raw json.RawMessage) (any, error) {
+		var a apps.ReconfigureArgs
+		_ = json.Unmarshal(raw, &a)
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		d.reconfigs = append(d.reconfigs, a)
+		return apps.PrepareResult{ID: a.ID, Warnings: []string{}}, nil
+	})
+	ps.Handle(priv.OpAppsConfig, func(_ context.Context, raw json.RawMessage) (any, error) {
+		var a priv.AppRef
+		_ = json.Unmarshal(raw, &a)
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		app, ok := d.apps[a.ID]
+		if !ok {
+			return nil, priv.Errorf(priv.CodeBadArgs, "%s isn't installed", a.ID)
+		}
+		return apps.AppConfig{ID: a.ID, Source: app.Source, SourceName: app.SourceName, UID: 30000,
+			Manifest: d.manifests[a.ID], Ports: map[string]int{"WEB": 8101},
+			Settings: []apps.SettingValue{{Env: "ADMIN_PASSWORD", Set: true}, {Env: "TITLE", Value: "Notes"}},
+			Grants:   app.Grants}, nil
+	})
 	ps.Handle(priv.OpAppsStart, setState("running"))
 	ps.Handle(priv.OpAppsStop, setState("stopped"))
 	ps.Handle(priv.OpAppsLogs, func(_ context.Context, raw json.RawMessage) (any, error) {
@@ -180,7 +258,7 @@ func TestAppsAPI(t *testing.T) {
 	RegisterJobKinds(m, pc)
 	catalog := t.TempDir()
 	writeTestApp(t, catalog, "1.0.0")
-	appStore := &appstore.Store{CatalogDir: catalog, UploadDir: filepath.Join(t.TempDir(), "uploads")}
+	appStore := &appstore.Store{CatalogDir: catalog, UploadDir: filepath.Join(t.TempDir(), "uploads"), DB: db}
 	RegisterAppJobs(m, pc, appStore)
 	if err := m.Start(ctx); err != nil {
 		t.Fatal(err)

@@ -44,12 +44,22 @@ type Config struct {
 	Updates *updates.Service
 	// Backups enables settings backups (nil disables them).
 	Backups *backups.Service
-	// Apps finds Docker app packages; nil uses the default folders.
-	Apps     *appstore.Store
-	Root     fs.FS // filesystem rooted at "/" for system info; nil uses the real one
-	Logger   *slog.Logger
-	WebRoot  string // directory with the built web desktop; empty disables static serving
-	Insecure bool   // allow session cookies over plain HTTP (true until TLS lands)
+	// Apps finds Docker app packages and keeps app access, imported
+	// catalogs and window proxy ports; nil uses the default folders and DB.
+	Apps *appstore.Store
+	// AppPrincipals says who a signed-in person is for app access (domain
+	// sign-in plugs in here); nil treats every account as a HardyOS user.
+	AppPrincipals AppPrincipals
+	Root          fs.FS // filesystem rooted at "/" for system info; nil uses the real one
+	Logger        *slog.Logger
+	WebRoot       string // directory with the built web desktop; empty disables static serving
+	Insecure      bool   // allow session cookies over plain HTTP (true until TLS lands)
+	// Kerberos checks domain passwords; nil uses the real Kerberos client
+	// (tests pass a fake).
+	Kerberos auth.PasswordChecker
+	// DomainInfoTTL is how long the domain's realm and DCs are cached for
+	// sign-in (default 30 s; tests use less).
+	DomainInfoTTL time.Duration
 }
 
 // Server is hardyd's HTTP handler.
@@ -57,9 +67,11 @@ type Server struct {
 	cfg      Config
 	users    *auth.Users
 	sessions *auth.Sessions
+	signin   *auth.SignIn
 	audit    *audit.Log
 	mux      *http.ServeMux
 	tickets  terminalTickets
+	proxy    *appProxy
 	started  time.Time
 	log      *slog.Logger
 }
@@ -79,10 +91,15 @@ func New(cfg Config) *Server {
 		cfg.Root = os.DirFS("/")
 	}
 	s := &Server{cfg: cfg, mux: http.NewServeMux(), started: time.Now(), log: cfg.Logger}
+	s.proxy = &appProxy{s: s}
 	if cfg.DB != nil {
 		s.users = &auth.Users{DB: cfg.DB}
 		s.sessions = &auth.Sessions{DB: cfg.DB}
 		s.audit = &audit.Log{DB: cfg.DB, Events: cfg.Events}
+		s.signin = &auth.SignIn{Users: s.users, Kerberos: cfg.Kerberos, Log: cfg.Logger}
+		if cfg.Priv != nil && cfg.Installer == nil {
+			s.signin.Domain = &privDirectory{pc: cfg.Priv, ttl: cfg.DomainInfoTTL}
+		}
 	}
 	s.routes()
 	return s
@@ -132,6 +149,7 @@ func (s *Server) routes() {
 			s.terminalRoutes()
 			s.domainRoutes()
 			s.appRoutes()
+			s.shareRoutes()
 		}
 		if s.cfg.Backups != nil {
 			s.backupRoutes()
@@ -154,7 +172,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Frame-Options", "SAMEORIGIN")
 	h.Set("Referrer-Policy", "same-origin")
-	h.Set("Content-Security-Policy", "default-src 'self'; font-src 'self' data:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; frame-ancestors 'self'")
+	h.Set("Content-Security-Policy", "default-src 'self'; font-src 'self' data:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; frame-src "+frameSrc(r)+"; frame-ancestors 'self'")
 
 	rw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 	if strings.HasPrefix(r.URL.Path, "/api/") && !csrfSafe(r) {

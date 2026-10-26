@@ -1,0 +1,52 @@
+{
+  "format": 1,
+  "id": "adguard-home",
+  "name": "AdGuard Home",
+  "version": "0.107.79",
+  "summary": "Block ads and trackers on every device at home, and keep kids away from sites they shouldn't see.",
+  "description": "AdGuard Home answers your network's DNS lookups (how devices turn names like example.com into addresses) and refuses the ones that lead to ads, trackers and malware. It works for every device, including smart TVs and game consoles, without installing anything on them. It can also turn on safe search and block adult sites per device.\n\nAdGuard Home uses this server's own network connection and answers DNS on the standard port 53 of this server's address, so nothing else on the server may use port 53. If this server is also your home's domain controller, that's fine: the domain controller has its own network address for its DNS, so they don't clash. Keep the domain controller as the DNS server for domain computers and set AdGuard Home's upstream for the domain's name to the domain controller if you want both.\n\nAfter installing, open AdGuard Home and follow the setup wizard. Keep the admin web interface on the port shown here (HardyOS opens it there), keep DNS on port 53, and create the admin login. Then set your router's DHCP \"DNS server\" to this server's address so every device uses it.",
+  "publisher": "AdGuard (packaged by HardyOS)",
+  "website": "https://adguard.com/adguard-home/overview.html",
+  "icon": "icon.svg",
+  "arch": [
+    "amd64",
+    "arm64"
+  ],
+  "minMemoryMB": 256,
+  "web": {
+    "port": "WEB",
+    "path": "/"
+  },
+  "ports": [
+    {
+      "name": "WEB",
+      "label": "Admin website (fixed: uses the server's network)",
+      "default": 3000
+    },
+    {
+      "name": "DNS",
+      "label": "DNS for your network",
+      "default": 53,
+      "protocol": "tcp"
+    },
+    {
+      "name": "DNS_UDP",
+      "label": "DNS for your network",
+      "default": 53,
+      "protocol": "udp"
+    }
+  ],
+  "folders": [
+    {
+      "path": "conf",
+      "mode": "0750"
+    },
+    {
+      "path": "work",
+      "mode": "0750"
+    }
+  ],
+  "permissions": {
+    "hostNetwork": true
+  }
+}

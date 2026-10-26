@@ -1,0 +1,65 @@
+{
+  "format": 1,
+  "id": "paperless-ngx",
+  "name": "Paperless-ngx",
+  "version": "3.3.4",
+  "summary": "Scan your paper documents and find any letter, bill or receipt in seconds.",
+  "description": "Paperless-ngx turns paper into a searchable archive. Scan letters, bills, receipts and manuals (or drop PDFs and photos in), and it reads the text, files each document, and learns to tag them by sender and type. Search by any word on the page.\n\nGive it two folders when installing. Documents is where Paperless keeps its archive: let Paperless manage it and don't edit files there by hand. Inbox is a folder you or your scanner can drop files into; Paperless picks them up, files them, and removes them from the inbox.\n\nAfter installing, open Paperless-ngx and sign in with the administrator name and password you set here. Changing them here later doesn't change an existing account; do that inside Paperless.",
+  "publisher": "Paperless-ngx project (packaged by HardyOS)",
+  "website": "https://docs.paperless-ngx.com",
+  "icon": "icon.svg",
+  "arch": ["amd64", "arm64"],
+  "minMemoryMB": 2048,
+  "web": { "port": "WEB", "path": "/" },
+  "ports": [
+    { "name": "WEB", "label": "Website", "default": 8000 }
+  ],
+  "settings": [
+    { "env": "POSTGRES_PASSWORD", "generate": "secret" },
+    { "env": "PAPERLESS_SECRET_KEY", "generate": "secret" },
+    {
+      "env": "PAPERLESS_ADMIN_USER",
+      "label": "Administrator name",
+      "type": "text",
+      "default": "admin",
+      "required": true
+    },
+    {
+      "env": "PAPERLESS_ADMIN_PASSWORD",
+      "label": "Administrator password",
+      "help": "Used to create the administrator account the first time Paperless starts.",
+      "type": "password",
+      "required": true
+    },
+    {
+      "env": "PAPERLESS_OCR_LANGUAGE",
+      "label": "Main language of your documents",
+      "help": "For reading the text. Combine with +, e.g. eng+spa. Included: eng, deu, fra, ita, spa.",
+      "type": "text",
+      "default": "eng",
+      "required": true
+    }
+  ],
+  "folders": [
+    { "path": "data", "mode": "0750" },
+    { "path": "export", "mode": "0750" },
+    { "path": "postgres", "mode": "0700" },
+    { "path": "redis", "mode": "0700" }
+  ],
+  "shares": [
+    {
+      "name": "DOCUMENTS",
+      "label": "Documents",
+      "help": "Where Paperless keeps your filed documents. Pick an empty folder, for example a Documents shared folder, and let Paperless manage it.",
+      "access": "write",
+      "suggest": "documents"
+    },
+    {
+      "name": "CONSUME",
+      "label": "Inbox (scanner folder)",
+      "help": "Drop files or point your scanner here; Paperless files them and empties the folder. For example Documents > Inbox.",
+      "access": "write",
+      "suggest": "documents"
+    }
+  ]
+}

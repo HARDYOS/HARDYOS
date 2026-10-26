@@ -104,6 +104,12 @@ func loadMigrations() ([]migration, error) {
 		out = append(out, migration{version: v, name: name, sql: string(body)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].version < out[j].version })
+	// Two branches picking the same number would otherwise skip one silently.
+	for i := 1; i < len(out); i++ {
+		if out[i].version == out[i-1].version {
+			return nil, fmt.Errorf("migrations %s and %s share version %d", out[i-1].name, out[i].name, out[i].version)
+		}
+	}
 	return out, nil
 }
 

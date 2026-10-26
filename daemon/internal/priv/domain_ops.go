@@ -26,11 +26,19 @@ const (
 	OpDomainUserPassword = "domain.user.password"
 	OpDomainUserEnable   = "domain.user.enable"
 	OpDomainUserDelete   = "domain.user.delete"
+	// OpDomainUserGroups looks up one account's state and groups for
+	// desktop sign-in (DomainUserRef -> domain.UserGroups).
+	OpDomainUserGroups = "domain.user_groups"
 
 	OpDomainGroups      = "domain.groups"
 	OpDomainGroupCreate = "domain.group.create"
 	OpDomainGroupUpdate = "domain.group.update"
 	OpDomainGroupDelete = "domain.group.delete"
+	// OpDomainAdminsGroupCreate creates the HardyOS Admins group (or adopts
+	// an existing one, if an administrator confirmed it) and records its
+	// SID in the domain's settings (domain.AdminsGroupArgs ->
+	// domain.AdminsGroup).
+	OpDomainAdminsGroupCreate = "domain.admins_group.create"
 )
 
 // DomainDestroyArgs confirms deleting the domain by naming it.
@@ -153,6 +161,11 @@ func RegisterDomain(s *Server, m *domain.Manager) {
 		return map[string]bool{"deleted": err == nil}, domainErr(err)
 	}))
 
+	s.Handle(OpDomainUserGroups, typed(func(ctx context.Context, a DomainUserRef) (any, error) {
+		g, err := m.UserGroups(ctx, a.Username)
+		return g, domainErr(err)
+	}))
+
 	s.Handle(OpDomainGroups, func(ctx context.Context, _ json.RawMessage) (any, error) {
 		g, err := m.Groups(ctx)
 		return DomainGroupsResult{Groups: g}, domainErr(err)
@@ -169,6 +182,10 @@ func RegisterDomain(s *Server, m *domain.Manager) {
 		err := m.DeleteGroup(ctx, a.Name)
 		return map[string]bool{"deleted": err == nil}, domainErr(err)
 	}))
+	s.Handle(OpDomainAdminsGroupCreate, typed(func(ctx context.Context, a domain.AdminsGroupArgs) (any, error) {
+		g, err := m.SetUpAdminsGroup(ctx, a)
+		return g, domainErr(err)
+	}))
 }
 
 // domainErr maps domain errors: the caller's mistakes are bad_args,
@@ -178,7 +195,8 @@ func domainErr(err error) error {
 		return nil
 	}
 	var ve *domain.ValidationError
-	if errors.As(err, &ve) || errors.Is(err, domain.ErrNotProvisioned) {
+	var exists *domain.AdminsGroupExistsError
+	if errors.As(err, &ve) || errors.As(err, &exists) || errors.Is(err, domain.ErrNotProvisioned) {
 		return Errorf(CodeBadArgs, "%v", err)
 	}
 	return Errorf(CodeFailed, "%v", err)

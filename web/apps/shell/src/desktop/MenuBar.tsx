@@ -7,7 +7,7 @@ import { useNotifications } from "../hooks/queries";
 import { useLogout } from "../hooks/session";
 import { BrandMark } from "../brand";
 import { BellIcon, KeyIcon, LogoutIcon } from "../icons";
-import { appById } from "../shell";
+import { APP_WINDOW, appById } from "../shell";
 import { Alert, Button, Field, TextInput } from "../ui";
 import { Dialog } from "../ui/Dialog";
 import { toast } from "../ui/toasts";
@@ -156,12 +156,21 @@ function UserMenu({ user }: { user: User }) {
             <span className="avatar">{initials(name)}</span>
             <div>
               <strong>{name}</strong>
-              <span>{user.role === "admin" ? "Administrator" : "User"} · {user.username}</span>
+              <span>
+                {user.role === "admin" ? "Administrator" : "User"} · {user.username}
+                {user.source === "domain" ? " · domain account" : ""}
+              </span>
             </div>
           </div>
-          <button type="button" role="menuitem" className="menu-item" onClick={() => { setOpen(false); setChanging(true); }}>
-            <KeyIcon size={16} /> Change password
-          </button>
+          {user.source === "domain" ? (
+            <p className="menu-note small muted" style={{ margin: "4px 10px 6px", maxWidth: 240 }}>
+              Your password belongs to the domain. Change it on a computer in the domain, or ask an administrator.
+            </p>
+          ) : (
+            <button type="button" role="menuitem" className="menu-item" onClick={() => { setOpen(false); setChanging(true); }}>
+              <KeyIcon size={16} /> Change password
+            </button>
+          )}
           <button type="button" role="menuitem" className="menu-item" onClick={() => logout.mutate()}>
             <LogoutIcon size={16} /> Sign out
           </button>
@@ -175,7 +184,9 @@ function UserMenu({ user }: { user: User }) {
 export function MenuBar({ user, connection }: { user: User; connection: string }) {
   const focusedApp = useWM((s) => {
     const w = s.windows.find((x) => x.id === s.focusedId);
-    return w ? appById(w.appId)?.name : undefined;
+    if (!w) return undefined;
+    // An installed app's window is named after the app, not the window kind.
+    return w.appId.startsWith(`${APP_WINDOW}:`) ? w.title : appById(w.appId)?.name;
   });
   return (
     <header className="menubar glass">

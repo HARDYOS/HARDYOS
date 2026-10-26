@@ -76,6 +76,9 @@ type Manifest struct {
 	// Folders are created under ${HARDY_APP_DATA} before the app first starts,
 	// with the owner the containers run as.
 	Folders []Folder `json:"folders,omitempty"`
+	// Shares are shared folders the app can be given (chosen at install).
+	// The compose file binds ${HARDY_SHARE_<NAME>}.
+	Shares []ShareMount `json:"shares,omitempty"`
 	// Permissions beyond a plain container. Anything not declared here is refused.
 	Permissions Permissions `json:"permissions,omitempty"`
 }
@@ -118,7 +121,7 @@ func (s Setting) Secret() bool { return s.Generate != "" || s.Type == "password"
 // Folder is created inside the app's data folder before it first starts.
 type Folder struct {
 	Path  string `json:"path"`            // relative to ${HARDY_APP_DATA}
-	Owner string `json:"owner,omitempty"` // "uid:gid", default 0:0
+	Owner string `json:"owner,omitempty"` // "uid:gid", default the app's own user (HARDY_UID)
 	Mode  string `json:"mode,omitempty"`  // octal, default "0755"
 }
 
@@ -126,6 +129,10 @@ type Folder struct {
 type Permissions struct {
 	Capabilities []string `json:"capabilities,omitempty"`
 	Devices      []string `json:"devices,omitempty"`
+	// HostNetwork lets services use network_mode: host.
+	HostNetwork bool `json:"hostNetwork,omitempty"`
+	// GPU lets the app use /dev/dri render nodes and NVIDIA GPUs if present.
+	GPU bool `json:"gpu,omitempty"`
 }
 
 // Package is a read and checked .hardyapp file.
@@ -166,6 +173,13 @@ var (
 	ownerRE     = regexp.MustCompile(`^[0-9]{1,10}:[0-9]{1,10}$`)
 	modeRE      = regexp.MustCompile(`^0?[0-7]{3}$`)
 	folderSegRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	shareIDRE   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
+)
+
+// Share access levels (manifest shares and admin choices).
+const (
+	AccessRead  = "read"
+	AccessWrite = "write"
 )
 
 // reservedIDs would clash with HardyOS's own datasets and names.
@@ -236,8 +250,10 @@ func (m *Manifest) Validate() error {
 			p.addf("port %s is declared twice", pt.Name)
 		}
 		ports[pt.Name] = true
-		if pt.Default < 1024 || pt.Default > 65535 {
-			p.addf("port %s: default %d must be 1024-65535", pt.Name, pt.Default)
+		// An app on the host network listens where it listens (DNS on 53);
+		// every other app is published on 1024-65535.
+		if lo := minPort(m.Permissions.HostNetwork); pt.Default < lo || pt.Default > 65535 {
+			p.addf("port %s: default %d must be %d-65535", pt.Name, pt.Default, lo)
 		}
 		if pt.Protocol != "" && pt.Protocol != "tcp" && pt.Protocol != "udp" {
 			p.addf("port %s: protocol must be tcp or udp", pt.Name)
@@ -313,6 +329,31 @@ func (m *Manifest) Validate() error {
 			p.addf("folder %s: mode must be octal like 0755", f.Path)
 		}
 	}
+	shareNames := map[string]bool{}
+	for _, s := range m.Shares {
+		if !portNameRE.MatchString(s.Name) {
+			p.addf("share name %q: use capital letters, digits and _ (e.g. MEDIA)", s.Name)
+		}
+		if shareNames[s.Name] {
+			p.addf("share %s is declared twice", s.Name)
+		}
+		shareNames[s.Name] = true
+		if strings.TrimSpace(s.Label) == "" || len(s.Label) > 60 {
+			p.addf("share %s: label 1-60 characters", s.Name)
+		}
+		if len(s.Help) > 200 {
+			p.addf("share %s: help at most 200 characters", s.Name)
+		}
+		if s.Access != AccessRead && s.Access != AccessWrite {
+			p.addf("share %s: access must be read or write", s.Name)
+		}
+		if s.Suggest != "" && !shareIDRE.MatchString(s.Suggest) {
+			p.addf("share %s: suggest %q isn't a shared folder id", s.Name, s.Suggest)
+		}
+	}
+	if len(m.Shares) > 8 {
+		p.addf("at most 8 shares")
+	}
 	for _, c := range m.Permissions.Capabilities {
 		if _, ok := AllowedCapabilities[c]; !ok {
 			p.addf("capability %s isn't available to apps", c)
@@ -324,6 +365,13 @@ func (m *Manifest) Validate() error {
 		}
 	}
 	return p.err()
+}
+
+func minPort(hostNetwork bool) int {
+	if hostNetwork {
+		return 1
+	}
+	return 1024
 }
 
 func checkFolderPath(rel string) error {

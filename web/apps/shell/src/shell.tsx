@@ -15,7 +15,12 @@ export interface AppDef extends AppManifest {
   component: LazyExoticComponent<ComponentType<AppProps>>;
   /** Shown in the dock but opens a "coming soon" window. */
   comingIn?: string;
+  /** Not in the dock or on the desktop (opened by other apps). */
+  hidden?: boolean;
 }
+
+/** Installed Docker apps open in windows with this id prefix plus ":" and the app's id. */
+export const APP_WINDOW = "os.hardy.appwindow";
 
 const ComingSoon = lazy(() => import("./apps/ComingSoon"));
 
@@ -91,13 +96,25 @@ export const APPS: AppDef[] = [
   },
 ];
 
+const appWindow: AppDef = {
+  id: APP_WINDOW,
+  name: "App",
+  icon: "bag",
+  color: "#7C5CF5",
+  glyph: (s) => <BagIcon size={s} />,
+  component: lazy(() => import("./apps/store/AppFrame")),
+  defaultSize: { width: 1180, height: 760 },
+  hidden: true,
+};
+
 export function appById(id: string): AppDef | undefined {
+  if (id === APP_WINDOW || id.startsWith(`${APP_WINDOW}:`)) return appWindow;
   return APPS.find((a) => a.id === id);
 }
 
-/** Apps the user may open. */
+/** Apps the user may open from the dock and desktop. */
 export function visibleApps(user: User | null | undefined): AppDef[] {
-  return APPS.filter((a) => !a.adminOnly || user?.role === "admin");
+  return APPS.filter((a) => !a.hidden && (!a.adminOnly || user?.role === "admin"));
 }
 
 export interface ShellContextValue extends ShellBridge {

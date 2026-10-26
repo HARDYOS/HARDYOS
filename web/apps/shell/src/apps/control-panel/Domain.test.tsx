@@ -22,7 +22,17 @@ const config = {
   others: [{ name: "dc2.home.hardynetworks.net", address: "192.168.1.21" }],
 };
 
-function serve(state: { provisioned: boolean }, calls: Call[]) {
+const SID = "S-1-5-21-1-2-3";
+
+type State = {
+  provisioned: boolean;
+  /** The recorded HardyOS Admins SID. */
+  adminsSid?: string;
+  /** Extra groups (beyond Domain Admins). */
+  groups?: { name: string; sid: string; members: string[] }[];
+};
+
+function serve(state: State, calls: Call[]) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: Request | string, init?: RequestInit) => {
@@ -32,7 +42,14 @@ function serve(state: { provisioned: boolean }, calls: Call[]) {
       calls.push({ method: req.method, path, body });
       const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: { "Content-Type": "application/json" } });
       if (path === "/domain" && req.method === "GET")
-        return json({ available: true, provisioned: state.provisioned, config: state.provisioned ? config : null, running: state.provisioned, responding: state.provisioned, problem: "" });
+        return json({
+          available: true,
+          provisioned: state.provisioned,
+          config: state.provisioned ? { ...config, ...(state.adminsSid ? { adminsGroupSid: state.adminsSid } : {}) } : null,
+          running: state.provisioned,
+          responding: state.provisioned,
+          problem: "",
+        });
       if (path === "/domain/suggest") return json({ parent: "enp1s0", hostAddress: "192.168.1.105/24", gateway: "192.168.1.1", dns: ["192.168.1.1"], address: "192.168.1.20/24" });
       if (path === "/domain/join" && req.method === "POST")
         return json({ job: { id: "job-2", kind: "domain.join", title: "Join the domain", state: "queued", progress: 0, message: "" }, warnings: [] }, 202);
@@ -40,6 +57,26 @@ function serve(state: { provisioned: boolean }, calls: Call[]) {
       if (path === "/domain" && req.method === "POST")
         return json({ job: { id: "job-1", kind: "domain.provision", title: "Create the domain", state: "queued", progress: 0, message: "" }, warnings: [] }, 202);
       if (path === "/jobs/job-1") return json({ id: "job-1", kind: "domain.provision", title: "Create the domain", state: "running", progress: 10, message: "Creating the domain database" });
+      if (path === "/domain/groups" && req.method === "GET")
+        return json({
+          groups: [
+            { name: "Domain Admins", sid: `${SID}-512`, description: "", members: ["Administrator"], builtin: true },
+            ...(state.groups ?? []).map((g) => ({ ...g, description: "", builtin: false })),
+          ],
+        });
+      if (path === "/domain/admins-group" && req.method === "POST") {
+        const adopt = (body as { adopt?: boolean } | null)?.adopt ?? false;
+        const named = state.groups?.find((g) => g.name === "HardyOS Admins");
+        if (named && !adopt) return json({ code: "admins_group_exists", message: "a group called HardyOS Admins already exists" }, 409);
+        if (named) state.adminsSid = named.sid;
+        else {
+          state.groups = [...(state.groups ?? []), { name: "HardyOS Admins", sid: `${SID}-1105`, members: [] }];
+          state.adminsSid = `${SID}-1105`;
+        }
+        return json({ job: { id: "job-3", kind: "domain.admins_group", title: "Create HardyOS Admins", state: "queued", progress: 0, message: "" }, warnings: [] }, 202);
+      }
+      if (path === "/jobs/job-3")
+        return json({ id: "job-3", kind: "domain.admins_group", title: "Create HardyOS Admins", state: "succeeded", progress: 100, message: "" });
       if (path === "/domain/users")
         return json({
           users: [
@@ -140,5 +177,46 @@ describe("Domain", () => {
     expect(screen.getByText("Turned off")).toBeTruthy();
     // Built-in accounts are hidden until asked for.
     expect(screen.queryByText("Administrator")).toBeNull();
+  });
+
+  it("explains desktop sign-in and creates the HardyOS Admins group", async () => {
+    const calls: Call[] = [];
+    serve({ provisioned: true }, calls);
+    renderDomain();
+    expect(await screen.findByText("Desktop sign-in")).toBeTruthy();
+    expect(screen.getByText("HOME\\name")).toBeTruthy();
+    expect(screen.getByText("name@home.hardynetworks.net")).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: "Create HardyOS Admins" }));
+    // Through the root op that records its SID, not a plain group create.
+    await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.path === "/domain/admins-group")).toBe(true));
+    expect(calls.find((c) => c.method === "POST" && c.path === "/domain/admins-group")!.body).toEqual({ adopt: false });
+    expect(calls.some((c) => c.method === "POST" && c.path === "/domain/groups")).toBe(false);
+    // Once it's recorded, the button goes and the explanation names it.
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Create HardyOS Admins" })).toBeNull());
+    expect(await screen.findByText("HardyOS Admins")).toBeTruthy();
+  });
+
+  it("doesn't trust a HardyOS Admins group it didn't create until it's adopted", async () => {
+    const calls: Call[] = [];
+    serve({ provisioned: true, groups: [{ name: "HardyOS Admins", sid: `${SID}-1300`, members: ["mallory"] }] }, calls);
+    renderDomain();
+    expect(await screen.findByText("HardyOS Admins wasn't created by HardyOS")).toBeTruthy();
+    expect(screen.getByText("mallory")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Create HardyOS Admins" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Use this group" }));
+    expect(await screen.findByText(/becomes a HardyOS administrator, with a root terminal/)).toBeTruthy();
+    const buttons = screen.getAllByRole("button", { name: "Use this group" });
+    fireEvent.click(buttons[buttons.length - 1]!);
+    await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.path === "/domain/admins-group")).toBe(true));
+    expect(calls.find((c) => c.method === "POST" && c.path === "/domain/admins-group")!.body).toEqual({ adopt: true });
+    await waitFor(() => expect(screen.queryByText("HardyOS Admins wasn't created by HardyOS")).toBeNull());
+  });
+
+  it("names the recorded group by its SID after a rename", async () => {
+    serve({ provisioned: true, adminsSid: `${SID}-1105`, groups: [{ name: "Desktop Bosses", sid: `${SID}-1105`, members: [] }] }, []);
+    renderDomain();
+    expect(await screen.findByText("Desktop Bosses")).toBeTruthy();
+    expect(screen.getByText(/the HardyOS Admins group, renamed/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Create HardyOS Admins" })).toBeNull();
   });
 });

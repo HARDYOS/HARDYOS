@@ -23,6 +23,12 @@ const (
 	OpAppsRestart  = "apps.restart"
 	OpAppsLogs     = "apps.logs"
 	OpAppsRemove   = "apps.remove"
+
+	OpAppsReconfigure = "apps.reconfigure"
+	OpAppsSnapshot    = "apps.snapshot"
+	OpAppsSnapshots   = "apps.snapshots"
+	OpAppsRollback    = "apps.rollback"
+	OpAppsConfig      = "apps.config"
 )
 
 // AppRef names an installed app.
@@ -100,6 +106,35 @@ func RegisterApps(s *Server, m *apps.Manager) {
 	s.Handle(OpAppsRemove, typed(func(ctx context.Context, a apps.RemoveArgs) (any, error) {
 		return appDone(appsErr(m.Remove(ctx, a)))
 	}))
+	s.Handle(OpAppsReconfigure, typed(func(ctx context.Context, a apps.ReconfigureArgs) (any, error) {
+		r, err := m.Reconfigure(ctx, a)
+		return r, appsErr(err)
+	}))
+	s.Handle(OpAppsSnapshot, typed(func(ctx context.Context, a apps.SnapshotArgs) (any, error) {
+		name, err := m.Snapshot(ctx, a)
+		return AppSnapshotResult{Snapshot: name}, appsErr(err)
+	}))
+	s.Handle(OpAppsSnapshots, typed(func(ctx context.Context, a AppRef) (any, error) {
+		l, err := m.Snapshots(ctx, a.ID)
+		return AppSnapshotsResult{Snapshots: l}, appsErr(err)
+	}))
+	s.Handle(OpAppsRollback, typed(func(ctx context.Context, a apps.RollbackArgs) (any, error) {
+		return appDone(appsErr(m.Rollback(ctx, a)))
+	}))
+	s.Handle(OpAppsConfig, typed(func(ctx context.Context, a AppRef) (any, error) {
+		c, err := m.Config(ctx, a.ID)
+		return c, appsErr(err)
+	}))
+}
+
+// AppSnapshotResult names the snapshot just taken.
+type AppSnapshotResult struct {
+	Snapshot string `json:"snapshot"`
+}
+
+// AppSnapshotsResult lists an app's snapshots, newest first.
+type AppSnapshotsResult struct {
+	Snapshots []apps.Snapshot `json:"snapshots"`
 }
 
 func appDone(err error) (any, error) {

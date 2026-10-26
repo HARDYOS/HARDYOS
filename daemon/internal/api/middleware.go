@@ -64,14 +64,45 @@ func (s *Server) currentUser(w http.ResponseWriter, r *http.Request) (*auth.User
 		internalError(s, w, err)
 		return nil, false
 	}
-	u, err := s.users.Get(r.Context(), info.UserID)
-	if err != nil || u.Disabled {
-		_ = s.sessions.Revoke(r.Context(), c.Value)
+	u, err := s.sessionUser(r, c.Value, info.UserID)
+	if err != nil {
 		s.clearCookie(w, r)
 		writeError(w, http.StatusUnauthorized, "unauthenticated", "account unavailable")
 		return nil, false
 	}
 	return u, true
+}
+
+// errAccountUnavailable: the account behind a session is gone or disabled.
+var errAccountUnavailable = errors.New("account unavailable")
+
+// sessionUser loads the account behind a valid session, the same way for
+// the desktop's API and the app window proxy: a missing or disabled
+// account ends the session (errAccountUnavailable); a domain account's
+// groups (and with them its role) are refreshed every 10 minutes, and one
+// deleted, turned off or expired in the domain ends all its sessions
+// (auth.ErrAccountGone). r is used for the audit entry only.
+func (s *Server) sessionUser(r *http.Request, token string, userID int64) (*auth.User, error) {
+	ctx := r.Context()
+	u, err := s.users.Get(ctx, userID)
+	if err != nil || u.Disabled {
+		_ = s.sessions.Revoke(ctx, token)
+		return nil, errAccountUnavailable
+	}
+	if u.Source == auth.SourceDomain {
+		nu, err := s.signin.Refresh(ctx, u)
+		if errors.Is(err, auth.ErrAccountGone) {
+			_ = s.sessions.RevokeUser(ctx, u.ID)
+			s.record(r, u, "auth.session.end", u.Username, audit.Success, "the domain account was deleted, turned off or expired")
+			return nil, err
+		}
+		if err != nil {
+			s.log.Warn("refresh domain groups", "user", u.Username, "err", err)
+		} else {
+			u = nu
+		}
+	}
+	return u, nil
 }
 
 func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string, expires time.Time) {

@@ -1,0 +1,31 @@
+{
+  "format": 1,
+  "id": "qbittorrent",
+  "name": "qBittorrent",
+  "version": "5.3.0",
+  "summary": "Download files with BitTorrent, from your browser or for Sonarr and Radarr.",
+  "description": "qBittorrent downloads files shared over BitTorrent into your Downloads folder. Use its website directly, or let Sonarr and Radarr send it what to fetch.\n\nAfter installing, open the app's Logs here in the App Store: qBittorrent prints a temporary password for the user admin there. Sign in, then set your own password under Tools > Options > Web UI. Downloads go to /downloads, which is the Downloads folder you choose here (Sonarr and Radarr see the same folder at the same path).\n\nOnly download what you have the right to.",
+  "publisher": "qBittorrent project, image by LinuxServer.io (packaged by HardyOS)",
+  "website": "https://www.qbittorrent.org",
+  "icon": "icon.svg",
+  "arch": ["amd64", "arm64"],
+  "minMemoryMB": 512,
+  "web": { "port": "WEB", "path": "/" },
+  "ports": [
+    { "name": "WEB", "label": "Website", "default": 8081 },
+    { "name": "TORRENT", "label": "Incoming connections (TCP)", "default": 6881 },
+    { "name": "TORRENT_UDP", "label": "Incoming connections (UDP)", "default": 6881, "protocol": "udp" }
+  ],
+  "folders": [
+    { "path": "config", "mode": "0750" }
+  ],
+  "shares": [
+    {
+      "name": "DOWNLOADS",
+      "label": "Downloads",
+      "help": "Where downloads are saved. Give Sonarr and Radarr the same folder. In qBittorrent it's /downloads.",
+      "access": "write",
+      "suggest": "downloads"
+    }
+  ]
+}

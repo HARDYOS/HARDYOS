@@ -1,0 +1,41 @@
+{
+  "format": 1,
+  "id": "vaultwarden",
+  "name": "Vaultwarden",
+  "version": "1.37.4",
+  "summary": "A family password manager that works with the Bitwarden apps and browser extensions.",
+  "description": "Vaultwarden keeps everyone's passwords, passkeys and secure notes on this server, encrypted with each person's master password. It works with the official Bitwarden apps for phones and computers and the Bitwarden browser extensions. Shared family collections let you share the Wi-Fi password or streaming logins.\n\nAfter installing, open Vaultwarden and create an account for each family member (each picks their own master password; it can't be recovered if forgotten). When everyone has an account, turn off \"Allow new accounts\" in the app's settings.\n\nThe Bitwarden apps only connect over HTTPS with a certificate your devices trust. Opening it from the HardyOS desktop works right away; for phones, give it a proper web address (with a certificate) and enter it as \"Web address\". The admin page at /admin is off unless you set an admin password.",
+  "publisher": "Vaultwarden project (packaged by HardyOS)",
+  "website": "https://github.com/dani-garcia/vaultwarden",
+  "icon": "icon.svg",
+  "arch": ["amd64", "arm64"],
+  "minMemoryMB": 256,
+  "web": { "port": "WEB", "path": "/" },
+  "ports": [
+    { "name": "WEB", "label": "Website and Bitwarden apps", "default": 8222 }
+  ],
+  "settings": [
+    {
+      "env": "SIGNUPS_ALLOWED",
+      "label": "Allow new accounts",
+      "help": "Leave on until everyone in the family has an account, then turn it off.",
+      "type": "boolean",
+      "default": "true"
+    },
+    {
+      "env": "DOMAIN",
+      "label": "Web address",
+      "help": "The https:// address family devices use, for example https://vault.example.com. Needed for passkeys and links in emails. Leave empty to use this server's address.",
+      "type": "text"
+    },
+    {
+      "env": "ADMIN_TOKEN",
+      "label": "Admin page password",
+      "help": "Turns on the admin page at /admin (server settings, inviting people). Leave empty to keep it off.",
+      "type": "password"
+    }
+  ],
+  "folders": [
+    { "path": "data", "mode": "0700" }
+  ]
+}

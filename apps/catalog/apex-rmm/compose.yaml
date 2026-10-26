@@ -1,0 +1,63 @@
+# Apex RMM for HardyOS. HardyOS fills in the HARDY_* variables and the
+# settings from hardyapp.json; data lives in the app's own ZFS dataset.
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: apex
+      POSTGRES_DB: apex
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      TZ: ${HARDY_TZ}
+    volumes:
+      - ${HARDY_APP_DATA}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U apex -d apex"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  apex:
+    image: ghcr.io/hardynetworks/apex-rmm:${APEX_TAG}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      APP_KEY: ${APP_KEY}
+      # The RustDesk server's public key, written by hbbs on its first start.
+      RUSTDESK_KEY_FILE: /rustdesk/id_ed25519.pub
+      TZ: ${HARDY_TZ}
+    ports:
+      - "${HARDY_PORT_WEB}:8080"
+    volumes:
+      - ${HARDY_APP_DATA}/rustdesk:/rustdesk:ro
+    extra_hosts:
+      # lets Apex reach services on the NAS itself
+      - "host.docker.internal:host-gateway"
+
+  # RustDesk server: remote control for the computers Apex manages.
+  hbbs:
+    image: docker.io/rustdesk/rustdesk-server:1.1.16
+    restart: unless-stopped
+    command: hbbs
+    depends_on: [hbbr]
+    volumes:
+      - ${HARDY_APP_DATA}/rustdesk:/root
+    ports:
+      - "${HARDY_PORT_RD_NAT}:21115"
+      - "${HARDY_PORT_RD_ID}:21116"
+      - "${HARDY_PORT_RD_ID_UDP}:21116/udp"
+      - "${HARDY_PORT_RD_WEB}:21118"
+
+  hbbr:
+    image: docker.io/rustdesk/rustdesk-server:1.1.16
+    restart: unless-stopped
+    command: hbbr
+    volumes:
+      - ${HARDY_APP_DATA}/rustdesk:/root
+    ports:
+      - "${HARDY_PORT_RD_RELAY}:21117"
+      - "${HARDY_PORT_RD_WEB_RELAY}:21119"

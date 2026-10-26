@@ -46,7 +46,8 @@ undo only writes the network files).
 ## Sign-in and sessions
 
 - Passwords are hashed with Argon2id. Five failed sign-ins in 15 minutes lock
-  that IP and that username for 15 minutes.
+  that IP and that username for 15 minutes. Domain accounts can sign in too
+  (see Domain controller > Desktop sign-in with domain accounts).
 - Sessions are random 256-bit tokens in an HttpOnly, Secure, SameSite=Strict
   cookie; only a SHA-256 hash is stored. They expire after 24 hours idle and
   30 days at most. Password changes and disabling an account end its sessions.
@@ -317,10 +318,116 @@ for the domain controller and sets the domain Administrator's password.
   already on the server is kept, and a DC that had partners isn't restored
   (it rejoins instead).
 
-The local HardyOS accounts (Control Panel > Users & Groups) stay separate for
-now; the local admin remains the break-glass account. Shares (Phase 2) use
-the domain's users and groups, and Authentik (Phase 3) signs apps in with
-them.
+The local HardyOS accounts (Control Panel > Users & Groups) stay alongside
+the domain's; the local admin remains the break-glass account. Shares
+(Phase 2) use the domain's users and groups, and Authentik (Phase 3) signs
+apps in with them.
+
+### Desktop sign-in with domain accounts
+
+When the server has a domain, its accounts sign in to the web desktop too
+(`internal/auth` `SignIn`, used by `POST /auth/login`):
+
+- **Names.** `alice`, `HOME\alice` and `alice@home.example.net` all mean
+  the domain's alice; `DNS-domain\alice` and `alice@REALM` work as well. A
+  local HardyOS account wins for a bare name, so the break-glass admin can't
+  be shadowed by a domain account. A prefix or suffix that isn't this
+  server's domain is refused (`unknown_domain`).
+- **Password check.** hardyd (not root) asks this server's own DC for a
+  ticket-granting ticket with a Kerberos AS exchange (gokrb5, pure Go, TCP,
+  no krb5.conf or DNS lookups): the realm and the DC's address come from
+  `domain.status`, cached for 30 seconds. hardyd reaches its DC through the
+  shim route, inside the host; `SetupNetwork` pins the ARP entries on both
+  ends of it (`ip neigh ... nud permanent`), so answers from the LAN can't
+  pull that traffic away. Partner DCs are never asked, not even when the
+  local one is down: an AS reply only shows that whoever answered knows a
+  key for the password typed, which anyone answering for a partner's
+  address can make up. If the local DC doesn't accept a connection within
+  2 seconds, sign-in answers 503 `domain_unavailable` ("the domain
+  controller on this server isn't answering; sign in with a HardyOS
+  account"); the whole check is bounded at 10 seconds. A server without a
+  DC of its own (member mode, later) refuses domain sign-in with 503
+  `no_local_dc` until a service-ticket check with a machine keytab exists.
+  The ticket is thrown away.
+- **Answers.** A wrong password and an unknown name give the same
+  `bad_credentials` as for local accounts (a bare name not known locally
+  also runs a dummy Argon2 check, so timing doesn't tell local from domain).
+  A turned-off, locked or expired account, or an expired password, gets its
+  own message: the KDC already tells any device on the network that much.
+  An unreachable DC or a clock more than 5 minutes off answer 503 and don't
+  count as failed guesses. Failed guesses count against the IP and against
+  the account under one key for every spelling (`user:home\alice`), with the
+  same 5-in-15-minutes lockout as local sign-in.
+- **Groups and role.** After the password, hardyd-priv's
+  `domain.user_groups {username}` runs `hardyos-dc-admin user.groups`, which
+  reads the account's state and its `tokenGroups` (nested groups and the
+  primary group included; BUILTIN groups left out) with each group's SID
+  (`groupSids`) and the domain's SID (`domainSid`). Turned-off and expired
+  accounts are refused. The role goes by SID, never by name (anyone allowed
+  to create or rename a group picks its name): members of `<domainSid>-512`
+  (Domain Admins) or of the HardyOS Admins group whose objectSid is
+  recorded in the domain settings (`adminsGroupSid` in `hardyos-dc.json`,
+  so it's in domain backups) are administrators, everyone else is a user.
+  A renamed HardyOS Admins keeps working. It isn't created automatically:
+  the Domain page's button runs `POST /domain/admins-group` (a job,
+  audited), whose root op `domain.admins_group.create` creates the group
+  and records its SID. If a group of that name already exists, HardyOS
+  didn't make it: the page shows its members and records it only when an
+  administrator adopts it (`adopt: true`); built-in groups are never
+  adopted. A DC that joined a domain records the group again the same way.
+- **Records.** The first sign-in creates a row in `users` with
+  `source = domain`, `username = HOME\alice` and an empty password hash, so
+  sessions, jobs and the audit log point at domain users the same way as at
+  local ones. The row holds the name, email, role and groups (`HOME\Family`)
+  from the domain; sessions record `source` and `principal`. While signed
+  in, the groups are looked up again at most every 10 minutes (from the
+  request that finds them older); a deleted, turned-off or expired account,
+  or a different domain, ends all its sessions. If the domain can't be
+  asked, the known groups stay and the lookup is retried a minute later;
+  after 30 minutes (3 refresh intervals) without a lookup that worked, the
+  account is a user (written to its row) and `/auth/me` says why in
+  `roleNote`, until a lookup works again.
+- **What a domain account can't do here.** Change its password through
+  HardyOS (`/auth/password` and the admin reset answer `domain_account`,
+  pointing to Domain > Users), have its name, email or role edited, be a
+  break-glass account, or count as the last administrator. An admin can turn
+  it off in HardyOS (a local switch) or forget it (delete the row). A domain
+  admin can open the terminal: the password is checked by Kerberos again.
+- **For access checks.** `auth.Identity` (implemented by `*auth.User`)
+  gives `IdentitySource()`, `IdentityPrincipal()` (`alice` or `HOME\alice`),
+  `IdentityGroups()` and `Matches(kind, name)` for rules of kind `user`,
+  `group` or `everyone`, compared case-insensitively. `/auth/me` returns
+  `source`, `principal` and `groups`.
+
+## Shared folders
+
+Folders on the data pools for the family's files and for apps (user and
+developer notes in [shares.md](shares.md)).
+
+- **Storage.** Each shared folder is a dataset `<pool>/shares/<id>`,
+  mounted at `/mnt/<pool>/shares/<id>`. Its settings are `org.hardyos:*`
+  user properties on the dataset (`share=1`, `name`, `description`,
+  `access`, `apps`, `recycle`, `guest`) and its quota is the ZFS `quota`,
+  so they move with the pool. Datasets get `acltype=posixacl`, `xattr=sa`,
+  `devices=off` and `setuid=off`.
+- **Root side.** `internal/shares` (in hardyd-priv) behind the ops
+  `shares.list/create/update/delete/starter/folders`. The apps engine uses
+  the same Manager in-process through `apps.ShareResolver`: `Resolve` gives
+  the real path of a share or a subfolder (never outside it), `GrantApp` and
+  `RevokeApp` add or remove the app user's ACL entries (the share root at
+  once with setfacl, everything below in a background walk that never
+  follows links) and record them in `org.hardyos:apps`.
+- **API.** `GET /shares` and `GET /shares/{id}` for everyone signed in
+  (family members don't see access rules, apps or pools); admins create,
+  change and delete through jobs (`shares.create`, `shares.update`,
+  `shares.delete`, `shares.starter`, run one at a time and audited) and
+  browse subfolders with `GET /shares/{id}/folders`.
+- **Control Panel › Shared Folders.** The list with usage and quota, the
+  create/edit dialog (pool, name, quota, recycle bin, guest, who can use
+  it), delete with the name typed, and the starter set when there are none.
+- **Later.** File sharing (SMB, NFS, Time Machine, SFTP/WebDAV) publishes
+  these same datasets and enforces the access rules; home folders arrive
+  with it.
 
 ## Apps
 
@@ -339,6 +446,28 @@ One-click Docker apps install from `.hardyapp` packages (format in
   Docker's data-root is `<pool>/docker`; its config is in
   `/var/lib/hardyos/apps/engine.json` (root-written). Docker is disabled at
   boot and started by hardyd-priv once that pool is mounted.
+- **Apps engine (App Store v2).** Each app has its own user ID
+  (30000-30999, in its `state.json` on the pool, kept with kept data) and a
+  source (`catalog`, `upload`, `imported`, `custom`) that hardyd-priv
+  derives from the package bytes (catalog only if they match a package in
+  `/usr/share/hardyos/apps`; decision 75); untrusted sources need
+  per-app grants for host network, GPU, devices and extra capabilities.
+  Shared folders reach apps through `apps.ShareResolver` (implemented by
+  `internal/shares`, wired in hardyd-priv's main): `Resolve` gives the
+  share root for `${HARDY_SHARE_<NAME>}` (apps never get subfolders),
+  `GrantApp`/`RevokeApp` set the app user's ACLs. The policy allows binds
+  in the data folder or of a chosen share's root (read grants forced
+  read-only), never one bind source inside another (decision 76), and is
+  re-checked against freshly resolved shares before every start. Folders
+  in an app's data are created with fd-relative calls that never follow
+  links. A rollback never brings back grants or shares removed since
+  (decision 77). Limits are a systemd slice per app in
+  `/run/systemd/system` plus `cgroup_parent` injected after the check; GPU
+  devices and NVIDIA reservations are fitted to the hardware found at
+  install. `apps.reconfigure`, `apps.config`, `apps.snapshot`,
+  `apps.snapshots` and `apps.rollback` change, show, snapshot and roll back
+  an installed app (code in `internal/apps/access.go`, `resources.go`,
+  `lifecycle.go`).
 - **API.** `GET /apps` (everyone: installed apps to open; admins also see
   containers, updates and kept data), `GET /apps/catalog`,
   `POST /apps/packages`, `POST /apps/plan`, and jobs for install, update
@@ -346,6 +475,83 @@ One-click Docker apps install from `.hardyapp` packages (format in
 - **App Store window.** My apps (open, start, stop, logs, update, remove)
   and Discover (the catalog and the install dialog: permissions in plain
   words, ports, settings, and the pool the first time).
+
+### App Store API, catalogs and app windows (App Store v2)
+
+hardyd's side of the App Store v2 (plan: `docs/plans/app-store-v2.md`
+section 3; decisions 65-69, security review 80-82):
+
+- **Records in hardyd's database** (migration `0005_apps_web.sql`, so
+  settings backups carry them): `app_access` (who may use each app; no rows
+  = everyone), `app_catalogs` (imported catalogs with their last good
+  index) and `app_proxy_ports` (each app's window port). `internal/appstore`
+  owns them next to the package store.
+- **Access.** `GET /apps` shows non-admins only the apps they may use;
+  `POST /apps/{id}/open` and the window proxy check the same list.
+  Principals are HardyOS users, `NETBIOS\user`, `NETBIOS\group` and
+  everyone; a signed-in person's principal and groups come from
+  `api.AppPrincipals` / the account's `auth.Identity` methods (domain
+  sign-in), else the HardyOS username.
+- **Jobs.** `apps.install` and `apps.update` call `apps.prepare` with the
+  package's source (catalog, upload, imported + catalog name, custom),
+  shares, grants and limits; `apps.update` takes `apps.snapshot
+  reason=update` first and, if a later step fails, ends with
+  `result.snapshot`. `apps.reconfigure` runs `apps.reconfigure` then
+  `apps.up`; `apps.rollback` runs `apps.rollback`. Passwords reach jobs
+  through the in-memory secret box. Grants come only from an admin's
+  request, are checked against what the package asks for, and are audited
+  one by one (`apps.grant`, `apps.grant.remove`).
+- **Imported catalogs.** hardyd fetches `index.json` (https only, 30 s, at
+  most 1 MB, redirects only to https) and packages (at most 512 KB) itself;
+  a package is used only if its SHA-256 matches the index and it is the app
+  and version the index names. Packages are cached in
+  `/var/lib/hardyos/app-imports`. hardyd-priv never touches the network for
+  them.
+- **Custom apps.** `POST /apps/custom` packs a manifest, the pasted
+  Compose file and a generated icon into a `.hardyapp` (source `custom`,
+  stored like an upload) and answers with an install plan.
+- **Window proxy** (`api/appproxy.go`). For every installed app with a web
+  page hardyd listens on its own port (44300 + n, kept in the database) with
+  the desktop's certificate and reverse-proxies to `127.0.0.1:<web port>`,
+  WebSockets included. `X-Frame-Options` and `frame-ancestors` from the app
+  are removed and replaced with `frame-ancestors` for the desktop's origin;
+  the desktop's own CSP allows `frame-src` on its host's ports. Proxies
+  listen on the desktop's own listen host. Ports don't isolate apps
+  (cookies are per host, and SameSite counts every port of a host as one
+  site), so until per-app subdomains replace them (with the reverse proxy)
+  the proxy does (decisions 80-81): app cookies are renamed
+  `a_<app id>_<name>` on the way out (no `Domain`, `hardyos_*` dropped) and
+  only that app's are forwarded, prefix removed; changes and WebSockets from
+  another Origin and same-site non-navigations (`Sec-Fetch-*`) are refused.
+  Sign-in: `POST /apps/{id}/open` mints a single-use token (one minute)
+  bound to the person, the app and their desktop session; the proxy accepts
+  it only for an iframe or document load (same-site or none) in a browser
+  that sends that same desktop session cookie, and swaps it for an
+  HttpOnly, SameSite=Strict cookie named for that app; every later request
+  needs the matching desktop cookie too. At most every 30 seconds per
+  request, and on a 30-second sweep, the proxy checks the desktop session
+  with `peekSession` (no idle-timeout slide), the account through
+  `sessionUser` (the same domain refresh as the desktop's own requests) and
+  the access list. Hijacked connections (WebSockets) are tracked per
+  session and closed when a check fails, on sign-out, access change,
+  account disable or password reset, on stop, and when an app job
+  (install, update, remove, reconfigure, rollback) finishes: the proxy
+  watches job events and then drops that app's listener, tokens and
+  sessions before reconciling. A 20-second reconcile loop also starts
+  proxies for new apps and stops them for removed ones.
+- **Provenance** (decision 82). `app_origins` (migration
+  `0006_apps_web_sec.sql`) records each install's source and, for imported
+  apps, the catalog's id; an imported package ref carries `catalogId` and
+  that catalog must list the sha. Installing or updating an id from another
+  source or catalog needs `replaceSource`. Custom-built packages live in
+  their own folder (`app-packages/custom`), apart from uploads. Catalog
+  fetches go through a dialer guard (`appstore/netguard.go`) that refuses
+  local addresses unless the catalog has `local_network` set.
+- **Web.** `apps/store/`: the stepped install dialog (settings, shared
+  folders, permissions, who can use it, limits under Advanced), the app
+  details view (overview, settings, access, snapshots, logs), Catalogs,
+  Create an app, and `AppFrame` (an installed app as a desktop window, id
+  `os.hardy.appwindow:<app id>`).
 
 ## Data and state
 

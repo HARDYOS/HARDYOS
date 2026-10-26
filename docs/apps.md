@@ -50,7 +50,11 @@ catalog in `apps/catalog/`) and check it with `hardyctl app-check`.
     { "path": "postgres", "mode": "0700" },
     { "path": "media", "owner": "1000:1000", "mode": "0755" }
   ],
-  "permissions": { "capabilities": [], "devices": [] }
+  "shares": [
+    { "name": "MEDIA", "label": "Media library", "help": "Where your movies and shows are",
+      "access": "read", "suggest": "media", "required": false }
+  ],
+  "permissions": { "capabilities": [], "devices": [], "hostNetwork": false, "gpu": false }
 }
 ```
 
@@ -69,12 +73,42 @@ catalog in `apps/catalog/`) and check it with `hardyctl app-check`.
   Values can't contain single quotes or line breaks. Names starting with `HARDY_`
   belong to HardyOS.
 - **folders**: created under the data folder before the app starts, with
-  the owner (`uid:gid`) and mode the containers need.
-- **permissions**: capabilities and devices the app needs beyond a plain
-  container, shown to the person installing it. Only the allowlist in
-  `daemon/internal/apps/policy.go` is available: for example `NET_ADMIN`,
-  `/dev/net/tun`, `/dev/dri` and USB serial sticks. Never `SYS_ADMIN` or
-  similar.
+  the owner (`uid:gid`) and mode the containers need. Without an owner, a
+  folder HardyOS creates belongs to the app's own user (`HARDY_UID`); an
+  update never changes the owner of a folder that's already there. Folders
+  are created one level at a time relative to the folder above
+  (`mkdirat`/`openat` with `O_NOFOLLOW`), and their mode and owner are set
+  through the opened folder itself, so a running container that swaps a
+  folder for a link can't redirect root anywhere else.
+- **shares**: shared folders the app can be given. `name` (`MEDIA`,
+  capital letters, digits and `_`) becomes `${HARDY_SHARE_MEDIA}`, which
+  the compose file binds as it is (never a folder inside it). The install
+  dialog offers every shared folder; apps always get a whole shared folder,
+  never a subfolder (`path` in a share choice must be empty), because only a
+  share's root, a ZFS mountpoint, can't be swapped for a link by something
+  else that writes in the share. `suggest` preselects a shared folder by id.
+  `access` (`read` or `write`) is the most the app gets: an admin may give
+  read where the app asks for write, never the reverse. `required` shares
+  must be chosen; any other share left out points at an empty folder of the
+  app's own, `${HARDY_APP_DATA}/.unshared/<NAME>`. At most 8.
+- **permissions**: what the app needs beyond a plain container, shown to the
+  person installing it in plain words.
+  - `capabilities` and `devices`: only the allowlist in
+    `daemon/internal/apps/policy.go`, for example `NET_ADMIN`,
+    `/dev/net/tun`, `/dev/dri` and USB serial sticks. Never `SYS_ADMIN` or
+    similar.
+  - `hostNetwork`: services may use `network_mode: host`. The app's ports
+    are then fixed at their defaults (HardyOS can't move them) and must be
+    free; such apps may also use ports below 1024 (DNS on 53).
+  - `gpu`: services may use the graphics devices (`/dev/dri`,
+    `/dev/dri/renderD*`) and NVIDIA reservations
+    (`deploy.resources.reservations.devices` with `driver: nvidia` and
+    `capabilities: [gpu]`). HardyOS looks for the hardware when installing:
+    without render nodes the devices are dropped, without `/dev/nvidia0` and
+    the NVIDIA container toolkit the reservation is dropped, each with a
+    warning; an app never fails to install for lack of a GPU. Services given
+    a graphics device also join the group that owns it, so an app running as
+    its own user can open it.
 
 ## Variables HardyOS provides
 
@@ -85,6 +119,15 @@ catalog in `apps/catalog/`) and check it with `hardyctl app-check`.
 | `HARDY_HOST` | The server's name or address as the installer reached it |
 | `HARDY_TZ` | The server's time zone |
 | `HARDY_PORT_<NAME>` | The host port chosen for each manifest port |
+| `HARDY_UID`, `HARDY_GID` | The app's own user and group ID (the same number), from 30000-30999 |
+| `HARDY_SHARE_<NAME>` | The root of the shared folder chosen for each manifest share (or its empty stand-in) |
+
+Each app gets its own user ID at its first install: the lowest free one
+from 30000-30999. It's kept in the app's state and stays reserved while the
+app's data is kept, so a reinstall finds its files owned by the same ID.
+Catalog apps run their processes as it (`PUID`/`PGID`, or
+`user: "${HARDY_UID}:${HARDY_GID}"`), and shared folders are given to that
+ID.
 
 ## What the compose file may do
 
@@ -92,22 +135,104 @@ HardyOS runs `docker compose config` and checks the result (with includes,
 `extends` and env files already applied), so what's checked is exactly what
 runs. Anything not allowed is refused:
 
-- No `privileged`, no `network_mode`, `pid`, `ipc`, `uts` or `cgroup` set to
-  `host`, no joining containers or networks outside the app.
-- Bind mounts only inside `${HARDY_APP_DATA}`, with private propagation. No
-  named volumes (data goes in folders HardyOS can snapshot); anonymous
-  volumes and tmpfs are fine.
+- No `privileged`, no `pid`, `ipc`, `uts` or `cgroup` set to `host`, no
+  joining containers or networks outside the app. `network_mode: host` only
+  with the `hostNetwork` permission.
+- Bind mounts only inside `${HARDY_APP_DATA}` or of the shared folder
+  chosen for one of the manifest's shares (`${HARDY_SHARE_<NAME>}` itself,
+  not a folder in it; the same goes for the empty stand-in of a share left
+  out), with private propagation. A share the app was given read access to
+  is mounted `read_only`. No bind source may be inside another one of the
+  same app, across all its services: not `${HARDY_APP_DATA}` together with
+  `${HARDY_APP_DATA}/db`, not `config` together with `config/cache`. Mount
+  folders side by side instead. Docker mounts bind sources by path again
+  whenever it restarts a container by itself (restart policy, Docker
+  restarting), without HardyOS checking again, and a container that mounts
+  the outer folder could have replaced the inner one with a link. The same
+  folder mounted twice is fine. No named volumes (data goes in folders
+  HardyOS can snapshot); anonymous volumes and tmpfs are fine.
 - Published ports only as declared in the manifest.
-- Capabilities and devices only as declared in the manifest's permissions.
+- Capabilities and devices only as declared in the manifest's permissions
+  (graphics devices and NVIDIA reservations with `gpu`).
 - `security_opt` only `no-new-privileges`; sysctls only `net.*`; logging
   only `json-file`, `local`, `journald` or `none`; bridge networks only.
-- No `build`, `container_name`, `secrets`, `configs`, GPU reservations or
-  privileged lifecycle hooks.
+- No `build`, `container_name`, `cgroup_parent`, `gpus`, `secrets`,
+  `configs` or privileged lifecycle hooks.
 
-HardyOS sets `restart: unless-stopped` (unless the app chose another policy)
-and the labels `org.hardyos.app` and `org.hardyos.app.version` on every
-container. Before every start it resolves each bind mount's real path, so a
-container can't swap a folder for a link to somewhere else.
+HardyOS sets `restart: unless-stopped` (unless the app chose another policy),
+the labels `org.hardyos.app` and `org.hardyos.app.version` and, after the
+check, `cgroup_parent` (the app's slice, see Limits) on every container.
+Before every start it resolves each bind mount's real path and each shared
+folder again: a container can't swap a folder for a link to somewhere else,
+a share that moved or went away isn't mounted from its old place, a share
+bind must still be the share's root, no bind may be inside another, and a
+read-only share must still be mounted read-only. An app installed with a
+share subfolder (allowed before) doesn't start until its shared folder is
+chosen again in its settings.
+
+## Sources and grants
+
+Every app records where its package came from: `catalog` (shipped with
+HardyOS), `upload` (an admin uploaded a `.hardyapp`), `imported` (from an
+imported catalog, whose name is kept as `sourceName`) or `custom` (built
+from a pasted Compose file).
+
+`hardyd-priv` decides whether a package is from the catalog, never hardyd
+(which must be treated as possibly compromised): a package is `catalog`
+only if its bytes (SHA-256) are those of a `.hardyapp` file shipped in
+`/usr/share/hardyos/apps` (a regular file, not a link), or of the package
+`hardyd-priv` itself found there when it installed the app (kept as
+`catalogSHA256` in its state, so the app stays a catalog app after an OS
+update ships a newer version). Everything else is untrusted: a source of
+`upload`, `imported` or `custom` that hardyd sends is kept as a label, and
+`catalog` or no source becomes `upload` (or the label the app already had).
+The installed package is kept in `.hardyos/package.hardyapp`, and the source
+is decided again from those bytes on every update, settings change and
+rollback. Apps installed before HardyOS kept the package, and any state
+without a verified hash, count as untrusted and are shown as `upload`.
+
+Catalog apps get what their manifest declares. Every other app is
+sandboxed: each of these needs an admin's grant, by name, in the install
+(or settings) request, or the install is refused:
+
+| Manifest asks for | Grant |
+| --- | --- |
+| `hostNetwork` | `hostNetwork` |
+| `gpu` | `gpu` |
+| a device, e.g. `/dev/net/tun` | `device:/dev/net/tun` |
+| a capability outside Docker's default set, e.g. `NET_ADMIN` | `cap:NET_ADMIN` |
+
+Capabilities already in Docker's default set (`CHOWN`, `NET_RAW`,
+`SETUID`, ...) need no grant. Grants are stored with the app and shown on it
+(`grants`), only the ones its manifest uses; an update that asks for
+something new is refused until that is granted too. hardyd only forwards
+grants an admin ticked, and audits them.
+
+With the host network, `NET_ADMIN` controls the server's own network
+(addresses, routes, firewall), not a private one; the install dialog says
+so, and an untrusted app needs both grants (`hostNetwork` and
+`cap:NET_ADMIN`). `NET_RAW` is in Docker's default set, so every container,
+host network or not, has it unless it drops it; with the host network it
+is described as raw access to the server's network.
+
+## Limits
+
+An app can be given a memory limit (MB) and a processor limit (number of
+processors, e.g. `1.5`); 0 means none. They apply to all the app's
+containers together through a systemd slice, `hardyos-app-<id>.slice`
+(dashes in the id escaped as `\x2d`), written to `/run/systemd/system` with
+`MemoryMax` and `CPUQuota` at every start (and at boot, before Docker
+brings the containers back), followed by `systemctl daemon-reload`.
+
+## Settings after installing
+
+`apps.reconfigure` changes ports, settings, shared folders, grants and
+limits of an installed app using its installed package; the job then runs
+`apps.up`. Anything left out keeps its value, and a password setting left
+empty keeps its password. Changing the shared folders removes the app's old
+access before giving the new one. `apps.config` returns the current
+configuration for the settings screen: passwords come back empty with
+`set: true`, generated secrets not at all.
 
 ## Where things live
 
@@ -119,26 +244,247 @@ The first install asks which pool apps go on. HardyOS then creates:
 - `<pool>/apps/<id>`: one dataset per app. `data/` is `HARDY_APP_DATA`;
   `.hardyos/` (root only) holds the manifest, compose file, the resolved
   and checked compose file that actually runs, `app.env` with the settings
-  and passwords, and `state.json`.
+  and passwords, `state.json`, and the package as installed
+  (`package.hardyapp`).
 
 Removing an app keeps its dataset unless "Also delete its data" is ticked.
-Installing it again picks the data and passwords back up.
+Installing it again picks the data, passwords and user ID back up (its
+shared folders and grants are chosen again). Either way the app loses its
+shared folder access and its slice.
+
+## Updates and rollback
+
+Apps update only when an admin clicks Update. The `apps.update` job first
+takes `apps.snapshot reason=update`: a ZFS snapshot
+`<pool>/apps/<id>@hardyos-update-<yyyymmdd-hhmmss>` (UTC) with the app's
+version in the user property `org.hardyos:app-version`, after noting in
+`.hardyos/images.json` the image each service runs. The newest three
+update snapshots are kept. If a later step fails, the job ends with the
+snapshot's name so the App Store offers Roll back.
+
+`apps.snapshots` lists an app's snapshots, newest first, with their
+versions. `apps.rollback` needs the app's name as confirmation; it stops the
+app, runs `zfs rollback -r` (later snapshots go), and brings back the data,
+package, settings and limits inside the snapshot, but never a permission
+the admin has taken away since: the app's grants become those both the
+snapshot and the app had just before, and a shared folder is kept only
+where both had one for the same share name (the current choice, at most
+the access the snapshot's manifest allows, and only if the shared folder
+still exists). Everything is then checked again like a settings change
+(source from the package bytes, grants, the full compose policy). If that
+passes, it puts the images back on their tags if those images are still on
+the server and starts the app. If not, the app stays stopped with the
+restored data and is marked `blocked` (shown on the app) with what is
+missing; starting it is refused until an admin allows that in the app's
+settings (`apps.reconfigure`), which checks everything again and clears the
+mark.
 
 ## How installing works
 
 1. `POST /apps/plan`: hardyd reads the package and asks `hardyd-priv` for
-   free ports.
-2. `POST /apps/install` starts an `apps.install` job. Password settings go
-   to the job through an in-memory reference, not its parameters.
+   free ports (host-network apps keep their own: `fixed`).
+2. `POST /apps/install` starts an `apps.install` job. The request carries
+   the package's source, settings, ports, the shared folder for each of the
+   app's shares, the extra permissions an administrator ticked (`grants`,
+   only for apps not from HardyOS's catalog), resource limits and who may
+   use it. Password settings go to the job through an in-memory reference,
+   not its parameters. Each grant is audited on its own (`apps.grant`).
 3. The job calls `hardyd-priv` to prepare the app (dataset, files, compose
    check), pull each image (retrying; if a registry is unreachable and the
    image is already on the server, that copy is used), and start it.
 
 Every step is a named operation in `hardyd-priv` (`apps.prepare`,
-`apps.pull`, `apps.up`, ...) with checked arguments. There is no way to run
+`apps.pull`, `apps.up`, `apps.reconfigure`, `apps.snapshot`,
+`apps.rollback`, ...) with checked arguments. There is no way to run
 an arbitrary compose file or command.
+
+## The catalog
+
+The apps shipped with HardyOS are in `apps/catalog/<id>/`, with an overview
+of each app's shared folders and permissions in
+[apps/README.md](../apps/README.md). Media server, photo, home, network,
+password, document and download apps: Jellyfin, Plex, Immich, Home
+Assistant, AdGuard Home, Vaultwarden, Paperless-ngx, Sonarr, Radarr,
+Prowlarr, qBittorrent, Bazarr and Seerr (Jellyseerr), plus KinCast and Apex
+RMM.
+
+- Image versions are pinned in each `compose.yaml` and the package version
+  follows the app's own version, so **Update** in the App Store is how an
+  app moves to a new version (decision 70).
+- Media apps see the same folders at the same paths: the Media library at
+  `/media`, Downloads at `/downloads` (decision 71). Apps reach each other
+  at `host.docker.internal:<port>` or the server's address.
+- Only catalog apps get `gpu` (Jellyfin, Plex, Immich) and `hostNetwork`
+  (Home Assistant, AdGuard Home) just by declaring them.
+
+## The App Store
+
+**My apps** lists the installed apps. Everyone sees the apps they may use
+and can open them; administrators also start, stop, update and remove them,
+and open an app's page for its settings:
+
+- **Overview**: Open (in a desktop window) or Open in new tab, start, stop,
+  restart, the shared folders, permissions and limits it has. **Update**
+  appears when the catalog it came from has a newer version. A snapshot of
+  the app is taken first; if the update fails, the App Store offers to roll
+  back to it. If the new version asks for a permission the app doesn't
+  have (apps not from HardyOS's catalog), it asks you to allow it first.
+- **Settings**: ports, settings (passwords stay as they are unless you type
+  a new one), shared folders, extra permissions and resource limits. Saving
+  restarts the app.
+- **Who can use it**: everyone signed in, or chosen HardyOS accounts, domain
+  users (`HOME\alice`) and domain groups (`HOME\Family`). Administrators can
+  always use every app.
+- **Snapshots**: the snapshots taken before updates (the newest three), each
+  with the version it holds, and Roll back (type the app's name). A
+  rollback that brought the data back but left the app needing a
+  permission shows as **Restored — needs a permission before it can start**,
+  not as a failure; the app's card and page then say what's missing, with
+  **Open settings** (Start stays off until the settings are saved).
+- **Logs**: the last 500 lines from every container.
+
+**Install** walks through steps: settings (ports, settings and, the first
+time, the pool), shared folders (one per folder the app asks for; apps get
+whole shared folders, read-only if you like), permissions, and who can use
+it with resource limits under Advanced. Permissions of apps from HardyOS's
+catalog are listed in plain words. For uploaded, imported and custom apps
+every extra permission is an unticked box under a red warning, and the app
+can't be installed until each is ticked.
+
+If an app with the same id is already installed (or its data kept) from
+somewhere else, another source or another imported catalog, the dialog
+says so in red: the new package would take over that app's data and
+passwords. It can't be installed until **Replace the installed app** is
+ticked (`replaceSource`, audited as `apps.replace_source`). The same holds
+for an update with a package from elsewhere.
+
+**Discover** shows HardyOS's catalog and, under each imported catalog's
+name, its apps labelled **Third-party**.
+
+**Catalogs** imports someone else's catalog from an https address,
+refreshes it and removes it. A catalog is an `index.json`:
+
+```json
+{
+  "name": "Hardy Labs",
+  "apps": [
+    { "id": "notebook", "name": "Notebook", "version": "3.2.0", "summary": "Shared notes.",
+      "url": "packages/notebook-3.2.0.hardyapp",
+      "sha256": "9f2c…64 hex digits…", "icon": "data:image/svg+xml;base64,…" }
+  ]
+}
+```
+
+`url` may be relative to the index and must be https. hardyd downloads a
+package when it's first planned and uses it only if its SHA-256 matches and
+it is the app and version the index names. An install from a catalog
+names it (`catalogId`); that catalog must list the package, hardyd records
+the catalog's id with the app, and updates come from that catalog only
+(apps installed before this was recorded follow the catalog's name).
+
+hardyd won't fetch a catalog or its packages from this server or its own
+networks (loopback, `10/8`, `172.16/12`, `192.168/16`, link-local, CGNAT
+`100.64/10`, IPv6 unique-local) unless **On my network** is ticked for that
+catalog (audited as `apps.catalog.local_network`), so a catalog address, a
+redirect or a DNS name can't point hardyd at the router's admin page or
+another device. The check is made on every connection, after DNS and after
+each redirect; unspecified, multicast and broadcast addresses are always
+refused. Apps with problems in the index
+are left out (the Catalogs page says which). Icons are only taken as data:
+URLs. Removing a catalog keeps its apps running; they just get no more
+updates from it.
+
+**Create an app** turns a pasted Compose file into a custom app: a name,
+an id, the ports it publishes (one may be its web page) and data folders.
+The Compose file publishes each port as `${HARDY_PORT_<NAME>}` and keeps
+its data under `${HARDY_APP_DATA}`; the same sandbox as uploaded packages
+applies. hardyd builds a `.hardyapp` (source `custom`) and the normal
+install follows. To change it later, create it again with a higher version
+and update the app with that package.
+
+**Upload a package** installs a `.hardyapp` file (source `upload`).
+Uploaded and custom-built packages are kept in separate folders, so a
+package can only be installed under the source it was saved as.
+
+## App windows
+
+Apps open as desktop windows. The desktop is served over HTTPS, so hardyd
+runs a small HTTPS proxy for each app with a web page on its own port
+(44300, 44301, …, remembered per app) with the desktop's certificate, on
+the same address the desktop listens on. Each Open asks hardyd for a
+one-minute, single-use link; the proxy swaps it for a cookie for that app
+only. The proxy passes WebSockets and lets the desktop frame the app, in a
+sandboxed frame that can't navigate the desktop's tab. **Open in new tab**
+uses the same proxy.
+
+Ports don't keep apps apart the way separate sites would: browsers keep
+cookies per host, not per port, and count every port of a host as the same
+site. So the proxy does the separating:
+
+- **Cookies.** Every cookie an app's server sets is renamed
+  `a_<app id>_<name>` (`__Host-` and `__Secure-` stay in front), loses any
+  `Domain`, and keeps its other attributes; one named `hardyos_*` is
+  dropped. Requests to an app carry only its own cookies, under the names
+  it gave them; HardyOS's cookies and other apps' never reach it.
+- **Requests from other apps.** A change (anything but GET or HEAD) or a
+  WebSocket from another page's origin is refused, and so is anything
+  another page on the host loads from the app that isn't a navigation
+  (images, scripts, fetches), going by the browser's `Sec-Fetch-*` headers.
+- **Sign-in.** The link works only as a frame or page the desktop (or you)
+  opened (`Sec-Fetch-Dest` iframe or document, `Sec-Fetch-Site` same-site
+  or none), and only in the browser signed in to the desktop session it was
+  made for: the desktop's session cookie reaches the proxy's port too, and
+  must match. Another app can't sign you in to an account of its choosing.
+  The proxy cookie is HttpOnly and `SameSite=Strict`, and every request
+  also needs the matching desktop session cookie.
+- **Ending.** A window's session ends with the desktop session, and the
+  person's account and access to the app are checked again at most every 30
+  seconds, without keeping the desktop signed in (an app left open doesn't
+  stop the desktop's idle timeout). Open WebSockets are closed when that
+  check fails, on a 30-second sweep, on sign-out, when the app's access
+  list changes, when an account is turned off or its password reset, and as
+  soon as a remove, reconfigure, update or rollback of the app finishes
+  (which also ends its window sessions: open it again).
+
+What's left until each app gets its own subdomain (with the reverse
+proxy):
+
+- Cookies an app's page sets from JavaScript can't be renamed. They are
+  shared by the desktop and every app on the host, so any app's scripts can
+  read non-HttpOnly cookies (its own or another app's) and set cookies
+  other apps' pages see. The proxy doesn't forward such cookies (they lack
+  the app's prefix), so an app's server never receives them.
+- An app whose page reads a cookie its server set, by name, from
+  JavaScript (Django's `csrftoken` pattern) sees it under the renamed name
+  and may fail; such apps need checking in a window until subdomains.
+- A browser that sends no `Sec-Fetch-*` headers (plain-HTTP development, old
+  browsers) gets only the Origin and session-cookie checks.
+
+## API
+
+| Call | Who | What |
+| --- | --- | --- |
+| `GET /apps` | signed in | Installed apps (only those you may use, for non-admins) |
+| `GET /apps/catalog` | admin | HardyOS's catalog |
+| `GET/POST/DELETE /apps/catalogs` | admin | Imported catalogs: list, import or refresh (`{url, localNetwork}`), remove (`{id}`) |
+| `POST /apps/packages` | admin | Upload a package |
+| `POST /apps/custom` | admin | Build a custom app; answers with an install plan |
+| `POST /apps/plan`, `POST /apps/install` | admin | Plan and install (job `apps.install`) |
+| `GET/PATCH /apps/{id}/config` | admin | Current configuration; change it (job `apps.reconfigure`) |
+| `GET/PUT /apps/{id}/access` | admin | Who may use the app |
+| `POST /apps/{id}/update` | admin | Update (job `apps.update`, snapshot first); `grants_required` when new permissions need allowing |
+| `GET /apps/{id}/snapshots`, `POST /apps/{id}/rollback` | admin | Snapshots and roll back (job, confirm = the app's name) |
+| `POST /apps/{id}/open` | who may use it | A link to open the app (through its window proxy) |
+| `POST /apps/{id}/start\|stop\|restart`, `GET /apps/{id}/logs`, `DELETE /apps/{id}` | admin | As before |
+
+Who may use each app, imported catalogs and window ports are kept in
+hardyd's database, so settings backups include them; each app's own
+configuration is on its dataset.
 
 ## Screens
 
 ![My apps](images/app-store/my-apps.png)
-![Installing an app](images/app-store/install.png)
+![Installing a third-party app: shared folders](images/app-store/install-folders.png)
+![Installing a third-party app: permissions](images/app-store/install-permissions.png)
+![An app's page](images/app-store/app-details.png)
+![An app in a desktop window](images/app-store/app-window.png)

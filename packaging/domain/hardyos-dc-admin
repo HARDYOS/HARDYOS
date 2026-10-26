@@ -11,6 +11,7 @@ Usage: hardyos-dc-admin <smb.conf> <command>
 
 import json
 import sys
+import time
 
 import ldb
 from samba.auth import system_session
@@ -33,7 +34,7 @@ PROTECTED_GROUPS = {"dnsadmins", "dnsupdateproxy"}
 USER_ATTRS = [
     "sAMAccountName", "givenName", "sn", "displayName", "mail",
     "userAccountControl", "memberOf", "whenCreated", "lastLogonTimestamp",
-    "objectSid", "pwdLastSet", "lockoutTime",
+    "objectSid", "pwdLastSet", "lockoutTime", "accountExpires",
 ]
 GROUP_ATTRS = ["sAMAccountName", "description", "member", "objectSid", "groupType", "isCriticalSystemObject"]
 
@@ -68,9 +69,12 @@ def gen_time(v):
     return f"{v[0:4]}-{v[4:6]}-{v[6:8]}T{v[8:10]}:{v[10:12]}:{v[12:14]}Z"
 
 
+def sid_of(msg):
+    return str(ndr_unpack(security.dom_sid, msg["objectSid"][0]))
+
+
 def rid(msg):
-    sid = ndr_unpack(security.dom_sid, msg["objectSid"][0])
-    return int(str(sid).rsplit("-", 1)[1])
+    return int(sid_of(msg).rsplit("-", 1)[1])
 
 
 
@@ -136,6 +140,19 @@ class Directory:
 
     # ---- commands ------------------------------------------------------
 
+    def dcs(self, _):
+        """Every domain controller, from the configuration partition (each DC
+        has an nTDSDSA object under its server object; joining creates it on
+        the DC it joined from, so it's there long before DNS replicates)."""
+        out = []
+        for m in self.db.search(base=self.db.get_config_basedn(), scope=ldb.SCOPE_SUBTREE,
+                                expression="(objectClass=nTDSDSA)", attrs=["objectGUID"]):
+            server = m.dn.parent()
+            res = self.db.search(base=server, scope=ldb.SCOPE_BASE, attrs=["dNSHostName"])
+            if len(res) == 1 and first(res[0], "dNSHostName"):
+                out.append(first(res[0], "dNSHostName").lower())
+        return {"dcs": sorted(set(out))}
+
     def users(self, _):
         res = self.db.search(
             base=self.base, scope=ldb.SCOPE_SUBTREE, attrs=USER_ATTRS,
@@ -154,11 +171,55 @@ class Directory:
             builtin = self._group_builtin(m)
             out.append({
                 "name": first(m, "sAMAccountName"),
+                "sid": sid_of(m),
                 "description": first(m, "description"),
                 "members": sorted(self.name_of(x) for x in m.get("member", [])),
                 "builtin": builtin,
             })
         return {"groups": sorted(out, key=lambda g: (g["builtin"], g["name"].lower()))}
+
+    def user_groups(self, a):
+        """One account's state and every group it's in (nested groups and
+        the primary group too, from tokenGroups), for desktop sign-in.
+        groupSids and domainSid decide the desktop role; names are for
+        display and access rules only (anyone allowed to create or rename a
+        group picks its name)."""
+        domain_sid = str(self.db.get_domain_sid())
+        try:
+            m = self._user(a["username"])
+        except Fail:
+            return {"exists": False, "groups": [], "groupSids": [], "domainSid": domain_sid}
+        info = self._user_json(m)
+        names = set()
+        sids = set()
+        res = self.db.search(base=m.dn, scope=ldb.SCOPE_BASE, attrs=["tokenGroups"])
+        for raw in res[0].get("tokenGroups", []) if len(res) == 1 else []:
+            sid = str(ndr_unpack(security.dom_sid, raw))
+            if sid.startswith("S-1-5-32-"):
+                continue  # BUILTIN\Users and friends aren't domain groups
+            g = self.db.search(base=self.base, scope=ldb.SCOPE_SUBTREE, attrs=["sAMAccountName"],
+                               expression="(objectSid=%s)" % ldb.binary_encode(sid))
+            if len(g) == 1:
+                names.add(first(g[0], "sAMAccountName"))
+                sids.add(sid)
+        if not names:
+            # No tokenGroups: the names still show, but no SIDs means no
+            # administrator role.
+            names = set(info["groups"])
+        expires = ad_time(first(m, "accountExpires", "0"))
+        return {
+            "exists": True,
+            "username": info["username"],
+            "displayName": info["displayName"] or " ".join(x for x in (info["givenName"], info["surname"]) if x),
+            "email": info["email"],
+            "enabled": info["enabled"],
+            "lockedOut": info["lockedOut"],
+            "expired": expires > 0 and expires < int(time.time()),
+            "mustChangePassword": info["mustChangePassword"],
+            "groups": sorted(names, key=str.lower),
+            "groupSids": sorted(sids),
+            "domainSid": domain_sid,
+        }
 
     @staticmethod
     def _group_builtin(m):
@@ -326,12 +387,14 @@ def password_error(e):
 
 COMMANDS = {
     "users": Directory.users,
+    "dcs": Directory.dcs,
     "groups": Directory.groups,
     "user.create": Directory.user_create,
     "user.update": Directory.user_update,
     "user.password": Directory.user_password,
     "user.enable": Directory.user_enable,
     "user.delete": Directory.user_delete,
+    "user.groups": Directory.user_groups,
     "group.create": Directory.group_create,
     "group.update": Directory.group_update,
     "group.delete": Directory.group_delete,

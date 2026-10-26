@@ -1,0 +1,19 @@
+# Home Assistant for HardyOS. It uses the server's network
+# (permissions.hostNetwork) so device discovery (mDNS, SSDP, broadcasts)
+# works; it listens on port 8123 as the manifest declares.
+services:
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:2026.10.4
+    # The image's s6 init needs root; Home Assistant doesn't support
+    # running as another user.
+    network_mode: host
+    environment:
+      TZ: ${HARDY_TZ}
+    volumes:
+      - ${HARDY_APP_DATA}/config:/config
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:${HARDY_PORT_WEB}/manifest.json"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 5

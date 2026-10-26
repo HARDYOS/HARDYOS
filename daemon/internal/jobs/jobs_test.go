@@ -171,3 +171,23 @@ func TestUnknownKind(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestFailedJobKeepsAResult(t *testing.T) {
+	m, start := newManager(t)
+	m.Register(Kind{Name: "test.partial", Run: func(jc *Context) (any, error) {
+		return nil, &FailedWith{Err: errors.New("step 2 broke"), Result: map[string]string{"snapshot": "s1"}}
+	}})
+	if err := start(); err != nil {
+		t.Fatal(err)
+	}
+	j, err := m.Submit(context.Background(), "test.partial", "Partial", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j = waitDone(t, m, j.ID)
+	var res map[string]string
+	_ = json.Unmarshal(j.Result, &res)
+	if j.State != Failed || j.Error != "step 2 broke" || res["snapshot"] != "s1" {
+		t.Fatalf("job: %+v %s", j, j.Result)
+	}
+}

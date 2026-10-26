@@ -1,0 +1,23 @@
+# Prowlarr for HardyOS (LinuxServer.io image).
+services:
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:2.6.5
+    environment:
+      # The image starts as root, then runs Prowlarr as this user and group.
+      PUID: ${HARDY_UID}
+      PGID: ${HARDY_GID}
+      UMASK: "002"
+      TZ: ${HARDY_TZ}
+    ports:
+      - "${HARDY_PORT_WEB}:9696"
+    volumes:
+      - ${HARDY_APP_DATA}/config:/config
+    extra_hosts:
+      # Reach Sonarr and Radarr through the server.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:9696/ping"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3

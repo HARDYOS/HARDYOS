@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -107,7 +108,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		bk = &backups.Service{DB: db, Priv: pc, Jobs: manager, Notify: notifications, Log: log, Current: version.Version}
 		bk.RegisterJobs(manager)
 	}
-	appStore := &appstore.Store{CatalogDir: appstore.DefaultCatalogDir, UploadDir: appstore.DefaultUploadDir}
+	appStore := &appstore.Store{CatalogDir: appstore.DefaultCatalogDir, UploadDir: appstore.DefaultUploadDir, DB: db}
 	if !live {
 		api.RegisterAppJobs(manager, pc, appStore)
 	}
@@ -165,6 +166,18 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		if err != nil {
 			return fmt.Errorf("tls certificate: %w", err)
 		}
+		if !live {
+			// App windows: an HTTPS proxy per app with a web page (44300 + n).
+			// They listen where the desktop listens (-https's host), like the
+			// plain-HTTP branch below.
+			host, p, _ := net.SplitHostPort(httpsAddr)
+			port, _ := strconv.Atoi(p)
+			go handler.RunAppProxy(ctx, api.AppProxyOptions{
+				TLS:         &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+				DesktopPort: port,
+				ListenHost:  host,
+			})
+		}
 		serve(&http.Server{
 			Addr:              httpsAddr,
 			Handler:           handler,
@@ -177,6 +190,12 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		}
 	} else if httpAddr != "" {
 		log.Warn("HTTPS disabled: serving over plain HTTP (development only)")
+		if !live {
+			_, p, _ := net.SplitHostPort(httpAddr)
+			port, _ := strconv.Atoi(p)
+			host, _, _ := net.SplitHostPort(httpAddr)
+			go handler.RunAppProxy(ctx, api.AppProxyOptions{DesktopPort: port, ListenHost: host})
+		}
 		serve(&http.Server{Addr: httpAddr, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}, false)
 	} else {
 		return errors.New("both -https and -http are empty; nothing to serve")

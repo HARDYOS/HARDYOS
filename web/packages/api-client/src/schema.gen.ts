@@ -84,7 +84,19 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Sign in */
+        /**
+         * Sign in
+         * @description Local HardyOS accounts sign in with their username. When this server
+         *     has a domain, domain accounts sign in as `alice`, `HOME\alice` or
+         *     `alice@home.example.net` (a local account wins for a bare name); the
+         *     password is checked by Kerberos with the domain controller this
+         *     server runs itself, never with its partners. The role is admin for
+         *     members of Domain Admins (`<domain SID>-512`) or of the HardyOS
+         *     Admins group recorded by its SID; group names don't count.
+         *     401 codes: `bad_credentials` (wrong password or unknown name),
+         *     `unknown_domain`, `account_disabled`, `account_locked`,
+         *     `account_expired`, `account_unavailable`, `password_expired`.
+         */
         post: operations["login"];
         delete?: never;
         options?: never;
@@ -1303,6 +1315,97 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/shares": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Every shared folder on every pool
+         * @description Everyone signed in may list them. Access rules, apps and storage
+         *     details (pool, dataset) are shown to administrators only.
+         */
+        get: operations["listShares"];
+        put?: never;
+        /** Create a shared folder (runs as a job) */
+        post: operations["createShare"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/shares/starter": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create the starter shared folders on a pool (runs as a job): Media with Movies, TV, Music and Photos, and Backups
+         * @description Folders that already exist are skipped.
+         */
+        post: operations["createStarterShares"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/shares/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** One shared folder */
+        get: operations["getShare"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete a shared folder and every file in it (runs as a job)
+         * @description Refused while an app uses it (409, naming the apps).
+         */
+        delete: operations["deleteShare"];
+        options?: never;
+        head?: never;
+        /**
+         * Change a shared folder's name, description, quota, flags or access rules (runs as a job)
+         * @description Fields left out keep their values.
+         */
+        patch: operations["updateShare"];
+        trace?: never;
+    };
+    "/shares/{id}/folders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Subfolders of a folder inside a shared folder (for pickers)
+         * @description Hidden folders and links aren't listed; paths can't leave the shared folder.
+         */
+        get: operations["listShareFolders"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/domain": {
         parameters: {
             query?: never;
@@ -1551,6 +1654,32 @@ export interface paths {
         patch: operations["updateDomainGroup"];
         trace?: never;
     };
+    "/domain/admins-group": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create the HardyOS Admins group and record its SID (runs as a job)
+         * @description Members of the recorded group are HardyOS administrators, by SID, so
+         *     renaming it doesn't matter and another group given its name grants
+         *     nothing. When a group called HardyOS Admins already exists that
+         *     HardyOS didn't record, the answer is 409 `admins_group_exists`
+         *     (the message lists its members) unless `adopt` is true, after an
+         *     administrator checked them. 409 `admins_group_recorded` when it's
+         *     already set up. The job's result is a DomainAdminsGroup.
+         */
+        post: operations["setUpDomainAdminsGroup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/apps": {
         parameters: {
             query?: never;
@@ -1641,7 +1770,11 @@ export interface paths {
          * Install an app (runs as a job; downloads its images and starts it)
          * @description Password settings are handed to the job in memory, never stored with
          *     it. Installing an app that's already installed reinstalls it with the
-         *     given settings, keeping its data and generated passwords.
+         *     given settings, keeping its data and generated passwords. When the
+         *     installed (or kept) app with that id came from another source or
+         *     another imported catalog (`AppPlan.replaceSourceRequired`), the
+         *     answer is 409 `replace_source_required` unless `replaceSource` is
+         *     true; a confirmed replacement is audited (`apps.replace_source`).
          */
         post: operations["installApp"];
         delete?: never;
@@ -1681,8 +1814,18 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Update an app to the catalog's version, or to an uploaded package (runs as a job)
-         * @description The app keeps its data, ports and settings, and downloads newer images.
+         * Update an app (runs as a job; a snapshot is taken first)
+         * @description Without a body: to the newest version in the catalog the app came from
+         *     (HardyOS's or an imported one). Uploaded and custom apps name the new
+         *     package. The app keeps its data, ports, settings and shares. The job
+         *     snapshots the app first; if a later step fails it ends with
+         *     `result.snapshot` so the App Store can offer to roll back. An update
+         *     of a non-catalog app that asks for new permissions answers 400
+         *     `grants_required` (with `grants`) before anything changes: send it
+         *     again with every grant in `grants`. An imported app updates from the
+         *     catalog it was installed from (by its id). A package from another
+         *     source or catalog answers 409 `replace_source_required` unless
+         *     `replaceSource` is true.
          */
         post: operations["updateApp"];
         delete?: never;
@@ -1724,6 +1867,170 @@ export interface paths {
         get: operations["getAppLogs"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/apps/catalogs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Imported (third-party) app catalogs */
+        get: operations["listImportedAppCatalogs"];
+        put?: never;
+        /**
+         * Import a catalog from an https index.json, or refresh one already imported
+         * @description hardyd fetches the index (at most 1 MB, 30 second timeout). Apps with
+         *     problems are left out and described in `lastError`. Packages are
+         *     downloaded when first planned and used only if their SHA-256 matches.
+         *     Every connection is checked after DNS and after each redirect:
+         *     addresses on this server or its own networks (loopback, link-local,
+         *     RFC 1918, CGNAT, unique-local) are refused unless `localNetwork` is
+         *     true for the catalog ("On my network", audited as
+         *     `apps.catalog.local_network`); unspecified, multicast and broadcast
+         *     addresses always are.
+         */
+        post: operations["importAppCatalog"];
+        /** Forget an imported catalog (apps installed from it keep running) */
+        delete: operations["removeAppCatalog"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/apps/custom": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Build a custom app (source custom) from a pasted Compose file and plan its install
+         * @description The Compose file publishes each port as `${HARDY_PORT_<NAME>}` and
+         *     keeps its data under `${HARDY_APP_DATA}`. Custom apps are sandboxed
+         *     like uploads; hardyd-priv checks the file when it prepares the app.
+         *     Install it with `source: custom` and the plan's `package.ref`.
+         */
+        post: operations["createCustomApp"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/apps/{id}/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * An installed app's settings, ports, shared folders, grants and limits
+         * @description Password settings are never returned (`value` is empty, `set` says whether one exists).
+         */
+        get: operations["getAppConfig"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Change an installed app (runs as a job, then restarts it)
+         * @description Omitted fields keep their values; a password left empty keeps its
+         *     value. A share choice with `share: ""` removes that shared folder.
+         *     `grants` replaces the app's extra permissions (non-catalog apps; each
+         *     change is audited).
+         */
+        patch: operations["reconfigureApp"];
+        trace?: never;
+    };
+    "/apps/{id}/access": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Who may use an app (empty = everyone signed in) */
+        get: operations["getAppAccess"];
+        /** Choose who may use an app (administrators always may) */
+        put: operations["setAppAccess"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/apps/{id}/snapshots": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Snapshots of an app's dataset, newest first (to roll back to) */
+        get: operations["listAppSnapshots"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/apps/{id}/rollback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Put an app back to one of its snapshots (runs as a job; later changes are lost) */
+        post: operations["rollbackApp"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/apps/{id}/open": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Where to open an app's web page, for a desktop window or a new tab
+         * @description Anyone who may use the app. With the window proxy running, the URL is
+         *     the app's HTTPS proxy port with a single-use token valid for a minute;
+         *     ask again for every window or tab.
+         */
+        post: operations["openApp"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1858,6 +2165,8 @@ export interface components {
         SetupStatus: {
             /** @description True until the first administrator exists */
             needsAdmin: boolean;
+            /** @description This server has a domain whose accounts can sign in to the desktop */
+            domainSignIn?: boolean;
         };
         SetupAdminRequest: {
             username: string;
@@ -1876,6 +2185,15 @@ export interface components {
         /** @enum {string} */
         Role: "admin" | "user";
         User: {
+            /**
+             * @description A local HardyOS account, or a domain account that has signed in to the desktop
+             * @enum {string}
+             */
+            source: "local" | "domain";
+            /** @description How access rules name this user — `alice` for local accounts, `HOME\alice` for domain accounts */
+            principal: string;
+            /** @description A domain account's groups as `HOME\Family` (Domain Users included), looked up at sign-in and at most every 10 minutes; empty for local accounts */
+            groups: string[];
             /** Format: int64 */
             id: number;
             username: string;
@@ -1889,6 +2207,8 @@ export interface components {
             createdAt: string;
             /** Format: date-time */
             lastLoginAt: string | null;
+            /** @description Why a domain account's role isn't what its groups give: its groups couldn't be looked up for over 30 minutes, so it has user rights until the domain answers again. Absent otherwise. */
+            roleNote?: string;
         };
         CreateUserRequest: {
             username: string;
@@ -2559,6 +2879,82 @@ export interface components {
         Enabled: {
             enabled: boolean;
         };
+        ShareRule: {
+            /** @enum {string} */
+            kind: "user" | "group" | "everyone";
+            /** @description HOME\alice, HOME\Family or a HardyOS account; empty for everyone */
+            name?: string;
+            /** @enum {string} */
+            level: "read" | "write" | "none";
+        };
+        ShareAppGrant: {
+            app: string;
+            /** @description The app's own Linux user ID */
+            uid: number;
+            /** @enum {string} */
+            level: "read" | "write";
+        };
+        Share: {
+            id: string;
+            name: string;
+            description: string;
+            pool: string;
+            dataset: string;
+            /** @description Where it is on the server */
+            path: string;
+            mounted: boolean;
+            /**
+             * Format: int64
+             * @description 0 for no quota
+             */
+            quotaBytes: number;
+            /** Format: int64 */
+            usedBytes: number;
+            /** @description Deleted files go to a recycle bin (with file sharing) */
+            recycle: boolean;
+            /** @description Guests may read it without signing in (with file sharing) */
+            guest: boolean;
+            /** @description Who may use it; empty means administrators only. Enforced with file sharing. */
+            access: components["schemas"]["ShareRule"][];
+            apps: components["schemas"]["ShareAppGrant"][];
+            /** Format: date-time */
+            createdAt: string;
+        };
+        ShareCreateRequest: {
+            pool: string;
+            /** @description 1-40 letters, digits, spaces and . - _ ( ) ' & */
+            name: string;
+            /** @description Defaults to one made from the name (Media -> media) */
+            id?: string;
+            description?: string;
+            /**
+             * Format: int64
+             * @description 0 for no quota
+             */
+            quotaBytes?: number;
+            recycle?: boolean;
+            guest?: boolean;
+            access?: components["schemas"]["ShareRule"][];
+            subfolders?: string[];
+        };
+        ShareUpdateRequest: {
+            name?: string;
+            description?: string;
+            /**
+             * Format: int64
+             * @description 0 removes the quota
+             */
+            quotaBytes?: number;
+            recycle?: boolean;
+            guest?: boolean;
+            access?: components["schemas"]["ShareRule"][];
+        };
+        ShareStarterRequest: {
+            pool: string;
+            /** @description Media with Movies */
+            media: boolean;
+            backups: boolean;
+        };
         DomainConfig: {
             /** @example home.hardynetworks.net */
             domain: string;
@@ -2582,6 +2978,8 @@ export interface components {
             host?: string;
             /** @description This DC joined an existing domain */
             joined?: boolean;
+            /** @description objectSid of the HardyOS Admins group, recorded when HardyOS created it or an administrator adopted an existing one; its members are HardyOS administrators whatever the group is called now. Absent until then. */
+            adminsGroupSid?: string;
             /** @description The domain's other domain controllers */
             others?: components["schemas"]["DomainController"][];
         };
@@ -2669,9 +3067,20 @@ export interface components {
         };
         DomainGroup: {
             name: string;
+            /** @description The group's objectSid; it stays when the group is renamed */
+            sid?: string;
             description: string;
             members: string[];
             builtin: boolean;
+        };
+        DomainAdminsGroup: {
+            name: string;
+            sid: string;
+            members: string[];
+            /** @description HardyOS created the group just now */
+            created: boolean;
+            /** @description An existing group was recorded */
+            adopted: boolean;
         };
         AppsOverview: {
             /** @description False when this build has no Docker */
@@ -2697,6 +3106,20 @@ export interface components {
             };
         };
         App: {
+            source: components["schemas"]["AppSource"];
+            /** @description The imported catalog's name (source imported) */
+            sourceName: string;
+            /** @description The app's own Linux user ID (30000-30999) */
+            uid: number;
+            /** @description Every shared folder the app declares; an empty share = none chosen */
+            shares: components["schemas"]["AppShare"][];
+            /** @description Extra permissions an administrator allowed */
+            grants: string[];
+            limits: components["schemas"]["AppLimits"];
+            /** @description What the app may do beyond a plain container */
+            permissions: string[];
+            /** @description Why the app can't start until an administrator changes its settings (a rollback brought back a version that needs a permission or shared folder it doesn't have now). Saving the settings with what's missing clears it. Absent otherwise. */
+            blocked?: string;
             id: string;
             name: string;
             version: string;
@@ -2734,10 +3157,25 @@ export interface components {
             updatedAt: string;
         };
         AppPackage: {
-            /** @enum {string} */
-            source: "catalog" | "upload";
-            /** @description The app id (catalog) or the package's SHA-256 (upload) */
+            source: components["schemas"]["AppSource"];
+            /** @description The app id (catalog) or the package's SHA-256 (upload */
             ref: string;
+            /** @description The imported catalog's name (source imported) */
+            sourceName: string;
+            /**
+             * Format: int64
+             * @description The imported catalog's id (source imported); send it back with the ref
+             */
+            catalogId?: number;
+            /**
+             * @description Extra permissions the package asks for. Catalog apps get them by
+             *     declaring them; any other source needs each one in the install's
+             *     `grants`.
+             */
+            grants: components["schemas"]["AppEntryGrant"][];
+            shares: components["schemas"]["AppShareMount"][];
+            /** @description The app uses the host network */
+            fixedPorts: boolean;
             id: string;
             name: string;
             version: string;
@@ -2773,9 +3211,13 @@ export interface components {
             images: string[];
         };
         AppPackageRef: {
-            /** @enum {string} */
-            source: "catalog" | "upload";
+            source: components["schemas"]["AppSource"];
             ref: string;
+            /**
+             * Format: int64
+             * @description The imported catalog the package is from (required for source imported); it must list that SHA-256
+             */
+            catalogId?: number;
         };
         AppPlan: {
             package: components["schemas"]["AppPackage"];
@@ -2790,13 +3232,25 @@ export interface components {
             installedVersion: string;
             /** @description The app's data was kept when it was removed and will be picked back up */
             keptData: boolean;
+            /** @description Where the installed (or kept) app with this id came from; empty when none or unknown */
+            installedSource: string;
+            /** @description The imported catalog it came from (installedSource imported) */
+            installedSourceName: string;
+            /** @description This package is from another source or imported catalog than the installed (or kept) app with the same id, and would take over its data and passwords: the install must send replaceSource true. */
+            replaceSourceRequired: boolean;
             available: boolean;
             problem: string;
         };
         AppInstallRequest: {
-            /** @enum {string} */
-            source: "catalog" | "upload";
+            source: components["schemas"]["AppSource"];
             ref: string;
+            /**
+             * Format: int64
+             * @description The imported catalog (source imported)
+             */
+            catalogId?: number;
+            /** @description Confirms replacing an installed or kept app with the same id from another source or catalog (AppPlan.replaceSourceRequired) */
+            replaceSource?: boolean;
             /** @description The pool for Docker and every app; only needed the first time */
             pool?: string;
             ports?: {
@@ -2805,12 +3259,213 @@ export interface components {
             settings?: {
                 [key: string]: string;
             };
+            /** @description The shared folder for each of the package's shares, by share name */
+            shares?: {
+                [key: string]: components["schemas"]["AppShareChoice"];
+            };
+            /** @description Extra permissions an administrator ticked (non-catalog apps only; each is audited) */
+            grants?: string[];
+            limits?: components["schemas"]["AppLimits"];
+            /** @description Who may use the app; omitted or empty = everyone signed in */
+            access?: components["schemas"]["AppPrincipal"][];
         };
         AppRemoveRequest: {
             /** @description The app's name */
             confirm: string;
             /** @description Delete the app's files and database too */
             deleteData?: boolean;
+        };
+        /**
+         * @description Where a package came from: HardyOS's catalog, an upload, an imported catalog, or made from a Compose file
+         * @enum {string}
+         */
+        AppSource: "catalog" | "upload" | "imported" | "custom";
+        AppShareMount: {
+            /** @description MEDIA: the Compose file binds ${HARDY_SHARE_MEDIA} */
+            name: string;
+            label: string;
+            help?: string;
+            /**
+             * @description The most the app gets
+             * @enum {string}
+             */
+            access: "read" | "write";
+            /** @description Shared folder id to preselect */
+            suggest?: string;
+            required?: boolean;
+        };
+        AppShareChoice: {
+            /** @description Shared folder id; empty = none */
+            share: string;
+            /** @description Always empty: apps get whole shared folders (a subfolder could be swapped for a link) */
+            path?: string;
+            /** @enum {string} */
+            access?: "read" | "write";
+        };
+        AppShare: {
+            name: string;
+            label: string;
+            share: string;
+            path: string;
+            access: string;
+        };
+        AppLimits: {
+            /** @description 0 = no limit */
+            memoryMB: number;
+            /** @description 0 = no limit */
+            cpus: number;
+        };
+        AppEntryGrant: {
+            /** @description hostNetwork, gpu, device:/dev/... or cap:NAME */
+            grant: string;
+            label: string;
+        };
+        AppPrincipal: {
+            /** @enum {string} */
+            kind: "user" | "group" | "everyone";
+            /** @description alice (HardyOS), HOME\alice (domain user), HOME\Family (domain group); empty for everyone */
+            name: string;
+        };
+        AppAccess: {
+            principals: components["schemas"]["AppPrincipal"][];
+        };
+        AppSettingValue: {
+            env: string;
+            /** @description Empty for passwords */
+            value: string;
+            set: boolean;
+        };
+        AppConfig: {
+            id: string;
+            source: components["schemas"]["AppSource"];
+            sourceName: string;
+            uid: number;
+            /** @description The installed hardyapp.json */
+            manifest: {
+                [key: string]: unknown;
+            };
+            ports: {
+                [key: string]: number;
+            };
+            settings: components["schemas"]["AppSettingValue"][];
+            shares: components["schemas"]["AppShare"][];
+            grants: string[];
+            limits: components["schemas"]["AppLimits"];
+            package: components["schemas"]["AppPackage"];
+        };
+        AppConfigUpdate: {
+            ports?: {
+                [key: string]: number;
+            };
+            settings?: {
+                [key: string]: string;
+            };
+            shares?: {
+                [key: string]: components["schemas"]["AppShareChoice"];
+            };
+            grants?: string[];
+            limits?: components["schemas"]["AppLimits"];
+        };
+        AppUpdateRequest: {
+            source?: components["schemas"]["AppSource"];
+            ref?: string;
+            /**
+             * Format: int64
+             * @description The imported catalog (source imported)
+             */
+            catalogId?: number;
+            /** @description Confirms a package from another source or catalog than the app came from */
+            replaceSource?: boolean;
+            /** @description Replaces the app's extra permissions (when the new version asks for more) */
+            grants?: string[];
+        };
+        AppGrantsNeeded: components["schemas"]["Error"] & {
+            grants?: components["schemas"]["AppEntryGrant"][];
+        };
+        AppSnapshot: {
+            name: string;
+            /** Format: date-time */
+            created: string;
+            /** @description The app's version when the snapshot was taken */
+            version: string;
+        };
+        AppSnapshots: {
+            snapshots: components["schemas"]["AppSnapshot"][];
+        };
+        AppRollbackRequest: {
+            snapshot: string;
+            /** @description The app's name */
+            confirm: string;
+        };
+        AppOpen: {
+            url: string;
+            /** @description Through HardyOS's HTTPS window proxy (can be shown in a desktop window) */
+            proxied: boolean;
+        };
+        AppCatalogApp: {
+            id: string;
+            name: string;
+            version: string;
+            summary: string;
+            url: string;
+            /** @description Install with source imported and this as ref */
+            sha256: string;
+            /** @description A data URL, or empty */
+            icon: string;
+        };
+        AppCatalog: {
+            /** Format: int64 */
+            id: number;
+            url: string;
+            name: string;
+            /** Format: date-time */
+            addedAt: string;
+            addedBy: string;
+            /** Format: date-time */
+            fetchedAt: string | null;
+            lastError: string;
+            /** @description "On my network": the catalog may be on this server or its own networks */
+            localNetwork: boolean;
+            apps: components["schemas"]["AppCatalogApp"][];
+        };
+        AppCatalogRequest: {
+            /** @description https:// address of the catalog's index.json */
+            url: string;
+            /** @description "On my network": allow this catalog on this server or its own networks (refused otherwise). Omitted keeps a refreshed catalog's setting. */
+            localNetwork?: boolean;
+        };
+        AppCatalogRemoveRequest: {
+            /** Format: int64 */
+            id: number;
+        };
+        CustomAppPort: {
+            /** @description WEB: published as ${HARDY_PORT_WEB} */
+            name: string;
+            label: string;
+            default: number;
+            /** @enum {string} */
+            protocol?: "tcp" | "udp";
+        };
+        CustomAppFolder: {
+            /** @description Inside ${HARDY_APP_DATA} */
+            path: string;
+            /** @description uid:gid */
+            owner?: string;
+            /** @description Octal, like 0755 */
+            mode?: string;
+        };
+        CustomAppRequest: {
+            id: string;
+            name: string;
+            /** @description Default 1.0.0 */
+            version?: string;
+            summary?: string;
+            compose: string;
+            ports: components["schemas"]["CustomAppPort"][];
+            /** @description The port with the app's web page */
+            webPort?: string;
+            webPath?: string;
+            folders?: components["schemas"]["CustomAppFolder"][];
         };
     };
     responses: {
@@ -3010,6 +3665,15 @@ export interface operations {
             429: {
                 headers: {
                     "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description This server's own domain controller isn't answering (`domain_unavailable`), its clock is too far off (`clock_skew`), or this server runs no domain controller of its own (`no_local_dc`) */
+            503: {
+                headers: {
                     [name: string]: unknown;
                 };
                 content: {
@@ -5001,6 +5665,173 @@ export interface operations {
             403: components["responses"]["Forbidden"];
         };
     };
+    listShares: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Shared folders, by name */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        shares: components["schemas"]["Share"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    createShare: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ShareCreateRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    createStarterShares: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ShareStarterRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    getShare: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The shared folder */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Share"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteShare: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description The shared folder's name, typed to confirm */
+                    confirm: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    updateShare: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ShareUpdateRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listShareFolders: {
+        parameters: {
+            query?: {
+                /** @description A folder inside the share, like Movies/Kids; empty for the share itself */
+                path?: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Folder names */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        folders: string[];
+                    };
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
     getDomain: {
         parameters: {
             query?: never;
@@ -5496,6 +6327,30 @@ export interface operations {
             403: components["responses"]["Forbidden"];
         };
     };
+    setUpDomainAdminsGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description Use the existing group called HardyOS Admins */
+                    adopt?: boolean;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
     listApps: {
         parameters: {
             query?: never;
@@ -5622,6 +6477,7 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     removeApp: {
@@ -5657,15 +6513,24 @@ export interface operations {
         };
         requestBody?: {
             content: {
-                "application/json": components["schemas"]["AppPackageRef"];
+                "application/json": components["schemas"]["AppUpdateRequest"];
             };
         };
         responses: {
             202: components["responses"]["JobAccepted"];
-            400: components["responses"]["Invalid"];
+            /** @description Invalid, or new permissions need allowing (code grants_required) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppGrantsNeeded"];
+                };
+            };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     appAction: {
@@ -5723,6 +6588,285 @@ export interface operations {
             400: components["responses"]["Invalid"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    listImportedAppCatalogs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Catalogs, by name */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppCatalog"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    importAppCatalog: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AppCatalogRequest"];
+            };
+        };
+        responses: {
+            /** @description The catalog */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppCatalog"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    removeAppCatalog: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AppCatalogRemoveRequest"];
+            };
+        };
+        responses: {
+            /** @description Removed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    createCustomApp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CustomAppRequest"];
+            };
+        };
+        responses: {
+            /** @description The install plan */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppPlan"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    getAppConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The configuration */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppConfig"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["Failed"];
+        };
+    };
+    reconfigureApp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AppConfigUpdate"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getAppAccess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The access list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppAccess"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    setAppAccess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AppAccess"];
+            };
+        };
+        responses: {
+            /** @description The stored access list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppAccess"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listAppSnapshots: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Snapshots */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppSnapshots"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["Failed"];
+        };
+    };
+    rollbackApp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AppRollbackRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    openApp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The address */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppOpen"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["Unavailable"];
         };
     };
     getInstallerStatus: {

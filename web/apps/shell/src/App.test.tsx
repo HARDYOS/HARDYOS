@@ -141,6 +141,35 @@ describe("App", () => {
     expect(dock.textContent).toContain("Resource Monitor");
   });
 
+  it("offers domain sign-in and keeps domain users away from the HardyOS password", async () => {
+    let signedIn = false;
+    let loginBody: Record<string, unknown> | null = null;
+    const alice = {
+      ...admin, id: 3, username: "HOME\\alice", displayName: "Alice Hardy", role: "user", breakGlass: false,
+      source: "domain", principal: "HOME\\alice", groups: ["HOME\\Domain Users", "HOME\\Family"],
+    };
+    mockServer({
+      "GET /setup": () => ({ body: { needsAdmin: false, domainSignIn: true } }),
+      "GET /auth/me": () => (signedIn ? { body: alice } : { status: 401, body: { code: "unauthenticated", message: "x" } }),
+      "POST /auth/login": (req) => {
+        void req.clone().json().then((b) => (loginBody = b as Record<string, unknown>));
+        signedIn = true;
+        return { body: alice };
+      },
+      ...desktopRoutes,
+    });
+    renderApp();
+    expect(await screen.findByText(/You can use your domain account/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Username"), { target: { value: "HOME\\alice" } });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "Al1ce-Passw0rd!" } });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await screen.findByRole("navigation", { name: "Dock" });
+    expect(loginBody).toMatchObject({ username: "HOME\\alice" });
+    fireEvent.click(screen.getByRole("button", { name: "Account: Alice Hardy" }));
+    expect(screen.getByText(/Your password belongs to the domain/)).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: /Change password/ })).toBeNull();
+  });
+
   it("runs the live installer: unlock, choose disks, settings, admin, install", async () => {
     let unlocked = false;
     let job: Record<string, unknown> | null = null;
