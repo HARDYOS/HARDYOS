@@ -303,6 +303,7 @@ func (d *FS) create(ctx context.Context, name string, flag int) (webdav.File, er
 	if w.top() || w.path == "" {
 		return nil, os.ErrPermission
 	}
+	exists := false
 	if e, err := d.Files.Stat(ctx, d.Who, w.share, w.path); err == nil {
 		if e.Dir {
 			return nil, os.ErrPermission
@@ -310,6 +311,15 @@ func (d *FS) create(ctx context.Context, name string, flag int) (webdav.File, er
 		if flag&os.O_EXCL != 0 {
 			return nil, os.ErrExist
 		}
+		// Replacing a file needs write access to that file itself, not
+		// just its folder (a rename into place would only check the
+		// folder): try opening it for writing as the person.
+		wf, _, err := d.Files.OpenWrite(ctx, d.Who, w.share, w.path)
+		if err != nil {
+			return nil, osErr(err)
+		}
+		_ = wf.Close()
+		exists = true
 	} else if !errors.Is(err, files.ErrNotFound) {
 		return nil, osErr(err)
 	}
@@ -323,7 +333,7 @@ func (d *FS) create(ctx context.Context, name string, flag int) (webdav.File, er
 		return nil, osErr(err)
 	}
 	d.forget()
-	return &writeFile{fs: d, ctx: ctx, w: w, tmp: tmp, f: f, name: path.Base(w.path)}, nil
+	return &writeFile{fs: d, ctx: ctx, w: w, tmp: tmp, f: f, name: path.Base(w.path), replaces: exists}, nil
 }
 
 // ---- file info -------------------------------------------------------------
@@ -549,6 +559,8 @@ type writeFile struct {
 	werr    error
 	closed  bool
 	modTime time.Time
+	// replaces: the target existed; its old version is recycled first.
+	replaces bool
 }
 
 func (f *writeFile) Write(p []byte) (int, error) {
@@ -605,6 +617,14 @@ func (f *writeFile) Close() error {
 			return cerr
 		}
 		return errors.New("the upload broke off; nothing was changed")
+	}
+	if f.replaces {
+		// The old version goes where a delete would put it (the recycle
+		// bin when the folder has one), never silently away.
+		if _, err := f.fs.Files.DeleteItem(ctx, f.fs.Who, f.w.share, f.w.path, false); err != nil && !errors.Is(err, files.ErrNotFound) {
+			_, _ = f.fs.Files.DeleteItem(ctx, f.fs.Who, f.w.share, f.tmp, true)
+			return osErr(err)
+		}
 	}
 	if err := f.fs.Files.Replace(ctx, f.fs.Who, f.w.share, f.tmp, f.w.path); err != nil {
 		_, _ = f.fs.Files.DeleteItem(ctx, f.fs.Who, f.w.share, f.tmp, true)

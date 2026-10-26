@@ -83,6 +83,17 @@ func TestRealSSHD(t *testing.T) {
 		if !strings.Contains(string(out), "x11forwarding yes") || !strings.Contains(string(out), "forcecommand none") {
 			t.Errorf("root's settings changed (on=%v):\n%s", on, out)
 		}
+		// The effective-config check reads this sshd's -T output right: a
+		// domain-style name (matched by "Match User") passes with the
+		// drop-in on, and fails with it off.
+		args := append([]string{"-f", filepath.Join(dir, "sshd_config"), "-h", key}, EffectiveArgs(`HOME\probe`)...)
+		out, err = exec.Command(sshd, args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("sshd -T: %v %s", err, out)
+		}
+		if err := CheckEffective(string(out), ViewsRoot); (err == nil) != on {
+			t.Errorf("CheckEffective on=%v: %v\n%s", on, err, out)
+		}
 	}
 	// A domain account (HARDYOS_SSHD_DOMAIN_USER, known to NSS) is locked in.
 	if u := os.Getenv("HARDYOS_SSHD_DOMAIN_USER"); u != "" {

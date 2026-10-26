@@ -22,13 +22,14 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/smb"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/sys/unix"
 )
 
 // TestSFTPMemberIntegration creates a domain (like TestSMBMemberIntegration),
 // joins the host's Samba to it, turns SFTP on for a shared folder and signs
 // in over SFTP as domain users through a private sshd (port 2222, its own
-// config including HardyOS's drop-in, in a mount namespace where
-// /etc/pam.d/sshd is HardyOS's edit of the system's). It checks: the views
+// config including HardyOS's drop-in, in a mount namespace of its own where
+// /etc/pam.d/sshd is HardyOS's edit of a copy of the system's). It checks: the views
 // (a folder by its rules, read-only binds for read access), writing as the
 // person, a wrong password and an account with nothing to see refused, no
 // TTY, no port forwarding, a command forced into SFTP. It needs root, the
@@ -103,12 +104,56 @@ func TestSFTPMemberIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = os.Chmod(views, 0o755)
-	t.Cleanup(func() { _ = syscall.Rmdir(views) })
-	pam := "@include common-auth\naccount required pam_nologin.so\n@include common-account\n@include common-session\n"
-	if b, err := os.ReadFile("/etc/pam.d/sshd"); err == nil {
-		pam = string(b)
+	t.Cleanup(func() {
+		// The views' root is a mount of its own once SFTP was on; the binds
+		// in it are gone by now (SFTP off), and it's private, so this
+		// reaches nothing else.
+		if l, err := (sftp.SysMounter{}).List(views); err != nil || len(l) > 0 {
+			t.Logf("views still hold mounts, left alone: %+v %v", l, err)
+			return
+		}
+		_ = unix.Unmount(views, unix.MNT_DETACH|unix.UMOUNT_NOFOLLOW)
+		if ok, _ := (sftp.SysMounter{}).IsMount(views); !ok {
+			_ = os.RemoveAll(views)
+		}
+	})
+	// The test's sshd sees a copy of the system's /etc/pam.d over the real
+	// one, in a mount namespace of its own; HardyOS edits the copy's sshd
+	// file, and the session check reads the system's real common-session
+	// (with its pam_systemd, if any). winbind is taken out of the copy's
+	// common-* stacks, as on HardyOS's image (diverted pam-auth-update
+	// profile), so domain passwords work only through HardyOS's block.
+	pamDir := sub("pam.d")
+	_ = os.Mkdir(pamDir, 0o755)
+	pamPath := filepath.Join(pamDir, "sshd")
+	ents, err := os.ReadDir("/etc/pam.d")
+	if err != nil {
+		t.Fatal(err)
 	}
-	_ = os.WriteFile(sub("pam-sshd"), []byte(pam), 0o644)
+	for _, e := range ents {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join("/etc/pam.d", e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasPrefix(e.Name(), "common-") {
+			var kept []string
+			for _, l := range strings.Split(string(b), "\n") {
+				if strings.Contains(l, "pam_winbind") {
+					// Keep the jumps right: pam_unix's success=N skipped it.
+					l = strings.Replace(l, "pam_winbind.so", "pam_deny.so", 1)
+				}
+				kept = append(kept, l)
+			}
+			b = []byte(strings.Join(kept, "\n"))
+		}
+		_ = os.WriteFile(filepath.Join(pamDir, e.Name()), b, 0o644)
+	}
+	if _, err := os.Stat(pamPath); err != nil {
+		t.Fatal("/etc/pam.d/sshd is missing (install openssh-server)")
+	}
 	key := sub("hostkey")
 	if out, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", key).CombinedOutput(); err != nil {
 		t.Fatalf("ssh-keygen: %v %s", err, out)
@@ -125,13 +170,20 @@ func TestSFTPMemberIntegration(t *testing.T) {
 			{Kind: shares.KindUser, Name: `HOME\alice`, Level: shares.LevelWrite},
 			{Kind: shares.KindUser, Name: `HOME\carol`, Level: shares.LevelNone},
 		}, Services: on}
+	// Real shares are verified ZFS mounts (shares.OpenRoot checks the
+	// device); this folder stands in for one on the test's file system.
+	var dst unix.Stat_t
+	if err := unix.Stat(docs.Path, &dst); err != nil {
+		t.Fatal(err)
+	}
+	docs.RootDev = uint64(dst.Dev)
 	src := &listShares{l: []shares.Share{docs}}
 	conf := sub("smb.conf")
 	mr := &memberRunner{conf: conf, resolv: sub("resolv.conf"), krb5: sub("krb5.conf"), log: sub("log"), procs: map[string]*memberProc{}}
 	t.Cleanup(mr.stopAll)
-	sr := &sshdRunner{inner: mr, sshd: sshd, conf: mainConf, key: key, pam: sub("pam-sshd"), log: sub("log", "sshd.out")}
+	sr := &sshdRunner{inner: mr, sshd: sshd, conf: mainConf, key: key, pam: pamDir, log: sub("log", "sshd.out")}
 	t.Cleanup(sr.stop)
-	sm := &sftp.Manager{Runner: sr, Root: views, DropIn: sub("sshd_config.d", "hardyos-sftp.conf"), PAMPath: sub("pam-sshd"), CommonAuth: sub("common-auth")}
+	sm := &sftp.Manager{Runner: sr, Root: views, DropIn: sub("sshd_config.d", "hardyos-sftp.conf"), PAMPath: pamPath, CommonAuth: sub("common-auth")}
 	m := &smb.Manager{
 		Runner: mr, Shares: src, ServerName: "NASIT", Port: 4455, NoDataset: true,
 		DataDir: sub("data"), ConfPath: conf, Krb5Conf: sub("krb5.conf"), NSSwitch: sub("nsswitch.conf"), AvahiService: sub("avahi", "hardyos-smb.service"),
@@ -147,6 +199,10 @@ func TestSFTPMemberIntegration(t *testing.T) {
 	t.Cleanup(func() {
 		_, _ = sm.Apply(ctx, false, nil, nil)
 		m.Wait()
+		// The failed-password tallies this test left (pam_faillock's default dir).
+		for u := range users {
+			_ = exec.Command("faillock", "--user", `HOME\`+u, "--reset").Run()
+		}
 		if !hadGroup {
 			_ = exec.Command("groupdel", sftp.Group).Run()
 		}
@@ -166,7 +222,7 @@ func TestSFTPMemberIntegration(t *testing.T) {
 	var st *smb.Status
 	// winbind may need a moment for fresh accounts.
 	for i := 0; i < 10; i++ {
-		if st, err = m.SetSettings(ctx, smb.SettingsArgs{SFTPEnabled: &yes}); err == nil && st.SFTP != nil && st.SFTP.Users >= 3 {
+		if st, err = m.SetSettings(ctx, smb.SettingsArgs{SFTPEnabled: &yes}); err == nil && st.SFTP != nil && st.SFTP.Users >= 2 {
 			break
 		}
 		time.Sleep(3 * time.Second)
@@ -236,6 +292,66 @@ func TestSFTPMemberIntegration(t *testing.T) {
 	if _, err := dial("carol", users["carol"]); err == nil {
 		t.Error("carol, with nothing to see, got in")
 	}
+	// Domain Admins get no view unless File Services allows them (alice,
+	// bob: the two with something to see).
+	if st.SFTP.Users != 2 {
+		t.Errorf("accounts with a view: %d", st.SFTP.Users)
+	}
+	if _, err := dial("administrator", pw); err == nil {
+		t.Error("the domain administrator got in with administrators off")
+	}
+
+	// Too many wrong passwords lock the name for a while (pam_faillock),
+	// even with the right one, without asking the DC.
+	for i := 0; i < sftp.FaillockDeny; i++ {
+		if c, err := dial("bob", fmt.Sprintf("Wrong-%d-Passw0rd", i)); err == nil {
+			c.Close()
+			t.Fatal("a wrong password got in")
+		}
+	}
+	if out, _ := exec.Command("faillock", "--user", `HOME\bob`).CombinedOutput(); strings.Count(string(out), "RHOST") < sftp.FaillockDeny {
+		pamNow, _ := exec.Command("nsenter", "-t", strconv.Itoa(sr.cmd.Process.Pid), "-m", "cat", "/etc/pam.d/sshd").CombinedOutput()
+		t.Errorf("wrong passwords not counted; faillock:\n%s\nsshd's PAM file:\n%s", out, pamNow)
+	}
+	if c, err := dial("bob", users["bob"]); err == nil {
+		c.Close()
+		out, _ := exec.Command("faillock", "--user", `HOME\bob`).CombinedOutput()
+		t.Errorf("bob got in after too many wrong passwords; faillock:\n%s", out)
+	}
+	_ = exec.Command("faillock", "--user", `HOME\bob`, "--reset").Run()
+	if c, err := dial("bob", users["bob"]); err != nil {
+		t.Errorf("bob after the lock was reset: %v", err)
+	} else {
+		c.Close()
+	}
+
+	// Something that overrides HardyOS's settings (an earlier drop-in):
+	// the effective-config check fails, PAM stops taking domain passwords
+	// and File Services says why; fixed, it works again.
+	override := sub("sshd_config.d", "00-it-override.conf")
+	_ = os.WriteFile(override, []byte("Match User *\\*\n\tForceCommand /bin/true\nMatch all\n"), 0o644)
+	st, err = m.SetSettings(ctx, smb.SettingsArgs{SFTPEnabled: &yes})
+	if err != nil || st.SFTP == nil || !strings.Contains(st.SFTP.Problem, "forcecommand") {
+		t.Errorf("an override wasn't noticed: %v %+v", err, st.SFTP)
+	}
+	if b, _ := os.ReadFile(pamPath); strings.Contains(string(b), "pam_winbind") {
+		t.Error("PAM still takes domain passwords with sshd's settings overridden")
+	}
+	sr.reload()
+	if c, err := dial("alice", users["alice"]); err == nil {
+		c.Close()
+		t.Error("alice got in with sshd's settings overridden")
+	}
+	_ = os.Remove(override)
+	if st, err = m.SetSettings(ctx, smb.SettingsArgs{SFTPEnabled: &yes}); err != nil || st.SFTP == nil || st.SFTP.Problem != "" {
+		t.Errorf("after removing the override: %v %+v", err, st.SFTP)
+	}
+	sr.reload()
+	if c, err := dial("alice", users["alice"]); err != nil {
+		t.Errorf("alice after the fix: %v", err)
+	} else {
+		c.Close()
+	}
 
 	// Off: domain accounts are refused.
 	no := false
@@ -293,13 +409,17 @@ type sshdRunner struct {
 	done                      chan struct{}
 }
 
+// start runs sshd in a mount namespace of its own (a private copy of this
+// one, with a copy of /etc/pam.d holding HardyOS's sshd file). The views' binds are
+// private, so they never propagate into it: the namespace is a snapshot,
+// and reload starts sshd again in a fresh one.
 func (r *sshdRunner) start() error {
-	script := fmt.Sprintf(`mount --bind %s /etc/pam.d/sshd && exec "$@"`, r.pam)
 	if _, err := os.Stat("/etc/pam.d/sshd"); err != nil {
 		return errors.New("/etc/pam.d/sshd is missing (install openssh-server)")
 	}
-	r.cmd = exec.Command("unshare", "-m", "--propagation", "slave", "sh", "-c", script, "sh", r.sshd, "-D", "-e", "-f", r.conf, "-h", r.key)
-	f, _ := os.Create(r.log)
+	script := `mount --bind "$1" /etc/pam.d && shift && exec "$@"`
+	r.cmd = exec.Command("unshare", "-m", "--propagation", "private", "sh", "-c", script, "sh", r.pam, r.sshd, "-D", "-e", "-f", r.conf, "-h", r.key)
+	f, _ := os.OpenFile(r.log, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	r.cmd.Stdout, r.cmd.Stderr = f, f
 	r.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := r.cmd.Start(); err != nil {
@@ -334,6 +454,15 @@ func (r *sshdRunner) stop() {
 	}
 }
 
+// reload starts the test's sshd again: it reads its files again and sees
+// the views as they are now.
+func (r *sshdRunner) reload() {
+	if r.running() {
+		r.stop()
+		_ = r.start()
+	}
+}
+
 func (r *sshdRunner) Run(ctx context.Context, stdin []byte, name string, args ...string) (sysexec.Result, error) {
 	line := strings.Join(append([]string{name}, args...), " ")
 	switch line {
@@ -345,11 +474,11 @@ func (r *sshdRunner) Run(ctx context.Context, stdin []byte, name string, args ..
 		}
 		return sysexec.Result{ExitCode: 3}, nil
 	case "systemctl reload " + sftp.SSHUnit:
-		if r.running() {
-			_ = r.cmd.Process.Signal(syscall.SIGHUP)
-			time.Sleep(time.Second)
-		}
+		r.reload()
 		return sysexec.Result{}, nil
+	}
+	if name == "sshd" && len(args) > 0 && args[0] == "-T" {
+		return sysexec.Exec{}.Run(ctx, stdin, r.sshd, append([]string{"-f", r.conf, "-h", r.key}, args...)...)
 	}
 	return r.inner.Run(ctx, stdin, name, args...)
 }

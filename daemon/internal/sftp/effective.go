@@ -25,8 +25,17 @@ func CheckEffective(out, root string) error {
 			continue
 		}
 		k, v, _ := strings.Cut(l, " ")
-		k = strings.ToLower(k)
-		got[k] = append(got[k], strings.TrimSpace(v))
+		k, v = strings.ToLower(k), strings.TrimSpace(v)
+		// A list (AllowGroups) is printed once per entry; both of the
+		// drop-in's Match blocks apply to an account matched by group and by
+		// name, so the same entry can come twice.
+		dup := false
+		for _, x := range got[k] {
+			dup = dup || x == v
+		}
+		if !dup {
+			got[k] = append(got[k], v)
+		}
 	}
 	want := []struct{ key, value string }{
 		{"forcecommand", "internal-sftp -d /"},
