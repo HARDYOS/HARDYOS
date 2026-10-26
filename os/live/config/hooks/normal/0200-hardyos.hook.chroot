@@ -12,6 +12,15 @@ systemctl enable zfs-zed.service || true
 systemctl disable samba-ad-dc.service smbd.service nmbd.service winbind.service >/dev/null 2>&1 || true
 systemctl mask samba-ad-dc.service >/dev/null 2>&1 || true
 
+# The file server's smbd and winbind (the host's own Samba) are unmasked but
+# stay disabled until the server joins a domain; hardyd-priv enables them
+# then. nmbd isn't used (no NetBIOS). Domain accounts can't sign in to the
+# console or SSH: winbind isn't in the PAM stack (SFTP adds it with care).
+systemctl unmask smbd.service winbind.service >/dev/null 2>&1 || true
+systemctl disable smbd.service winbind.service >/dev/null 2>&1 || true
+systemctl mask nmbd.service >/dev/null 2>&1 || true
+pam-auth-update --package --remove winbind >/dev/null 2>&1 || true
+
 # Docker stays off at boot: its data lives on a pool (not the boot
 # environment), so hardyd-priv starts it once that pool is mounted.
 systemctl disable docker.service docker.socket containerd.service >/dev/null 2>&1 || true

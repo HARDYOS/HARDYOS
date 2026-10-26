@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { initials } from "../../format";
-import { CalendarIcon, CpuIcon, DomainIcon, FolderIcon, GridIcon, LayersIcon, NetworkIcon, RefreshIcon, ShieldIcon, UsersIcon } from "../../icons";
+import { CalendarIcon, CpuIcon, DomainIcon, FolderIcon, GridIcon, LayersIcon, NetworkIcon, RefreshIcon, ShareIcon, ShieldIcon, UsersIcon } from "../../icons";
 import { type AppProps, useShell } from "../../shell";
 import { AppLayout, PageHeader, SideNav } from "../../ui";
 import { AuditLog } from "../shared";
 import { Backup } from "./Backup";
 import { DateTime } from "./DateTime";
 import { Domain } from "./Domain";
+import { FileServices } from "./FileServices";
 import { Hardware } from "./Hardware";
 import { Network } from "./Network";
 import { SharedFolders } from "./SharedFolders";
@@ -20,6 +21,7 @@ const SECTIONS = [
   { id: "users", label: "Users & Groups", icon: <UsersIcon size={16} /> },
   { id: "domain", label: "Domain", icon: <DomainIcon size={16} /> },
   { id: "shares", label: "Shared Folders", icon: <FolderIcon size={16} /> },
+  { id: "files", label: "File Services", icon: <ShareIcon size={16} /> },
   { id: "network", label: "Network", icon: <NetworkIcon size={16} /> },
   { id: "time", label: "Date & Time", icon: <CalendarIcon size={16} /> },
   { id: "hardware", label: "Hardware", icon: <CpuIcon size={16} /> },
@@ -57,6 +59,7 @@ export default function ControlPanel({ args }: AppProps) {
       {section === "users" && <Users />}
       {section === "domain" && <Domain />}
       {section === "shares" && <SharedFolders admin={user.role === "admin"} />}
+      {section === "files" && <FileServices admin={user.role === "admin"} />}
       {section === "network" && <Network />}
       {section === "time" && <DateTime />}
       {section === "hardware" && <Hardware />}

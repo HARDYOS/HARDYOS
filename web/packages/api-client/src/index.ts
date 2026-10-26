@@ -136,3 +136,6 @@ export type FileEntry = S["FileEntry"];
 export type FileVersion = S["FileVersion"];
 export type FileUpload = S["FileUpload"];
 export type FileTransferRequest = S["FileTransferRequest"];
+export type FileServicesStatus = S["FileServicesStatus"];
+export type FileServicesHomes = S["FileServicesHomes"];
+export type FileServicesShare = S["FileServicesShare"];

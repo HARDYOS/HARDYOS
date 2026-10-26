@@ -499,6 +499,116 @@ section 2; user notes in [shares.md](shares.md)).
   `HARDYOS_NFS_INTEGRATION=1`) mounts real exports over 127.0.0.1 with
   NFSv3 and v4.
 
+## SMB file server
+
+File sharing part A ([plans/file-sharing.md](plans/file-sharing.md)
+section 1; user guide in [file-sharing.md](file-sharing.md)).
+
+```
+   Windows / Mac ──SMB 445──► smbd (host) ──► /mnt/<pool>/shares/<id>   POSIX ACLs per rule
+                                 │ winbindd (host): HOME\alice → uid 101103 (rid)
+                                 ▼
+                     hdc-shim ──► DC (netns hardyos-dc, its own Samba)
+```
+
+- **Two Samba instances.** The DC's Samba stays in its namespace with its
+  own config and `/run/samba` (Domain controller). The host runs Debian's
+  `smbd.service` and `winbind.service` as a **member server** of the
+  domain; they're unmasked in the image but stay disabled until the join,
+  nmbd is masked (no NetBIOS). `internal/smb` (in hardyd-priv) owns
+  `/etc/samba/smb.conf`, `/etc/krb5.conf` (the realm, its DCs as KDCs) and
+  the winbind entries in `/etc/nsswitch.conf`. Samba's own databases
+  (machine account, ID map) and the keytab live in `/var/lib/hardyos-files`,
+  the dataset `rpool/hardyos-files` shared by every boot environment, with
+  `settings.json` (SMB on/off, home folders) and `state.json` (membership,
+  which shares' trees have their permissions).
+- **Joining.** `files.join` writes the config, then runs `net ads join`
+  with `PASSWD_FD=0` and the password on stdin (sysexec's `RunEnv`), never
+  on argv. For this server's own domain it uses the DC's details
+  (`domain.Manager.Load`: NetBIOS name, DCs with this one first as
+  `password server`, the HardyOS Admins SID); for another domain it asks a
+  DC found through DNS for the short name (`net ads lookup`). The
+  server registers its LAN addresses in the domain's DNS. The provision
+  and DC-join jobs in hardyd call `files.join` with the same password at
+  their end (a failure only leaves a note in the job), and deleting the
+  domain calls `files.leave` without a password. `files.leave {confirm}`
+  deletes the computer account when given the password, then disables the
+  units and wipes the machine secrets and ID map here.
+- **ID mapping.** `* : tdb 3000-7999`, `<NETBIOS> : rid 100000-999999`, so
+  `HOME\alice` (RID 1103) is uid 101103 on every HardyOS server, clear of
+  local users, app UIDs (30000-30999), NFS (31000-31999) and hardyos-files
+  (29999). `winbind use default domain = no`; template shell nologin.
+- **Shares.** One `[<Name>]` per shared folder with SMB on, mounted:
+  `vfs objects = catia fruit streams_xattr [shadow_copy2] acl_xattr
+  [recycle]`, `read only = yes` plus `valid users` / `read list` /
+  `write list` / `invalid users` from the rules (Everyone =
+  `@HOME\Domain Users`; `@HOME\Domain Admins` and the HardyOS Admins SID
+  always in the write list), `inherit acls`, `map acl inherit`,
+  `access based share enum`, guest (`guest ok`, `nobody` read-only) when
+  the folder's guest flag is on, `.recycle` hidden, `.hardyos*` vetoed.
+  Generated configs are checked with `testparm` before they replace the
+  old one; a changed `[global]` restarts winbind and smbd, a changed share
+  list reloads smbd.
+- **Permissions on disk.** The same rules become POSIX ACL entries
+  (`shares.PeopleACL`: users and groups resolved through winbind with
+  `getent`; write rwX, read r-X, a user with no access ---, `u:nobody:r-X`
+  for guests, Domain Admins rwX) on the share root at once
+  (`shares.SetPeopleRoot`, "other" cleared) and everything below in a
+  background walk (`shares.ApplyPeopleTree`, the app grants' no-follow fd
+  walker). Only entries in the domain and Samba ID ranges and the guest's
+  are file sharing's; app, NFS and file-manager entries are kept. A walk
+  runs again only when the entries changed (hash in `state.json`) or the
+  root's ACL differs. If Domain Admins can't be looked up (winbind down),
+  nothing is changed.
+- **Previous Versions.** `shadow_copy2` with `shadow:snapdir =
+  .zfs/snapshot`, `shadow:mountpoint` = the folder,
+  `shadow:snapprefix = ^hardyos-auto-\(hourly\|daily\|weekly\|monthly\)$`
+  (a basic regex, as Samba compiles it), `shadow:delimiter = _`,
+  `shadow:format = _%Y-%m-%d-%H%M`, UTC: part B's automatic snapshots.
+- **Recycle bin.** `vfs_recycle` into `.recycle/%U` (folders and versions
+  kept, access time set on delete); off on Time Machine folders. Once a day
+  hardyd-priv removes what has been there 30 days, through fds opened
+  with `O_NOFOLLOW` and `unlinkat`, staying on the folder's file system.
+- **Time Machine and Avahi.** Folders with Time Machine get
+  `fruit:time machine` (+ `max size`); `fruit:metadata = stream`,
+  `fruit:model = MacSamba` are global. hardyd-priv writes
+  `/etc/avahi/services/hardyos-smb.service` (`_smb._tcp`, `_device-info`,
+  `_adisk._tcp` with one `dkN` record per Time Machine folder) while smbd
+  serves; Samba's own mDNS registration is off.
+- **Home folders.** With File Services › Home folders on, hardyd-priv
+  makes `<pool>/homes` (posixacl, devices/setuid off, mode 0711) and one
+  dataset `<pool>/homes/<netbios>.<user>` (lower case, owner the user and
+  Domain Users, 0700, the default quota) for every turned-on account (an
+  LDAP search with the machine account), when turned on and every 10
+  minutes; it never removes one. `[homes]` has no path: winbind's
+  `template homedir = <mount>/<netbios>.%U` gives it, so no script runs
+  as root on connect.
+- **Staying in step.** `priv.RegisterFiles` returns a `ShareHook`:
+  `Changed` runs `files.apply` after every shared folder change (even a
+  failed one), `BeforeDelete` takes the folder out of smb.conf, stops its
+  walk and has smbd close it (`smbcontrol close-share`) so its dataset
+  isn't busy. `smb.Manager.Watch` applies again every 10 minutes (new
+  accounts' homes, a DC that moved) and empties old recycle-bin files
+  daily.
+- **Ops and API.** Root ops `files.status`, `files.join`, `files.leave`,
+  `files.settings`, `files.apply` (`priv/files_ops.go`). API
+  `GET /files` (everyone signed in; settings and problems for admins),
+  `POST /files/join`, `POST /files/leave` (`confirm: true`),
+  `PATCH /files/settings`, all three jobs (lock `files`), audited, with
+  passwords only in the job secret box.
+- **Web.** Control Panel › File Services (`FileServices.tsx`: join,
+  status, SMB on/off, home folders, leave, how to connect from Windows,
+  Mac, Linux and Time Machine) and the shared folder dialog's SMB section
+  (`ShareSMBSection.tsx`: SMB, Previous Versions, Time Machine and its
+  size, the folder's addresses).
+- **Tests.** Unit tests with `sysexec.Fake` (golden `smb.conf` with
+  tricky names, rule mapping, the password never on argv, homes, recycle
+  cleanup that never follows links); `TestPeopleACL` runs the walker on
+  the machine's file system; `TestSMBMemberIntegration` (CI's Samba job,
+  `HARDYOS_DC_INTEGRATION=1`, root) creates a DC, joins the host's Samba
+  to it from a temporary folder on port 4455 and checks read, write, no
+  access, guest, the recycle bin and Previous Versions with smbclient.
+
 ## Apps
 
 One-click Docker apps install from `.hardyapp` packages (format in

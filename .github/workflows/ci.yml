@@ -109,8 +109,10 @@ jobs:
       - name: install Samba
         run: |
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq samba samba-ad-dc samba-ad-provision samba-dsdb-modules winbind smbclient iputils-arping bind9-dnsutils
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq samba samba-ad-dc samba-ad-provision samba-dsdb-modules samba-vfs-modules winbind libnss-winbind smbclient iputils-arping bind9-dnsutils
           sudo systemctl stop smbd nmbd winbind samba-ad-dc 2>/dev/null || true
+          # The file server test looks domain accounts up through winbind.
+          sudo sed -i -E '/^(passwd|group):/{/winbind/!s/$/ winbind/}' /etc/nsswitch.conf
           sudo install -D -m 0755 packaging/domain/hardyos-dc-admin /usr/lib/hardyos/hardyos-dc-admin
           # A private LAN for the DC: cloud networks answer ARP for every address.
           sudo ip link add lan0 type dummy
@@ -123,6 +125,10 @@ jobs:
         run: |
           sudo HARDYOS_DC_INTEGRATION=1 HARDYOS_DC_TEST_ADDRESS=10.123.0.20/24 HARDYOS_DC_TEST_ADDRESS2=10.123.0.21/24 \
             HARDYOS_DC_TEST_GATEWAY=10.123.0.1 "$RUNNER_TEMP/domain.test" -test.run TestDCIntegration -test.v -test.timeout 30m
+      - name: file server - join as a member, SMB access by rule, guest, recycle bin, Previous Versions
+        run: |
+          sudo HARDYOS_DC_INTEGRATION=1 HARDYOS_DC_TEST_ADDRESS=10.123.0.20/24 HARDYOS_DC_TEST_GATEWAY=10.123.0.1 \
+            "$RUNNER_TEMP/domain.test" -test.run TestSMBMemberIntegration -test.v -test.timeout 20m
       - name: domain controller logs
         if: failure()
         run: |
