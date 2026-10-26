@@ -24,6 +24,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/install"
 	"github.com/hardyos/hardyos/daemon/internal/network"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
+	"github.com/hardyos/hardyos/daemon/internal/shares"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 	"github.com/hardyos/hardyos/daemon/internal/update"
 	"github.com/hardyos/hardyos/daemon/internal/version"
@@ -110,7 +111,9 @@ func main() {
 		go dc.Watch(ctx)
 		// Docker apps: Docker stays off at boot until hardyd-priv has pointed
 		// it at its dataset on the pool, then the apps come back by themselves.
-		am := &apps.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log}
+		shm := &shares.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log}
+		priv.RegisterShares(s, shm)
+		am := &apps.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log, Shares: shm}
 		priv.RegisterApps(s, am)
 		go am.OnStart(ctx)
 		priv.RegisterBootRepair(s, priv.StorageEnv{Runner: sysexec.Exec{}, Root: os.DirFS("/")}, "/", boot.ConfigPath)

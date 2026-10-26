@@ -76,6 +76,9 @@ type Manifest struct {
 	// Folders are created under ${HARDY_APP_DATA} before the app first starts,
 	// with the owner the containers run as.
 	Folders []Folder `json:"folders,omitempty"`
+	// Shares are shared folders the app can be given (chosen at install).
+	// The compose file binds ${HARDY_SHARE_<NAME>}.
+	Shares []ShareMount `json:"shares,omitempty"`
 	// Permissions beyond a plain container. Anything not declared here is refused.
 	Permissions Permissions `json:"permissions,omitempty"`
 }
@@ -126,6 +129,10 @@ type Folder struct {
 type Permissions struct {
 	Capabilities []string `json:"capabilities,omitempty"`
 	Devices      []string `json:"devices,omitempty"`
+	// HostNetwork lets services use network_mode: host.
+	HostNetwork bool `json:"hostNetwork,omitempty"`
+	// GPU lets the app use /dev/dri render nodes and NVIDIA GPUs if present.
+	GPU bool `json:"gpu,omitempty"`
 }
 
 // Package is a read and checked .hardyapp file.

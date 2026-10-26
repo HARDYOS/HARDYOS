@@ -1,0 +1,86 @@
+{
+  "format": 1,
+  "id": "apex-rmm",
+  "name": "Apex RMM",
+  "version": "1.0.0",
+  "summary": "Remote monitoring and management for your Windows, Mac and Linux computers.",
+  "description": "Apex RMM keeps an eye on every computer you look after: inventory, health and alerts, scripts, a remote terminal, remote control through its own RustDesk server, S3 backups and power reporting.\n\nAfter installing, open Apex RMM and follow its setup wizard. It asks for a one-time setup code, which is in the app's Logs here in the App Store. Then install the agent on your computers from the dashboard. Remote control uses the bundled RustDesk server: enter this server's address under Settings > RustDesk, and forward the RustDesk ports on your router if computers connect from outside your network.",
+  "publisher": "Hardy Networks",
+  "website": "https://github.com/hardynetworks/apex-rmm",
+  "icon": "icon.svg",
+  "arch": [
+    "amd64",
+    "arm64"
+  ],
+  "minMemoryMB": 1024,
+  "web": {
+    "port": "WEB",
+    "path": "/"
+  },
+  "ports": [
+    {
+      "name": "WEB",
+      "label": "Dashboard and agents",
+      "default": 8080
+    },
+    {
+      "name": "RD_NAT",
+      "label": "RustDesk NAT test",
+      "default": 21115
+    },
+    {
+      "name": "RD_ID",
+      "label": "RustDesk ID server",
+      "default": 21116
+    },
+    {
+      "name": "RD_ID_UDP",
+      "label": "RustDesk ID server (UDP)",
+      "default": 21116,
+      "protocol": "udp"
+    },
+    {
+      "name": "RD_RELAY",
+      "label": "RustDesk relay",
+      "default": 21117
+    },
+    {
+      "name": "RD_WEB",
+      "label": "RustDesk web client",
+      "default": 21118
+    },
+    {
+      "name": "RD_WEB_RELAY",
+      "label": "RustDesk web relay",
+      "default": 21119
+    }
+  ],
+  "settings": [
+    {
+      "env": "POSTGRES_PASSWORD",
+      "generate": "secret"
+    },
+    {
+      "env": "APP_KEY",
+      "generate": "secret"
+    },
+    {
+      "env": "APEX_TAG",
+      "label": "Apex RMM version",
+      "help": "The image tag to run. \"latest\" follows new releases when you update the app.",
+      "type": "text",
+      "default": "latest",
+      "required": true
+    }
+  ],
+  "folders": [
+    {
+      "path": "postgres",
+      "mode": "0700"
+    },
+    {
+      "path": "rustdesk",
+      "mode": "0755"
+    }
+  ]
+}

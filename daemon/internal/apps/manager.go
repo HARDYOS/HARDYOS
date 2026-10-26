@@ -75,6 +75,8 @@ type Manager struct {
 	StateDir string
 	// MemTotal reports the server's memory in bytes (tests can fake it).
 	MemTotal func() uint64
+	// Shares resolves and grants shared folders (nil: apps get none).
+	Shares ShareResolver
 
 	mu sync.Mutex // installs and removals, one at a time
 
@@ -118,6 +120,14 @@ type App struct {
 	Web         *AppWeb     `json:"web"`
 	InstalledAt time.Time   `json:"installedAt"`
 	UpdatedAt   time.Time   `json:"updatedAt"`
+
+	Source      Source     `json:"source"`
+	SourceName  string     `json:"sourceName"`
+	UID         int        `json:"uid"`
+	Shares      []AppShare `json:"shares"`
+	Grants      []string   `json:"grants"`
+	Limits      Limits     `json:"limits"`
+	Permissions []string   `json:"permissions"`
 }
 
 // Container is one service's container.
@@ -627,6 +637,13 @@ type PrepareArgs struct {
 	Host     string            `json:"host"`
 	Ports    map[string]int    `json:"ports,omitempty"`
 	Settings map[string]string `json:"settings,omitempty"`
+	// Source is where the package came from (see contract.go); it decides
+	// which permissions need explicit grants.
+	Source     Source                 `json:"source,omitempty"`
+	SourceName string                 `json:"sourceName,omitempty"`
+	Shares     map[string]ShareChoice `json:"shares,omitempty"`
+	Grants     []string               `json:"grants,omitempty"`
+	Limits     *Limits                `json:"limits,omitempty"`
 }
 
 // PrepareResult tells the install job what to download next.
