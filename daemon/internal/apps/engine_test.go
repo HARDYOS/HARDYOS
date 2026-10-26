@@ -252,12 +252,15 @@ func TestInstallWithSharesUIDAndLimits(t *testing.T) {
 	if fi, err := os.Stat(filepath.Join(data, ".unshared", "DOWNLOADS")); err != nil || !fi.IsDir() {
 		t.Errorf("unshared folder: %v", err)
 	}
-	// Folders without an owner belong to the app's user; explicit owners stay.
-	if uid := ownerOf(t, filepath.Join(data, "db")); uid != 30001 {
-		t.Errorf("db owner %d", uid)
-	}
-	if uid := ownerOf(t, filepath.Join(data, "cache")); uid != 999 {
-		t.Errorf("cache owner %d", uid)
+	// Folders without an owner belong to the app's user; explicit owners stay
+	// (only root can set owners).
+	if os.Geteuid() == 0 {
+		if uid := ownerOf(t, filepath.Join(data, "db")); uid != 30001 {
+			t.Errorf("db owner %d", uid)
+		}
+		if uid := ownerOf(t, filepath.Join(data, "cache")); uid != 999 {
+			t.Errorf("cache owner %d", uid)
+		}
 	}
 	if g := e.shares.take(); len(g) != 1 || g[0] != "grant media notes 30001 false" {
 		t.Errorf("grants: %v", g)
@@ -699,7 +702,9 @@ func TestAdaptGPU(t *testing.T) {
 	// A render node: the device stays and the service joins its group.
 	must(t, os.MkdirAll(filepath.Join(root, "dev/dri"), 0o755))
 	must(t, os.WriteFile(filepath.Join(root, "dev/dri/renderD128"), nil, 0o660))
-	must(t, os.Chown(filepath.Join(root, "dev/dri/renderD128"), 0, 993))
+	if os.Geteuid() == 0 {
+		must(t, os.Chown(filepath.Join(root, "dev/dri/renderD128"), 0, 993))
+	}
 	r = resolved(t, svc, "")
 	m := &Manager{Root: root}
 	hw := m.detectGPU()
