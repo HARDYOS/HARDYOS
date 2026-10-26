@@ -34,6 +34,14 @@ export async function openInNewTab(id: string, name: string) {
   }
 }
 
+/**
+ * What an app in a desktop window may do. No allow-top-navigation: an app
+ * can't send the desktop's tab somewhere else. allow-same-origin is the
+ * app's own origin (its proxy port), never the desktop's.
+ */
+export const APP_FRAME_SANDBOX =
+  "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads";
+
 /** Whether a URL can be shown inside the desktop (no mixed content). */
 export function frameable(o: AppOpen, desktopProtocol = window.location.protocol): boolean {
   return o.proxied || !(desktopProtocol === "https:" && o.url.startsWith("http:"));
@@ -93,6 +101,7 @@ export function AppFrameView({ id, name }: { id: string; name: string }) {
             src={open.url}
             title={name}
             allow="fullscreen; clipboard-read; clipboard-write; autoplay; picture-in-picture"
+            sandbox={APP_FRAME_SANDBOX}
             referrerPolicy="no-referrer"
           />
         ) : (

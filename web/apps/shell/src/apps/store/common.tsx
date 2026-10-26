@@ -80,6 +80,16 @@ export function jobSnapshot(j: Job): string | undefined {
   return s || undefined;
 }
 
+/**
+ * A rollback that put the data back but left the app stopped, because the
+ * snapshot's version needs a permission or shared folder it no longer has:
+ * what's missing, or undefined.
+ */
+export function jobRestored(j: Job): string | undefined {
+  const r = j.result as { restored?: boolean; blocked?: string } | null | undefined;
+  return r?.restored ? r.blocked || "It needs a permission it doesn't have now." : undefined;
+}
+
 // ---- shared folders --------------------------------------------------------
 // The shares API (docs/plans/app-store-v2.md section 1) is built alongside;
 // these calls follow its contract until its schemas are in the generated client.

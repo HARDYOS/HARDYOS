@@ -9,7 +9,7 @@ import { Alert, AppLayout, Badge, Button, EmptyState, ErrorBox, Field, Loading, 
 import { Dialog } from "../../ui/Dialog";
 import { toast } from "../../ui/toasts";
 import { JobProgress } from "../shared";
-import { AppDetails, LogsView } from "./AppDetails";
+import { AppDetails, BlockedAlert, LogsView, type Tab as DetailTab } from "./AppDetails";
 import { appWindowId, openInNewTab } from "./AppFrame";
 import { CatalogsPage, ImportedSections } from "./Catalogs";
 import { AppIcon, STATE, SourceBadge, appNotes, isRunning, jobSnapshot, useApps, useCatalog } from "./common";
@@ -35,6 +35,11 @@ export function AppStoreView({ isAdmin, onOpen = (a) => void openInNewTab(a.id, 
   const [section, setSection] = useState<Section>("installed");
   const [installing, setInstalling] = useState<{ ref: AppPackageRef; plan?: AppPlan } | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [detailTab, setDetailTab] = useState<DetailTab>("overview");
+  const select = (id: string, tab: DetailTab = "overview") => {
+    setSelected(id);
+    setDetailTab(tab);
+  };
   const apps = useApps();
   const updates = Object.keys(apps.data?.updates ?? {}).length;
 
@@ -73,9 +78,9 @@ export function AppStoreView({ isAdmin, onOpen = (a) => void openInNewTab(a.id, 
     >
       {section === "installed" &&
         (isAdmin && detail ? (
-          <DetailsWithRemove app={detail} update={apps.data?.updates[detail.id]} onBack={() => setSelected(null)} onOpen={onOpen} />
+          <DetailsWithRemove key={`${detail.id}:${detailTab}`} app={detail} update={apps.data?.updates[detail.id]} tab={detailTab} onBack={() => setSelected(null)} onOpen={onOpen} />
         ) : (
-          <Installed isAdmin={isAdmin} onDiscover={() => go("discover")} onSelect={setSelected} onOpen={onOpen} />
+          <Installed isAdmin={isAdmin} onDiscover={() => go("discover")} onSelect={select} onOpen={onOpen} />
         ))}
       {section === "discover" && isAdmin && <Discover overview={apps.data} onInstall={(ref) => setInstalling({ ref })} />}
       {section === "catalogs" && isAdmin && <CatalogsPage />}
@@ -95,13 +100,13 @@ export function AppStoreView({ isAdmin, onOpen = (a) => void openInNewTab(a.id, 
   );
 }
 
-function DetailsWithRemove({ app, update, onBack, onOpen }: { app: InstalledApp; update?: string; onBack: () => void; onOpen: OpenApp }) {
+function DetailsWithRemove({ app, update, tab, onBack, onOpen }: { app: InstalledApp; update?: string; tab: DetailTab; onBack: () => void; onOpen: OpenApp }) {
   const [removing, setRemoving] = useState(false);
   const [job, setJob] = useState<string | null>(null);
   const qc = useQueryClient();
   return (
     <>
-      <AppDetails app={app} update={update} onBack={onBack} onRemove={() => setRemoving(true)} onOpen={onOpen} />
+      <AppDetails app={app} update={update} initialTab={tab} onBack={onBack} onRemove={() => setRemoving(true)} onOpen={onOpen} />
       {job && (
         <JobProgress
           id={job}
@@ -129,7 +134,17 @@ function EngineBanner({ o, isAdmin }: { o: AppsOverview; isAdmin: boolean }) {
   return null;
 }
 
-function Installed({ isAdmin, onDiscover, onSelect, onOpen }: { isAdmin: boolean; onDiscover: () => void; onSelect: (id: string) => void; onOpen: OpenApp }) {
+function Installed({
+  isAdmin,
+  onDiscover,
+  onSelect,
+  onOpen,
+}: {
+  isAdmin: boolean;
+  onDiscover: () => void;
+  onSelect: (id: string, tab?: DetailTab) => void;
+  onOpen: OpenApp;
+}) {
   const q = useApps();
   if (q.isPending) return <Loading />;
   if (q.isError) return <ErrorBox error={q.error} onRetry={() => q.refetch()} />;
@@ -169,7 +184,15 @@ function Installed({ isAdmin, onDiscover, onSelect, onOpen }: { isAdmin: boolean
         ) : (
           <div className="app-grid">
             {o.apps.map((a) => (
-              <AppCard key={a.id} app={a} update={o.updates[a.id]} isAdmin={isAdmin} onSelect={() => onSelect(a.id)} onOpen={onOpen} />
+              <AppCard
+                key={a.id}
+                app={a}
+                update={o.updates[a.id]}
+                isAdmin={isAdmin}
+                onSelect={() => onSelect(a.id)}
+                onSettings={() => onSelect(a.id, "settings")}
+                onOpen={onOpen}
+              />
             ))}
           </div>
         )}
@@ -179,7 +202,21 @@ function Installed({ isAdmin, onDiscover, onSelect, onOpen }: { isAdmin: boolean
   );
 }
 
-function AppCard({ app, update, isAdmin, onSelect, onOpen }: { app: InstalledApp; update?: string; isAdmin: boolean; onSelect: () => void; onOpen: OpenApp }) {
+function AppCard({
+  app,
+  update,
+  isAdmin,
+  onSelect,
+  onSettings,
+  onOpen,
+}: {
+  app: InstalledApp;
+  update?: string;
+  isAdmin: boolean;
+  onSelect: () => void;
+  onSettings: () => void;
+  onOpen: OpenApp;
+}) {
   const qc = useQueryClient();
   const [busy, setBusy] = useState<string | null>(null);
   const [job, setJob] = useState<string | null>(null);
@@ -244,6 +281,7 @@ function AppCard({ app, update, isAdmin, onSelect, onOpen }: { app: InstalledApp
         <Badge tone={st.tone}>{st.label}</Badge>
       </header>
       {app.summary && <p className="app-card__summary">{app.summary}</p>}
+      {app.blocked && <BlockedAlert app={app} onSettings={isAdmin ? onSettings : undefined} />}
       {isAdmin && (
         <dl className="app-card__facts small">
           {app.ports.map((p) => (
@@ -298,7 +336,7 @@ function AppCard({ app, update, isAdmin, onSelect, onOpen }: { app: InstalledApp
                 <StopIcon size={13} /> Stop
               </Button>
             ) : (
-              <Button size="sm" onClick={() => act("start")} busy={busy === "start"} disabled={!!job}>
+              <Button size="sm" onClick={() => act("start")} busy={busy === "start"} disabled={!!job || !!app.blocked}>
                 <PlayIcon size={13} /> Start
               </Button>
             )}

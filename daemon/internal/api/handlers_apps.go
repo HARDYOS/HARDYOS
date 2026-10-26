@@ -34,19 +34,21 @@ const (
 // appInstallParams are an install or update job's parameters. Password
 // settings wait in jobSecrets (job parameters are kept in the job history).
 type appInstallParams struct {
-	Source     string                      `json:"source"`
-	Ref        string                      `json:"ref"`
-	SourceName string                      `json:"sourceName,omitempty"`
-	ID         string                      `json:"id"`
-	Name       string                      `json:"name"`
-	Pool       string                      `json:"pool,omitempty"`
-	Host       string                      `json:"host,omitempty"`
-	Ports      map[string]int              `json:"ports,omitempty"`
-	Settings   map[string]string           `json:"settings,omitempty"`
-	SecretRef  string                      `json:"secretRef,omitempty"`
-	Shares     map[string]apps.ShareChoice `json:"shares,omitempty"`
-	Grants     []string                    `json:"grants,omitempty"`
-	Limits     *apps.Limits                `json:"limits,omitempty"`
+	Source     string `json:"source"`
+	Ref        string `json:"ref"`
+	SourceName string `json:"sourceName,omitempty"`
+	// CatalogID is the imported catalog the package came from.
+	CatalogID int64                       `json:"catalogId,omitempty"`
+	ID        string                      `json:"id"`
+	Name      string                      `json:"name"`
+	Pool      string                      `json:"pool,omitempty"`
+	Host      string                      `json:"host,omitempty"`
+	Ports     map[string]int              `json:"ports,omitempty"`
+	Settings  map[string]string           `json:"settings,omitempty"`
+	SecretRef string                      `json:"secretRef,omitempty"`
+	Shares    map[string]apps.ShareChoice `json:"shares,omitempty"`
+	Grants    []string                    `json:"grants,omitempty"`
+	Limits    *apps.Limits                `json:"limits,omitempty"`
 }
 
 // appReconfigureParams is a settings change; passwords wait in jobSecrets.
@@ -120,7 +122,7 @@ func RegisterAppJobs(m *jobs.Manager, pc *priv.Client, store *appstore.Store) {
 		return "app:" + p.ID
 	}
 	load := func(jc *jobs.Context, p appInstallParams) (*apps.Package, error) {
-		pkg, err := store.LoadContext(jc, p.Source, p.Ref)
+		pkg, err := store.LoadFrom(jc, p.Source, p.Ref, p.CatalogID)
 		if err != nil {
 			return nil, err
 		}
@@ -128,6 +130,14 @@ func RegisterAppJobs(m *jobs.Manager, pc *priv.Client, store *appstore.Store) {
 			return nil, fmt.Errorf("the package changed: it's now %s", pkg.Manifest.ID)
 		}
 		return pkg, nil
+	}
+	// remember where the app came from: updates follow the same imported
+	// catalog, and installing the same id from elsewhere needs replaceSource.
+	remember := func(p appInstallParams) {
+		if store.DB == nil {
+			return
+		}
+		_ = store.SetOrigin(context.Background(), appstore.Origin{AppID: p.ID, Source: p.Source, CatalogID: p.CatalogID, CatalogName: p.SourceName, Ref: p.Ref})
 	}
 	install := func(jc *jobs.Context) (any, error) {
 		var p appInstallParams
@@ -167,6 +177,7 @@ func RegisterAppJobs(m *jobs.Manager, pc *priv.Client, store *appstore.Store) {
 		if prep.Upgrade {
 			verb = "updated"
 		}
+		remember(p)
 		jc.Progress(100, p.Name+" is "+verb)
 		return map[string]any{"id": p.ID, "upgrade": prep.Upgrade, "notes": notes}, nil
 	}
@@ -218,6 +229,7 @@ func RegisterAppJobs(m *jobs.Manager, pc *priv.Client, store *appstore.Store) {
 		if err := appUp(jc, pc, p.ID); err != nil {
 			return nil, failed(err)
 		}
+		remember(p)
 		jc.Progress(100, p.Name+" is updated")
 		return map[string]any{"id": p.ID, "upgrade": true, "snapshot": snap.Snapshot, "notes": notes}, nil
 	}
@@ -269,6 +281,18 @@ func RegisterAppJobs(m *jobs.Manager, pc *priv.Client, store *appstore.Store) {
 			ctx, cancel := context.WithTimeout(jc, 10*time.Minute)
 			defer cancel()
 			if err := pc.Call(ctx, priv.OpAppsRollback, p.RollbackArgs, nil); err != nil {
+				// The data may be back with the app left stopped because it
+				// needs a permission removed since (decision 77): say so, so
+				// the App Store shows "restored" rather than a failed rollback.
+				var o apps.Overview
+				if serr := pc.Call(ctx, priv.OpAppsStatus, nil, &o); serr == nil {
+					for _, a := range o.Apps {
+						if a.ID == p.ID && a.Blocked != "" {
+							return nil, &jobs.FailedWith{Err: err, Result: map[string]any{
+								"id": p.ID, "snapshot": p.Snapshot, "restored": true, "blocked": a.Blocked}}
+						}
+					}
+				}
 				return nil, err
 			}
 			jc.Progress(100, p.Name+" is back to "+p.Snapshot)
@@ -355,7 +379,7 @@ func (s *Server) appsStatus(ctx context.Context) (*apps.Overview, error) {
 	for i := range o.Apps {
 		a := &o.Apps[i]
 		if a.Source == "" {
-			a.Source = apps.SourceCatalog
+			a.Source = apps.SourceUpload // root decides "catalog"; an unknown source is never trusted
 		}
 		if a.Shares == nil {
 			a.Shares = []apps.AppShare{}
@@ -381,18 +405,30 @@ func (s *Server) appsStatus(ctx context.Context) (*apps.Overview, error) {
 func (s *Server) newerVersion(ctx context.Context, a apps.App) (version, ref string) {
 	st := s.appStore()
 	switch a.Source {
-	case apps.SourceCatalog, "":
+	case apps.SourceCatalog:
 		v := st.CatalogVersion(a.ID)
 		if v != "" && apps.NewerVersion(v, a.Version) {
 			return v, a.ID
 		}
 	case apps.SourceImported:
-		v, sha := st.ImportedLatest(ctx, a.SourceName, a.ID)
+		v, sha, _ := s.importedLatest(ctx, a)
 		if v != "" && apps.NewerVersion(v, a.Version) {
 			return v, sha
 		}
 	}
 	return "", ""
+}
+
+// importedLatest is the newest version of an imported app in the catalog it
+// was installed from: by the catalog id hardyd recorded at install, or (apps
+// installed before that was recorded) by the catalog's name.
+func (s *Server) importedLatest(ctx context.Context, a apps.App) (version, sha string, catalogID int64) {
+	st := s.appStore()
+	if o := st.OriginOf(ctx, a.ID); o != nil && o.Source == appstore.SourceImported && o.CatalogID > 0 {
+		v, sha := st.ImportedLatestIn(ctx, o.CatalogID, a.ID)
+		return v, sha, o.CatalogID
+	}
+	return st.ImportedLatest(ctx, a.SourceName, a.ID)
 }
 
 func (s *Server) handleApps(w http.ResponseWriter, r *http.Request, u *auth.User) {
@@ -465,10 +501,16 @@ func (s *Server) handleAppUpload(w http.ResponseWriter, r *http.Request, u *auth
 }
 
 // AppPackageRef names a package: from the catalog (ref = app id), or
-// uploaded, imported or custom (ref = the package's SHA-256).
+// uploaded, imported or custom (ref = the package's SHA-256). An imported
+// package also names its catalog (CatalogID), which must list that hash.
 type AppPackageRef struct {
-	Source string `json:"source"`
-	Ref    string `json:"ref"`
+	Source    string `json:"source"`
+	Ref       string `json:"ref"`
+	CatalogID int64  `json:"catalogId,omitempty"`
+}
+
+func (s *Server) loadRef(ctx context.Context, ref AppPackageRef) (*apps.Package, error) {
+	return s.appStore().LoadFrom(ctx, ref.Source, ref.Ref, ref.CatalogID)
 }
 
 // AppPlan is what the install dialog needs.
@@ -484,9 +526,19 @@ type AppPlan struct {
 	Installed        bool   `json:"installed"`
 	InstalledVersion string `json:"installedVersion"`
 	// KeptData: the app was removed with its data kept; it's picked back up.
-	KeptData  bool   `json:"keptData"`
-	Available bool   `json:"available"`
-	Problem   string `json:"problem"`
+	KeptData bool `json:"keptData"`
+	// InstalledSource and InstalledSourceName are where the installed (or
+	// kept) app with this id came from ("" when nothing is installed or it
+	// isn't known).
+	InstalledSource     string `json:"installedSource"`
+	InstalledSourceName string `json:"installedSourceName"`
+	// ReplaceSourceRequired: this package comes from another source or
+	// catalog than the installed (or kept) app with the same id, which it
+	// would replace, data and passwords included. The install must then send
+	// replaceSource: true.
+	ReplaceSourceRequired bool   `json:"replaceSourceRequired"`
+	Available             bool   `json:"available"`
+	Problem               string `json:"problem"`
 }
 
 func (s *Server) handleAppPlan(w http.ResponseWriter, r *http.Request, _ *auth.User) {
@@ -505,7 +557,7 @@ func (s *Server) handleAppPlan(w http.ResponseWriter, r *http.Request, _ *auth.U
 // appPlan works out the install dialog for a package.
 func (s *Server) appPlan(ctx context.Context, ref AppPackageRef) (*AppPlan, error) {
 	st := s.appStore()
-	pkg, err := st.LoadContext(ctx, ref.Source, ref.Ref)
+	pkg, err := s.loadRef(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
@@ -516,12 +568,15 @@ func (s *Server) appPlan(ctx context.Context, ref AppPackageRef) (*AppPlan, erro
 	mf := pkg.Manifest
 	plan := &AppPlan{Package: appstore.EntryOf(ref.Source, ref.Ref, pkg), Pools: []string{},
 		EnginePool: o.Pool, Available: o.Available, Problem: o.Problem}
-	plan.Package.SourceName = st.SourceNameOf(ctx, ref.Source, ref.Ref)
+	plan.Package.SourceName = st.SourceNameOf(ctx, ref.Source, ref.Ref, ref.CatalogID)
+	plan.Package.CatalogID = importedCatalog(ref)
 	for _, a := range o.Apps {
 		if a.ID == mf.ID {
 			plan.Installed, plan.InstalledVersion = true, a.Version
 		}
 	}
+	sc := s.sourceChange(ctx, o, mf.ID, ref, plan.Package.SourceName)
+	plan.InstalledSource, plan.InstalledSourceName, plan.ReplaceSourceRequired = sc.fromSource, sc.fromName, sc.differs
 	for _, k := range o.KeptData {
 		if k.ID == mf.ID {
 			plan.KeptData = true
@@ -571,6 +626,65 @@ type AppInstallRequest struct {
 	Limits *apps.Limits `json:"limits,omitempty"`
 	// Access is who may use the app; empty or omitted = everyone.
 	Access []appstore.Principal `json:"access,omitempty"`
+	// ReplaceSource confirms replacing an installed (or kept) app with the
+	// same id from another source or catalog (AppPlan.ReplaceSourceRequired):
+	// the new package gets the old one's data and passwords.
+	ReplaceSource bool `json:"replaceSource,omitempty"`
+}
+
+// sourceChangeInfo compares a package with what's installed under its id.
+type sourceChangeInfo struct {
+	fromSource, fromName string
+	differs              bool
+}
+
+func (c sourceChangeInfo) describe(toSource, toName string) string {
+	label := func(src, name string) string {
+		switch {
+		case src == appstore.SourceImported && name != "":
+			return "imported from " + name
+		case src == "":
+			return "unknown"
+		}
+		return src
+	}
+	return label(c.fromSource, c.fromName) + " -> " + label(toSource, toName)
+}
+
+// sourceChange works out whether installing ref (from the catalog called
+// sourceName) would replace an installed or kept app with the same id that
+// came from somewhere else: another source, or another imported catalog (by
+// the catalog id hardyd recorded, else by name).
+func (s *Server) sourceChange(ctx context.Context, o *apps.Overview, id string, ref AppPackageRef, sourceName string) sourceChangeInfo {
+	origin := s.appStore().OriginOf(ctx, id)
+	var c sourceChangeInfo
+	found := false
+	for _, a := range o.Apps {
+		if a.ID == id {
+			c.fromSource, c.fromName, found = string(a.Source), a.SourceName, true
+		}
+	}
+	if !found {
+		kept := false
+		for _, k := range o.KeptData {
+			kept = kept || k.ID == id
+		}
+		if !kept || origin == nil {
+			return sourceChangeInfo{}
+		}
+		c.fromSource, c.fromName = origin.Source, origin.CatalogName
+	}
+	switch {
+	case c.fromSource != ref.Source:
+		c.differs = true
+	case ref.Source == appstore.SourceImported:
+		if origin != nil && origin.Source == appstore.SourceImported && origin.CatalogID > 0 {
+			c.differs = origin.CatalogID != ref.CatalogID
+		} else {
+			c.differs = c.fromName != sourceName
+		}
+	}
+	return c
 }
 
 var (
@@ -724,13 +838,25 @@ func (s *Server) handleAppInstall(w http.ResponseWriter, r *http.Request, u *aut
 		return
 	}
 	st := s.appStore()
-	pkg, err := st.LoadContext(r.Context(), req.Source, req.Ref)
+	pkg, err := s.loadRef(r.Context(), req.AppPackageRef)
 	if err != nil {
 		s.writeAppError(w, err)
 		return
 	}
 	mf := pkg.Manifest
 	source := apps.Source(req.Source)
+	sourceName := st.SourceNameOf(r.Context(), req.Source, req.Ref, req.CatalogID)
+	o, err := s.appsStatus(r.Context())
+	if err != nil {
+		s.writePrivError(w, err)
+		return
+	}
+	sc := s.sourceChange(r.Context(), o, mf.ID, req.AppPackageRef, sourceName)
+	if sc.differs && !req.ReplaceSource {
+		writeError(w, http.StatusConflict, "replace_source_required",
+			fmt.Sprintf("%s is already installed from somewhere else (%s); this package would take over its data and passwords. Confirm replaceSource to do that", mf.Name, sc.describe(req.Source, sourceName)))
+		return
+	}
 	// Catch the quick mistakes before a long job; hardyd-priv checks again.
 	var p apps.Problems
 	checkPorts(&p, mf, req.Ports)
@@ -756,7 +882,7 @@ func (s *Server) handleAppInstall(w http.ResponseWriter, r *http.Request, u *aut
 		s.writeAppError(w, p)
 		return
 	}
-	params := appInstallParams{Source: req.Source, Ref: req.Ref, SourceName: st.SourceNameOf(r.Context(), req.Source, req.Ref),
+	params := appInstallParams{Source: req.Source, Ref: req.Ref, SourceName: sourceName, CatalogID: importedCatalog(req.AppPackageRef),
 		ID: mf.ID, Name: mf.Name, Pool: req.Pool, Host: requestHost(r), Ports: req.Ports, Settings: plain,
 		Shares: req.Shares, Grants: req.Grants, Limits: req.Limits}
 	if len(secret) > 0 {
@@ -773,6 +899,9 @@ func (s *Server) handleAppInstall(w http.ResponseWriter, r *http.Request, u *aut
 	target := mf.ID + " " + mf.Version
 	if source != apps.SourceCatalog {
 		target += " (" + req.Source + ")"
+	}
+	if sc.differs {
+		s.record(r, u, "apps.replace_source", mf.ID, audit.Success, sc.describe(req.Source, sourceName))
 	}
 	s.recordGrants(r, u, mf.ID, nil, req.Grants)
 	s.submit(w, r, u, JobKindAppInstall, "Install "+mf.Name+" "+mf.Version, params, "apps.install", target, nil)
@@ -836,6 +965,17 @@ type AppUpdateRequest struct {
 	// Grants replaces the app's extra permissions, for an update that asks
 	// for a new one (apps not from HardyOS's catalog); omitted keeps them.
 	Grants *[]string `json:"grants,omitempty"`
+	// ReplaceSource confirms updating with a package from another source or
+	// catalog than the app came from (see AppInstallRequest).
+	ReplaceSource bool `json:"replaceSource,omitempty"`
+}
+
+// importedCatalog is the catalog id of an imported package ref (0 otherwise).
+func importedCatalog(ref AppPackageRef) int64 {
+	if ref.Source == appstore.SourceImported {
+		return ref.CatalogID
+	}
+	return 0
 }
 
 // GrantsNeeded answers an update that asks for permissions the app doesn't
@@ -858,21 +998,21 @@ func (s *Server) handleAppUpdate(w http.ResponseWriter, r *http.Request, u *auth
 	st := s.appStore()
 	if ref.Source == "" {
 		switch a.Source {
-		case apps.SourceCatalog, "":
+		case apps.SourceCatalog:
 			ref = AppPackageRef{Source: appstore.SourceCatalog, Ref: a.ID}
 		case apps.SourceImported:
-			_, sha := st.ImportedLatest(r.Context(), a.SourceName, a.ID)
+			_, sha, catalogID := s.importedLatest(r.Context(), *a)
 			if sha == "" {
-				writeError(w, http.StatusNotFound, "not_found", "no imported catalog called "+a.SourceName+" lists "+a.Name+" any more")
+				writeError(w, http.StatusNotFound, "not_found", "the imported catalog "+a.Name+" came from ("+a.SourceName+") doesn't list it any more")
 				return
 			}
-			ref = AppPackageRef{Source: appstore.SourceImported, Ref: sha}
+			ref = AppPackageRef{Source: appstore.SourceImported, Ref: sha, CatalogID: catalogID}
 		default:
 			writeError(w, http.StatusBadRequest, "invalid", a.Name+" was "+map[apps.Source]string{apps.SourceUpload: "uploaded", apps.SourceCustom: "made here"}[a.Source]+": choose the new package to update it")
 			return
 		}
 	}
-	pkg, err := st.LoadContext(r.Context(), ref.Source, ref.Ref)
+	pkg, err := s.loadRef(r.Context(), ref)
 	if err != nil {
 		s.writeAppError(w, err)
 		return
@@ -881,7 +1021,22 @@ func (s *Server) handleAppUpdate(w http.ResponseWriter, r *http.Request, u *auth
 		writeError(w, http.StatusBadRequest, "invalid", "that package is "+pkg.Manifest.Name+", not "+a.Name)
 		return
 	}
-	params := appInstallParams{Source: ref.Source, Ref: ref.Ref, SourceName: st.SourceNameOf(r.Context(), ref.Source, ref.Ref), ID: a.ID, Name: a.Name}
+	sourceName := st.SourceNameOf(r.Context(), ref.Source, ref.Ref, ref.CatalogID)
+	o, err := s.appsStatus(r.Context())
+	if err != nil {
+		s.writePrivError(w, err)
+		return
+	}
+	sc := s.sourceChange(r.Context(), o, a.ID, ref, sourceName)
+	if sc.differs && !req.ReplaceSource {
+		writeError(w, http.StatusConflict, "replace_source_required",
+			fmt.Sprintf("%s came from somewhere else (%s); confirm replaceSource to update it with this package", a.Name, sc.describe(ref.Source, sourceName)))
+		return
+	}
+	if sc.differs {
+		s.record(r, u, "apps.replace_source", a.ID, audit.Success, sc.describe(ref.Source, sourceName))
+	}
+	params := appInstallParams{Source: ref.Source, Ref: ref.Ref, SourceName: sourceName, CatalogID: importedCatalog(ref), ID: a.ID, Name: a.Name}
 	mf := pkg.Manifest
 	if !apps.Source(ref.Source).Trusted() {
 		var p apps.Problems

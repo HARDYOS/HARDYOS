@@ -1770,7 +1770,11 @@ export interface paths {
          * Install an app (runs as a job; downloads its images and starts it)
          * @description Password settings are handed to the job in memory, never stored with
          *     it. Installing an app that's already installed reinstalls it with the
-         *     given settings, keeping its data and generated passwords.
+         *     given settings, keeping its data and generated passwords. When the
+         *     installed (or kept) app with that id came from another source or
+         *     another imported catalog (`AppPlan.replaceSourceRequired`), the
+         *     answer is 409 `replace_source_required` unless `replaceSource` is
+         *     true; a confirmed replacement is audited (`apps.replace_source`).
          */
         post: operations["installApp"];
         delete?: never;
@@ -1818,7 +1822,10 @@ export interface paths {
          *     `result.snapshot` so the App Store can offer to roll back. An update
          *     of a non-catalog app that asks for new permissions answers 400
          *     `grants_required` (with `grants`) before anything changes: send it
-         *     again with every grant in `grants`.
+         *     again with every grant in `grants`. An imported app updates from the
+         *     catalog it was installed from (by its id). A package from another
+         *     source or catalog answers 409 `replace_source_required` unless
+         *     `replaceSource` is true.
          */
         post: operations["updateApp"];
         delete?: never;
@@ -1881,6 +1888,12 @@ export interface paths {
          * @description hardyd fetches the index (at most 1 MB, 30 second timeout). Apps with
          *     problems are left out and described in `lastError`. Packages are
          *     downloaded when first planned and used only if their SHA-256 matches.
+         *     Every connection is checked after DNS and after each redirect:
+         *     addresses on this server or its own networks (loopback, link-local,
+         *     RFC 1918, CGNAT, unique-local) are refused unless `localNetwork` is
+         *     true for the catalog ("On my network", audited as
+         *     `apps.catalog.local_network`); unspecified, multicast and broadcast
+         *     addresses always are.
          */
         post: operations["importAppCatalog"];
         /** Forget an imported catalog (apps installed from it keep running) */
@@ -3105,6 +3118,8 @@ export interface components {
             limits: components["schemas"]["AppLimits"];
             /** @description What the app may do beyond a plain container */
             permissions: string[];
+            /** @description Why the app can't start until an administrator changes its settings (a rollback brought back a version that needs a permission or shared folder it doesn't have now). Saving the settings with what's missing clears it. Absent otherwise. */
+            blocked?: string;
             id: string;
             name: string;
             version: string;
@@ -3147,6 +3162,11 @@ export interface components {
             ref: string;
             /** @description The imported catalog's name (source imported) */
             sourceName: string;
+            /**
+             * Format: int64
+             * @description The imported catalog's id (source imported); send it back with the ref
+             */
+            catalogId?: number;
             /**
              * @description Extra permissions the package asks for. Catalog apps get them by
              *     declaring them; any other source needs each one in the install's
@@ -3193,6 +3213,11 @@ export interface components {
         AppPackageRef: {
             source: components["schemas"]["AppSource"];
             ref: string;
+            /**
+             * Format: int64
+             * @description The imported catalog the package is from (required for source imported); it must list that SHA-256
+             */
+            catalogId?: number;
         };
         AppPlan: {
             package: components["schemas"]["AppPackage"];
@@ -3207,12 +3232,25 @@ export interface components {
             installedVersion: string;
             /** @description The app's data was kept when it was removed and will be picked back up */
             keptData: boolean;
+            /** @description Where the installed (or kept) app with this id came from; empty when none or unknown */
+            installedSource: string;
+            /** @description The imported catalog it came from (installedSource imported) */
+            installedSourceName: string;
+            /** @description This package is from another source or imported catalog than the installed (or kept) app with the same id, and would take over its data and passwords: the install must send replaceSource true. */
+            replaceSourceRequired: boolean;
             available: boolean;
             problem: string;
         };
         AppInstallRequest: {
             source: components["schemas"]["AppSource"];
             ref: string;
+            /**
+             * Format: int64
+             * @description The imported catalog (source imported)
+             */
+            catalogId?: number;
+            /** @description Confirms replacing an installed or kept app with the same id from another source or catalog (AppPlan.replaceSourceRequired) */
+            replaceSource?: boolean;
             /** @description The pool for Docker and every app; only needed the first time */
             pool?: string;
             ports?: {
@@ -3331,6 +3369,13 @@ export interface components {
         AppUpdateRequest: {
             source?: components["schemas"]["AppSource"];
             ref?: string;
+            /**
+             * Format: int64
+             * @description The imported catalog (source imported)
+             */
+            catalogId?: number;
+            /** @description Confirms a package from another source or catalog than the app came from */
+            replaceSource?: boolean;
             /** @description Replaces the app's extra permissions (when the new version asks for more) */
             grants?: string[];
         };
@@ -3379,11 +3424,15 @@ export interface components {
             /** Format: date-time */
             fetchedAt: string | null;
             lastError: string;
+            /** @description "On my network": the catalog may be on this server or its own networks */
+            localNetwork: boolean;
             apps: components["schemas"]["AppCatalogApp"][];
         };
         AppCatalogRequest: {
             /** @description https:// address of the catalog's index.json */
             url: string;
+            /** @description "On my network": allow this catalog on this server or its own networks (refused otherwise). Omitted keeps a refreshed catalog's setting. */
+            localNetwork?: boolean;
         };
         AppCatalogRemoveRequest: {
             /** Format: int64 */
@@ -6428,6 +6477,7 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     removeApp: {
@@ -6480,6 +6530,7 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     appAction: {

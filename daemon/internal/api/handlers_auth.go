@@ -138,6 +138,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		_ = s.sessions.Revoke(r.Context(), c.Value)
+		s.proxy.endDesktopSession(c.Value) // app windows and their WebSockets too
 	}
 	s.clearCookie(w, r)
 	w.WriteHeader(http.StatusNoContent)
@@ -173,6 +174,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request, u 
 	}
 	// Sign out every other session; keep this browser signed in with a fresh one.
 	_ = s.sessions.RevokeUser(r.Context(), u.ID)
+	s.proxy.endUser(u.ID)
 	s.startSession(w, r, u)
 	s.record(r, u, "auth.password.change", u.Username, audit.Success, "")
 	w.WriteHeader(http.StatusNoContent)

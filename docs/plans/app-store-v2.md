@@ -199,7 +199,10 @@ Roll back.
   an https URL to `index.json`: `{"name","apps":[{"id","name","version","summary","url","sha256","icon"}]}`;
   hardyd fetches index and packages (size limits, sha256 must match), never
   hardyd-priv. Shown in Discover under the catalog's name with a
-  "Third-party" label.
+  "Third-party" label. Imported package refs carry the catalog's id
+  (`catalogId`), which must list that sha; the install records it and
+  updates follow it. Fetches refuse this server's own networks unless the
+  catalog is marked "On my network" (decision 82).
 - Custom app: App Store > Create an app: name, id, pasted compose YAML, the
   web port and other published ports, data folders; hardyd builds a
   `.hardyapp` (source `custom`) and runs the normal install.
@@ -208,11 +211,19 @@ Roll back.
   page: listen on `44300 + n` (allocated, stored in hardyd's database),
   same certificate as the desktop, proxies to `127.0.0.1:<webport>` including
   WebSockets, and removes `X-Frame-Options` / `frame-ancestors` so the
-  desktop origin may frame it. Sign-in to HardyOS is required for the proxy
-  (session cookie on the desktop origin isn't sent cross-port, so use a
-  short-lived token in the first URL that sets a proxy cookie). The
-  desktop opens the app in a window (iframe) with "Open in new tab".
-  Replaced by subdomains when the reverse proxy lands.
+  desktop origin may frame it. Sign-in to HardyOS is required for the proxy:
+  the desktop's session cookie must never reach an app, so a short-lived
+  token in the first URL is swapped for a per-app proxy cookie. Ports do
+  **not** isolate apps: browsers keep cookies per host, not per port, and
+  SameSite treats every port of a host as the same site, so the desktop and
+  every app share one cookie jar and are same-site to each other. Until
+  per-app subdomains (with the reverse proxy) replace the ports, the proxy
+  renames each app's cookies to `a_<app id>_<name>` and forwards only that
+  app's, refuses cross-app requests (other Origin on changes and
+  WebSockets, same-site non-navigations), and binds every proxy session to
+  the desktop session cookie (decisions 80-82; residual risks in
+  `docs/apps.md`). The desktop opens the app in a sandboxed window (iframe,
+  no top navigation) with "Open in new tab".
 - Settings backups: hardyd's backup includes app access, catalogs, proxy
   ports; root's apps state is on the pool already.
 
@@ -238,7 +249,7 @@ Roll back.
 | --- | --- | --- |
 | Shared folders | `internal/shares/`, `priv/shares_ops.go`, API `handlers_shares.go`, web `control-panel/SharedFolders*.tsx` | 55-59 |
 | Apps engine | `internal/apps/` (not `contract.go` types' names), `priv/apps_ops.go` | 60-64, 75-77 (security review) |
-| Apps API + web | `api/handlers_apps*.go`, `api/appproxy*.go`, `internal/appstore/`, `web/apps/shell/src/apps/store/` | 65-69 |
+| Apps API + web | `api/handlers_apps*.go`, `api/appproxy*.go`, `internal/appstore/`, `web/apps/shell/src/apps/store/` | 65-69, 80-82 (security review) |
 | Catalog | `apps/catalog/*` | 70-71 |
 | Domain sign-in | `internal/auth/` (domain parts), `priv/domain_ops.go` (one op), login UI | 72-74 |
 

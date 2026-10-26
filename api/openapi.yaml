@@ -2080,7 +2080,11 @@ paths:
       description: |
         Password settings are handed to the job in memory, never stored with
         it. Installing an app that's already installed reinstalls it with the
-        given settings, keeping its data and generated passwords.
+        given settings, keeping its data and generated passwords. When the
+        installed (or kept) app with that id came from another source or
+        another imported catalog (`AppPlan.replaceSourceRequired`), the
+        answer is 409 `replace_source_required` unless `replaceSource` is
+        true; a confirmed replacement is audited (`apps.replace_source`).
       tags: [apps]
       requestBody:
         required: true
@@ -2093,6 +2097,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /apps/{id}:
     parameters:
       - { name: id, in: path, required: true, schema: { type: string } }
@@ -2125,7 +2130,10 @@ paths:
         `result.snapshot` so the App Store can offer to roll back. An update
         of a non-catalog app that asks for new permissions answers 400
         `grants_required` (with `grants`) before anything changes: send it
-        again with every grant in `grants`.
+        again with every grant in `grants`. An imported app updates from the
+        catalog it was installed from (by its id). A package from another
+        source or catalog answers 409 `replace_source_required` unless
+        `replaceSource` is true.
       tags: [apps]
       requestBody:
         required: false
@@ -2142,6 +2150,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /apps/{id}/{action}:
     parameters:
       - { name: id, in: path, required: true, schema: { type: string } }
@@ -2204,6 +2213,12 @@ paths:
         hardyd fetches the index (at most 1 MB, 30 second timeout). Apps with
         problems are left out and described in `lastError`. Packages are
         downloaded when first planned and used only if their SHA-256 matches.
+        Every connection is checked after DNS and after each redirect:
+        addresses on this server or its own networks (loopback, link-local,
+        RFC 1918, CGNAT, unique-local) are refused unless `localNetwork` is
+        true for the catalog ("On my network", audited as
+        `apps.catalog.local_network`); unspecified, multicast and broadcast
+        addresses always are.
       tags: [apps]
       requestBody:
         required: true
@@ -3600,6 +3615,13 @@ components:
         grants: { type: array, items: { type: string }, description: Extra permissions an administrator allowed }
         limits: { $ref: "#/components/schemas/AppLimits" }
         permissions: { type: array, items: { type: string }, description: What the app may do beyond a plain container, in plain words }
+        blocked:
+          type: string
+          description: >-
+            Why the app can't start until an administrator changes its settings
+            (a rollback brought back a version that needs a permission or shared
+            folder it doesn't have now). Saving the settings with what's
+            missing clears it. Absent otherwise.
         id: { type: string }
         name: { type: string }
         version: { type: string }
@@ -3650,6 +3672,7 @@ components:
         source: { $ref: "#/components/schemas/AppSource" }
         ref: { type: string, description: The app id (catalog) or the package's SHA-256 (upload, imported, custom) }
         sourceName: { type: string, description: The imported catalog's name (source imported) }
+        catalogId: { type: integer, format: int64, description: The imported catalog's id (source imported); send it back with the ref }
         grants:
           type: array
           description: |
@@ -3704,9 +3727,14 @@ components:
       properties:
         source: { $ref: "#/components/schemas/AppSource" }
         ref: { type: string }
+        catalogId:
+          type: integer
+          format: int64
+          description: The imported catalog the package is from (required for source imported); it must list that SHA-256
     AppPlan:
       type: object
-      required: [package, ports, pools, enginePool, installed, installedVersion, keptData, available, problem]
+      required: [package, ports, pools, enginePool, installed, installedVersion, keptData, installedSource, installedSourceName,
+        replaceSourceRequired, available, problem]
       properties:
         package: { $ref: "#/components/schemas/AppPackage" }
         ports:
@@ -3718,6 +3746,14 @@ components:
         installed: { type: boolean }
         installedVersion: { type: string }
         keptData: { type: boolean, description: The app's data was kept when it was removed and will be picked back up }
+        installedSource: { type: string, description: "Where the installed (or kept) app with this id came from; empty when none or unknown" }
+        installedSourceName: { type: string, description: The imported catalog it came from (installedSource imported) }
+        replaceSourceRequired:
+          type: boolean
+          description: >-
+            This package is from another source or imported catalog than the
+            installed (or kept) app with the same id, and would take over its
+            data and passwords: the install must send replaceSource true.
         available: { type: boolean }
         problem: { type: string }
     AppInstallRequest:
@@ -3726,6 +3762,10 @@ components:
       properties:
         source: { $ref: "#/components/schemas/AppSource" }
         ref: { type: string }
+        catalogId: { type: integer, format: int64, description: The imported catalog (source imported) }
+        replaceSource:
+          type: boolean
+          description: Confirms replacing an installed or kept app with the same id from another source or catalog (AppPlan.replaceSourceRequired)
         pool: { type: string, description: The pool for Docker and every app; only needed the first time }
         ports:
           type: object
@@ -3841,6 +3881,8 @@ components:
       properties:
         source: { $ref: "#/components/schemas/AppSource" }
         ref: { type: string }
+        catalogId: { type: integer, format: int64, description: The imported catalog (source imported) }
+        replaceSource: { type: boolean, description: Confirms a package from another source or catalog than the app came from }
         grants: { type: array, items: { type: string }, description: Replaces the app's extra permissions (when the new version asks for more) }
     AppGrantsNeeded:
       allOf:
@@ -3885,7 +3927,7 @@ components:
         icon: { type: string, description: "A data URL, or empty" }
     AppCatalog:
       type: object
-      required: [id, url, name, addedAt, addedBy, fetchedAt, lastError, apps]
+      required: [id, url, name, addedAt, addedBy, fetchedAt, lastError, localNetwork, apps]
       properties:
         id: { type: integer, format: int64 }
         url: { type: string }
@@ -3894,12 +3936,19 @@ components:
         addedBy: { type: string }
         fetchedAt: { type: string, format: date-time, nullable: true }
         lastError: { type: string }
+        localNetwork: { type: boolean, description: '"On my network": the catalog may be on this server or its own networks' }
         apps: { type: array, items: { $ref: "#/components/schemas/AppCatalogApp" } }
     AppCatalogRequest:
       type: object
       required: [url]
       properties:
         url: { type: string, description: "https:// address of the catalog's index.json" }
+        localNetwork:
+          type: boolean
+          description: >-
+            "On my network": allow this catalog on this server or its own
+            networks (refused otherwise). Omitted keeps a refreshed catalog's
+            setting.
     AppCatalogRemoveRequest:
       type: object
       required: [id]

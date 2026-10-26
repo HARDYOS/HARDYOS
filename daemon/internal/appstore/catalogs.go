@@ -64,8 +64,11 @@ type Catalog struct {
 	AddedBy   string     `json:"addedBy"`
 	FetchedAt *time.Time `json:"fetchedAt"`
 	// LastError is why the last refresh failed, or which apps were skipped.
-	LastError string       `json:"lastError"`
-	Apps      []CatalogApp `json:"apps"`
+	LastError string `json:"lastError"`
+	// LocalNetwork lets hardyd fetch this catalog and its packages from this
+	// server or its own networks (an administrator ticked "On my network").
+	LocalNetwork bool         `json:"localNetwork"`
+	Apps         []CatalogApp `json:"apps"`
 }
 
 var (
@@ -73,11 +76,23 @@ var (
 	iconRE    = regexp.MustCompile(`^data:image/(svg\+xml|png);base64,[A-Za-z0-9+/=]+$`)
 )
 
-func (s *Store) client() *http.Client {
+// client fetches catalogs and packages. Every connection it makes is
+// checked by the network guard (netguard.go); allowLocal is the catalog's
+// "On my network" flag. s.Client (tests) supplies TLS settings only: its
+// transport is cloned and guarded the same way.
+func (s *Store) client(allowLocal bool) *http.Client {
+	var base *http.Transport
 	if s.Client != nil {
-		return s.Client
+		switch t := s.Client.Transport.(type) {
+		case *http.Transport:
+			base = t
+		case nil:
+		default:
+			// A custom round tripper (tests) never dials; used as given.
+			return &http.Client{Timeout: fetchTimeout, CheckRedirect: httpsRedirectsOnly, Transport: t}
+		}
 	}
-	return &http.Client{Timeout: fetchTimeout, CheckRedirect: httpsRedirectsOnly}
+	return &http.Client{Timeout: fetchTimeout, CheckRedirect: httpsRedirectsOnly, Transport: guardedTransport(base, allowLocal)}
 }
 
 func httpsRedirectsOnly(req *http.Request, via []*http.Request) error {
@@ -100,7 +115,7 @@ func CheckCatalogURL(raw string) (*url.URL, error) {
 }
 
 // fetch downloads at most limit bytes from an https URL.
-func (s *Store) fetch(ctx context.Context, u *url.URL, limit int64) ([]byte, error) {
+func (s *Store) fetch(ctx context.Context, u *url.URL, limit int64, allowLocal bool) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
@@ -109,8 +124,12 @@ func (s *Store) fetch(ctx context.Context, u *url.URL, limit int64) ([]byte, err
 	}
 	req.Header.Set("Accept", "application/json, application/octet-stream")
 	req.Header.Set("User-Agent", "HardyOS-AppStore/1")
-	resp, err := s.client().Do(req)
+	resp, err := s.client(allowLocal).Do(req)
 	if err != nil {
+		var le *LocalAddressError
+		if errors.As(err, &le) {
+			return nil, fmt.Errorf("couldn't fetch from %s: %w", u.Host, le)
+		}
 		return nil, fmt.Errorf("couldn't reach %s: %w", u.Host, err)
 	}
 	defer resp.Body.Close()
@@ -204,14 +223,14 @@ func skippedNote(skipped []string) string {
 	return note
 }
 
-const catalogCols = `id, url, name, added_at, added_by, fetched_at, last_error, index_json`
+const catalogCols = `id, url, name, added_at, added_by, fetched_at, last_error, local_network, index_json`
 
 func scanCatalog(row interface{ Scan(...any) error }) (*Catalog, error) {
 	var (
 		c                   Catalog
 		added, fetched, idx string
 	)
-	if err := row.Scan(&c.ID, &c.URL, &c.Name, &added, &c.AddedBy, &fetched, &c.LastError, &idx); err != nil {
+	if err := row.Scan(&c.ID, &c.URL, &c.Name, &added, &c.AddedBy, &fetched, &c.LastError, &c.LocalNetwork, &idx); err != nil {
 		return nil, err
 	}
 	c.AddedAt = store.ParseTime(added)
@@ -263,8 +282,10 @@ func (s *Store) ImportedCatalog(ctx context.Context, id int64) (*Catalog, error)
 	return c, err
 }
 
-// AddCatalog fetches an index.json and adds the catalog.
-func (s *Store) AddCatalog(ctx context.Context, rawURL, by string) (*Catalog, error) {
+// AddCatalog fetches an index.json and adds the catalog. localNetwork is the
+// administrator's "On my network" tick: without it the catalog can't be on
+// this server or its own networks.
+func (s *Store) AddCatalog(ctx context.Context, rawURL, by string, localNetwork bool) (*Catalog, error) {
 	db, err := s.db()
 	if err != nil {
 		return nil, err
@@ -285,7 +306,7 @@ func (s *Store) AddCatalog(ctx context.Context, rawURL, by string) (*Catalog, er
 			return nil, apps.Problems{"that catalog is already imported as " + c.Name}
 		}
 	}
-	b, err := s.fetch(ctx, u, MaxIndexBytes)
+	b, err := s.fetch(ctx, u, MaxIndexBytes, localNetwork)
 	if err != nil {
 		return nil, apps.Problems{err.Error()}
 	}
@@ -300,8 +321,8 @@ func (s *Store) AddCatalog(ctx context.Context, rawURL, by string) (*Catalog, er
 	}
 	ib, _ := json.Marshal(idx)
 	now := store.Now()
-	res, err := db.ExecContext(ctx, `INSERT INTO app_catalogs (url, name, added_at, added_by, fetched_at, last_error, index_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`, u.String(), idx.Name, now, by, now, skippedNote(skipped), string(ib))
+	res, err := db.ExecContext(ctx, `INSERT INTO app_catalogs (url, name, added_at, added_by, fetched_at, last_error, local_network, index_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, u.String(), idx.Name, now, by, now, skippedNote(skipped), localNetwork, string(ib))
 	if err != nil {
 		return nil, err
 	}
@@ -324,7 +345,7 @@ func (s *Store) RefreshCatalog(ctx context.Context, id int64) (*Catalog, error) 
 	if err != nil {
 		return nil, err
 	}
-	b, err := s.fetch(ctx, u, MaxIndexBytes)
+	b, err := s.fetch(ctx, u, MaxIndexBytes, c.LocalNetwork)
 	var idx *CatalogIndex
 	var skipped []string
 	if err == nil {
@@ -341,6 +362,22 @@ func (s *Store) RefreshCatalog(ctx context.Context, id int64) (*Catalog, error) 
 		return nil, err
 	}
 	return s.ImportedCatalog(ctx, id)
+}
+
+// SetCatalogLocal changes a catalog's "On my network" flag.
+func (s *Store) SetCatalogLocal(ctx context.Context, id int64, on bool) error {
+	db, err := s.db()
+	if err != nil {
+		return err
+	}
+	res, err := db.ExecContext(ctx, `UPDATE app_catalogs SET local_network = ? WHERE id = ?`, on, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("%w: no such catalog", ErrNotFound)
+	}
+	return nil
 }
 
 // RemoveCatalog forgets an imported catalog. Apps installed from it keep
@@ -360,28 +397,33 @@ func (s *Store) RemoveCatalog(ctx context.Context, id int64) (*Catalog, error) {
 	return c, nil
 }
 
-// findImported finds the catalog listing a package hash.
-func (s *Store) findImported(ctx context.Context, sha string) (*Catalog, *CatalogApp, bool) {
-	cs, err := s.Catalogs(ctx)
+// findImported finds a package hash in the imported catalog with that id.
+// The hash must be listed by that catalog: another catalog listing the same
+// hash doesn't count, so an install is always labelled with (and updated
+// from) the catalog the administrator chose.
+func (s *Store) findImported(ctx context.Context, catalogID int64, sha string) (*Catalog, *CatalogApp, bool) {
+	if catalogID <= 0 {
+		return nil, nil, false
+	}
+	c, err := s.ImportedCatalog(ctx, catalogID)
 	if err != nil {
 		return nil, nil, false
 	}
-	for i := range cs {
-		for j := range cs[i].Apps {
-			if cs[i].Apps[j].SHA256 == sha {
-				return &cs[i], &cs[i].Apps[j], true
-			}
+	for j := range c.Apps {
+		if c.Apps[j].SHA256 == sha {
+			return c, &c.Apps[j], true
 		}
 	}
 	return nil, nil, false
 }
 
-// ImportedLatest is the newest version of an app in the named catalog and
-// its package hash.
-func (s *Store) ImportedLatest(ctx context.Context, catalog, id string) (version, sha string) {
+// ImportedLatest is the newest version of an app in the catalog called name,
+// its package hash and the catalog's id. Only for apps installed before
+// hardyd recorded the catalog's id; use ImportedLatestIn otherwise.
+func (s *Store) ImportedLatest(ctx context.Context, catalog, id string) (version, sha string, catalogID int64) {
 	cs, err := s.Catalogs(ctx)
 	if err != nil {
-		return "", ""
+		return "", "", 0
 	}
 	for _, c := range cs {
 		if c.Name != catalog {
@@ -389,8 +431,23 @@ func (s *Store) ImportedLatest(ctx context.Context, catalog, id string) (version
 		}
 		for _, a := range c.Apps {
 			if a.ID == id {
-				return a.Version, a.SHA256
+				return a.Version, a.SHA256, c.ID
 			}
+		}
+	}
+	return "", "", 0
+}
+
+// ImportedLatestIn is the newest version of an app in the imported catalog
+// with that id, and its package hash.
+func (s *Store) ImportedLatestIn(ctx context.Context, catalogID int64, id string) (version, sha string) {
+	c, err := s.ImportedCatalog(ctx, catalogID)
+	if err != nil {
+		return "", ""
+	}
+	for _, a := range c.Apps {
+		if a.ID == id {
+			return a.Version, a.SHA256
 		}
 	}
 	return "", ""
@@ -399,10 +456,13 @@ func (s *Store) ImportedLatest(ctx context.Context, catalog, id string) (version
 // loadImported returns a package from an imported catalog, downloading it
 // the first time. It must hash to what the index says and be the app and
 // version the index names.
-func (s *Store) loadImported(ctx context.Context, sha string) (*apps.Package, error) {
-	c, a, ok := s.findImported(ctx, sha)
+func (s *Store) loadImported(ctx context.Context, catalogID int64, sha string) (*apps.Package, error) {
+	if catalogID <= 0 {
+		return nil, fmt.Errorf("%w: say which imported catalog the package is from (catalogId)", ErrNotFound)
+	}
+	c, a, ok := s.findImported(ctx, catalogID, sha)
 	if !ok {
-		return nil, fmt.Errorf("%w: no imported catalog lists that package any more", ErrNotFound)
+		return nil, fmt.Errorf("%w: that catalog doesn't list this package (any more)", ErrNotFound)
 	}
 	cached := filepath.Join(s.importDir(), sha+".hardyapp")
 	if p, err := readFile(cached); err == nil && p.SHA256 == sha {
@@ -412,7 +472,7 @@ func (s *Store) loadImported(ctx context.Context, sha string) (*apps.Package, er
 	if err != nil {
 		return nil, err
 	}
-	raw, err := s.fetch(ctx, u, apps.MaxPackageBytes)
+	raw, err := s.fetch(ctx, u, apps.MaxPackageBytes, c.LocalNetwork)
 	if err != nil {
 		return nil, apps.Problems{fmt.Sprintf("downloading %s from %s: %v", a.Name, c.Name, err)}
 	}

@@ -3,6 +3,7 @@ package appstore
 import (
 	"context"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -113,8 +114,21 @@ func TestRecordsTravelInBackups(t *testing.T) {
 	if c, _ := r.Catalogs(ctx); len(c) != 1 || len(c[0].Apps) != 1 {
 		t.Errorf("catalogs after restore: %+v", c)
 	}
-	if v, sha := r.ImportedLatest(ctx, "X", "a"); v != "1" || sha == "" {
-		t.Errorf("imported latest: %q %q", v, sha)
+	v, sha, cid := r.ImportedLatest(ctx, "X", "a")
+	if v != "1" || sha == "" || cid == 0 {
+		t.Errorf("imported latest: %q %q %d", v, sha, cid)
+	}
+	if v2, sha2 := r.ImportedLatestIn(ctx, cid, "a"); v2 != v || sha2 != sha {
+		t.Errorf("imported latest by id: %q %q", v2, sha2)
+	}
+	if v2, _ := r.ImportedLatestIn(ctx, cid+1, "a"); v2 != "" {
+		t.Error("another catalog id lists it")
+	}
+	if err := r.SetOrigin(ctx, Origin{AppID: "jellyfin", Source: SourceImported, CatalogID: cid, CatalogName: "X", Ref: sha}); err != nil {
+		t.Fatal(err)
+	}
+	if o := r.OriginOf(ctx, "jellyfin"); o == nil || o.CatalogID != cid || o.CatalogName != "X" {
+		t.Errorf("origin: %+v", o)
 	}
 	if err := r.ForgetApp(ctx, "jellyfin"); err != nil {
 		t.Fatal(err)
@@ -122,6 +136,19 @@ func TestRecordsTravelInBackups(t *testing.T) {
 	if l, _ := r.Access(ctx, "jellyfin"); len(l) != 0 {
 		t.Error("forget kept access")
 	}
+	if r.OriginOf(ctx, "jellyfin") != nil {
+		t.Error("forget kept the origin")
+	}
+}
+
+// customRaw reads a built custom package's bytes.
+func customRaw(t *testing.T, s *Store, ref string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(s.customDir(), ref+".hardyapp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 func TestBuildCustom(t *testing.T) {
@@ -139,6 +166,27 @@ func TestBuildCustom(t *testing.T) {
 	if e2, _ := s.BuildCustom(CustomApp{ID: "whoami", Name: "who am I", Compose: "services:\n  web:\n    image: traefik/whoami\n    ports: [\"${HARDY_PORT_WEB}:80\"]\n",
 		Ports: []apps.Port{{Name: "WEB", Label: "Website", Default: 8400}}, WebPort: "WEB"}); e2 == nil || e2.Ref != e.Ref {
 		t.Error("not reproducible")
+	}
+	// A custom package isn't an upload, and an upload isn't custom: each is
+	// only found under the source it was saved as.
+	if _, err := s.Load(SourceUpload, e.Ref); err == nil {
+		t.Error("the custom package loads as an upload")
+	}
+	up, err := s.Save(customRaw(t, s, e.Ref))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Load(SourceCustom, up.Ref); err != nil {
+		t.Errorf("same bytes saved as custom: %v", err) // built as custom, so it's there
+	}
+	if err := os.Remove(filepath.Join(s.customDir(), e.Ref+".hardyapp")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Load(SourceCustom, up.Ref); err == nil {
+		t.Error("an uploaded package loads as custom")
+	}
+	if _, err := s.Load(SourceUpload, up.Ref); err != nil {
+		t.Errorf("upload: %v", err)
 	}
 	_, err = s.BuildCustom(CustomApp{ID: "Bad", Name: "", Compose: "image: x", WebPort: "WEB"})
 	if p, ok := err.(apps.Problems); !ok || len(p) < 3 {

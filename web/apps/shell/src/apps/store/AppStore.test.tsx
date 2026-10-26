@@ -46,6 +46,7 @@ const labnotes = {
   source: "imported",
   ref: "a".repeat(64),
   sourceName: "Hardy Labs",
+  catalogId: 1,
   id: "labnotes",
   name: "Lab Notes",
   version: "2.0.0",
@@ -267,6 +268,7 @@ describe("App Store install", () => {
       expect(calls.find((c) => c.path === "/apps/install")?.body).toEqual({
         source: "imported",
         ref: "a".repeat(64),
+        catalogId: 1,
         ports: { WEB: 8300 },
         settings: {},
         shares: { MEDIA: { share: "media", path: "", access: "read" } },
@@ -278,6 +280,8 @@ describe("App Store install", () => {
         ],
       }),
     );
+    // The plan names the catalog the admin installs from.
+    expect(calls.find((c) => c.path === "/apps/plan")?.body).toEqual({ source: "imported", ref: "a".repeat(64), catalogId: 1 });
   });
 
   it("reinstalling keeps current settings unless changed", async () => {
@@ -410,6 +414,42 @@ describe("Installed apps", () => {
     );
   });
 
+  it("shows a blocked app and takes the admin to its settings", async () => {
+    const calls: Call[] = [];
+    const blocked = { ...installed, state: "stopped", blocked: "after going back to hardyos-update-1 it needs something it isn't allowed now: the GPU." };
+    base(calls, { "/apps": () => overview([blocked]) });
+    wrap(<AppStoreView isAdmin />);
+    const card = await screen.findByRole("article", { name: "KinCast" });
+    expect(within(card).getByText("KinCast can't start yet")).toBeTruthy();
+    expect(within(card).getByText(/needs something it isn't allowed now/)).toBeTruthy();
+    expect((within(card).getByRole("button", { name: /Start/ }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(within(card).getByRole("button", { name: "Open settings" }));
+    expect(await screen.findByLabelText("Processing speed")).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Settings" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("shows a rollback that restored the data but needs a permission as restored", async () => {
+    const calls: Call[] = [];
+    base(calls, {
+      "/jobs/job-5": () =>
+        job("job-5", "apps.rollback", "failed", {
+          error: "KinCast's data is back at hardyos-update-20261026-120000, but the app stays stopped",
+          result: { id: "kincast", snapshot: "hardyos-update-20261026-120000", restored: true, blocked: "it needs the GPU again." },
+        }),
+    });
+    wrap(<AppStoreView isAdmin />);
+    fireEvent.click(await screen.findByRole("button", { name: "KinCast settings" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Snapshots" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Roll back" }));
+    const confirm = await screen.findByRole("dialog", { name: "Roll KinCast back?" });
+    fireEvent.change(within(confirm).getByLabelText("Type KinCast to confirm"), { target: { value: "KinCast" } });
+    fireEvent.click(within(confirm).getByRole("button", { name: "Roll back" }));
+    expect(await screen.findByText("Restored — needs a permission before it can start")).toBeTruthy();
+    expect(screen.getByText(/it needs the GPU again/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+    expect(await screen.findByLabelText("Processing speed")).toBeTruthy();
+  });
+
   it("offers a rollback when an update fails after its snapshot", async () => {
     const calls: Call[] = [];
     base(calls, {
@@ -460,6 +500,52 @@ describe("Installed apps", () => {
     expect(screen.queryByRole("button", { name: "Catalogs" })).toBeNull();
     expect(screen.queryByText(/Upload a package/)).toBeNull();
   });
+
+  it("warns in red and needs a tick before another source takes over an installed app", async () => {
+    const calls: Call[] = [];
+    const evil = { ...kincast, source: "imported", ref: "e".repeat(64), sourceName: "Evil Apps", catalogId: 7, settings: [] };
+    serve(
+      {
+        "/apps": () => overview([installed]),
+        "/apps/catalog": () => [],
+        "/apps/catalogs": () => [
+          {
+            id: 7,
+            url: "https://evil.example/index.json",
+            name: "Evil Apps",
+            addedAt: "",
+            addedBy: "cade",
+            fetchedAt: null,
+            lastError: "",
+            localNetwork: false,
+            apps: [{ id: "kincast", name: "KinCast", version: "9.9.9", summary: "", url: "https://evil.example/k.hardyapp", sha256: "e".repeat(64), icon: "" }],
+          },
+        ],
+        "/apps/plan": () =>
+          plan(evil, { installed: true, installedVersion: "1.0.0", installedSource: "catalog", installedSourceName: "", replaceSourceRequired: true }),
+        "/users": () => [],
+        "/domain": () => ({ __status: 404, code: "x", message: "" }),
+        "POST /apps/install": () => accepted("job-1", "apps.install"),
+        "/jobs/job-1": () => job("job-1", "apps.install"),
+      },
+      calls,
+    );
+    wrap(<AppStoreView isAdmin />);
+    fireEvent.click(await screen.findByRole("button", { name: "Discover" }));
+    const section = await screen.findByRole("region", { name: "Evil Apps" });
+    fireEvent.click(within(within(section).getByRole("article", { name: "KinCast" })).getByRole("button", { name: "Reinstall…" }));
+    const dialog = await screen.findByRole("dialog", { name: "Reinstall KinCast" });
+    const warning = within(dialog).getAllByRole("alert").find((a) => /take over/.test(a.textContent ?? ""));
+    expect(warning?.textContent).toMatch(/installed from HardyOS's catalog.*from the Evil Apps catalog/);
+    next(dialog);
+    next(dialog);
+    const install = within(dialog).getByRole("button", { name: "Reinstall" }) as HTMLButtonElement;
+    expect(install.disabled).toBe(true);
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: /Replace the installed KinCast/ }));
+    expect(install.disabled).toBe(false);
+    fireEvent.click(install);
+    await waitFor(() => expect(calls.find((c) => c.path === "/apps/install")?.body).toMatchObject({ source: "imported", catalogId: 7, replaceSource: true }));
+  });
 });
 
 describe("Catalogs and custom apps", () => {
@@ -486,7 +572,15 @@ describe("Catalogs and custom apps", () => {
     fireEvent.change(input, { target: { value: "https://labs.example/index.json" } });
     fireEvent.click(screen.getByRole("button", { name: /Import catalog/ }));
     expect(await screen.findByText(/were left out/)).toBeTruthy();
-    expect(calls.find((c) => c.method === "POST")?.body).toEqual({ url: "https://labs.example/index.json" });
+    expect(calls.find((c) => c.method === "POST")?.body).toEqual({ url: "https://labs.example/index.json", localNetwork: false });
+
+    // A catalog at home needs "On my network" ticked.
+    fireEvent.change(input, { target: { value: "https://192.168.1.20/index.json" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: /On my network/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Import catalog/ }));
+    await waitFor(() =>
+      expect(calls.filter((c) => c.method === "POST").at(-1)?.body).toEqual({ url: "https://192.168.1.20/index.json", localNetwork: true }),
+    );
   });
 
   it("creates an app from a Compose file and goes on to install it", async () => {
@@ -518,6 +612,12 @@ describe("App windows", () => {
     const frame = (await screen.findByTitle("KinCast")) as HTMLIFrameElement;
     expect(frame.tagName).toBe("IFRAME");
     expect(frame.src).toBe("https://nas.local:44300/__hardyos/auth?token=t");
+    // Sandboxed: no top navigation.
+    const sandbox = frame.getAttribute("sandbox") ?? "";
+    expect(sandbox.split(" ").sort()).toEqual(
+      ["allow-downloads", "allow-forms", "allow-modals", "allow-popups", "allow-popups-to-escape-sandbox", "allow-same-origin", "allow-scripts"].sort(),
+    );
+    expect(sandbox).not.toContain("top-navigation");
     expect(screen.getByRole("button", { name: /Open in new tab/ })).toBeTruthy();
   });
 

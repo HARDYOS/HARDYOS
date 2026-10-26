@@ -41,7 +41,7 @@ export function ImportedSections({ installed, onInstall, disabled }: { installed
                   </header>
                   {a.summary && <p className="app-card__summary">{a.summary}</p>}
                   <footer className="app-card__actions">
-                    <Button size="sm" variant={installed.has(a.id) ? "secondary" : "primary"} disabled={disabled} onClick={() => onInstall({ source: "imported", ref: a.sha256 })}>
+                    <Button size="sm" variant={installed.has(a.id) ? "secondary" : "primary"} disabled={disabled} onClick={() => onInstall({ source: "imported", ref: a.sha256, catalogId: c.id })}>
                       {installed.has(a.id) ? "Reinstall…" : "Install"}
                     </Button>
                   </footer>
@@ -59,6 +59,7 @@ export function CatalogsPage() {
   const qc = useQueryClient();
   const q = useImportedCatalogs(true);
   const [url, setUrl] = useState("");
+  const [localNetwork, setLocalNetwork] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [problems, setProblems] = useState<string[]>([]);
   const [removing, setRemoving] = useState<AppCatalog | null>(null);
@@ -68,10 +69,14 @@ export function CatalogsPage() {
     setBusy(key);
     setProblems([]);
     try {
-      const c = await unwrap(api.POST("/apps/catalogs", { body: { url: u } }));
+      // A refresh keeps the catalog's "On my network" setting.
+      const c = await unwrap(api.POST("/apps/catalogs", { body: key === "add" ? { url: u, localNetwork } : { url: u } }));
       await qc.invalidateQueries({ queryKey: ["apps", "catalogs"] });
       toast("success", key === "add" ? `Imported ${c.name}` : `Refreshed ${c.name}`, `${c.apps.length} apps`);
-      if (key === "add") setUrl("");
+      if (key === "add") {
+        setUrl("");
+        setLocalNetwork(false);
+      }
     } catch (err) {
       setProblems(err instanceof ApiFailure && err.details.length > 0 ? err.details : [errorMessage(err)]);
     } finally {
@@ -99,6 +104,15 @@ export function CatalogsPage() {
               <TextInput id={fid} className="input mono" placeholder="https://example.com/hardyos/index.json" value={url} onChange={(e) => setUrl(e.target.value)} spellCheck={false} />
             )}
           </Field>
+          <div className="grant-list">
+            <label>
+              <input type="checkbox" checked={localNetwork} onChange={(e) => setLocalNetwork(e.target.checked)} />
+              <span>
+                On my network: the catalog is on this server or another device at home. HardyOS won't fetch catalogs from local addresses (like 192.168.x.x)
+                unless this is ticked, so a catalog can't send it to your router or other devices.
+              </span>
+            </label>
+          </div>
           {problems.length > 0 && <Alert tone="bad">{problems.join(" ")}</Alert>}
           <div className="row">
             <Button type="submit" variant="primary" disabled={!urlOk} busy={busy === "add"}>
@@ -127,7 +141,10 @@ export function CatalogsPage() {
                 {q.data.map((c) => (
                   <tr key={c.id}>
                     <td>
-                      <div>{c.name}</div>
+                      <div className="row" style={{ gap: 6 }}>
+                        {c.name}
+                        {c.localNetwork && <Badge tone="neutral">On my network</Badge>}
+                      </div>
                       <div className="mono small muted">{c.url}</div>
                       {c.lastError && (
                         <div className="small catalog-note">

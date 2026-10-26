@@ -346,9 +346,15 @@ func TestImportedCatalogsAndCustomApps(t *testing.T) {
 	if code := e.kid.do("POST", "/api/v1/apps/catalogs", AppCatalogRequest{URL: indexURL}, nil); code != 403 {
 		t.Fatalf("kid added a catalog: %d", code)
 	}
+	// The test catalog is on this server: refused until "On my network".
+	er = ErrorResponse{}
+	if code := e.admin.do("POST", "/api/v1/apps/catalogs", AppCatalogRequest{URL: indexURL}, &er); code != 400 || !strings.Contains(er.Message, "On my network") {
+		t.Fatalf("local catalog without the flag = %d %+v", code, er)
+	}
+	yes := true
 	var cat appstore.Catalog
-	if code := e.admin.do("POST", "/api/v1/apps/catalogs", AppCatalogRequest{URL: indexURL}, &cat); code != 200 || cat.Name != "Hardy Labs" || len(cat.Apps) != 2 ||
-		!strings.Contains(cat.LastError, "plain") || cat.Apps[0].Icon != "" {
+	if code := e.admin.do("POST", "/api/v1/apps/catalogs", AppCatalogRequest{URL: indexURL, LocalNetwork: &yes}, &cat); code != 200 || cat.Name != "Hardy Labs" || len(cat.Apps) != 2 ||
+		!strings.Contains(cat.LastError, "plain") || cat.Apps[0].Icon != "" || !cat.LocalNetwork {
 		t.Fatalf("add catalog = %d %+v %+v", code, cat, er)
 	}
 	var list []appstore.Catalog
@@ -358,19 +364,26 @@ func TestImportedCatalogsAndCustomApps(t *testing.T) {
 
 	// The package is fetched, checked against the index's hash and labelled.
 	lab := cat.Apps[0]
+	labRef := AppPackageRef{Source: "imported", Ref: lab.SHA256, CatalogID: cat.ID}
 	var plan AppPlan
-	if code := e.admin.do("POST", "/api/v1/apps/plan", AppPackageRef{Source: "imported", Ref: lab.SHA256}, &plan); code != 200 ||
-		plan.Package.SourceName != "Hardy Labs" || len(plan.Package.Grants) != 2 || len(plan.Package.Shares) != 1 {
+	if code := e.admin.do("POST", "/api/v1/apps/plan", labRef, &plan); code != 200 ||
+		plan.Package.SourceName != "Hardy Labs" || plan.Package.CatalogID != cat.ID || len(plan.Package.Grants) != 2 || len(plan.Package.Shares) != 1 || plan.ReplaceSourceRequired {
 		er = ErrorResponse{}
-		e.admin.do("POST", "/api/v1/apps/plan", AppPackageRef{Source: "imported", Ref: lab.SHA256}, &er)
+		e.admin.do("POST", "/api/v1/apps/plan", labRef, &er)
 		t.Fatalf("plan = %d %+v %+v", code, plan, er)
 	}
-	if code := e.admin.do("POST", "/api/v1/apps/plan", AppPackageRef{Source: "imported", Ref: cat.Apps[1].SHA256}, &er); code != 400 || !strings.Contains(er.Message, "checksum") {
+	// An imported package names the catalog it's from, which must list it.
+	for _, bad := range []int64{0, cat.ID + 10} {
+		if code := e.admin.do("POST", "/api/v1/apps/plan", AppPackageRef{Source: "imported", Ref: lab.SHA256, CatalogID: bad}, &er); code != 404 {
+			t.Fatalf("plan with catalog %d = %d %+v", bad, code, er)
+		}
+	}
+	if code := e.admin.do("POST", "/api/v1/apps/plan", AppPackageRef{Source: "imported", Ref: cat.Apps[1].SHA256, CatalogID: cat.ID}, &er); code != 400 || !strings.Contains(er.Message, "checksum") {
 		t.Fatalf("tampered package = %d %+v", code, er)
 	}
 
 	// Extra permissions must be asked for, and each one is audited.
-	req := AppInstallRequest{AppPackageRef: AppPackageRef{Source: "imported", Ref: lab.SHA256}, Pool: "tank",
+	req := AppInstallRequest{AppPackageRef: labRef, Pool: "tank",
 		Grants: []string{"gpu"}, Limits: &apps.Limits{MemoryMB: 1}}
 	if code := e.admin.do("POST", "/api/v1/apps/install", req, &er); code != 400 || len(er.Details) != 5 {
 		t.Fatalf("bad grants = %d %+v", code, er) // gpu not asked, two not allowed, the share is required, memory too small
@@ -438,14 +451,67 @@ func TestImportedCatalogsAndCustomApps(t *testing.T) {
 		t.Fatalf("update prepared %+v", got)
 	}
 
+	if o := e.store.OriginOf(e.ctx, "labnotes"); o == nil || o.CatalogID != cat.ID || o.Source != "imported" {
+		t.Fatalf("origin after the update: %+v", o)
+	}
+
+	// Another catalog listing the same app id (even the same package) can't
+	// quietly take over the installed app and its data.
+	otherIndex := `{"name":"Other Labs","apps":[{"id":"labnotes","name":"Lab Notes","version":"1.1.0","summary":"Notes.","url":"/pkgs/lab-2.hardyapp","sha256":"` + shaHex(labApp(t, "1.1.0")) + `"}]}`
+	remote.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/hardyos/index.json":
+			_, _ = io.WriteString(w, newIndex)
+		case "/other/index.json":
+			_, _ = io.WriteString(w, otherIndex)
+		default:
+			mu.Lock()
+			b := pkgs[r.URL.Path]
+			mu.Unlock()
+			_, _ = w.Write(b)
+		}
+	})
+	var other appstore.Catalog
+	if code := e.admin.do("POST", "/api/v1/apps/catalogs", AppCatalogRequest{URL: remote.URL + "/other/index.json", LocalNetwork: &yes}, &other); code != 200 {
+		t.Fatalf("second catalog = %d", code)
+	}
+	otherRef := AppPackageRef{Source: "imported", Ref: other.Apps[0].SHA256, CatalogID: other.ID}
+	if code := e.admin.do("POST", "/api/v1/apps/plan", otherRef, &plan); code != 200 || !plan.ReplaceSourceRequired ||
+		plan.InstalledSource != "imported" || plan.InstalledSourceName != "Hardy Labs" || plan.Package.SourceName != "Other Labs" {
+		t.Fatalf("plan from another catalog = %d %+v", code, plan)
+	}
+	take := AppInstallRequest{AppPackageRef: otherRef, Grants: all, Shares: map[string]apps.ShareChoice{"DOCS": {Share: "documents", Access: "read"}}}
+	if code := e.admin.do("POST", "/api/v1/apps/install", take, &er); code != 409 || er.Code != "replace_source_required" || !strings.Contains(er.Message, "Hardy Labs") {
+		t.Fatalf("takeover without confirming = %d %+v", code, er)
+	}
+	// The same package uploaded is another source too.
+	var upEntry appstore.Entry
+	if code := e.admin.do("POST", "/api/v1/apps/packages", labApp(t, "1.1.0"), &upEntry); code != 200 {
+		t.Fatalf("upload = %d", code)
+	}
+	if code := e.admin.do("POST", "/api/v1/apps/plan", AppPackageRef{Source: upEntry.Source, Ref: upEntry.Ref}, &plan); code != 200 || !plan.ReplaceSourceRequired {
+		t.Fatalf("plan for an upload over an imported app = %d %+v", code, plan)
+	}
+	take.ReplaceSource = true
+	if j := e.runJob(t, "POST", "/api/v1/apps/install", take); j["state"] != "succeeded" {
+		t.Fatalf("confirmed takeover: %v", j)
+	}
+	if a := auditActions(e.admin, "apps.replace_source"); len(a) != 1 || a[0] != "apps.replace_source labnotes" {
+		t.Fatalf("replace audit: %v", a)
+	}
+	if o := e.store.OriginOf(e.ctx, "labnotes"); o == nil || o.CatalogID != other.ID || o.CatalogName != "Other Labs" {
+		t.Fatalf("origin after the takeover: %+v", o)
+	}
+	e.admin.do("DELETE", "/api/v1/apps/catalogs", AppCatalogRemoveRequest{ID: other.ID}, nil)
+
 	if code := e.admin.do("DELETE", "/api/v1/apps/catalogs", AppCatalogRemoveRequest{ID: cat.ID}, nil); code != 204 {
 		t.Fatalf("remove catalog = %d", code)
 	}
 	if code := e.admin.do("DELETE", "/api/v1/apps/catalogs", AppCatalogRemoveRequest{ID: cat.ID}, nil); code != 404 {
 		t.Fatalf("remove again = %d", code)
 	}
-	if a := auditActions(e.admin, "apps.catalog"); len(a) != 3 {
-		t.Fatalf("catalog audit: %v", a) // add, refresh, remove
+	if a := auditActions(e.admin, "apps.catalog"); len(a) != 8 {
+		t.Fatalf("catalog audit: %v", a) // refused add, add + local network (x2), refresh, remove (x2)
 	}
 
 	// Create an app from a Compose file.
@@ -604,7 +670,7 @@ func TestAppWindowProxy(t *testing.T) {
 
 	// Signing out of the desktop ends the app session too.
 	e.admin.do("POST", "/api/v1/auth/logout", nil, nil)
-	if res, err := browser.Get("https://127.0.0.1:" + itoa(base) + "/"); err != nil || res.StatusCode != 403 {
+	if res, err := browser.Get("https://127.0.0.1:" + itoa(base) + "/"); err != nil || res.StatusCode != 401 {
 		t.Fatalf("after sign-out: %v %v", err, res.StatusCode)
 	}
 
@@ -633,11 +699,31 @@ func TestDomainIdentityForAppAccess(t *testing.T) {
 
 func TestStripHelpers(t *testing.T) {
 	h := http.Header{}
-	h.Add("Cookie", "a=1; hardyos_session=x; b=2")
-	h.Add("Cookie", "hardyos_app_notes=y")
-	stripHardyCookies(h)
-	if got := h.Values("Cookie"); len(got) != 1 || got[0] != "a=1; b=2" {
+	h.Add("Cookie", "a=1; hardyos_session=x; a_notes_sid=2; a_notes-2_sid=3; __Host-a_notes_csrf=4")
+	h.Add("Cookie", "hardyos_app_notes=y; a_notes_hardyos_session=z; a_other_sid=5; a_notes_=6")
+	appRequestCookies(h, "notes")
+	if got := h.Values("Cookie"); len(got) != 1 || got[0] != "sid=2; __Host-csrf=4" {
 		t.Fatalf("cookies: %v", got)
+	}
+	h = http.Header{"Cookie": {"hardyos_session=x; plain=1"}}
+	if appRequestCookies(h, "notes"); h.Get("Cookie") != "" {
+		t.Fatalf("cookies for an app without any: %v", h.Values("Cookie"))
+	}
+	for in, want := range map[string]string{
+		"sid=abc; Path=/; HttpOnly; Domain=example.net; SameSite=Lax": "a_notes_sid=abc; Path=/; HttpOnly; SameSite=Lax",
+		"__Host-token=1; Secure; Path=/":                              "__Host-a_notes_token=1; Secure; Path=/",
+		"__secure-x=2; Secure; domain=.nas":                           "__secure-a_notes_x=2; Secure",
+		" pref = dark ;Max-Age=60":                                    "a_notes_pref=dark; Max-Age=60",
+		"hardyos_session=evil; Path=/":                                "",
+		"HardyOS_App_other=evil":                                      "",
+		"__Host-hardyos_session=evil; Secure; Path=/":                 "",
+		"novalue":   "",
+		"=nameless": "",
+	} {
+		got, ok := rewriteSetCookie(in, "notes")
+		if (want == "") == ok || got != want {
+			t.Errorf("rewriteSetCookie(%q) = %q %v, want %q", in, got, ok, want)
+		}
 	}
 	for in, want := range map[string]string{
 		"default-src 'self'; frame-ancestors 'none'":          "default-src 'self'",

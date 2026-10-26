@@ -168,11 +168,14 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		}
 		if !live {
 			// App windows: an HTTPS proxy per app with a web page (44300 + n).
-			_, p, _ := net.SplitHostPort(httpsAddr)
+			// They listen where the desktop listens (-https's host), like the
+			// plain-HTTP branch below.
+			host, p, _ := net.SplitHostPort(httpsAddr)
 			port, _ := strconv.Atoi(p)
 			go handler.RunAppProxy(ctx, api.AppProxyOptions{
 				TLS:         &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
 				DesktopPort: port,
+				ListenHost:  host,
 			})
 		}
 		serve(&http.Server{

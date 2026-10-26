@@ -89,7 +89,7 @@ func (s *Server) appConfig(ctx context.Context, id string) (*apps.AppConfig, err
 		return nil, err
 	}
 	if c.Source == "" {
-		c.Source = apps.SourceCatalog
+		c.Source = apps.SourceUpload // root decides "catalog"; an unknown source is never trusted
 	}
 	if c.Settings == nil {
 		c.Settings = []apps.SettingValue{}
@@ -244,6 +244,8 @@ func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request, u *a
 		return
 	}
 	s.record(r, u, "apps.access", a.ID, audit.Success, describeAccess(list))
+	// Open windows (and WebSockets) of people who lost access end now.
+	s.proxy.recheckApp(r.Context(), a.ID)
 	stored, err := s.appStore().Access(r.Context(), a.ID)
 	if err != nil {
 		s.writeAppError(w, err)

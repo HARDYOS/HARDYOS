@@ -6,18 +6,45 @@ package api
 // reverse proxy for every installed app with a web page, on its own port
 // (44300 + n, kept in hardyd's database), with the desktop's certificate.
 //
-// Sign-in: the desktop's session cookie isn't usable there (it belongs to
-// the desktop and must never reach an app), so POST /apps/{id}/open mints a
-// short-lived, single-use token. The first URL carries it; the proxy swaps it
-// for an HttpOnly cookie for that app only. The proxy session follows the
-// desktop session: it ends when that one does, and the app's access list is
-// checked again every 30 seconds.
+// Ports don't isolate apps. Browsers keep cookies per host, not per port,
+// and SameSite counts every port of a host as the same site, so the
+// desktop and every app proxy share one cookie jar and are "same-site" to
+// each other. Per-app subdomains (with the reverse proxy, later) are the
+// real fix; until then the proxy hardens what it can:
+//
+//   - Cookies: every Set-Cookie from an app is renamed a_<app id>_<name>
+//     (after a __Host-/__Secure- prefix), loses any Domain attribute, and is
+//     dropped if it is named hardyos_*. Requests to an app's proxy carry only
+//     that app's cookies, renamed back; HardyOS's own cookies and other
+//     apps' never reach it. Cookies an app's page sets from JavaScript can't
+//     be renamed: they stay shared by every port on the host (docs/apps.md).
+//   - Cross-app requests: non-GET/HEAD requests and every WebSocket upgrade
+//     with an Origin other than the proxy's own are refused, and so is any
+//     same-site or cross-site request that isn't a navigation (Sec-Fetch-*),
+//     so another app's page can't post to, embed or read this one.
+//   - Sign-in: the desktop's session cookie must never reach an app, so
+//     POST /apps/{id}/open mints a short-lived, single-use token bound to the
+//     desktop session. The proxy swaps it for an HttpOnly, SameSite=Strict
+//     cookie for that app only, and only for a frame or page load (not a
+//     fetch, image or script) in a browser that holds that same desktop
+//     session (its hardyos_session cookie reaches every port), so another
+//     app can't sign someone into its own token (login CSRF).
+//   - The proxy session follows the desktop session: every request needs
+//     the same desktop session cookie, which is checked (without extending
+//     its idle timeout) together with the account and the app's access
+//     list at most every 30 seconds. WebSockets are tracked and closed when
+//     a check fails, on a 30-second sweep, on sign-out, when access
+//     changes, and when the app is removed, reconfigured, updated or rolled
+//     back.
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
@@ -34,6 +61,8 @@ import (
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/apps"
+	"github.com/hardyos/hardyos/daemon/internal/events"
+	"github.com/hardyos/hardyos/daemon/internal/jobs"
 )
 
 // Window proxy settings.
@@ -46,8 +75,12 @@ const (
 )
 
 // proxyRecheck is how often a proxy session checks the desktop session and
-// the app's access list again (a variable for tests).
-var proxyRecheck = 30 * time.Second
+// the app's access list again on a request, and proxySweep how often every
+// session (WebSockets included) is checked (variables for tests).
+var (
+	proxyRecheck = 30 * time.Second
+	proxySweep   = 30 * time.Second
+)
 
 // AppProxyOptions configures the window proxy.
 type AppProxyOptions struct {
@@ -55,7 +88,8 @@ type AppProxyOptions struct {
 	TLS *tls.Config
 	// BasePort is the first proxy port (default 44300).
 	BasePort int
-	// ListenHost is the address to listen on ("" = every address).
+	// ListenHost is the address to listen on ("" = every address); hardyd
+	// passes the desktop's own listen host.
 	ListenHost string
 	// DesktopPort is the desktop's own port, for frame-ancestors (0 = the
 	// scheme's default).
@@ -96,6 +130,8 @@ type proxySession struct {
 	desktopToken string
 	expires      time.Time
 	checked      time.Time
+	// conns are the session's hijacked connections (WebSockets).
+	conns map[*trackedConn]struct{}
 }
 
 func randomToken() string {
@@ -113,6 +149,9 @@ func (s *Server) RunAppProxy(ctx context.Context, opts AppProxyOptions) {
 	if opts.Interval == 0 {
 		opts.Interval = 20 * time.Second
 	}
+	// Finished app jobs change what the proxy serves: watch for them.
+	sub := s.cfg.Events.Subscribe(0, true, 256)
+	defer s.cfg.Events.Unsubscribe(sub)
 	p.mu.Lock()
 	p.opts, p.running = opts, true
 	p.listeners = map[string]*proxyListener{}
@@ -122,24 +161,66 @@ func (s *Server) RunAppProxy(ctx context.Context, opts AppProxyOptions) {
 	defer p.stop()
 	t := time.NewTicker(opts.Interval)
 	defer t.Stop()
+	sweep := time.NewTicker(proxySweep)
+	defer sweep.Stop()
+	p.reconcile(ctx)
 	for {
-		p.reconcile(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			p.reconcile(ctx)
+		case <-sweep.C:
+			p.sweep(ctx)
+		case e, ok := <-sub.C:
+			if !ok {
+				return
+			}
+			if id := finishedAppJob(e); id != "" {
+				p.dropApp(id)
+				p.reconcile(ctx)
+			}
 		}
 	}
 }
 
+// finishedAppJob returns the app id of an app job that just finished (it
+// may have changed or removed the app), or "".
+func finishedAppJob(e events.Event) string {
+	if e.Type != events.TypeJobUpdated {
+		return ""
+	}
+	var j struct {
+		Kind   string     `json:"kind"`
+		State  jobs.State `json:"state"`
+		Params struct {
+			ID string `json:"id"`
+		} `json:"params"`
+	}
+	if json.Unmarshal(e.Data, &j) != nil || !j.State.Done() {
+		return ""
+	}
+	switch j.Kind {
+	case JobKindAppInstall, JobKindAppUpdate, JobKindAppRemove, JobKindAppReconfigure, JobKindAppRollback:
+		return j.Params.ID
+	}
+	return ""
+}
+
 func (p *appProxy) stop() {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.running = false
+	var conns []*trackedConn
 	for id, l := range p.listeners {
-		_ = l.srv.Close()
+		_ = l.srv.Close() // doesn't close hijacked connections: those follow
 		delete(p.listeners, id)
 	}
+	for k, ss := range p.sessions {
+		conns = append(conns, p.endLocked(k, ss)...)
+	}
+	p.tokens = map[string]proxyToken{}
+	p.mu.Unlock()
+	closeAll(conns)
 }
 
 func (p *appProxy) isRunning() bool {
@@ -155,6 +236,112 @@ func (p *appProxy) scheme() string {
 		return "https"
 	}
 	return "http"
+}
+
+// endLocked forgets a session and returns its connections for closing
+// (outside p.mu: closing a tracked connection takes it).
+func (p *appProxy) endLocked(key string, ss *proxySession) []*trackedConn {
+	delete(p.sessions, key)
+	out := make([]*trackedConn, 0, len(ss.conns))
+	for c := range ss.conns {
+		out = append(out, c)
+	}
+	ss.conns = nil
+	return out
+}
+
+func closeAll(conns []*trackedConn) {
+	for _, c := range conns {
+		_ = c.Close()
+	}
+}
+
+// endSessions ends every session that match picks, closing its WebSockets.
+func (p *appProxy) endSessions(match func(*proxySession) bool) {
+	p.mu.Lock()
+	var conns []*trackedConn
+	for k, ss := range p.sessions {
+		if match(ss) {
+			conns = append(conns, p.endLocked(k, ss)...)
+		}
+	}
+	p.mu.Unlock()
+	closeAll(conns)
+}
+
+// endDesktopSession ends the app sessions opened from a desktop session
+// (signing out).
+func (p *appProxy) endDesktopSession(token string) {
+	if token == "" {
+		return
+	}
+	p.endSessions(func(ss *proxySession) bool { return ss.desktopToken == token })
+}
+
+// endUser ends every app session of an account (disabled, deleted, new
+// password).
+func (p *appProxy) endUser(userID int64) {
+	p.endSessions(func(ss *proxySession) bool { return ss.userID == userID })
+}
+
+// dropApp stops an app's listener and ends its sessions and tokens; the
+// next reconcile starts the listener again if the app still has a page.
+func (p *appProxy) dropApp(appID string) {
+	p.mu.Lock()
+	if l := p.listeners[appID]; l != nil {
+		_ = l.srv.Close()
+		delete(p.listeners, appID)
+	}
+	for k, t := range p.tokens {
+		if t.appID == appID {
+			delete(p.tokens, k)
+		}
+	}
+	p.mu.Unlock()
+	p.endSessions(func(ss *proxySession) bool { return ss.appID == appID })
+}
+
+// recheckApp checks every session of an app now (its access list changed).
+func (p *appProxy) recheckApp(ctx context.Context, appID string) {
+	p.checkAll(ctx, func(ss *proxySession) bool { return ss.appID == appID })
+}
+
+// sweep checks every session, so open WebSockets end within proxySweep of
+// the desktop session or the person's access ending.
+func (p *appProxy) sweep(ctx context.Context) {
+	p.checkAll(ctx, func(*proxySession) bool { return true })
+}
+
+func (p *appProxy) checkAll(ctx context.Context, which func(*proxySession) bool) {
+	type item struct {
+		key string
+		ss  *proxySession
+	}
+	p.mu.Lock()
+	var list []item
+	for k, ss := range p.sessions {
+		if which(ss) {
+			list = append(list, item{k, ss})
+		}
+	}
+	p.mu.Unlock()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
+	for _, it := range list {
+		if time.Now().After(it.ss.expires) || !p.verify(req, it.ss) {
+			p.end(it.key, it.ss)
+		}
+	}
+}
+
+// end forgets one session (if it's still there) and closes its WebSockets.
+func (p *appProxy) end(key string, ss *proxySession) {
+	p.mu.Lock()
+	var conns []*trackedConn
+	if cur := p.sessions[key]; cur == ss {
+		conns = p.endLocked(key, ss)
+	}
+	p.mu.Unlock()
+	closeAll(conns)
 }
 
 // reconcile starts proxies for new apps, stops them for removed ones and
@@ -176,7 +363,6 @@ func (p *appProxy) reconcile(ctx context.Context) {
 	}
 	now := time.Now()
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	for id, l := range p.listeners {
 		if !want[id] {
 			_ = l.srv.Close()
@@ -184,15 +370,18 @@ func (p *appProxy) reconcile(ctx context.Context) {
 		}
 	}
 	for k, t := range p.tokens {
-		if now.After(t.expires) {
+		if now.After(t.expires) || !want[t.appID] {
 			delete(p.tokens, k)
 		}
 	}
+	var conns []*trackedConn
 	for k, ss := range p.sessions {
 		if now.After(ss.expires) || !want[ss.appID] {
-			delete(p.sessions, k)
+			conns = append(conns, p.endLocked(k, ss)...)
 		}
 	}
+	p.mu.Unlock()
+	closeAll(conns)
 }
 
 func appTarget(a apps.App) *url.URL {
@@ -283,7 +472,7 @@ func (p *appProxy) handler(l *proxyListener) http.Handler {
 			pr.SetURL(l.target.Load())
 			pr.Out.Host = pr.In.Host // links the app builds point back at the proxy
 			pr.SetXForwarded()
-			stripHardyCookies(pr.Out.Header)
+			appRequestCookies(pr.Out.Header, l.appID)
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			p.fixResponse(resp, l)
@@ -295,6 +484,10 @@ func (p *appProxy) handler(l *proxyListener) http.Handler {
 		},
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if why := p.crossAppRequest(r); why != "" {
+			proxyPage(w, http.StatusForbidden, "Blocked a request from another page", why)
+			return
+		}
 		if r.URL.Path == proxyAuthPath {
 			p.signIn(w, r, l)
 			return
@@ -305,20 +498,82 @@ func (p *appProxy) handler(l *proxyListener) http.Handler {
 				"Open this app from the HardyOS desktop to use it here.")
 			return
 		}
-		if !p.recheck(r.Context(), ss) {
-			p.mu.Lock()
-			delete(p.sessions, key)
-			p.mu.Unlock()
+		if !p.recheck(r, ss) {
+			p.end(key, ss)
 			proxyPage(w, http.StatusForbidden, "You can't use this app right now",
 				"Your HardyOS sign-in ended or an administrator changed who may use it. Open it again from the desktop.")
 			return
 		}
-		rp.ServeHTTP(w, r)
+		rp.ServeHTTP(&trackingWriter{ResponseWriter: w, p: p, key: key, ss: ss}, r)
 	})
 }
 
-// signIn swaps a token from the desktop for this app's proxy cookie.
+// crossAppRequest says why a request looks like it comes from another page
+// on this host (another app's proxy, which is "same-site" to this one), or "".
+// The app's own requests are same-origin and pass; navigations (opening the
+// app, links into it) pass, everything else from another origin doesn't.
+func (p *appProxy) crossAppRequest(r *http.Request) string {
+	own := p.scheme() + "://" + r.Host
+	origin := r.Header.Get("Origin")
+	upgrade := r.Header.Get("Upgrade") != "" && headerHasToken(r.Header, "Connection", "upgrade")
+	if origin != "" && !strings.EqualFold(origin, own) {
+		if upgrade {
+			return "A WebSocket from another page can't connect to this app."
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			return "Another page can't send changes to this app."
+		}
+	}
+	site := strings.ToLower(r.Header.Get("Sec-Fetch-Site"))
+	if (site == "same-site" || site == "cross-site") && !strings.EqualFold(r.Header.Get("Sec-Fetch-Mode"), "navigate") {
+		return "Another page can't load this app's content. Open the app from the HardyOS desktop."
+	}
+	return ""
+}
+
+func headerHasToken(h http.Header, key, token string) bool {
+	for _, v := range h.Values(key) {
+		for _, t := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(t), token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// desktopCookie is the desktop session cookie the browser sent (it reaches
+// every port on the host).
+func desktopCookie(r *http.Request) string {
+	if c, err := r.Cookie(SessionCookie); err == nil {
+		return c.Value
+	}
+	return ""
+}
+
+func sameSecret(a, b string) bool {
+	return a != "" && len(a) == len(b) && subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+// signIn swaps a token from the desktop for this app's proxy cookie. Only
+// for loading a frame or a page (Sec-Fetch-Dest iframe or document) that
+// the desktop or the person started (Sec-Fetch-Site same-site or none), and
+// only in the browser that holds the desktop session the token was minted
+// for: the desktop's session cookie reaches this port too, so another app
+// can't plant its own token in someone's window (login CSRF). Browsers that
+// send no Sec-Fetch headers (plain http) rely on the session binding.
 func (p *appProxy) signIn(w http.ResponseWriter, r *http.Request, l *proxyListener) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		proxyPage(w, http.StatusMethodNotAllowed, "This link has expired", "Open the app again from the HardyOS desktop.")
+		return
+	}
+	dest := strings.ToLower(r.Header.Get("Sec-Fetch-Dest"))
+	site := strings.ToLower(r.Header.Get("Sec-Fetch-Site"))
+	if (dest != "" && dest != "iframe" && dest != "document") || (site != "" && site != "same-site" && site != "none") {
+		proxyPage(w, http.StatusForbidden, "Open this app from the HardyOS desktop",
+			"This sign-in link only works when the desktop opens it.")
+		return
+	}
 	tok := r.URL.Query().Get("token")
 	now := time.Now()
 	p.mu.Lock()
@@ -330,6 +585,11 @@ func (p *appProxy) signIn(w http.ResponseWriter, r *http.Request, l *proxyListen
 			"Open the app again from the HardyOS desktop.")
 		return
 	}
+	if !sameSecret(desktopCookie(r), t.desktopToken) {
+		proxyPage(w, http.StatusForbidden, "Open this app from your HardyOS desktop",
+			"This link was made for another sign-in. Open the app from the desktop in this browser.")
+		return
+	}
 	key := randomToken()
 	p.mu.Lock()
 	p.sessions[key] = &proxySession{appID: t.appID, userID: t.userID, desktopToken: t.desktopToken,
@@ -338,7 +598,7 @@ func (p *appProxy) signIn(w http.ResponseWriter, r *http.Request, l *proxyListen
 	p.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{
 		Name: proxyCookie(l.appID), Value: key, Path: "/",
-		HttpOnly: true, Secure: tlsOn, SameSite: http.SameSiteLaxMode,
+		HttpOnly: true, Secure: tlsOn, SameSite: http.SameSiteStrictMode,
 	})
 	next := t.next
 	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || strings.Contains(next, `\`) {
@@ -349,36 +609,49 @@ func (p *appProxy) signIn(w http.ResponseWriter, r *http.Request, l *proxyListen
 	http.Redirect(w, r, next, http.StatusSeeOther)
 }
 
+// session finds the request's proxy session. The browser must also send the
+// desktop session it was opened from: a proxy cookie planted from another
+// app's page (cookies set by scripts are shared by every port) is useless
+// without the victim's own desktop session.
 func (p *appProxy) session(r *http.Request, l *proxyListener) (*proxySession, string) {
 	c, err := r.Cookie(proxyCookie(l.appID))
 	if err != nil {
 		return nil, ""
 	}
+	desk := desktopCookie(r)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	ss := p.sessions[c.Value]
-	if ss == nil || ss.appID != l.appID || time.Now().After(ss.expires) {
+	if ss == nil || ss.appID != l.appID || time.Now().After(ss.expires) || !sameSecret(desk, ss.desktopToken) {
 		return nil, ""
 	}
 	return ss, c.Value
 }
 
-// recheck confirms, at most every 30 seconds, that the desktop session is
+// recheck confirms, at most every proxyRecheck, that the desktop session is
 // still signed in and its user may still use the app.
-func (p *appProxy) recheck(ctx context.Context, ss *proxySession) bool {
+func (p *appProxy) recheck(r *http.Request, ss *proxySession) bool {
 	p.mu.Lock()
 	fresh := time.Since(ss.checked) < proxyRecheck
 	p.mu.Unlock()
 	if fresh {
 		return true
 	}
+	return p.verify(r, ss)
+}
+
+// verify checks a proxy session now: the desktop session (without
+// extending its idle timeout), the account (with the same domain refresh
+// as the desktop's own requests) and the app's access list.
+func (p *appProxy) verify(r *http.Request, ss *proxySession) bool {
 	s := p.s
-	info, err := s.sessions.Validate(ctx, ss.desktopToken)
+	ctx := r.Context()
+	info, err := s.peekSession(ctx, ss.desktopToken)
 	if err != nil || info.UserID != ss.userID {
 		return false
 	}
-	u, err := s.users.Get(ctx, info.UserID)
-	if err != nil || u.Disabled {
+	u, err := s.sessionUser(r, ss.desktopToken, info.UserID)
+	if err != nil {
 		return false
 	}
 	may, err := s.mayUse(ctx, ss.desktopToken, u, ss.appID)
@@ -391,22 +664,126 @@ func (p *appProxy) recheck(ctx context.Context, ss *proxySession) bool {
 	return true
 }
 
-// stripHardyCookies keeps HardyOS's own cookies (the desktop session and
-// every app's proxy cookie) away from the app.
-func stripHardyCookies(h http.Header) {
+// trackingWriter records connections the reverse proxy hijacks for
+// WebSockets with their session, so they can be closed when it ends.
+type trackingWriter struct {
+	http.ResponseWriter
+	p   *appProxy
+	key string
+	ss  *proxySession
+}
+
+func (w *trackingWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *trackingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	c, brw, err := http.NewResponseController(w.ResponseWriter).Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	tc := &trackedConn{Conn: c, p: w.p, ss: w.ss}
+	w.p.mu.Lock()
+	live := w.p.sessions[w.key] == w.ss // not ended while the request ran
+	if live {
+		if w.ss.conns == nil {
+			w.ss.conns = map[*trackedConn]struct{}{}
+		}
+		w.ss.conns[tc] = struct{}{}
+	}
+	w.p.mu.Unlock()
+	if !live {
+		_ = c.Close()
+		return nil, nil, errors.New("the app session ended")
+	}
+	return tc, brw, nil
+}
+
+// trackedConn is a hijacked connection of a proxy session.
+type trackedConn struct {
+	net.Conn
+	p    *appProxy
+	ss   *proxySession
+	once sync.Once
+}
+
+func (c *trackedConn) Close() error {
+	c.once.Do(func() {
+		c.p.mu.Lock()
+		delete(c.ss.conns, c)
+		c.p.mu.Unlock()
+	})
+	return c.Conn.Close()
+}
+
+// appCookiePrefix is what an app's cookies are renamed with in the browser.
+// App ids have no "_", so one app's prefix is never the start of another's.
+func appCookiePrefix(appID string) string { return "a_" + appID + "_" }
+
+// splitCookiePrefix separates a __Host- or __Secure- prefix (which must stay
+// first for the browser to enforce it) from the rest of a cookie name.
+func splitCookiePrefix(name string) (prefix, base string) {
+	for _, pre := range []string{"__Host-", "__Secure-"} {
+		if len(name) >= len(pre) && strings.EqualFold(name[:len(pre)], pre) {
+			return name[:len(pre)], name[len(pre):]
+		}
+	}
+	return "", name
+}
+
+func isHardyCookie(base string) bool {
+	return strings.HasPrefix(strings.ToLower(base), "hardyos_")
+}
+
+// rewriteSetCookie scopes one Set-Cookie line from an app to that app:
+// name a_<id>_<name> (after a __Host-/__Secure- prefix), no Domain, every
+// other attribute kept. Nameless cookies and ones named hardyos_* are
+// dropped (ok false).
+func rewriteSetCookie(line, appID string) (string, bool) {
+	nv, attrs, _ := strings.Cut(line, ";")
+	name, val, ok := strings.Cut(nv, "=")
+	name = strings.TrimSpace(name)
+	if !ok || name == "" {
+		return "", false
+	}
+	pre, base := splitCookiePrefix(name)
+	if base == "" || isHardyCookie(base) {
+		return "", false
+	}
+	var b strings.Builder
+	b.WriteString(pre + appCookiePrefix(appID) + base + "=" + strings.TrimSpace(val))
+	for _, a := range strings.Split(attrs, ";") {
+		a = strings.TrimSpace(a)
+		k, _, _ := strings.Cut(a, "=")
+		if a == "" || strings.EqualFold(strings.TrimSpace(k), "domain") {
+			continue
+		}
+		b.WriteString("; " + a)
+	}
+	return b.String(), true
+}
+
+// appRequestCookies keeps only an app's own cookies on a request to it,
+// under the names the app gave them. HardyOS's cookies (the desktop session,
+// every app's proxy cookie) and other apps' cookies never reach it.
+func appRequestCookies(h http.Header, appID string) {
 	lines := h.Values("Cookie")
 	if len(lines) == 0 {
 		return
 	}
+	prefix := appCookiePrefix(appID)
 	var keep []string
 	for _, line := range lines {
 		for _, part := range strings.Split(line, ";") {
 			part = strings.TrimSpace(part)
-			name, _, _ := strings.Cut(part, "=")
-			if part == "" || strings.HasPrefix(strings.TrimSpace(name), "hardyos_") {
+			name, val, _ := strings.Cut(part, "=")
+			pre, base := splitCookiePrefix(strings.TrimSpace(name))
+			if !strings.HasPrefix(base, prefix) {
 				continue
 			}
-			keep = append(keep, part)
+			orig := base[len(prefix):]
+			if orig == "" || isHardyCookie(orig) {
+				continue
+			}
+			keep = append(keep, pre+orig+"="+val)
 		}
 	}
 	h.Del("Cookie")
@@ -415,10 +792,18 @@ func stripHardyCookies(h http.Header) {
 	}
 }
 
-// fixResponse lets the desktop frame the app and keeps the app's redirects
-// on the proxy.
+// fixResponse lets the desktop frame the app, scopes its cookies to it and
+// keeps the app's redirects on the proxy.
 func (p *appProxy) fixResponse(resp *http.Response, l *proxyListener) {
 	h := resp.Header
+	if lines := h.Values("Set-Cookie"); len(lines) > 0 {
+		h.Del("Set-Cookie")
+		for _, line := range lines {
+			if nl, ok := rewriteSetCookie(line, l.appID); ok {
+				h.Add("Set-Cookie", nl)
+			}
+		}
+	}
 	h.Del("X-Frame-Options")
 	for _, key := range []string{"Content-Security-Policy", "Content-Security-Policy-Report-Only"} {
 		vals := h.Values(key)

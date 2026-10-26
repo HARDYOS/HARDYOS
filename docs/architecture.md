@@ -479,7 +479,7 @@ One-click Docker apps install from `.hardyapp` packages (format in
 ### App Store API, catalogs and app windows (App Store v2)
 
 hardyd's side of the App Store v2 (plan: `docs/plans/app-store-v2.md`
-section 3; decisions 65-69):
+section 3; decisions 65-69, security review 80-82):
 
 - **Records in hardyd's database** (migration `0005_apps_web.sql`, so
   settings backups carry them): `app_access` (who may use each app; no rows
@@ -515,15 +515,38 @@ section 3; decisions 65-69):
   the desktop's certificate and reverse-proxies to `127.0.0.1:<web port>`,
   WebSockets included. `X-Frame-Options` and `frame-ancestors` from the app
   are removed and replaced with `frame-ancestors` for the desktop's origin;
-  the desktop's own CSP allows `frame-src` on its host's ports. Sign-in:
-  `POST /apps/{id}/open` mints a single-use token (one minute) bound to the
-  person, the app and their desktop session; the proxy swaps it for an
-  HttpOnly, SameSite=Lax cookie named for that app. Every 30 seconds the
-  proxy checks that the desktop session still exists and the person may
-  still use the app. HardyOS's own cookies (the desktop session and every
-  app's proxy cookie) are stripped from requests before they reach the app.
-  A reconcile loop starts proxies for new apps and stops them for removed
-  ones. To be replaced by per-app subdomains when the reverse proxy lands.
+  the desktop's own CSP allows `frame-src` on its host's ports. Proxies
+  listen on the desktop's own listen host. Ports don't isolate apps
+  (cookies are per host, and SameSite counts every port of a host as one
+  site), so until per-app subdomains replace them (with the reverse proxy)
+  the proxy does (decisions 80-81): app cookies are renamed
+  `a_<app id>_<name>` on the way out (no `Domain`, `hardyos_*` dropped) and
+  only that app's are forwarded, prefix removed; changes and WebSockets from
+  another Origin and same-site non-navigations (`Sec-Fetch-*`) are refused.
+  Sign-in: `POST /apps/{id}/open` mints a single-use token (one minute)
+  bound to the person, the app and their desktop session; the proxy accepts
+  it only for an iframe or document load (same-site or none) in a browser
+  that sends that same desktop session cookie, and swaps it for an
+  HttpOnly, SameSite=Strict cookie named for that app; every later request
+  needs the matching desktop cookie too. At most every 30 seconds per
+  request, and on a 30-second sweep, the proxy checks the desktop session
+  with `peekSession` (no idle-timeout slide), the account through
+  `sessionUser` (the same domain refresh as the desktop's own requests) and
+  the access list. Hijacked connections (WebSockets) are tracked per
+  session and closed when a check fails, on sign-out, access change,
+  account disable or password reset, on stop, and when an app job
+  (install, update, remove, reconfigure, rollback) finishes: the proxy
+  watches job events and then drops that app's listener, tokens and
+  sessions before reconciling. A 20-second reconcile loop also starts
+  proxies for new apps and stops them for removed ones.
+- **Provenance** (decision 82). `app_origins` (migration
+  `0006_apps_web_sec.sql`) records each install's source and, for imported
+  apps, the catalog's id; an imported package ref carries `catalogId` and
+  that catalog must list the sha. Installing or updating an id from another
+  source or catalog needs `replaceSource`. Custom-built packages live in
+  their own folder (`app-packages/custom`), apart from uploads. Catalog
+  fetches go through a dialer guard (`appstore/netguard.go`) that refuses
+  local addresses unless the catalog has `local_network` set.
 - **Web.** `apps/store/`: the stepped install dialog (settings, shared
   folders, permissions, who can use it, limits under Advanced), the app
   details view (overview, settings, access, snapshots, logs), Catalogs,

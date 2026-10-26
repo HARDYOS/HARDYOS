@@ -2,6 +2,7 @@ import type { AppInstallRequest, AppPackage, AppPackageRef, AppPlan, AppShareCho
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { ApiFailure, api, errorMessage, unwrap } from "../../api";
+import { AlertIcon } from "../../icons";
 import { Alert, Button, ErrorBox, Field, Loading, Select, TextInput, Toggle } from "../../ui";
 import { Dialog } from "../../ui/Dialog";
 import { toast } from "../../ui/toasts";
@@ -35,7 +36,7 @@ export function InstallDialog({
 }) {
   const qc = useQueryClient();
   const plan = useQuery({
-    queryKey: ["apps", "plan", pkgRef.source, pkgRef.ref],
+    queryKey: ["apps", "plan", pkgRef.source, pkgRef.ref, pkgRef.catalogId ?? 0],
     queryFn: () => unwrap(api.POST("/apps/plan", { body: pkgRef })),
     staleTime: 0,
     gcTime: 0,
@@ -107,6 +108,7 @@ function InstallForm({ plan, onClose, onStarted }: { plan: AppPlan; onClose: () 
   const [grants, setGrants] = useState<string[]>([]);
   const [limits, setLimits] = useState<LimitsDraft>({ memoryMB: "", cpus: "" });
   const [access, setAccess] = useState<AccessDraft>({ everyone: true, principals: [] });
+  const [replaceOk, setReplaceOk] = useState(false);
   const [busy, setBusy] = useState(false);
   const [problems, setProblems] = useState<string[]>([]);
 
@@ -119,7 +121,7 @@ function InstallForm({ plan, onClose, onStarted }: { plan: AppPlan; onClose: () 
   };
   const index = steps.indexOf(step);
   const last = index === steps.length - 1;
-  const allReady = steps.every((s) => stepReady[s]) && plan.available;
+  const allReady = steps.every((s) => stepReady[s]) && plan.available && (!plan.replaceSourceRequired || replaceOk);
 
   async function submit() {
     if (!last) {
@@ -138,6 +140,8 @@ function InstallForm({ plan, onClose, onStarted }: { plan: AppPlan; onClose: () 
       const body: AppInstallRequest = {
         source: pkg.source,
         ref: pkg.ref,
+        catalogId: pkg.source === "imported" ? pkg.catalogId : undefined,
+        replaceSource: plan.replaceSourceRequired ? replaceOk : undefined,
         pool: plan.enginePool ? undefined : pool,
         ports: Object.fromEntries(Object.entries(ports).map(([k, v]) => [k, Number(v)])),
         settings: chosen,
@@ -191,6 +195,8 @@ function InstallForm({ plan, onClose, onStarted }: { plan: AppPlan; onClose: () 
           ))}
         </ol>
 
+        {plan.replaceSourceRequired && <ReplaceSourceWarning plan={plan} value={replaceOk} onChange={setReplaceOk} />}
+
         {step === "settings" && <SettingsStep plan={plan} pool={pool} setPool={setPool} ports={ports} setPorts={setPorts} settings={settings} setSettings={setSettings} />}
         {step === "folders" && (
           <>
@@ -230,6 +236,42 @@ function InstallForm({ plan, onClose, onStarted }: { plan: AppPlan; onClose: () 
         )}
       </div>
     </Dialog>
+  );
+}
+
+function sourceWords(source: string, name?: string): string {
+  switch (source) {
+    case "catalog":
+      return "HardyOS's catalog";
+    case "imported":
+      return name ? `the ${name} catalog` : "an imported catalog";
+    case "upload":
+      return "an uploaded package";
+    case "custom":
+      return "a Compose file (Create an app)";
+  }
+  return "somewhere HardyOS can't tell";
+}
+
+/** The installed app with this id came from somewhere else: say so, and make the admin tick it. */
+function ReplaceSourceWarning({ plan, value, onChange }: { plan: AppPlan; value: boolean; onChange: (v: boolean) => void }) {
+  const pkg = plan.package;
+  return (
+    <div className="stack" style={{ gap: 8 }}>
+      <div className="grant-warning" role="alert">
+        <AlertIcon size={15} />
+        <span>
+          {pkg.name} ({pkg.id}) is {plan.installed ? "installed" : "kept"} from {sourceWords(plan.installedSource, plan.installedSourceName)}. This package is
+          from {sourceWords(pkg.source, pkg.sourceName)}, and it would take over that app's data and passwords. Only go on if you trust it with them.
+        </span>
+      </div>
+      <div className="grant-list">
+        <label>
+          <input type="checkbox" checked={value} onChange={(e) => onChange(e.target.checked)} />
+          <span>Replace the installed {pkg.name} with this one, giving it the data and passwords</span>
+        </label>
+      </div>
+    </div>
   );
 }
 

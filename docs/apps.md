@@ -336,7 +336,11 @@ and open an app's page for its settings:
   users (`HOME\alice`) and domain groups (`HOME\Family`). Administrators can
   always use every app.
 - **Snapshots**: the snapshots taken before updates (the newest three), each
-  with the version it holds, and Roll back (type the app's name).
+  with the version it holds, and Roll back (type the app's name). A
+  rollback that brought the data back but left the app needing a
+  permission shows as **Restored — needs a permission before it can start**,
+  not as a failure; the app's card and page then say what's missing, with
+  **Open settings** (Start stays off until the settings are saved).
 - **Logs**: the last 500 lines from every container.
 
 **Install** walks through steps: settings (ports, settings and, the first
@@ -346,6 +350,13 @@ it with resource limits under Advanced. Permissions of apps from HardyOS's
 catalog are listed in plain words. For uploaded, imported and custom apps
 every extra permission is an unticked box under a red warning, and the app
 can't be installed until each is ticked.
+
+If an app with the same id is already installed (or its data kept) from
+somewhere else, another source or another imported catalog, the dialog
+says so in red: the new package would take over that app's data and
+passwords. It can't be installed until **Replace the installed app** is
+ticked (`replaceSource`, audited as `apps.replace_source`). The same holds
+for an update with a package from elsewhere.
 
 **Discover** shows HardyOS's catalog and, under each imported catalog's
 name, its apps labelled **Third-party**.
@@ -366,7 +377,19 @@ refreshes it and removes it. A catalog is an `index.json`:
 
 `url` may be relative to the index and must be https. hardyd downloads a
 package when it's first planned and uses it only if its SHA-256 matches and
-it is the app and version the index names. Apps with problems in the index
+it is the app and version the index names. An install from a catalog
+names it (`catalogId`); that catalog must list the package, hardyd records
+the catalog's id with the app, and updates come from that catalog only
+(apps installed before this was recorded follow the catalog's name).
+
+hardyd won't fetch a catalog or its packages from this server or its own
+networks (loopback, `10/8`, `172.16/12`, `192.168/16`, link-local, CGNAT
+`100.64/10`, IPv6 unique-local) unless **On my network** is ticked for that
+catalog (audited as `apps.catalog.local_network`), so a catalog address, a
+redirect or a DNS name can't point hardyd at the router's admin page or
+another device. The check is made on every connection, after DNS and after
+each redirect; unspecified, multicast and broadcast addresses are always
+refused. Apps with problems in the index
 are left out (the Catalogs page says which). Icons are only taken as data:
 URLs. Removing a catalog keeps its apps running; they just get no more
 updates from it.
@@ -380,17 +403,62 @@ install follows. To change it later, create it again with a higher version
 and update the app with that package.
 
 **Upload a package** installs a `.hardyapp` file (source `upload`).
+Uploaded and custom-built packages are kept in separate folders, so a
+package can only be installed under the source it was saved as.
 
 ## App windows
 
 Apps open as desktop windows. The desktop is served over HTTPS, so hardyd
 runs a small HTTPS proxy for each app with a web page on its own port
-(44300, 44301, …, remembered per app) with the desktop's certificate. Each
-Open asks hardyd for a one-minute, single-use link; the proxy swaps it for
-a cookie for that app only, and the session ends when you sign out of the
-desktop or lose access to the app. The proxy passes WebSockets, lets the
-desktop frame the app, and never forwards HardyOS's own cookies. **Open in
-new tab** uses the same proxy.
+(44300, 44301, …, remembered per app) with the desktop's certificate, on
+the same address the desktop listens on. Each Open asks hardyd for a
+one-minute, single-use link; the proxy swaps it for a cookie for that app
+only. The proxy passes WebSockets and lets the desktop frame the app, in a
+sandboxed frame that can't navigate the desktop's tab. **Open in new tab**
+uses the same proxy.
+
+Ports don't keep apps apart the way separate sites would: browsers keep
+cookies per host, not per port, and count every port of a host as the same
+site. So the proxy does the separating:
+
+- **Cookies.** Every cookie an app's server sets is renamed
+  `a_<app id>_<name>` (`__Host-` and `__Secure-` stay in front), loses any
+  `Domain`, and keeps its other attributes; one named `hardyos_*` is
+  dropped. Requests to an app carry only its own cookies, under the names
+  it gave them; HardyOS's cookies and other apps' never reach it.
+- **Requests from other apps.** A change (anything but GET or HEAD) or a
+  WebSocket from another page's origin is refused, and so is anything
+  another page on the host loads from the app that isn't a navigation
+  (images, scripts, fetches), going by the browser's `Sec-Fetch-*` headers.
+- **Sign-in.** The link works only as a frame or page the desktop (or you)
+  opened (`Sec-Fetch-Dest` iframe or document, `Sec-Fetch-Site` same-site
+  or none), and only in the browser signed in to the desktop session it was
+  made for: the desktop's session cookie reaches the proxy's port too, and
+  must match. Another app can't sign you in to an account of its choosing.
+  The proxy cookie is HttpOnly and `SameSite=Strict`, and every request
+  also needs the matching desktop session cookie.
+- **Ending.** A window's session ends with the desktop session, and the
+  person's account and access to the app are checked again at most every 30
+  seconds, without keeping the desktop signed in (an app left open doesn't
+  stop the desktop's idle timeout). Open WebSockets are closed when that
+  check fails, on a 30-second sweep, on sign-out, when the app's access
+  list changes, when an account is turned off or its password reset, and as
+  soon as a remove, reconfigure, update or rollback of the app finishes
+  (which also ends its window sessions: open it again).
+
+What's left until each app gets its own subdomain (with the reverse
+proxy):
+
+- Cookies an app's page sets from JavaScript can't be renamed. They are
+  shared by the desktop and every app on the host, so any app's scripts can
+  read non-HttpOnly cookies (its own or another app's) and set cookies
+  other apps' pages see. The proxy doesn't forward such cookies (they lack
+  the app's prefix), so an app's server never receives them.
+- An app whose page reads a cookie its server set, by name, from
+  JavaScript (Django's `csrftoken` pattern) sees it under the renamed name
+  and may fail; such apps need checking in a window until subdomains.
+- A browser that sends no `Sec-Fetch-*` headers (plain-HTTP development, old
+  browsers) gets only the Origin and session-cookie checks.
 
 ## API
 
@@ -398,7 +466,7 @@ new tab** uses the same proxy.
 | --- | --- | --- |
 | `GET /apps` | signed in | Installed apps (only those you may use, for non-admins) |
 | `GET /apps/catalog` | admin | HardyOS's catalog |
-| `GET/POST/DELETE /apps/catalogs` | admin | Imported catalogs: list, import or refresh (`{url}`), remove (`{id}`) |
+| `GET/POST/DELETE /apps/catalogs` | admin | Imported catalogs: list, import or refresh (`{url, localNetwork}`), remove (`{id}`) |
 | `POST /apps/packages` | admin | Upload a package |
 | `POST /apps/custom` | admin | Build a custom app; answers with an install plan |
 | `POST /apps/plan`, `POST /apps/install` | admin | Plan and install (job `apps.install`) |

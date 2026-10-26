@@ -9,7 +9,7 @@ import { ConfirmDialog, Dialog } from "../../ui/Dialog";
 import { toast } from "../../ui/toasts";
 import { JobProgress } from "../shared";
 import { openInNewTab } from "./AppFrame";
-import { STATE, SourceBadge, appNotes, isRunning, jobSnapshot } from "./common";
+import { STATE, SourceBadge, appNotes, isRunning, jobRestored, jobSnapshot } from "./common";
 import { PortFields, SettingField, portProblem } from "./InstallDialog";
 import {
   AccessEditor,
@@ -25,7 +25,7 @@ import {
   limitsValue,
 } from "./parts";
 
-type Tab = "overview" | "settings" | "access" | "snapshots" | "logs";
+export type Tab = "overview" | "settings" | "access" | "snapshots" | "logs";
 const TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "settings", label: "Settings" },
@@ -36,8 +36,22 @@ const TABS: { id: Tab; label: string }[] = [
 
 type OpenApp = (app: Pick<InstalledApp, "id" | "name">) => void;
 
-export function AppDetails({ app, update, onBack, onRemove, onOpen }: { app: InstalledApp; update?: string; onBack: () => void; onRemove: () => void; onOpen: OpenApp }) {
-  const [tab, setTab] = useState<Tab>("overview");
+export function AppDetails({
+  app,
+  update,
+  onBack,
+  onRemove,
+  onOpen,
+  initialTab = "overview",
+}: {
+  app: InstalledApp;
+  update?: string;
+  onBack: () => void;
+  onRemove: () => void;
+  onOpen: OpenApp;
+  initialTab?: Tab;
+}) {
+  const [tab, setTab] = useState<Tab>(initialTab);
   const st = STATE[app.state] ?? { tone: "neutral" as const, label: app.state };
   return (
     <>
@@ -62,10 +76,12 @@ export function AppDetails({ app, update, onBack, onRemove, onOpen }: { app: Ins
             </button>
           ))}
         </div>
-        {tab === "overview" && <Overview app={app} update={update} onRemove={onRemove} onRollback={() => setTab("snapshots")} onOpen={onOpen} />}
+        {tab === "overview" && (
+          <Overview app={app} update={update} onRemove={onRemove} onRollback={() => setTab("snapshots")} onSettings={() => setTab("settings")} onOpen={onOpen} />
+        )}
         {tab === "settings" && <SettingsTab app={app} />}
         {tab === "access" && <AccessTab app={app} />}
-        {tab === "snapshots" && <SnapshotsTab app={app} />}
+        {tab === "snapshots" && <SnapshotsTab app={app} onSettings={() => setTab("settings")} />}
         {tab === "logs" && <LogsView app={app} />}
       </div>
     </>
@@ -74,7 +90,21 @@ export function AppDetails({ app, update, onBack, onRemove, onOpen }: { app: Ins
 
 // ---- overview ---------------------------------------------------------------
 
-function Overview({ app, update, onRemove, onRollback, onOpen: openApp }: { app: InstalledApp; update?: string; onRemove: () => void; onRollback: () => void; onOpen: OpenApp }) {
+function Overview({
+  app,
+  update,
+  onRemove,
+  onRollback,
+  onSettings,
+  onOpen: openApp,
+}: {
+  app: InstalledApp;
+  update?: string;
+  onRemove: () => void;
+  onRollback: () => void;
+  onSettings: () => void;
+  onOpen: OpenApp;
+}) {
   const qc = useQueryClient();
   const [busy, setBusy] = useState<string | null>(null);
   const [job, setJob] = useState<string | null>(null);
@@ -124,6 +154,7 @@ function Overview({ app, update, onRemove, onRollback, onOpen: openApp }: { app:
 
   return (
     <div className="stack">
+      {app.blocked && <BlockedAlert app={app} onSettings={onSettings} />}
       <div className="row app-details__actions">
         {app.web && (
           <>
@@ -140,7 +171,7 @@ function Overview({ app, update, onRemove, onRollback, onOpen: openApp }: { app:
             <StopIcon size={13} /> Stop
           </Button>
         ) : (
-          <Button onClick={() => act("start")} busy={busy === "start"} disabled={!!job}>
+          <Button onClick={() => act("start")} busy={busy === "start"} disabled={!!job || !!app.blocked}>
             <PlayIcon size={13} /> Start
           </Button>
         )}
@@ -445,13 +476,27 @@ function AccessForm({ app, initial }: { app: InstalledApp; initial: AccessDraft 
   );
 }
 
+/** The app can't start until its settings give it what a rollback left out. */
+export function BlockedAlert({ app, onSettings }: { app: Pick<InstalledApp, "name" | "blocked">; onSettings?: () => void }) {
+  return (
+    <Alert
+      tone="bad"
+      title={`${app.name} can't start yet`}
+      action={onSettings ? <Button size="sm" onClick={onSettings}>Open settings</Button> : undefined}
+    >
+      {app.blocked} Give it what it needs in its settings and save them, then start it.
+    </Alert>
+  );
+}
+
 // ---- snapshots ----------------------------------------------------------------
 
-function SnapshotsTab({ app }: { app: InstalledApp }) {
+function SnapshotsTab({ app, onSettings }: { app: InstalledApp; onSettings: () => void }) {
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ["apps", app.id, "snapshots"], queryFn: () => unwrap(api.GET("/apps/{id}/snapshots", { params: { path: { id: app.id } } })) });
   const [rolling, setRolling] = useState<string | null>(null);
   const [job, setJob] = useState<string | null>(null);
+  const [restored, setRestored] = useState<string | null>(null);
   if (q.isPending) return <Loading />;
   if (q.isError) return <ErrorBox error={q.error} onRetry={() => q.refetch()} />;
   const list = q.data.snapshots;
@@ -461,7 +506,26 @@ function SnapshotsTab({ app }: { app: InstalledApp }) {
         HardyOS takes a snapshot of {app.name} before every update and keeps the last three. Rolling back puts its data, settings and version back as
         they were then; anything changed since is lost.
       </p>
-      {job && <JobProgress id={job} onDone={() => { void qc.invalidateQueries({ queryKey: ["apps"] }); void q.refetch(); }} />}
+      {restored && (
+        <Alert tone="warn" title="Restored — needs a permission before it can start" action={<Button size="sm" onClick={onSettings}>Open settings</Button>}>
+          {app.name}'s data, settings and version are back, but it stays stopped: {restored}
+        </Alert>
+      )}
+      {job && (
+        <JobProgress
+          id={job}
+          onDone={(j) => {
+            void qc.invalidateQueries({ queryKey: ["apps"] });
+            void q.refetch();
+            const missing = jobRestored(j);
+            if (missing) {
+              // Not a failed rollback: the data is back; the app needs a permission.
+              setJob(null);
+              setRestored(missing);
+            }
+          }}
+        />
+      )}
       {list.length === 0 ? (
         <p className="small muted">No snapshots yet.</p>
       ) : (
@@ -500,6 +564,7 @@ function SnapshotsTab({ app }: { app: InstalledApp }) {
           onClose={() => setRolling(null)}
           onConfirm={async () => {
             const r = await unwrap(api.POST("/apps/{id}/rollback", { params: { path: { id: app.id } }, body: { snapshot: rolling, confirm: app.name } }));
+            setRestored(null);
             setJob(r.job.id);
           }}
         >

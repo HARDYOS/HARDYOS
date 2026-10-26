@@ -188,8 +188,49 @@ func (s *Store) ForgetApp(ctx context.Context, appID string) error {
 	if _, err := db.ExecContext(ctx, `DELETE FROM app_access WHERE app_id = ?`, appID); err != nil {
 		return err
 	}
+	if _, err = db.ExecContext(ctx, `DELETE FROM app_origins WHERE app_id = ?`, appID); err != nil {
+		return err
+	}
 	_, err = db.ExecContext(ctx, `DELETE FROM app_proxy_ports WHERE app_id = ?`, appID)
 	return err
+}
+
+// Origin is where hardyd installed an app from.
+type Origin struct {
+	AppID  string
+	Source string
+	// CatalogID and CatalogName name the imported catalog (imported apps).
+	CatalogID   int64
+	CatalogName string
+	// Ref is the package installed last (app id or SHA-256).
+	Ref string
+}
+
+// SetOrigin records where an app was installed from.
+func (s *Store) SetOrigin(ctx context.Context, o Origin) error {
+	db, err := s.db()
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `INSERT INTO app_origins (app_id, source, catalog_id, catalog_name, ref) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(app_id) DO UPDATE SET source = excluded.source, catalog_id = excluded.catalog_id,
+		catalog_name = excluded.catalog_name, ref = excluded.ref`, o.AppID, o.Source, o.CatalogID, o.CatalogName, o.Ref)
+	return err
+}
+
+// OriginOf returns where an app was installed from, or nil when hardyd has
+// no record (installed before records were kept, or no database).
+func (s *Store) OriginOf(ctx context.Context, appID string) *Origin {
+	db, err := s.db()
+	if err != nil {
+		return nil
+	}
+	o := Origin{AppID: appID}
+	if err := db.QueryRowContext(ctx, `SELECT source, catalog_id, catalog_name, ref FROM app_origins WHERE app_id = ?`, appID).
+		Scan(&o.Source, &o.CatalogID, &o.CatalogName, &o.Ref); err != nil {
+		return nil
+	}
+	return &o
 }
 
 // ProxyPorts returns every app's window proxy port.

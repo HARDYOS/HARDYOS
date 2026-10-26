@@ -38,13 +38,32 @@ const (
 // each app, imported catalogs, window proxy ports) in hardyd's database.
 type Store struct {
 	CatalogDir string // packages that ship with HardyOS (*.hardyapp)
-	UploadDir  string // packages people uploaded or built, named <sha256>.hardyapp
+	UploadDir  string // packages people uploaded, named <sha256>.hardyapp
+	// CustomDir holds packages built by Create an app, named <sha256>.hardyapp
+	// (default: UploadDir/custom). Kept apart from uploads so a package can
+	// only be installed under the label it was saved with.
+	CustomDir string
 	// ImportDir caches packages from imported catalogs, named <sha256>.hardyapp.
 	ImportDir string
 	// DB holds app access, imported catalogs and proxy ports; nil disables them.
 	DB *store.DB
 	// Client fetches imported catalogs; nil uses a client with timeouts.
 	Client *http.Client
+}
+
+func (s *Store) customDir() string {
+	if s.CustomDir != "" {
+		return s.CustomDir
+	}
+	return filepath.Join(s.UploadDir, "custom")
+}
+
+// dirFor is the folder for uploaded or custom packages.
+func (s *Store) dirFor(source string) string {
+	if source == SourceCustom {
+		return s.customDir()
+	}
+	return s.UploadDir
 }
 
 func (s *Store) importDir() string {
@@ -70,7 +89,10 @@ type Entry struct {
 	// Ref is the app id (catalog) or the package's SHA-256 (upload, imported, custom).
 	Ref string `json:"ref"`
 	// SourceName is the imported catalog's name ("" otherwise).
-	SourceName  string         `json:"sourceName"`
+	SourceName string `json:"sourceName"`
+	// CatalogID is the imported catalog's id (imported packages only); the
+	// install sends it back with the ref.
+	CatalogID   int64          `json:"catalogId,omitempty"`
 	ID          string         `json:"id"`
 	Name        string         `json:"name"`
 	Version     string         `json:"version"`
@@ -220,14 +242,15 @@ func (s *Store) save(raw []byte, source string) (*Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(s.UploadDir, 0o700); err != nil {
+	dir := s.dirFor(source)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(s.UploadDir, p.SHA256+".hardyapp")
+	path := filepath.Join(dir, p.SHA256+".hardyapp")
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		return nil, err
 	}
-	s.pruneDir(s.UploadDir, path, 10)
+	s.pruneDir(dir, path, 10)
 	e := EntryOf(source, p.SHA256, p)
 	return &e, nil
 }
@@ -250,15 +273,23 @@ func (s *Store) pruneDir(dir, keep string, n int) {
 	}
 }
 
-// Load finds a package by source and ref.
+// Load finds a package by source and ref (imported packages need LoadFrom).
 func (s *Store) Load(source, ref string) (*apps.Package, error) {
-	return s.LoadContext(context.Background(), source, ref)
+	return s.LoadFrom(context.Background(), source, ref, 0)
 }
 
-// LoadContext finds a package by source and ref. A package from an imported
-// catalog is downloaded (and checked against the catalog's SHA-256) the
-// first time.
+// LoadContext finds a package by source and ref (imported packages need
+// LoadFrom).
 func (s *Store) LoadContext(ctx context.Context, source, ref string) (*apps.Package, error) {
+	return s.LoadFrom(ctx, source, ref, 0)
+}
+
+// LoadFrom finds a package by source and ref; catalogID is the imported
+// catalog an imported package comes from, which must list that hash. A
+// package from an imported catalog is downloaded (and checked against the
+// catalog's SHA-256) the first time. Uploads and custom apps live in their
+// own folders, so each is only found under the source it was saved as.
+func (s *Store) LoadFrom(ctx context.Context, source, ref string, catalogID int64) (*apps.Package, error) {
 	switch source {
 	case SourceCatalog:
 		if apps.ValidID(ref) != nil {
@@ -275,7 +306,7 @@ func (s *Store) LoadContext(ctx context.Context, source, ref string) (*apps.Pack
 		if !shaRE.MatchString(ref) {
 			return nil, ErrNotFound
 		}
-		p, err := readFile(filepath.Join(s.UploadDir, ref+".hardyapp"))
+		p, err := readFile(filepath.Join(s.dirFor(source), ref+".hardyapp"))
 		if errors.Is(err, os.ErrNotExist) {
 			if source == SourceCustom {
 				return nil, fmt.Errorf("%w: create the app again", ErrNotFound)
@@ -290,17 +321,18 @@ func (s *Store) LoadContext(ctx context.Context, source, ref string) (*apps.Pack
 		if !shaRE.MatchString(ref) {
 			return nil, ErrNotFound
 		}
-		return s.loadImported(ctx, ref)
+		return s.loadImported(ctx, catalogID, ref)
 	}
 	return nil, ErrNotFound
 }
 
-// SourceNameOf is the imported catalog's name for an imported package ref.
-func (s *Store) SourceNameOf(ctx context.Context, source, ref string) string {
+// SourceNameOf is the name of the imported catalog with that id, when it
+// lists the package ref.
+func (s *Store) SourceNameOf(ctx context.Context, source, ref string, catalogID int64) string {
 	if source != SourceImported {
 		return ""
 	}
-	if c, _, ok := s.findImported(ctx, ref); ok {
+	if c, _, ok := s.findImported(ctx, catalogID, ref); ok {
 		return c.Name
 	}
 	return ""

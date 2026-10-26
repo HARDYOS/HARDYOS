@@ -23,6 +23,11 @@ func (s *Server) handleAppCatalogs(w http.ResponseWriter, r *http.Request, _ *au
 // AppCatalogRequest imports a catalog, or refreshes one already imported.
 type AppCatalogRequest struct {
 	URL string `json:"url"`
+	// LocalNetwork ("On my network") lets hardyd fetch the catalog from this
+	// server or its own networks (loopback, private, link-local, CGNAT and
+	// unique-local addresses), which are refused otherwise. Omitted keeps a
+	// refreshed catalog's setting.
+	LocalNetwork *bool `json:"localNetwork,omitempty"`
 }
 
 func (s *Server) handleAddAppCatalog(w http.ResponseWriter, r *http.Request, u *auth.User) {
@@ -43,6 +48,13 @@ func (s *Server) handleAddAppCatalog(w http.ResponseWriter, r *http.Request, u *
 	}
 	for _, c := range existing {
 		if c.URL == u2.String() {
+			if req.LocalNetwork != nil && *req.LocalNetwork != c.LocalNetwork {
+				if err := st.SetCatalogLocal(r.Context(), c.ID, *req.LocalNetwork); err != nil {
+					s.writeAppError(w, err)
+					return
+				}
+				s.record(r, u, "apps.catalog.local_network", c.URL, audit.Success, onOff(*req.LocalNetwork))
+			}
 			got, err := st.RefreshCatalog(r.Context(), c.ID)
 			if err != nil {
 				s.record(r, u, "apps.catalog.refresh", c.URL, audit.Failure, err.Error())
@@ -54,14 +66,25 @@ func (s *Server) handleAddAppCatalog(w http.ResponseWriter, r *http.Request, u *
 			return
 		}
 	}
-	c, err := st.AddCatalog(r.Context(), req.URL, u.Username)
+	local := req.LocalNetwork != nil && *req.LocalNetwork
+	c, err := st.AddCatalog(r.Context(), req.URL, u.Username, local)
 	if err != nil {
 		s.record(r, u, "apps.catalog.add", req.URL, audit.Failure, err.Error())
 		s.writeAppError(w, err)
 		return
 	}
 	s.record(r, u, "apps.catalog.add", c.URL, audit.Success, c.Name+": "+strconv.Itoa(len(c.Apps))+" apps")
+	if local {
+		s.record(r, u, "apps.catalog.local_network", c.URL, audit.Success, "on")
+	}
 	writeJSON(w, http.StatusOK, c)
+}
+
+func onOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
 }
 
 // catalogProblem shows a refresh failure (a network error, say) as the
