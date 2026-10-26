@@ -42,6 +42,9 @@ type Root struct {
 	Name string
 	// Share is its id (files.HomeShare for Home).
 	Share string
+	// Recycle: the folder has a recycle bin (a file a PUT replaces goes
+	// there first).
+	Recycle bool
 }
 
 // HomeName is the home folder's name at the top.
@@ -55,7 +58,7 @@ func Roots(list []files.ShareInfo, on func(id string) bool) []Root {
 	taken := map[string]bool{}
 	for _, s := range list {
 		if s.ID == files.HomeShare {
-			out = append(out, Root{Name: HomeName, Share: s.ID})
+			out = append(out, Root{Name: HomeName, Share: s.ID, Recycle: s.Recycle})
 			taken[strings.ToLower(HomeName)] = true
 		}
 	}
@@ -74,7 +77,7 @@ func Roots(list []files.ShareInfo, on func(id string) bool) []Root {
 			}
 		}
 		taken[strings.ToLower(n)] = true
-		out = append(out, Root{Name: n, Share: s.ID})
+		out = append(out, Root{Name: n, Share: s.ID, Recycle: s.Recycle})
 	}
 	return out
 }
@@ -90,7 +93,7 @@ type FS struct {
 	BodyFailed func() bool
 	// Changed is told about uploads ("put", with the size), deletes and
 	// moves, for the audit log. Optional.
-	Changed func(op, target string, size int64)
+	Changed func(op, target, detail string, size int64)
 
 	mu         sync.Mutex
 	cache      map[string]*info
@@ -224,7 +227,11 @@ func (d *FS) Mkdir(ctx context.Context, name string, _ os.FileMode) error {
 		return os.ErrPermission
 	}
 	d.forget()
-	return osErr(d.Files.Mkdir(ctx, d.Who, w.share, w.path))
+	if err := d.Files.Mkdir(ctx, d.Who, w.share, w.path); err != nil {
+		return osErr(err)
+	}
+	d.changed("mkdir", w, "", 0)
+	return nil
 }
 
 // RemoveAll implements webdav.FileSystem: to the recycle bin when the
@@ -241,7 +248,7 @@ func (d *FS) RemoveAll(ctx context.Context, name string) error {
 	if _, err := d.Files.DeleteItem(ctx, d.Who, w.share, w.path, false); err != nil {
 		return osErr(err)
 	}
-	d.changed("delete", w, 0)
+	d.changed("delete", w, "", 0)
 	return nil
 }
 
@@ -263,14 +270,69 @@ func (d *FS) Rename(ctx context.Context, oldName, newName string) error {
 	if err := d.Files.Rename(ctx, d.Who, from.share, from.path, to.share, to.path); err != nil {
 		return osErr(err)
 	}
-	d.changed("move", from, 0)
+	d.changed("move", from, "to "+to.share+":/"+to.path, 0)
 	return nil
 }
 
-func (d *FS) changed(op string, w where, size int64) {
+func (d *FS) changed(op string, w where, detail string, size int64) {
 	if d.Changed != nil {
-		d.Changed(op, w.share+":/"+w.path, size)
+		d.Changed(op, w.share+":/"+w.path, detail, size)
 	}
+}
+
+// Name is how the audit log names a WebDAV path ("media:/Films/a.mkv").
+func (d *FS) Name(name string) string {
+	w, err := d.resolve(name)
+	if err != nil || w.top() {
+		return path.Clean("/" + name)
+	}
+	return w.share + ":/" + w.path
+}
+
+// Same reports whether two WebDAV names are the same file or folder here
+// (after cleaning; "" and "/" are the top).
+func (d *FS) Same(a, b string) bool {
+	wa, erra := d.resolve(a)
+	wb, errb := d.resolve(b)
+	if erra != nil || errb != nil {
+		return path.Clean("/"+a) == path.Clean("/"+b)
+	}
+	return wa.share == wb.share && wa.path == wb.path
+}
+
+// Inside reports whether b is strictly inside a (a folder copied into
+// itself would never end).
+func (d *FS) Inside(a, b string) bool {
+	wa, erra := d.resolve(a)
+	wb, errb := d.resolve(b)
+	if erra != nil || errb != nil || wa.top() {
+		return false
+	}
+	return wa.share == wb.share && (wa.path == "" && wb.path != "" || strings.HasPrefix(wb.path, wa.path+"/"))
+}
+
+// CheckReplace is what replacing name (PUT over it, COPY or MOVE with
+// Overwrite) needs: when it is a file, the person must be allowed to
+// write that file itself, not just its folder (a rename into place would
+// only ask the folder). os.ErrPermission when they may not.
+func (d *FS) CheckReplace(ctx context.Context, name string) error {
+	w, err := d.resolve(name)
+	if err != nil || w.top() || w.path == "" {
+		return nil // nothing there to replace, or refused later anyway
+	}
+	e, err := d.Files.Stat(ctx, d.Who, w.share, w.path)
+	if err != nil || e.Dir {
+		return nil
+	}
+	wf, _, err := d.Files.OpenWrite(ctx, d.Who, w.share, w.path)
+	if err != nil {
+		if errors.Is(err, files.ErrNotFound) {
+			return nil
+		}
+		return osErr(err)
+	}
+	_ = wf.Close()
+	return nil
 }
 
 // OpenFile implements webdav.FileSystem.
@@ -539,7 +601,9 @@ func (f *readFile) Patch(p []webdav.Proppatch) ([]webdav.Propstat, error) {
 	return noDeadProps{setTime: func(t time.Time) {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(f.ctx), 15*time.Second)
 		defer cancel()
-		_ = f.fs.Files.SetModified(ctx, f.fs.Who, f.w.share, f.w.path, t)
+		if err := f.fs.Files.SetModified(ctx, f.fs.Who, f.w.share, f.w.path, t); err == nil {
+			f.fs.changed("settime", f.w, "modified "+t.UTC().Format(time.RFC3339), 0)
+		}
 	}}.Patch(p)
 }
 
@@ -618,9 +682,11 @@ func (f *writeFile) Close() error {
 		}
 		return errors.New("the upload broke off; nothing was changed")
 	}
-	if f.replaces {
-		// The old version goes where a delete would put it (the recycle
-		// bin when the folder has one), never silently away.
+	if f.replaces && f.w.root.Recycle {
+		// The old version goes to the recycle bin, as a delete would put
+		// it. Without a bin the rename below replaces it in one step (the
+		// person may write that file: create checked), so the name is
+		// never missing in between.
 		if _, err := f.fs.Files.DeleteItem(ctx, f.fs.Who, f.w.share, f.w.path, false); err != nil && !errors.Is(err, files.ErrNotFound) {
 			_, _ = f.fs.Files.DeleteItem(ctx, f.fs.Who, f.w.share, f.tmp, true)
 			return osErr(err)
@@ -631,6 +697,6 @@ func (f *writeFile) Close() error {
 		return osErr(err)
 	}
 	f.fs.forget()
-	f.fs.changed("put", f.w, f.n)
+	f.fs.changed("put", f.w, "", f.n)
 	return nil
 }

@@ -3514,6 +3514,8 @@ export interface components {
             homes: components["schemas"]["FileServicesHomes"];
             /** @description SFTP for domain accounts (folders with SFTP on */
             sftpEnabled: boolean;
+            /** @description Domain administrators (Domain Admins, HardyOS Admins) may use SFTP too; off by default, so they get no view and their passwords are never tried over SSH */
+            sftpAdmins?: boolean;
             /** @description WebDAV at https://<server>/dav/ for domain accounts (folders with WebDAV on, and Home) */
             webdavEnabled: boolean;
         };
@@ -3582,6 +3584,7 @@ export interface components {
             smbEnabled?: boolean;
             homes?: components["schemas"]["FileServicesHomes"];
             sftpEnabled?: boolean;
+            sftpAdmins?: boolean;
             webdavEnabled?: boolean;
         };
         FileServicesSFTP: {

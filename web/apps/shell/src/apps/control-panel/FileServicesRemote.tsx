@@ -10,10 +10,15 @@ import { jobDone } from "./shareServices";
 export function RemoteAccessCard({ st, admin }: { st: FileServicesStatus; admin: boolean }) {
   const qc = useQueryClient();
   const set = useMutation({
-    mutationFn: (body: { sftpEnabled?: boolean; webdavEnabled?: boolean }) => jobDone(unwrap(api.PATCH("/files/settings", { body }))),
+    mutationFn: (body: { sftpEnabled?: boolean; sftpAdmins?: boolean; webdavEnabled?: boolean }) =>
+      jobDone(unwrap(api.PATCH("/files/settings", { body }))),
     onSuccess: (_, body) => {
-      const what = body.sftpEnabled !== undefined ? "SFTP" : "WebDAV";
-      toast("success", `${what} is ${(body.sftpEnabled ?? body.webdavEnabled) ? "on" : "off"}`);
+      if (body.sftpAdmins !== undefined) {
+        toast("success", `Domain administrators ${body.sftpAdmins ? "can" : "can't"} use SFTP`);
+      } else {
+        const what = body.sftpEnabled !== undefined ? "SFTP" : "WebDAV";
+        toast("success", `${what} is ${(body.sftpEnabled ?? body.webdavEnabled) ? "on" : "off"}`);
+      }
       void qc.invalidateQueries({ queryKey: ["files"] });
     },
   });
@@ -48,6 +53,15 @@ export function RemoteAccessCard({ st, admin }: { st: FileServicesStatus; admin:
               <span className="mono">{sftp.users}</span>&nbsp;accounts with folders
             </Badge>
           </div>
+        )}
+        {admin && st.settings.sftpEnabled && (
+          <Toggle
+            label="Domain administrators too"
+            description="Off: members of Domain Admins and HardyOS Admins get no SFTP view, so their passwords are never tried over SSH. Turn on only if they need SFTP."
+            checked={st.settings.sftpAdmins ?? false}
+            disabled={set.isPending}
+            onChange={(v) => set.mutate({ sftpAdmins: v })}
+          />
         )}
         {admin && st.settings.sftpEnabled && sftp?.problem && <Alert tone="warn">{sftp.problem}</Alert>}
         {admin && (

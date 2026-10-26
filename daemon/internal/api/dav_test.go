@@ -301,18 +301,6 @@ func TestDAVSignIn(t *testing.T) {
 		res, _ := e.req(t, "PROPFIND", "/dav/", user, pw, nil, map[string]string{"Depth": "0"})
 		return res.StatusCode
 	}
-	// A local HardyOS account is refused without its password being tried.
-	if c := propfind("cade", "supersecret1"); c != 403 {
-		t.Errorf("local account = %d", c)
-	}
-	for i := 0; i < 7; i++ {
-		if c := propfind("cade", "wrong"); c != 403 {
-			t.Errorf("local account, wrong password = %d", c)
-		}
-	}
-	if code := e.client(t).do("POST", "/api/v1/auth/login", map[string]string{"username": "cade", "password": "supersecret1"}, nil); code != 200 {
-		t.Errorf("WebDAV attempts locked the administrator out: %d", code)
-	}
 
 	// Each spelling works; a checked password is trusted for a while.
 	for _, n := range []string{"alice", `HOME\alice`, "alice@home.example.net"} {

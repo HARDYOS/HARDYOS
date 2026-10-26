@@ -127,6 +127,22 @@ describe("FileServices", () => {
     expect(calls.find((c) => c.path === "/files/leave")?.body).toEqual({ confirm: true });
   });
 
+  it("keeps domain administrators out of SFTP unless switched on", async () => {
+    const calls: Call[] = [];
+    const sftpOn: FileServicesStatus = {
+      ...joined,
+      settings: { ...joined.settings, sftpEnabled: true },
+      sftp: { enabled: true, running: true, users: 2, folders: 2, port: 22, problem: "" },
+    };
+    serve(calls, sftpOn);
+    renderIn(<FileServices admin />);
+    const sw = (await screen.findByRole("switch", { name: /Domain administrators too/ })) as HTMLInputElement;
+    expect(sw.checked).toBe(false);
+    fireEvent.click(sw);
+    await waitFor(() => expect(calls.some((c) => c.path === "/files/settings")).toBe(true));
+    expect(calls.find((c) => c.path === "/files/settings")?.body).toEqual({ sftpAdmins: true });
+  });
+
   it("hides the settings from family members", async () => {
     serve([], joined);
     renderIn(<FileServices admin={false} />);

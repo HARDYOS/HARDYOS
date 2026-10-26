@@ -187,6 +187,11 @@ func (f *fakeFiles) OpenWrite(_ context.Context, who files.Who, share, p string)
 	if err != nil {
 		return nil, nil, err
 	}
+	// The file's own write permission decides, even for root (it stands in
+	// for an ACL that lets the person read only).
+	if fi, err := os.Stat(full); err == nil && fi.Mode().Perm()&0o200 == 0 {
+		return nil, nil, ferr(files.ErrNoAccess, "you may only read that file")
+	}
 	fl, err := os.OpenFile(full, os.O_WRONLY, 0)
 	if err != nil {
 		return nil, nil, mapOS(err)
@@ -316,7 +321,16 @@ func (f *fakeFiles) DeleteItem(_ context.Context, who files.Who, share, p string
 		return false, mapOS(err)
 	}
 	f.note(fmt.Sprintf("delete %s:%s permanent=%v", share, p, permanent))
-	return f.recycle[share] && !permanent, os.RemoveAll(full)
+	if f.recycle[share] && !permanent {
+		// Into the bin, keeping the folders (the worker's layout, roughly).
+		bin := filepath.Join(f.dirs[share], ".recycle", "bin", filepath.FromSlash(strings.Trim(p, "/")))
+		if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
+			return false, err
+		}
+		_ = os.RemoveAll(bin)
+		return true, os.Rename(full, bin)
+	}
+	return false, os.RemoveAll(full)
 }
 
 func (f *fakeFiles) SetModified(_ context.Context, who files.Who, share, p string, t time.Time) error {

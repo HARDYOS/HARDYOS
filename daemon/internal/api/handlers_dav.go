@@ -15,8 +15,13 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
+	"os"
+	"path"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
@@ -41,6 +46,17 @@ const (
 	davMaxCache        = 4096
 	davMaxLockUsers    = 1024
 	davRealm           = `Basic realm="HardyOS", charset="UTF-8"`
+	// davMaxBody bounds every request body but an upload's (XML).
+	davMaxBody = 1 << 20
+	// Locks: at most an hour each (clients refresh them), so many per
+	// person and in all, and an owner note at most this long.
+	davMaxLockTime     = time.Hour
+	davMaxLocksPerUser = 256
+	davMaxLocks        = 8192
+	davMaxLockOwner    = 1024
+	// davLimitedLogEvery: a rate-limited sign-in is written to the audit log
+	// at most this often per key (with how many were turned away).
+	davLimitedLogEvery = 15 * time.Minute
 )
 
 // davState is the WebDAV server's memory: checked passwords (only an HMAC
@@ -53,7 +69,11 @@ type davState struct {
 	mu      sync.Mutex
 	checked map[[32]byte]davChecked
 	logged  map[int64]time.Time
-	locks   map[string]webdav.LockSystem
+	locks   map[string]*cappedLS
+	// lockCount is every person's locks together.
+	lockCount atomic.Int64
+	// limited: rate-limited sign-ins per key since the last audit entry.
+	limited map[string]*davLimited
 
 	cfgMu sync.Mutex
 	cfg   *davConfig
@@ -79,8 +99,37 @@ func (d *davState) init() {
 		}
 		d.checked = map[[32]byte]davChecked{}
 		d.logged = map[int64]time.Time{}
-		d.locks = map[string]webdav.LockSystem{}
+		d.locks = map[string]*cappedLS{}
+		d.limited = map[string]*davLimited{}
 	})
+}
+
+type davLimited struct {
+	since time.Time
+	n     int
+}
+
+// noteLimited counts a rate-limited sign-in for key and reports whether it
+// should be written to the audit log now (the first in davLimitedLogEvery),
+// with how many were turned away since the last entry.
+func (d *davState) noteLimited(key string) (bool, int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	now := time.Now()
+	l := d.limited[key]
+	if l != nil && now.Sub(l.since) < davLimitedLogEvery {
+		l.n++
+		return false, 0
+	}
+	if len(d.limited) >= davMaxCache {
+		d.limited = map[string]*davLimited{}
+	}
+	prev := 0
+	if l != nil {
+		prev = l.n
+	}
+	d.limited[key] = &davLimited{since: now}
+	return true, prev
 }
 
 func (d *davState) cacheKey(limitKey, password string) [32]byte {
@@ -153,7 +202,7 @@ func (d *davState) shouldLog(id int64) bool {
 
 // lockSystem is the person's own lock table: paths are only unique within
 // one person's view (everyone has a /Home).
-func (d *davState) lockSystem(principal string) webdav.LockSystem {
+func (d *davState) lockSystem(principal string) *cappedLS {
 	k := strings.ToLower(principal)
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -161,9 +210,12 @@ func (d *davState) lockSystem(principal string) webdav.LockSystem {
 		return ls
 	}
 	if len(d.locks) >= davMaxLockUsers {
-		d.locks = map[string]webdav.LockSystem{}
+		for _, ls := range d.locks {
+			d.lockCount.Add(-int64(ls.count()))
+		}
+		d.locks = map[string]*cappedLS{}
 	}
-	ls := webdav.NewMemLS()
+	ls := &cappedLS{LockSystem: webdav.NewMemLS(), total: &d.lockCount, held: map[string]time.Time{}}
 	d.locks[k] = ls
 	return ls
 }
@@ -258,24 +310,80 @@ func (s *Server) handleDAV(w http.ResponseWriter, r *http.Request) {
 		davError(w, http.StatusServiceUnavailable, "the shared folders can't be listed right now")
 		return
 	}
+	if r.Method != http.MethodPut {
+		// Only uploads are big; XML bodies (PROPFIND, PROPPATCH, LOCK) and
+		// anything else are bounded.
+		r.Body = http.MaxBytesReader(w, r.Body, davMaxBody)
+	}
 	body := &davBody{ReadCloser: r.Body}
 	r.Body = body
+	copySrc := ""
 	d := &dav.FS{
 		Files: fs, Who: who,
 		Roots:      dav.Roots(list, func(id string) bool { return cfg.shares[id] }),
 		BodyFailed: body.failed,
-		Changed: func(op, target string, size int64) {
-			detail := "webdav"
+		Changed: func(op, target, detail string, size int64) {
+			action := map[string]string{"put": "files.upload", "delete": "files.delete", "move": "files.move",
+				"mkdir": "files.mkdir", "settime": "files.settime"}[op]
 			if op == "put" {
-				detail = fmt.Sprintf("webdav, %d bytes", size)
+				detail = fmt.Sprintf("%d bytes", size)
+				if r.Method == "COPY" {
+					action, detail = "files.copy", "from "+copySrc+", "+detail
+				}
 			}
-			action := map[string]string{"put": "files.upload", "delete": "files.delete", "move": "files.move"}[op]
+			if detail != "" {
+				detail = "webdav, " + detail
+			} else {
+				detail = "webdav"
+			}
 			s.record(r, u, action, target, audit.Success, detail)
 		},
 	}
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
 		h.Set("Content-Disposition", "attachment")
+	case http.MethodPost:
+		// Nothing is posted to WebDAV; x/net/webdav would serve it like GET.
+		h.Set("Allow", "OPTIONS, GET, HEAD, PUT, DELETE, MKCOL, COPY, MOVE, PROPFIND, PROPPATCH, LOCK, UNLOCK")
+		davError(w, http.StatusMethodNotAllowed, "POST isn't used by WebDAV")
+		return
+	case "PROPFIND":
+		// A whole tree in one answer is a way to keep the server busy (and
+		// to start a file worker per folder): RFC 4918 9.1 lets a server
+		// refuse it. No Depth header means infinity.
+		if dh := strings.TrimSpace(r.Header.Get("Depth")); dh == "" || strings.EqualFold(dh, "infinity") {
+			h.Set("Content-Type", "application/xml; charset=utf-8")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `<?xml version="1.0" encoding="utf-8"?>`+"\n"+`<D:error xmlns:D="DAV:"><D:propfind-finite-depth/></D:error>`+"\n")
+			return
+		}
+	case "LOCK":
+		// What the client is told matches what's kept (cappedLS).
+		r.Header.Set("Timeout", davLockTimeout(r.Header.Get("Timeout")))
+	case http.MethodPut:
+		if !s.davCheckReplace(w, r, d, strings.TrimPrefix(r.URL.Path, "/dav")) {
+			return
+		}
+	case "COPY", "MOVE":
+		src, dst, ok := davDestination(w, r)
+		if !ok {
+			return
+		}
+		if d.Same(src, dst) {
+			davError(w, http.StatusForbidden, "the destination is the same as the source")
+			return
+		}
+		if d.Inside(src, dst) {
+			davError(w, http.StatusForbidden, "a folder can't be copied or moved into itself")
+			return
+		}
+		if r.Header.Get("Overwrite") != "F" && !s.davCheckReplace(w, r, d, dst) {
+			return
+		}
+		copySrc = d.Name(src)
+		// x/net/webdav compares the raw paths: give it the cleaned ones.
+		r.URL.Path, r.URL.RawPath = "/dav"+src, ""
+		r.Header.Set("Destination", escapedDAV(dst))
 	}
 	handler := &webdav.Handler{
 		Prefix: "/dav", FileSystem: d, LockSystem: s.dav.lockSystem(u.Username),
@@ -286,6 +394,149 @@ func (s *Server) handleDAV(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	handler.ServeHTTP(w, r)
+}
+
+// davCheckReplace answers 403 (and false) when the request would replace a
+// file the person may not write.
+func (s *Server) davCheckReplace(w http.ResponseWriter, r *http.Request, d *dav.FS, name string) bool {
+	if err := d.CheckReplace(r.Context(), name); errors.Is(err, os.ErrPermission) {
+		davError(w, http.StatusForbidden, "you may not change that file")
+		return false
+	}
+	return true
+}
+
+// davClean cleans a request path and takes /dav off it ("/" for the top);
+// ok is false for anything outside /dav.
+func davClean(p string) (string, bool) {
+	c := path.Clean("/" + p)
+	if c == "/dav" {
+		return "/", true
+	}
+	rest, ok := strings.CutPrefix(c, "/dav/")
+	return "/" + rest, ok
+}
+
+// davDestination reads a COPY or MOVE's source and Destination, cleaned
+// and below /dav (answering the request itself when they aren't usable).
+func davDestination(w http.ResponseWriter, r *http.Request) (src, dst string, ok bool) {
+	hdr := r.Header.Get("Destination")
+	u, err := url.Parse(hdr)
+	if hdr == "" || err != nil {
+		davError(w, http.StatusBadRequest, "a Destination header is needed")
+		return "", "", false
+	}
+	if u.Host != "" && u.Host != r.Host {
+		davError(w, http.StatusBadGateway, "the destination is on another server")
+		return "", "", false
+	}
+	src, ok1 := davClean(r.URL.Path)
+	dst, ok2 := davClean(u.Path)
+	if !ok1 || !ok2 {
+		davError(w, http.StatusForbidden, "the destination must be inside /dav/")
+		return "", "", false
+	}
+	return src, dst, true
+}
+
+// escapedDAV is a /dav path as a header value (x/net/webdav parses the
+// Destination as a URL: a "#" or "%" in a name must stay a name).
+func escapedDAV(p string) string { return (&url.URL{Path: "/dav" + p}).EscapedPath() }
+
+// davLockTimeout is a LOCK's Timeout header with at most davMaxLockTime:
+// the client's first choice when it is a number of seconds within it,
+// else the most allowed ("Infinite" or nothing included).
+func davLockTimeout(h string) string {
+	first, _, _ := strings.Cut(h, ",")
+	first = strings.TrimSpace(first)
+	if n, ok := strings.CutPrefix(first, "Second-"); ok {
+		if v, err := strconv.ParseUint(n, 10, 32); err == nil && time.Duration(v)*time.Second <= davMaxLockTime {
+			return first
+		}
+	}
+	return fmt.Sprintf("Second-%d", int(davMaxLockTime/time.Second))
+}
+
+// errTooManyLocks: the person (or the server) holds as many WebDAV locks
+// as it allows.
+var errTooManyLocks = errors.New("too many WebDAV locks; unlock some files or wait for their locks to run out")
+
+// cappedLS is a person's lock table with bounds: no lock lasts longer
+// than davMaxLockTime (an "Infinite" timeout included), a person holds at
+// most davMaxLocksPerUser and the server davMaxLocks, and an owner note
+// longer than davMaxLockOwner isn't kept.
+type cappedLS struct {
+	webdav.LockSystem
+	total *atomic.Int64
+
+	mu   sync.Mutex
+	held map[string]time.Time // token -> when it runs out
+}
+
+func capDuration(d time.Duration) time.Duration {
+	if d < 0 || d > davMaxLockTime {
+		return davMaxLockTime
+	}
+	return d
+}
+
+// prune forgets locks that ran out (the memory table drops them itself).
+func (c *cappedLS) prune(now time.Time) {
+	for t, until := range c.held {
+		if now.After(until) {
+			delete(c.held, t)
+			c.total.Add(-1)
+		}
+	}
+}
+
+func (c *cappedLS) Create(now time.Time, d webdav.LockDetails) (string, error) {
+	d.Duration = capDuration(d.Duration)
+	if len(d.OwnerXML) > davMaxLockOwner {
+		d.OwnerXML = ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.prune(now)
+	if len(c.held) >= davMaxLocksPerUser || c.total.Load() >= davMaxLocks {
+		return "", errTooManyLocks
+	}
+	tok, err := c.LockSystem.Create(now, d)
+	if err == nil {
+		c.held[tok] = now.Add(d.Duration)
+		c.total.Add(1)
+	}
+	return tok, err
+}
+
+func (c *cappedLS) Refresh(now time.Time, token string, d time.Duration) (webdav.LockDetails, error) {
+	d = capDuration(d)
+	ld, err := c.LockSystem.Refresh(now, token, d)
+	if err == nil {
+		c.mu.Lock()
+		if _, ok := c.held[token]; ok {
+			c.held[token] = now.Add(d)
+		}
+		c.mu.Unlock()
+	}
+	return ld, err
+}
+
+func (c *cappedLS) Unlock(now time.Time, token string) error {
+	err := c.LockSystem.Unlock(now, token)
+	c.mu.Lock()
+	if _, ok := c.held[token]; ok {
+		delete(c.held, token)
+		c.total.Add(-1)
+	}
+	c.mu.Unlock()
+	return err
+}
+
+func (c *cappedLS) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.held)
 }
 
 // davBody notes whether the request body broke off before its end.
@@ -340,11 +591,24 @@ func (s *Server) davSignIn(w http.ResponseWriter, r *http.Request) (*auth.User, 
 		return nil, false
 	}
 	ip := s.clientIP(r)
-	for _, key := range []string{"ip:" + ip, userKey} {
+	// A local account's name is counted under a key of its own: guesses at
+	// it over WebDAV must not lock its owner out of the desktop.
+	localKey := "dav-local:" + userKey
+	for _, key := range []string{"ip:" + ip, userKey, localKey} {
 		if ok, wait := s.cfg.Limiter.Allowed(key); !ok {
 			secs := int(math.Ceil(wait.Seconds()))
 			w.Header().Set("Retry-After", fmt.Sprint(secs))
-			s.record(r, nil, "dav.login", name, audit.Denied, "rate limited")
+			// Not one audit row per refused request (a script could fill
+			// the log): the first per key and window, with the count since.
+			if first, n := s.dav.noteLimited(key); first {
+				detail := "rate limited"
+				if n > 0 {
+					detail = fmt.Sprintf("rate limited (%d more refused since the last entry)", n)
+				}
+				s.record(r, nil, "dav.login", name, audit.Denied, detail)
+			} else {
+				s.log.Debug("webdav: rate-limited sign-in", "key", key)
+			}
 			davError(w, http.StatusTooManyRequests, fmt.Sprintf("too many failed sign-ins; try again in %d minutes", (secs+59)/60))
 			return nil, false
 		}
@@ -352,15 +616,29 @@ func (s *Server) davSignIn(w http.ResponseWriter, r *http.Request) (*auth.User, 
 	u, err := s.signin.AuthenticateDomain(ctx, name, pw)
 	if err != nil {
 		status, counts := davLoginStatus(err)
+		local := errors.Is(err, auth.ErrLocalAccount)
 		if counts {
 			s.cfg.Limiter.Fail("ip:" + ip)
-			s.cfg.Limiter.Fail(userKey)
+			if local {
+				s.cfg.Limiter.Fail(localKey)
+			} else {
+				s.cfg.Limiter.Fail(userKey)
+			}
 		}
-		s.record(r, nil, "dav.login", name, audit.Failure, err.Error())
+		detail := err.Error()
+		if local {
+			detail = "a local account's name (refused unchecked)"
+		}
+		s.record(r, nil, "dav.login", name, audit.Failure, detail)
 		if status == http.StatusUnauthorized {
 			w.Header().Set("WWW-Authenticate", davRealm)
 		}
 		msg := err.Error()
+		if local {
+			// Answered like a wrong password: nothing tells a guesser which
+			// names are the server's own accounts.
+			msg = auth.ErrBadCredentials.Error()
+		}
 		if status == http.StatusInternalServerError {
 			s.log.Error("webdav sign-in", "err", err)
 			msg = "something went wrong; see the system log"
@@ -404,9 +682,7 @@ func (s *Server) davUser(r *http.Request, id int64) (*auth.User, error) {
 // unreachable doesn't).
 func davLoginStatus(err error) (int, bool) {
 	switch {
-	case errors.Is(err, auth.ErrLocalAccount):
-		return http.StatusForbidden, false
-	case isErr(err, auth.ErrBadCredentials, auth.ErrUnknownDomain, auth.ErrAccountDisabled, auth.ErrAccountLocked,
+	case isErr(err, auth.ErrLocalAccount, auth.ErrBadCredentials, auth.ErrUnknownDomain, auth.ErrAccountDisabled, auth.ErrAccountLocked,
 		auth.ErrAccountExpired, auth.ErrAccountRevoked, auth.ErrPasswordExpired):
 		return http.StatusUnauthorized, true
 	case errors.Is(err, auth.ErrDisabledHere):
