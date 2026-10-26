@@ -32,8 +32,23 @@ var (
 	imageIDRE  = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 )
 
-// installedPackage rebuilds the package the app was installed from.
+// installedPackage reads the package the app was installed from: the
+// package file itself when there is one (its bytes decide the source), else
+// (installed before HardyOS kept it) rebuilt from its parts, with no bytes,
+// so it counts as untrusted.
 func installedPackage(ia *installedApp) (*Package, error) {
+	if raw, err := os.ReadFile(ia.meta(packageFile)); err == nil {
+		pkg, err := ReadPackage(raw)
+		if err != nil {
+			return nil, fmt.Errorf("the installed package of %s: %w", ia.state.ID, err)
+		}
+		if pkg.Manifest.ID != ia.state.ID {
+			return nil, fmt.Errorf("the installed package of %s is for %s", ia.state.ID, pkg.Manifest.ID)
+		}
+		return pkg, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
 	mf := ia.manifest
 	if err := mf.Validate(); err != nil {
 		return nil, err
@@ -97,7 +112,7 @@ func (m *Manager) Config(ctx context.Context, id string) (*AppConfig, error) {
 		Grants: append([]string{}, ia.state.Grants...), Limits: ia.state.Limits,
 	}
 	if cfg.Source == "" {
-		cfg.Source = SourceCatalog
+		cfg.Source = SourceUpload // not verified (see installedApp.view)
 	}
 	for k, v := range ia.state.Ports {
 		cfg.Ports[k] = v
@@ -249,24 +264,108 @@ func (m *Manager) Rollback(ctx context.Context, a RollbackArgs) error {
 	if err != nil {
 		return fmt.Errorf("reading %s after the rollback: %w", ia.manifest.Name, err)
 	}
-	if back.state.Removed {
-		back.state.Removed = false
-	}
+
+	// The snapshot brings back the data and the package, never permissions
+	// the admin has taken away since: grants are those in both, shared
+	// folders the current choice where both have one (and the share still
+	// exists). Then everything is checked again as for a reconfigure; until
+	// that passes the app stays stopped and blocked.
+	cur := ia.state
+	asked, dropped := m.rollbackShares(ctx, back.manifest, back.state.Shares, cur.Shares)
+	back.state.Removed = false
 	back.state.UpdatedAt = m.now()
+	back.state.Grants = intersectGrants(back.state.Grants, cur.Grants)
+	back.state.Shares = map[string]ShareChoice{}
+	for name, ch := range asked {
+		if ch.Share != "" {
+			back.state.Shares[name] = ch
+		}
+	}
+	back.state.Blocked = "the rollback didn't finish; open the app's settings and save them to check it again"
 	if err := writeFileAtomic(back.meta(stateFile), mustJSON(back.state), 0o600); err != nil {
 		return err
 	}
-	// The snapshot's shared folder choices, as they were then.
-	var live map[string]ShareChoice
-	if !ia.state.Removed {
-		live = ia.state.Shares
+	for _, d := range dropped {
+		m.log().Info("apps: rollback leaves out a shared folder the app no longer has", "app", a.ID, "share", d)
 	}
-	if err := m.applyShareGrants(ctx, a.ID, back.state.UID, live, back.state.Shares); err != nil {
+	pkg, err := installedPackage(back)
+	if err == nil {
+		_, err = m.prepare(ctx, pkg, PrepareArgs{Shares: asked, Grants: append([]string{}, back.state.Grants...)}, true)
+	}
+	if err != nil {
+		why := problemWords(err)
+		back.state.Blocked = fmt.Sprintf("after going back to %s it needs something it isn't allowed now: %s", a.Snapshot, why)
+		if werr := writeFileAtomic(back.meta(stateFile), mustJSON(back.state), 0o600); werr != nil {
+			m.log().Warn("apps: recording a blocked rollback failed", "app", a.ID, "err", werr)
+		}
+		m.log().Warn("apps: rolled back but blocked", "app", a.ID, "snapshot", a.Snapshot, "err", err)
+		return fmt.Errorf("%s's data is back at %s, but the app stays stopped: %s. Allow that in the app's settings (or choose its shared folders again), then start it", ia.manifest.Name, a.Snapshot, why)
+	}
+	after, err := m.load(ctx, c, a.ID)
+	if err != nil {
 		return err
 	}
-	m.restoreImages(ctx, back)
-	m.log().Info("apps: rolled back", "app", a.ID, "snapshot", a.Snapshot, "version", back.manifest.Version)
-	return m.up(ctx, back, c)
+	// The ACLs on disk are still those of the choices before the rollback.
+	if err := m.applyShareGrants(ctx, a.ID, after.state.UID, cur.Shares, after.state.Shares); err != nil {
+		return err
+	}
+	m.restoreImages(ctx, after)
+	m.log().Info("apps: rolled back", "app", a.ID, "snapshot", a.Snapshot, "version", after.manifest.Version)
+	return m.up(ctx, after, c)
+}
+
+// rollbackShares picks the shared folders an app keeps after a rollback,
+// for every share the snapshot's manifest declares: the current choice
+// where the snapshot and the app now both have one (at most the access the
+// snapshot's manifest allows), and nothing where only the snapshot has one
+// or the share is gone. It returns the choices (one per share, "" for
+// none) and the names left out.
+func (m *Manager) rollbackShares(ctx context.Context, mf Manifest, snap, cur map[string]ShareChoice) (map[string]ShareChoice, []string) {
+	asked := map[string]ShareChoice{}
+	var dropped []string
+	for _, s := range mf.Shares {
+		sc, cc := snap[s.Name], cur[s.Name]
+		ch := ShareChoice{}
+		switch {
+		case sc.Share == "":
+		case cc.Share == "" || cc.Path != "" || m.Shares == nil:
+			dropped = append(dropped, s.Name)
+		default:
+			if _, err := m.Shares.Resolve(ctx, cc.Share, ""); err != nil {
+				dropped = append(dropped, s.Name)
+				break
+			}
+			ch = ShareChoice{Share: cc.Share, Access: cc.Access}
+			if ch.Access == "" || s.Access == AccessRead {
+				ch.Access = s.Access
+			}
+		}
+		asked[s.Name] = ch
+	}
+	sort.Strings(dropped)
+	return asked, dropped
+}
+
+// intersectGrants returns the grants in both lists, sorted.
+func intersectGrants(a, b []string) []string {
+	in := setOf(b)
+	out := []string{}
+	for _, g := range a {
+		if in[g] && !contains(out, g) {
+			out = append(out, g)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// problemWords is an error as one line for messages.
+func problemWords(err error) string {
+	var p Problems
+	if errors.As(err, &p) {
+		return strings.Join(p, "; ")
+	}
+	return err.Error()
 }
 
 // restoreImages points moving tags back at the images the snapshot ran,

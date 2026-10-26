@@ -99,14 +99,17 @@ nothing extra (config is on the datasets).
 ```
 
 - `shares[].name` `^[A-Z][A-Z0-9_]{0,23}$`; compose uses `${HARDY_SHARE_<NAME>}`
-  as a bind source. The install dialog offers every shared folder (plus an
-  optional subfolder); `suggest` preselects a share id if it exists. When none
+  as a bind source. The install dialog offers every shared folder; apps get
+  whole shared folders only (no subfolder: `ShareChoice.path` must be `""`,
+  decision 76), and `HARDY_SHARE_<NAME>` is the share's root. `suggest`
+  preselects a share id if it exists. When none
   is chosen and it's not required, `HARDY_SHARE_<NAME>` points to an empty
   folder `${HARDY_APP_DATA}/.unshared/<name>`. `access` is the most the app
   gets; the admin may lower write to read.
-- Policy: a bind source must be inside the data folder or inside the host path
-  chosen for a declared share (write binds only if the grant is write; read
-  grants force `read_only: true`).
+- Policy: a bind source must be inside the data folder or be exactly the
+  root of a share chosen for a declared share (not a folder in it; read
+  grants force `read_only: true`), and no bind source may be inside another
+  bind source of the same app across its services (decision 76).
 - `hostNetwork`: allows `network_mode: host` on services. Declared ports are
   then fixed (no remapping); the install checks they're free.
 - `gpu`: allows `/dev/dri` (render nodes) and NVIDIA device reservations
@@ -127,7 +130,11 @@ or `user:`). Folders without an explicit owner default to it.
 
 `Source` = `catalog` (shipped with HardyOS), `upload`, `imported` (from an
 imported catalog; `SourceName` = the catalog's name), `custom` (made from a
-pasted Compose file). Only `catalog` apps get `hostNetwork`, `gpu`, devices
+pasted Compose file). hardyd-priv decides `catalog` itself: only a package
+whose SHA-256 matches a file in the shipped catalog folder (or the package it
+verified at install, `catalogSHA256` in state) is a catalog app; the source
+hardyd sends is a label for the others, and `catalog`/empty from hardyd
+becomes `upload` (decision 75). Only `catalog` apps get `hostNetwork`, `gpu`, devices
 and non-basic capabilities by declaring them. For other sources each of these
 is refused unless listed in the request's `grants` (strings:
 `hostNetwork`, `gpu`, `device:/dev/...`, `cap:NET_ADMIN`). Grants are stored
@@ -155,15 +162,19 @@ Existing: `apps.status/ports/prepare/services/pull/up/start/stop/restart/logs/re
 - `apps.snapshots` `{id}` -> `[{name, created, version}]` (version from a
   `org.hardyos:app-version` user property set on the snapshot).
 - `apps.rollback` `{id, snapshot, confirm}`: stops the app, `zfs rollback -r`,
-  starts it with the package and settings inside the snapshot.
+  starts it with the package and settings inside the snapshot, but with only
+  the grants and shared folders it has both in the snapshot and now
+  (decision 77); if the checks then fail, the app stays stopped, marked
+  `blocked`, until an admin reconfigures it.
   `confirm` = app name.
 - `apps.config` `{id}` -> current settings (passwords masked as `""` with
   `set: true`), ports, shares, grants, limits, uid, source — for the settings
   screen.
 
 The `App` view gains: `source`, `sourceName`, `uid`, `shares`
-(`[{name,label,share,path,access}]`), `grants`, `limits`, `permissions`
-(plain-words list from `DescribePermissions`).
+(`[{name,label,share,path,access}]`, `path` always `""`), `grants`, `limits`,
+`permissions` (plain-words list from `DescribePermissions`) and `blocked`
+(omitted unless a rollback left the app needing a permission).
 
 Update flow (hardyd job `apps.update`): `apps.snapshot reason=update` ->
 `apps.prepare` (new package) -> pulls -> `apps.up`. If any step after the
@@ -180,8 +191,8 @@ Roll back.
 - `GET /apps/{id}/config`, `PATCH /apps/{id}/config` (job `apps.reconfigure`),
   `POST /apps/{id}/update` (job), `GET /apps/{id}/snapshots`,
   `POST /apps/{id}/rollback` (job, confirm).
-- Install dialog: shares step (pick shared folder + optional subfolder per
-  declared share, show read/write), permissions step (labels for catalog
+- Install dialog: shares step (pick a shared folder per declared share, no
+  subfolder, show read/write), permissions step (labels for catalog
   apps; for non-catalog apps, unticked checkboxes with a red warning),
   limits (advanced), who can use it.
 - Imported catalogs: `GET/POST/DELETE /apps/catalogs` (admin). A catalog is
@@ -226,7 +237,7 @@ Roll back.
 | Part | Owns | Decisions |
 | --- | --- | --- |
 | Shared folders | `internal/shares/`, `priv/shares_ops.go`, API `handlers_shares.go`, web `control-panel/SharedFolders*.tsx` | 55-59 |
-| Apps engine | `internal/apps/` (not `contract.go` types' names), `priv/apps_ops.go` | 60-64 |
+| Apps engine | `internal/apps/` (not `contract.go` types' names), `priv/apps_ops.go` | 60-64, 75-77 (security review) |
 | Apps API + web | `api/handlers_apps*.go`, `api/appproxy*.go`, `internal/appstore/`, `web/apps/shell/src/apps/store/` | 65-69 |
 | Catalog | `apps/catalog/*` | 70-71 |
 | Domain sign-in | `internal/auth/` (domain parts), `priv/domain_ops.go` (one op), login UI | 72-74 |

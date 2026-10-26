@@ -198,8 +198,10 @@ func TestDockerIntegration(t *testing.T) {
 	}
 	_ = os.WriteFile(filepath.Join(root, "usr/bin/docker"), nil, 0o755)
 	sim := &zfsSim{base: t.TempDir(), ds: map[string]bool{"tank": true}, real: sysexec.Exec{}}
-	m := &Manager{Runner: sim, Root: root}
+	m := &Manager{Runner: sim, Root: root, CatalogDir: t.TempDir()}
 	pkg := catalogPackage(t, "kincast")
+	// Shipped with HardyOS: root recognises the bytes as a catalog package.
+	must(t, os.WriteFile(filepath.Join(m.CatalogDir, "kincast.hardyapp"), pkg, 0o644))
 
 	ports, err := m.SuggestPorts(ctx, []PortCheck{{Name: "WEB", Default: 18095}, {Name: "RTMP", Default: 11935}}, "")
 	if err != nil {
@@ -215,6 +217,9 @@ func TestDockerIntegration(t *testing.T) {
 	})
 	if prep.Upgrade || len(prep.Services) != 3 {
 		t.Fatalf("prepare result: %+v", prep)
+	}
+	if cfg, err := m.Config(ctx, "kincast"); err != nil || cfg.Source != SourceCatalog {
+		t.Errorf("source: %v %+v", err, cfg)
 	}
 	for _, s := range prep.Services {
 		r, err := m.Pull(ctx, "kincast", s.Service)
@@ -474,27 +479,38 @@ func TestDockerIntegrationEngine(t *testing.T) {
 	}
 	must(t, os.WriteFile(filepath.Join(state, "v2"), nil, 0o644))
 
-	// Roll back: the snapshot's files, shares and limits return.
+	// Roll back: the snapshot's files and limits return, but not the media
+	// share the admin took away since (a rollback never gives access back).
 	if err := m.Rollback(ctx, RollbackArgs{ID: id, Snapshot: snap, Confirm: "wrong"}); err == nil {
 		t.Fatal("rollback without the name")
 	}
 	if err := m.Rollback(ctx, RollbackArgs{ID: id, Snapshot: snap, Confirm: name}); err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
-	waitFor(t, ctx, "the app serving the media share again", func() bool { return get() == 200 })
+	waitFor(t, ctx, "the app running again without the media share", func() bool { return get() == 404 })
 	if _, err := os.Stat(filepath.Join(state, "v1")); err != nil {
 		t.Error("v1 lost in the rollback")
 	}
 	if _, err := os.Stat(filepath.Join(state, "v2")); err == nil {
 		t.Error("v2 survived the rollback")
 	}
-	if g := shares.take(); strings.Join(g, ";") != "revoke "+id+";grant dl "+id+" 30000 true;grant media "+id+" 30000 false" {
+	if g := shares.take(); len(g) != 0 {
 		t.Errorf("grants after rollback: %v", g)
 	}
 	o, err := m.Status(ctx)
-	if err != nil || len(o.Apps) != 1 || o.Apps[0].Limits.MemoryMB != 128 || o.Apps[0].Shares[0].Share != "media" || o.Apps[0].Source != SourceUpload {
+	if err != nil || len(o.Apps) != 1 || o.Apps[0].Limits.MemoryMB != 128 || o.Apps[0].Shares[0].Share != "" ||
+		o.Apps[0].Source != SourceUpload || o.Apps[0].Blocked != "" {
 		t.Errorf("status after rollback: %v %+v", err, o)
 	}
+	// The admin gives the share back.
+	if _, err := m.Reconfigure(ctx, ReconfigureArgs{ID: id, Shares: map[string]ShareChoice{"MEDIA": {Share: "media"}}}); err != nil {
+		t.Fatalf("reconfigure: %v", err)
+	}
+	if g := shares.take(); strings.Join(g, ";") != "revoke "+id+";grant dl "+id+" 30000 true;grant media "+id+" 30000 false" {
+		t.Errorf("grants after giving the share back: %v", g)
+	}
+	must(t, m.Up(ctx, id))
+	waitFor(t, ctx, "the app serving the media share again", func() bool { return get() == 200 })
 
 	if err := m.Remove(ctx, RemoveArgs{ID: id, Confirm: name, DeleteData: true}); err != nil {
 		t.Fatal(err)
