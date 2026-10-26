@@ -1,6 +1,6 @@
 # Builds the ISO and test updates, then installs and runs HardyOS in a VM
 # (os/smoke-test.sh): installer, first boot, sign-in, a storage pool, a
-# settings backup and an update. Runs for pull requests and main; branches
+# settings backup, a domain and an update. Runs for pull requests and main; branches
 # named test-build/... also keep the ISO and updates for testing elsewhere.
 #
 # Everything is signed with a key made for this run only: its public key is

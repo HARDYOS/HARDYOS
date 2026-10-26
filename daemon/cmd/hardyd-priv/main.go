@@ -18,6 +18,7 @@ import (
 
 	"github.com/hardyos/hardyos/daemon/internal/backup"
 	"github.com/hardyos/hardyos/daemon/internal/boot"
+	"github.com/hardyos/hardyos/daemon/internal/domain"
 	"github.com/hardyos/hardyos/daemon/internal/hw"
 	"github.com/hardyos/hardyos/daemon/internal/install"
 	"github.com/hardyos/hardyos/daemon/internal/network"
@@ -94,6 +95,11 @@ func main() {
 		priv.RegisterNetwork(s, netm)
 		priv.RegisterBackup(s, bk)
 		priv.RegisterTerminal(s)
+		// The domain controller, once set up: kept attached to the LAN and
+		// running through network changes and crashes.
+		dc := &domain.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log}
+		priv.RegisterDomain(s, dc)
+		go dc.Watch(ctx)
 		priv.RegisterBootRepair(s, priv.StorageEnv{Runner: sysexec.Exec{}, Root: os.DirFS("/")}, "/", boot.ConfigPath)
 		if len(updater.Keys()) == 0 {
 			log.Warn("no trusted release key: updates can't be installed until one is added")

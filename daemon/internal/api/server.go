@@ -127,6 +127,7 @@ func (s *Server) routes() {
 			s.networkRoutes()
 			s.bootRoutes()
 			s.terminalRoutes()
+			s.domainRoutes()
 		}
 		if s.cfg.Backups != nil {
 			s.backupRoutes()

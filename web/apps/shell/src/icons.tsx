@@ -86,6 +86,14 @@ export const CpuIcon = svg(
     <path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" />
   </>,
 );
+export const DomainIcon = svg(
+  <>
+    <rect x="9" y="3" width="6" height="5" rx="1" />
+    <rect x="3" y="16" width="6" height="5" rx="1" />
+    <rect x="15" y="16" width="6" height="5" rx="1" />
+    <path d="M12 8v4M6 16v-2h12v2" />
+  </>,
+);
 export const ShieldIcon = svg(<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z" />);
 export const InfoIcon = svg(
   <>

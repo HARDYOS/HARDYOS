@@ -17,6 +17,8 @@ depends:
 recommends:
   - zfsutils-linux
   - smartmontools
+  - samba-ad-dc
+  - iputils-arping
 contents:
   - src: ../dist/bin/hardyd
     dst: /usr/bin/hardyd
@@ -36,6 +38,12 @@ contents:
     dst: /lib/systemd/system/hardyd-priv.service
   - src: ./systemd/hardyos-issue.service
     dst: /lib/systemd/system/hardyos-issue.service
+  - src: ./systemd/hardyos-dc.service
+    dst: /lib/systemd/system/hardyos-dc.service
+  # Domain controller directory helper (Samba's Python API), run by hardyd-priv.
+  - src: ./domain/hardyos-dc-admin
+    dst: /usr/lib/hardyos/hardyos-dc-admin
+    file_info: { mode: 0755 }
   # Console login screen: the server's web address, kept current by hardyos-issue.service.
   - src: ./console/hardyos-issue
     dst: /usr/lib/hardyos/hardyos-issue

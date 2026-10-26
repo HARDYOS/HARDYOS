@@ -6,6 +6,12 @@ systemctl enable hardyd-priv.service hardyd.service
 systemctl enable ssh.service || true
 systemctl enable zfs-zed.service || true
 
+# Samba's own units stay off: HardyOS runs the domain controller as
+# hardyos-dc.service (in its own network namespace) and will manage file
+# sharing itself.
+systemctl disable samba-ad-dc.service smbd.service nmbd.service winbind.service >/dev/null 2>&1 || true
+systemctl mask samba-ad-dc.service >/dev/null 2>&1 || true
+
 # Load the zfs module at boot so pools can be imported right away.
 echo zfs > /etc/modules-load.d/zfs.conf
 

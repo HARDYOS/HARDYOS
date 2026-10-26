@@ -85,3 +85,8 @@ export function eventsUrl(origin: string = globalThis.location?.origin ?? "http:
   u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
   return u.toString();
 }
+export type DomainStatus = S["DomainStatus"];
+export type DomainConfig = S["DomainConfig"];
+export type DomainSuggestion = S["DomainSuggestion"];
+export type DomainUser = S["DomainUser"];
+export type DomainGroup = S["DomainGroup"];
