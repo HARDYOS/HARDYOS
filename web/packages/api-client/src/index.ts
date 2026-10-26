@@ -45,6 +45,7 @@ export type PoolBackup = S["PoolBackup"];
 export type BackupStaged = S["BackupStaged"];
 export type RestoreResult = S["RestoreResult"];
 export type BackupDownload = S["BackupDownload"];
+export type BootDisks = S["BootDisks"];
 export type InstallerHardware = S["InstallerHardware"];
 export type InstallerNIC = S["InstallerNIC"];
 export type InstallPlan = S["InstallPlan"];

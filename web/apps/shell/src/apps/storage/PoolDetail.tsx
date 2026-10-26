@@ -44,12 +44,12 @@ function layoutLabel(v: Vdev): string {
   }
 }
 
-function leafDisks(v: Vdev): Vdev[] {
+export function leafDisks(v: Vdev): Vdev[] {
   if (v.type === "disk" || v.type === "file") return [v];
   return v.children.flatMap(leafDisks);
 }
 
-function stateTone(s: string) {
+export function stateTone(s: string) {
   if (s === "ONLINE" || s === "AVAIL") return "good" as const;
   if (s === "DEGRADED" || s === "OFFLINE" || s === "INUSE") return "warn" as const;
   return "bad" as const;
@@ -287,12 +287,12 @@ export function PoolDetail({ pool, onGone }: { pool: string; onGone: () => void 
   );
 }
 
-function shortName(v: Vdev) {
+export function shortName(v: Vdev) {
   const n = v.disk || v.name;
   return n.replace("/dev/disk/by-id/", "");
 }
 
-function ScanCard({ scan }: { scan: Scan }) {
+export function ScanCard({ scan }: { scan: Scan }) {
   const label = scan.kind === "scrub" ? "Scrubbing" : scan.kind === "resilver" ? "Resilvering" : "Expanding";
   return (
     <Card title={`${label}${scan.state === "paused" ? " (paused)" : ""}`}>
@@ -366,7 +366,7 @@ function VdevRow({
   );
 }
 
-function DiskPickerDialog({
+export function DiskPickerDialog({
   title,
   description,
   disks,
