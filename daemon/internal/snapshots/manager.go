@@ -317,7 +317,7 @@ func CleanName(name string, now time.Time) (string, error) {
 	case !manualRE.MatchString(name):
 		return "", invalid("the snapshot name %q can only have letters a-z, digits and . _ : - (no spaces), starting with a letter or digit", name)
 	case reservedLabel(name):
-		return "", invalid("names starting with %s are kept for automatic snapshots", AutoPrefix)
+		return "", invalid("names starting with %s or %s are kept for automatic and replication snapshots", AutoPrefix, ReplicationPrefix)
 	}
 	return name, nil
 }

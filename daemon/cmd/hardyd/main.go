@@ -21,6 +21,7 @@ import (
 
 	"github.com/hardyos/hardyos/daemon/internal/api"
 	"github.com/hardyos/hardyos/daemon/internal/appstore"
+	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/backups"
 	"github.com/hardyos/hardyos/daemon/internal/clientip"
@@ -33,6 +34,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/notify"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/publish"
+	"github.com/hardyos/hardyos/daemon/internal/replication"
 	"github.com/hardyos/hardyos/daemon/internal/secretbox"
 	"github.com/hardyos/hardyos/daemon/internal/storage"
 	"github.com/hardyos/hardyos/daemon/internal/store"
@@ -144,6 +146,15 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		fileAccess = &files.Client{Priv: pc, Lookup: files.UserLookup(&auth.Users{DB: db})}
 		api.RegisterFileJobs(manager, fileAccess)
 	}
+	// Replication to and from other HardyOS servers. Notifications go
+	// through replication.Notifier (a no-op until internal/notify's
+	// interface lands).
+	var repl *replication.Service
+	if !live {
+		repl = &replication.Service{DB: db, Root: &replication.PrivRoot{Priv: pc}, Jobs: manager, Notifier: replication.NopNotifier{},
+			Audit: &audit.Log{DB: db, Events: broker}, Sealer: &replication.Sealer{Source: secrets}, Log: log}
+		repl.RegisterJobs(manager)
+	}
 	var inst *installer.Service
 	if live {
 		inst = &installer.Service{Priv: pc, Jobs: manager, Limiter: auth.NewLoginLimiter()}
@@ -161,6 +172,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		Storage: stor, Notify: notifications, Metrics: collector,
 		WebRoot: webRoot, Insecure: httpsAddr == "", Installer: inst, Updates: upd, Backups: bk,
 		Apps: appStore, Files: fileAccess, TrustedProxies: trustedProxies, Secrets: secrets, Remote: remote,
+		Replication: repl,
 	})
 
 	go housekeeping(ctx, log, &auth.Sessions{DB: db})
@@ -172,6 +184,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		go upd.ConfirmWhenHealthy(ctx, time.Minute)
 		go upd.RunChecks(ctx) // look for new versions on GitHub daily
 		go bk.Run(ctx)        // nightly settings backup
+		go repl.Run(ctx)      // replication schedule, stale alerts, receiving from other servers
 		if p := handler.OIDC(); p != nil {
 			go p.Start(ctx) // sign-in provider: signing keys on schedule, expired sign-ins removed
 		}

@@ -29,6 +29,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/network"
 	"github.com/hardyos/hardyos/daemon/internal/nfs"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
+	"github.com/hardyos/hardyos/daemon/internal/replica"
 	"github.com/hardyos/hardyos/daemon/internal/sftp"
 	"github.com/hardyos/hardyos/daemon/internal/shares"
 	"github.com/hardyos/hardyos/daemon/internal/smb"
@@ -197,6 +198,11 @@ func main() {
 		priv.RegisterVMs(s, vmm)
 		go vmm.OnStart(ctx)
 		go vmm.Watch(ctx)
+		// Replication between servers: snapshots, zfs send and receive
+		// (into <pool>/replicas/<source>/ only), restores. VMs are frozen
+		// by their guest agent for the snapshot when they can be.
+		replItems := &priv.ReplicationItems{Shares: shm, Apps: am, VMs: vmm}
+		priv.RegisterReplication(s, &replica.Manager{Runner: sysexec.Exec{}, Items: replItems, Restore: replItems, Freeze: vmm.Frozen, Log: log})
 		priv.RegisterBootRepair(s, priv.StorageEnv{Runner: sysexec.Exec{}, Root: os.DirFS("/")}, "/", boot.ConfigPath)
 		if len(updater.Keys()) == 0 {
 			log.Warn("no trusted release key: updates can't be installed until one is added")
