@@ -30,6 +30,8 @@ jobs:
       - name: vet
         working-directory: daemon
         run: go vet ./...
+      - name: restic (the version HardyOS ships, for the cloud backup tests)
+        run: sudo scripts/install-restic.sh /usr/local/bin/restic
       - name: test
         working-directory: daemon
         run: go test -race ./...
@@ -57,6 +59,7 @@ jobs:
           go test -c -o "$RUNNER_TEMP/priv.test" ./internal/priv
           go test -c -o "$RUNNER_TEMP/install.test" ./internal/install
           go test -c -o "$RUNNER_TEMP/backup.test" ./internal/backup
+          go test -c -o "$RUNNER_TEMP/cloudbackup.test" ./internal/cloudbackup
       - name: storage operations against real ZFS
         run: sudo HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/priv.test" -test.run TestZFSIntegration -test.v
       - name: installer on loop devices
@@ -65,6 +68,10 @@ jobs:
         run: sudo HARDYOS_MOUNTNS_TEST=1 HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/install.test" -test.run 'SystemDirs' -test.v
       - name: settings backups on a pool
         run: sudo HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/backup.test" -test.run TestZFSBackupIntegration -test.v
+      - name: restic for cloud backups
+        run: sudo scripts/install-restic.sh /usr/local/bin/restic
+      - name: cloud backups from snapshots, restores through a staging dataset
+        run: sudo HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/cloudbackup.test" -test.run TestZFSIntegrationCloudBackup -test.v -test.timeout 10m
 
   nfs:
     name: NFS (loopback)

@@ -4306,7 +4306,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
   /backup/restore:
     post:
-      operationId: restoreBackup
+      operationId: restoreCloudBackup
       summary: Restore from a version (a job; a rollback needs the item's name typed)
       tags: [cloudbackup]
       requestBody:
