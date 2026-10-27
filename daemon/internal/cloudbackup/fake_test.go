@@ -459,7 +459,7 @@ func newEnv(t *testing.T) *env {
 		key[i] = byte(i)
 	}
 	e := &env{t: t, base: base, vol: vol, shares: sh, system: &fakeSystem{}, work: work,
-		vms: &fakeVMs{vol: vol, specs: map[string]vms.Spec{}, dirs: map[string]string{}, disks: map[string]string{}},
+		vms:  &fakeVMs{vol: vol, specs: map[string]vms.Spec{}, dirs: map[string]string{}, disks: map[string]string{}},
 		apps: &fakeApps{vol: vol, srcs: map[string]apps.BackupSource{}, dirs: map[string]string{}}}
 	e.files = &fakeFiles{shares: sh, level: shares.LevelWrite}
 	e.root = &Root{

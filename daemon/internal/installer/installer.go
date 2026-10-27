@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/auth"
+	"github.com/hardyos/hardyos/daemon/internal/cloudbackup"
 	"github.com/hardyos/hardyos/daemon/internal/install"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
@@ -53,6 +54,23 @@ type Service struct {
 	mu       sync.Mutex
 	sessions map[string]time.Time // sha256(token) -> expiry
 	jobID    string
+	// restore is the cloud backup to restore from (the bucket's keys and the
+	// repository key): kept in memory for the install job, never in its
+	// parameters.
+	restore *cloudbackup.ProbeArgs
+}
+
+// Probe opens a cloud backup from its recovery kit and lists the versions
+// a new install can restore from.
+func (s *Service) Probe(ctx context.Context, a cloudbackup.ProbeArgs) ([]cloudbackup.ProbeVersion, error) {
+	var res priv.CloudProbeResult
+	if err := s.Priv.Call(ctx, priv.OpInstallCloudProbe, a, &res); err != nil {
+		return nil, err
+	}
+	if res.Versions == nil {
+		res.Versions = []cloudbackup.ProbeVersion{}
+	}
+	return res.Versions, nil
 }
 
 // Unlock checks a typed code and returns a new session token.
@@ -136,11 +154,16 @@ type StartRequest struct {
 	Plan        install.Plan `json:"plan"`
 	Admin       Admin        `json:"admin"`
 	ConfirmWipe bool         `json:"confirmWipe"`
+	// Restore, when set, brings the settings and domain back from a cloud
+	// backup version (Run) at the first start.
+	Restore *cloudbackup.ProbeArgs `json:"restore,omitempty"`
 }
 
 type jobParams struct {
 	Plan install.Plan `json:"plan"`
 	Seed install.Seed `json:"seed"`
+	// Restore: settings come back from the cloud backup kept in memory.
+	Restore bool `json:"restore,omitempty"`
 }
 
 // Start validates the request and submits the install job.
@@ -183,7 +206,16 @@ func (s *Service) Start(ctx context.Context, req StartRequest) (*jobs.Job, error
 	if _, err := s.Check(ctx, req.Plan); err != nil {
 		return nil, err
 	}
-	j, err := s.Jobs.Submit(ctx, JobKind, "Install HardyOS", jobParams{Plan: req.Plan, Seed: seed}, nil)
+	if req.Restore != nil {
+		if err := cloudbackup.ValidRunID(req.Restore.Run); err != nil {
+			return nil, errors.New("choose the backup version to restore")
+		}
+		if _, err := cloudbackup.ParseKit(req.Restore.Kit); err != nil {
+			return nil, err
+		}
+	}
+	s.restore = req.Restore
+	j, err := s.Jobs.Submit(ctx, JobKind, "Install HardyOS", jobParams{Plan: req.Plan, Seed: seed, Restore: req.Restore != nil}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -240,6 +272,24 @@ func (s *Service) run(jc *jobs.Context) (any, error) {
 		{70, "Applying your settings and preparing the first boot", priv.OpInstallConfigure, priv.InstallArgs{Plan: p.Plan, Seed: &p.Seed}},
 		{88, "Installing the boot loader", priv.OpInstallBoot, priv.InstallArgs{Plan: p.Plan}},
 		{97, "Finishing up", priv.OpInstallFinish, nil},
+	}
+	if p.Restore {
+		s.mu.Lock()
+		ra := s.restore
+		s.mu.Unlock()
+		if ra == nil {
+			return nil, errors.New("the backup's keys were lost (the installer restarted); start again")
+		}
+		// After the system is configured, before the boot loader: the
+		// settings wait in the new system for its first start.
+		var out []step
+		for _, st := range steps {
+			out = append(out, st)
+			if st.op == priv.OpInstallConfigure {
+				out = append(out, step{80, "Bringing back the settings and the domain from the backup", priv.OpInstallCloudStage, *ra})
+			}
+		}
+		steps = out
 	}
 	for _, st := range steps {
 		jc.Progress(st.pct, st.msg)

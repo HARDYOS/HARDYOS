@@ -49,7 +49,7 @@ const DefaultRunDir = "/run/hardyos-backup"
 
 // Datasets HardyOS makes on a pool for backups.
 const (
-	StagingParent = "hardyos-restore"     // <pool>/hardyos-restore/<id>
+	StagingParent = "hardyos-restore"    // <pool>/hardyos-restore/<id>
 	CloneParent   = "hardyos-backup-tmp" // <pool>/hardyos-backup-tmp/<id>
 )
 

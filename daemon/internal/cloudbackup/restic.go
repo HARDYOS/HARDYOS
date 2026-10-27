@@ -57,7 +57,19 @@ type Restic struct {
 	TestAllow func(netip.Addr) bool
 	// CACert is an extra CA file for S3 (tests with a TLS fake only).
 	CACert string
+	// KillGrace is how long a cancelled restic gets to remove its lock
+	// before its process group is killed (default 15 s).
+	KillGrace time.Duration
 }
+
+func (r *Restic) killGrace() time.Duration {
+	if r.KillGrace > 0 {
+		return r.KillGrace
+	}
+	return 15 * time.Second
+}
+
+func sleepMS(n int) { time.Sleep(time.Duration(n) * time.Millisecond) }
 
 func (r *Restic) binary() string {
 	if r.Binary != "" {
@@ -226,7 +238,7 @@ func (r *Restic) run(ctx context.Context, repo *Repo, c call) ([]byte, error) {
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGINT)
 			select {
 			case <-stop:
-			case <-time.After(15 * time.Second):
+			case <-time.After(r.killGrace()):
 				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			}
 		case <-stop:

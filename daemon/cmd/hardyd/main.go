@@ -24,6 +24,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/backups"
 	"github.com/hardyos/hardyos/daemon/internal/clientip"
+	"github.com/hardyos/hardyos/daemon/internal/cloudbackups"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/files"
 	"github.com/hardyos/hardyos/daemon/internal/install"
@@ -119,6 +120,14 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		bk = &backups.Service{DB: db, Priv: pc, Jobs: manager, Notify: notifications, Log: log, Current: version.Version}
 		bk.RegisterJobs(manager)
 	}
+	// Versioned cloud backups: tasks, runs and the schedule here, restic in
+	// hardyd-priv. Notifications go through cloudbackups.Notifier; the
+	// notification service (internal/notify's events) plugs in there.
+	var cloud *cloudbackups.Service
+	if !live {
+		cloud = &cloudbackups.Service{DB: db, Priv: pc, Jobs: manager, Notifier: cloudbackups.NopNotifier{}, Log: log, Version: version.Version}
+		cloud.RegisterJobs(manager)
+	}
 	appStore := &appstore.Store{CatalogDir: appstore.DefaultCatalogDir, UploadDir: appstore.DefaultUploadDir, DB: db}
 	if !live {
 		api.RegisterAppJobs(manager, pc, appStore)
@@ -159,7 +168,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 	handler := api.New(api.Config{
 		DB: db, Jobs: manager, Events: broker, Priv: pc, Logger: log,
 		Storage: stor, Notify: notifications, Metrics: collector,
-		WebRoot: webRoot, Insecure: httpsAddr == "", Installer: inst, Updates: upd, Backups: bk,
+		WebRoot: webRoot, Insecure: httpsAddr == "", Installer: inst, Updates: upd, Backups: bk, CloudBackups: cloud,
 		Apps: appStore, Files: fileAccess, TrustedProxies: trustedProxies, Secrets: secrets, Remote: remote,
 	})
 
@@ -172,6 +181,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		go upd.ConfirmWhenHealthy(ctx, time.Minute)
 		go upd.RunChecks(ctx) // look for new versions on GitHub daily
 		go bk.Run(ctx)        // nightly settings backup
+		go cloud.Run(ctx)     // cloud backup schedules, prunes and checks
 		if p := handler.OIDC(); p != nil {
 			go p.Start(ctx) // sign-in provider: signing keys on schedule, expired sign-ins removed
 		}

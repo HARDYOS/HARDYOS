@@ -88,6 +88,9 @@ type Root struct {
 	TestAllow func(netip.Addr) bool
 	Log       *slog.Logger
 	Now       func() time.Time
+	// AccessTimeout bounds the access test when a destination is saved
+	// (default 90 s).
+	AccessTimeout time.Duration
 
 	store     targetStore
 	storeOnce sync.Once
@@ -229,6 +232,8 @@ func (r *Root) Save(ctx context.Context, a SaveArgs) (*SaveResult, error) {
 		return nil, err
 	}
 	created := false
+	ctx, cancel := context.WithTimeout(ctx, r.accessTimeout())
+	defer cancel()
 	if creds.RepoPassword == "" {
 		pw, err := NewRepoPassword()
 		if err != nil {
@@ -267,10 +272,22 @@ func (r *Root) Save(ctx context.Context, a SaveArgs) (*SaveResult, error) {
 	return &SaveResult{Target: t, Created: created}, nil
 }
 
+// accessTimeout bounds testing a destination (restic retries some
+// errors, such as an unknown access key, for many minutes).
+func (r *Root) accessTimeout() time.Duration {
+	if r.AccessTimeout > 0 {
+		return r.AccessTimeout
+	}
+	return 90 * time.Second
+}
+
 // accessError explains a failed access test.
 func accessError(err error) error {
 	if errors.Is(err, ErrWrongKey) || errors.Is(err, ErrLocked) {
 		return err
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return &Problem{Msg: "the bucket didn't answer in time: check the endpoint, the bucket's name and the keys"}
 	}
 	var p *Problem
 	if errors.As(err, &p) {
