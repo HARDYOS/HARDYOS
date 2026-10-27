@@ -11,7 +11,7 @@ import (
 )
 
 // What keeps VMs in their place on the network and in the host
-// (decisions 136-138): VLAN cards are checked before the VM runs, cards on
+// (decisions 136-138, 142): VLAN cards are checked before the VM runs, cards on
 // the home network can't use other computers' addresses, VMs on the
 // private network can only ask the server for addresses and names, and
 // QEMU runs confined by AppArmor.

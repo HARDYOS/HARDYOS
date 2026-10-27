@@ -9,7 +9,7 @@ disk image. Open **Virtual Machines** in the dock (administrators only).
 
 Graphics cards and other devices are covered in [GPUs and devices](gpus.md).
 How it works inside: [architecture](architecture.md#virtual-machines),
-decisions 120-125.
+decisions 120-125 and 134-143.
 
 ## Before you start
 
@@ -36,7 +36,10 @@ Click **New VM**. Seven short steps, with sensible choices already made:
 
 3. **Disks**: the pool, and the disks' sizes. Disks are *thin*: a 96 GB
    disk only takes the space the VM has really written. Add more disks
-   here or later.
+   here or later. The disks must fit in the pool's free space; turn on
+   *Allow more than the pool has free* to make them bigger anyway. Each VM
+   can use at most its disks' sizes plus a quarter (and 2 GB) on the pool,
+   snapshots included, so one VM can't fill the pool for everything else.
 4. **Install**: the installer disc, or for Home Assistant, cloud images and
    imports, the disk image. Pick it from the **ISO library** or paste a
    download link (with its SHA-256 checksum if the download page gives one).
@@ -49,6 +52,15 @@ Click **New VM**. Seven short steps, with sensible choices already made:
    from your router, like any computer), **Private (NAT)** (it reaches the
    internet through the server but nothing can reach it), or a **VLAN**.
    Routers get two network cards (WAN and LAN).
+
+   On the home network and VLANs, a card may only use its own MAC address
+   and the IP address it got, so a VM can't pretend to be the router or
+   another computer. Routers and firewalls (OPNsense, pfSense) forward
+   other computers' traffic and need **Allow address spoofing** on (the
+   router template turns it on). Cards with the filter use IPv4 only on
+   the home network. VMs on **Private (NAT)** can reach the internet and
+   ask the server for an address and names (DHCP, DNS), but nothing else
+   on the server itself (not its web desktop, SSH or shared folders).
 
    ![Network](images/vms/new-vm-network.png)
 
@@ -106,8 +118,12 @@ the guest agent runs.
   through) so the router sits between the internet and your network.
 - **Import a disk image**: VMs from Proxmox, VirtualBox, VMware or Hyper-V
   (qcow2, vmdk, vdi, vhdx, raw). Copy the image into the ISOs folder first.
-  Images that need other files (backing files, split VMDKs) are refused:
-  export them as one file.
+  Images that need other files (backing files, split VMDKs, VMDK
+  descriptor files) are refused: export them as one file. HardyOS first
+  copies the image into the VM's own folder (so the pool needs room for
+  the image twice while it's imported), then converts that copy as an
+  unprivileged user with no network, so a crafted image can't make it read
+  other files.
 
 ## The ISO library
 
@@ -116,7 +132,9 @@ the pool you choose the first time you download one. Copy files in from
 any computer over the network (`\\<server>\ISOs`, administrators) or with
 the File Manager, or download them here by link (https only; files from
 the server's own network aren't downloaded). Files a VM has in a drive
-can't be deleted.
+can't be deleted. VMs don't use discs from the ISOs folder while it's
+shared over NFS; turn NFS off for it. If a disc is replaced (or turned
+into a link) while a VM starts, the start stops: start it again.
 
 ![ISO library](images/vms/iso-library.png)
 
@@ -135,7 +153,9 @@ down, like pressing the power button) and the square **Turn off** button
 keyboard and mouse. The toolbar sends **Ctrl+Alt+Del**, **types text** into
 the VM for you (handy for passwords), switches between fit-to-window and
 actual size, and goes full screen. Only administrators can open a VM's
-screen, and every time it's opened is logged.
+screen, and every time it's opened is logged. The screen closes within
+15 seconds when you sign out, or when your account stops being an
+administrator's.
 
 ![A VM's screen](images/vms/vm-console.png)
 
@@ -144,7 +164,10 @@ screen, and every time it's opened is logged.
 CPU, memory, disks (grow, add, remove), CD/DVD drives, network cards and
 devices. Changes to a running VM apply when it next starts (the page and
 the list say *restart*); disks can grow while it runs but shrink never.
-Removing a disk deletes it and its snapshots, so the VM must be off.
+Removing a disk deletes it and its snapshots, so the VM must be off and
+you type its name to save. A VLAN card's VM starts only once its port is
+on its VLAN (checked); if the VLAN can't be set, the VM is turned off
+again and says why.
 
 ![Hardware](images/vms/vm-hardware.png)
 
@@ -152,7 +175,10 @@ Removing a disk deletes it and its snapshots, so the VM must be off.
 
 A snapshot keeps the whole VM as it is: every disk, its settings, its
 firmware variables and its TPM. Take one before an update; **Go back**
-puts everything back (the VM must be off, and you type its name). Snapshots
+puts everything back (the VM must be off, and you type its name).
+Deleting a snapshot asks for the name too. Snapshots count toward the
+VM's space on the pool: if a VM with many snapshots rewrites a lot, it
+pauses when it reaches its limit; delete old snapshots or grow a disk. Snapshots
 of a running VM freeze the guest's files for a moment when the guest agent
 runs; without it the snapshot is like pulling the plug (fine for most
 systems; the list marks it).
@@ -190,5 +216,7 @@ HardyOS's VPN once remote access is set up.
   off ([GPUs and devices](gpus.md)).
 - VM disks are ZFS volumes, so pool snapshots, replication and the cluster
   later can move them.
+- Every VM runs confined by AppArmor. If libvirt can't confine VMs (AppArmor
+  turned off), the app says VMs aren't supported and why.
 - Licences: noVNC (the screen) is MPL-2.0, its licence is served at
   `/licenses/noVNC-LICENSE.txt`.
