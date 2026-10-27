@@ -35,7 +35,31 @@ const (
 	toolkitKeyPath        = "/etc/apt/keyrings/hardyos-nvidia-container-toolkit.asc"
 	toolkitListPath       = "/etc/apt/sources.list.d/hardyos-nvidia-container-toolkit.list"
 	nonFreeSourcesPath    = "/etc/apt/sources.list.d/hardyos-non-free.sources"
+	toolkitPinPath        = "/etc/apt/preferences.d/hardyos-nvidia-container-toolkit"
 )
+
+// ToolkitPackages are the only packages taken from NVIDIA's repository.
+// Everything else it offers is pinned away (priority -1), so the
+// repository can never replace one of Debian's packages, or HardyOS's.
+var ToolkitPackages = []string{
+	"nvidia-container-toolkit", "nvidia-container-toolkit-base",
+	"libnvidia-container1", "libnvidia-container-tools",
+}
+
+// toolkitPin is the apt preferences file: the toolkit packages from
+// nvidia.github.io at the normal priority, nothing else from there. The
+// package-specific record comes first; apt prefers it over the general one.
+func toolkitPin() string {
+	return fmt.Sprintf(`# Added by HardyOS: only NVIDIA's container toolkit comes from NVIDIA's repository.
+Package: %s
+Pin: origin "nvidia.github.io"
+Pin-Priority: 500
+
+Package: *
+Pin: origin "nvidia.github.io"
+Pin-Priority: -1
+`, strings.Join(ToolkitPackages, " "))
+}
 
 //go:embed keys/nvidia-container-toolkit.asc
 var toolkitKey []byte
@@ -155,6 +179,9 @@ Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 	if err := put(toolkitKeyPath, toolkitKey); err != nil {
 		return err
 	}
+	if err := put(toolkitPinPath, []byte(toolkitPin())); err != nil {
+		return err
+	}
 	list := fmt.Sprintf("# Added by HardyOS: NVIDIA's container toolkit (key %s).\ndeb [signed-by=%s] %s/%s /\n", ToolkitKeyFingerprint, toolkitKeyPath, ToolkitRepo, debArch(arch))
 	return put(toolkitListPath, []byte(list))
 }
@@ -164,6 +191,7 @@ Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 func removeSources(sysRoot string) {
 	_ = os.Remove(filepath.Join(sysRoot, toolkitListPath))
 	_ = os.Remove(filepath.Join(sysRoot, toolkitKeyPath))
+	_ = os.Remove(filepath.Join(sysRoot, toolkitPinPath))
 }
 
 // keyFingerprint is the v4 fingerprint of the first public key in an

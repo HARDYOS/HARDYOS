@@ -1,0 +1,4 @@
+{
+  "comment": "SHA-256 checksums of NVIDIA vGPU KVM host driver installers (NVIDIA-Linux-<arch>-<version>-vgpu-kvm.run) that HardyOS's maintainers checked against NVIDIA's published checksums. Empty by default: HardyOS can't download NVIDIA's licensed files to check them. Add an entry only from NVIDIA's own checksum list. An installer that isn't listed can still be installed; the admin is warned and the install is logged.",
+  "drivers": []
+}

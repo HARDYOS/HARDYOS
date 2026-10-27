@@ -237,11 +237,11 @@ func TestGPUOwnershipRoundTrip(t *testing.T) {
 		t.Fatalf("usb problems = %v", p)
 	}
 	// Released while running: refused.
-	f.run.OnResult("virsh -c qemu:///system list --name --state-running", sysexec.Result{Stdout: []byte("gaming\n")})
+	f.run.OnResult("virsh -c qemu:///system list --name", sysexec.Result{Stdout: []byte("gaming\n")})
 	if err := h.Release(ctx, "gaming"); err == nil || !strings.Contains(err.Error(), "still running") {
 		t.Fatalf("release while running: %v", err)
 	}
-	f.run.OnResult("virsh -c qemu:///system list --name --state-running", sysexec.Result{Stdout: []byte("\n")})
+	f.run.OnResult("virsh -c qemu:///system list --name", sysexec.Result{Stdout: []byte("\n")})
 	if err := h.Release(ctx, "gaming"); err != nil {
 		t.Fatal(err)
 	}
@@ -420,7 +420,7 @@ func TestPrepareAgainReleasesLeftovers(t *testing.T) {
 
 func TestPCIWithROM(t *testing.T) {
 	f := server(t)
-	f.file("/var/lib/hardyos/vm-roms/rx580.rom", "ROM")
+	f.file("/var/lib/hardyos/root/vm-roms/rx580.rom", "ROM")
 	h := f.host()
 	prep, err := h.Prepare(context.Background(), "win11", []Device{{Kind: KindGPU, ID: "0000:02:00.0", ROMFile: "rx580.rom"}, {Kind: KindPCI, ID: "0000:00:14.0"}})
 	if err != nil {

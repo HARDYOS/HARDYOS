@@ -33,6 +33,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/smb"
 	"github.com/hardyos/hardyos/daemon/internal/snapshots"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
+	"github.com/hardyos/hardyos/daemon/internal/syslock"
 	"github.com/hardyos/hardyos/daemon/internal/update"
 	"github.com/hardyos/hardyos/daemon/internal/version"
 	"github.com/hardyos/hardyos/daemon/internal/vms"
@@ -93,9 +94,26 @@ func main() {
 	if live {
 		priv.RegisterSystem(s, sysexec.Exec{}, nil)
 	} else {
+		// Boot menu changes, updates and GPU driver tasks take turns, with
+		// hardyctl boot-sync too (a lock file in root's runtime directory).
+		syslock.Init()
+		// Root's own state directory on the shared dataset; files early
+		// builds put in hardyd's directory move there.
+		if err := boot.MigrateRootState(boot.Env{Runner: sysexec.Exec{}, Root: "/"}); err != nil {
+			log.Warn("root's state directory", "dir", rootfile.RootStateDir, "err", err)
+		}
+		if err := devices.MigrateRoms("/"); err != nil {
+			log.Warn("GPU ROM library", "err", err)
+		}
 		// Before hardyd touches the state dataset: finish a settings restore,
 		// undo a failed update, or start the new version's confirm watchdog.
-		updater.OnBoot(ctx)
+		if release, err := syslock.Acquire(ctx, "Checking the last update"); err == nil {
+			updater.OnBoot(ctx)
+			release()
+		} else {
+			log.Warn("system lock", "err", err)
+			updater.OnBoot(ctx)
+		}
 		// GPUs and devices for VMs. The NVIDIA driver HardyOS installed is
 		// rebuilt inside every new version before it's offered for boot.
 		gpus := &gpu.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log}

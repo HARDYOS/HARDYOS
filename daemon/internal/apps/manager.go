@@ -1585,23 +1585,13 @@ func checkBlocked(ia *installedApp) error {
 }
 
 func writeFileAtomic(path string, b []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-")
+	// Root writing into hardyd's directory: never through a link hardyd
+	// planted, a directory included (rootfile.WriteAtomic).
+	abs, err := filepath.Abs(path)
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
+	return rootfile.WriteAtomic(abs, b, mode)
 }
 
 func mustJSON(v any) []byte {

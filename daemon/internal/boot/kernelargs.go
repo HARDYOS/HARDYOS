@@ -14,8 +14,15 @@ import (
 // KernelArgsPath holds the extra kernel arguments every menu entry gets
 // (for example the IOMMU flags for PCI passthrough). It sits on the shared
 // state dataset, so every boot environment, and every update, uses the same
-// list. Only hardyd-priv writes it; a copy root didn't write is ignored.
-const KernelArgsPath = "/var/lib/hardyos/kernel-args.json"
+// list. It lives in root's own directory there (rootfile.RootStateDir,
+// 0755 root): only hardyd-priv writes it, and a copy root didn't write is
+// ignored.
+const KernelArgsPath = rootfile.RootStateDir + "/kernel-args.json"
+
+// LegacyKernelArgsPath is where the first Phase 5 builds kept the file, in
+// hardyd's directory. MigrateRootState moves a trusted copy into
+// KernelArgsPath; until then LoadKernelArgs still reads it.
+const LegacyKernelArgsPath = "/var/lib/hardyos/kernel-args.json"
 
 // KernelArgs is the file's content.
 type KernelArgs struct {
@@ -89,7 +96,10 @@ func RemoveKernelArgs(have []string, keys ...string) []string {
 // reported as an error (and Sync then boots without the extras, because
 // the server must always be able to boot).
 func LoadKernelArgs(env Env) ([]string, error) {
-	b, err := rootfile.ReadFile(env.path(KernelArgsPath))
+	b, err := rootfile.ReadFileInRootDir(env.path(KernelArgsPath))
+	if errors.Is(err, os.ErrNotExist) {
+		b, err = rootfile.ReadFile(env.path(LegacyKernelArgsPath))
+	}
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -134,5 +144,31 @@ func SaveKernelArgs(env Env, args []string) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(env.path(KernelArgsPath), append(b, '\n'), 0o644)
+	if err := rootfile.WriteInRootDir(env.path(KernelArgsPath), append(b, '\n'), 0o644, 0o755); err != nil {
+		return err
+	}
+	// The new file is the one in use; an old copy must not come back.
+	_ = os.Remove(env.path(LegacyKernelArgsPath))
+	return nil
+}
+
+// MigrateRootState moves root's state files that early builds wrote into
+// hardyd's directory into root's own one (hardyd-priv runs it at start).
+// Only a copy root wrote is moved; anything else is removed.
+func MigrateRootState(env Env) error {
+	if err := rootfile.EnsureRootDir(env.path(rootfile.RootStateDir), 0o755); err != nil {
+		return err
+	}
+	b, err := rootfile.ReadFile(env.path(LegacyKernelArgsPath))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err == nil {
+		if _, serr := os.Lstat(env.path(KernelArgsPath)); errors.Is(serr, os.ErrNotExist) {
+			if err := rootfile.WriteInRootDir(env.path(KernelArgsPath), b, 0o644, 0o755); err != nil {
+				return err
+			}
+		}
+	}
+	return os.Remove(env.path(LegacyKernelArgsPath))
 }

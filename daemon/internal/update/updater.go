@@ -187,11 +187,8 @@ func writeJSON(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o640); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	// hardyd's directory: never through a link it planted.
+	return rootfile.WriteAtomic(path, append(b, '\n'), 0o640)
 }
 
 // PendingUpdate returns the pending update, if any.

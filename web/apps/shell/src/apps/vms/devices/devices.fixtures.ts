@@ -137,6 +137,8 @@ export function nvidiaStatus(over: Partial<NvidiaStatus> = {}): NvidiaStatus {
     vgpu: null,
     vgpuHostDriver: false,
     task: null,
+    skipNextUpdate: null,
+    reinstallNeeded: null,
     ...over,
   };
 }

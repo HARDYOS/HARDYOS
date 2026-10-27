@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 )
@@ -58,8 +57,21 @@ func (m *Manager) PrepareNvidia() (*Task, error) {
 		if _, err := c.run(ctx, aptEnv, "apt-get", args...); err != nil {
 			return nil, fmt.Errorf("downloading the packages: %w", err)
 		}
+		c.step(75, "Listing the exact package versions downloaded")
+		// What apt would install now, from the packages just downloaded:
+		// the versions the admin agrees to and that get installed.
+		sim, err := c.run(ctx, aptEnv, "apt-get", append([]string{"-s", "--no-install-recommends", "install"}, DriverPackages...)...)
+		if err != nil {
+			return nil, fmt.Errorf("listing the downloaded packages: %w", err)
+		}
+		versions := map[string]string{}
+		for p, v := range parseSimulation(sim) {
+			if contains(DriverPackages, p) {
+				versions[p] = v
+			}
+		}
 		c.step(80, "Reading NVIDIA's licence from the packages")
-		text, src, version, err := m.extractLicence(ctx, c)
+		text, src, version, err := m.extractLicence(ctx, c, versions)
 		if err != nil {
 			return nil, err
 		}
@@ -75,7 +87,7 @@ func (m *Manager) PrepareNvidia() (*Task, error) {
 		if err != nil {
 			return nil, err
 		}
-		rec.Licence = &Licence{SHA256: hex.EncodeToString(sum[:]), Version: version, Packages: DriverPackages, Prepared: time.Now().UTC(), Source: src}
+		rec.Licence = &Licence{SHA256: hex.EncodeToString(sum[:]), Version: version, Packages: DriverPackages, Versions: versions, Prepared: time.Now().UTC(), Source: src}
 		if err := m.save(rec); err != nil {
 			return nil, err
 		}
@@ -83,16 +95,23 @@ func (m *Manager) PrepareNvidia() (*Task, error) {
 	})
 }
 
-// extractLicence unpacks the downloaded package and returns the licence.
-func (m *Manager) extractLicence(ctx context.Context, c *tc) (text, source, version string, err error) {
+// extractLicence unpacks the downloaded package that is about to be
+// installed (the version apt listed, else the newest one downloaded by
+// dpkg's version order) and returns the licence.
+func (m *Manager) extractLicence(ctx context.Context, c *tc, versions map[string]string) (text, source, version string, err error) {
 	for _, pkg := range licencePackages {
-		debs, _ := filepath.Glob(m.path("/var/cache/apt/archives/" + pkg + "_*.deb"))
-		if len(debs) == 0 {
+		deb := ""
+		if v := versions[pkg]; v != "" {
+			deb, version = debFile(m.path("/"), pkg, v), v
+		}
+		if deb == "" {
+			if deb, version, err = newestDeb(ctx, m.Runner, m.path("/"), pkg); err != nil {
+				return "", "", "", err
+			}
+		}
+		if deb == "" {
 			continue
 		}
-		sort.Strings(debs)
-		deb := debs[len(debs)-1]
-		version = debVersion(filepath.Base(deb))
 		tmp, err := m.ensureDir("licence-tmp")
 		if err != nil {
 			return "", "", "", err
@@ -185,11 +204,13 @@ func (m *Manager) InstallNvidia(a InstallArgs) (*Task, error) {
 		if err != nil {
 			return nil, err
 		}
-		rec.Driver = &Consent{By: a.By, At: time.Now().UTC(), LicenceSHA256: lic.SHA256, Version: lic.Version, Packages: DriverPackages}
+		rec.Driver = &Consent{By: a.By, At: time.Now().UTC(), LicenceSHA256: lic.SHA256, Version: lic.Version, Packages: lic.Packages, Versions: lic.Versions}
+		rec.ReinstallNeeded = nil
 		if err := m.save(rec); err != nil {
 			return nil, err
 		}
-		c.logf("Licence %s agreed to by %s", lic.SHA256, a.By)
+		c.logf("Licence %s (NVIDIA driver %s) agreed to by %s", lic.SHA256, lic.Version, a.By)
+		m.log().Info("NVIDIA licence agreed to", "by", a.By, "licenceSha256", lic.SHA256, "version", lic.Version)
 		if err := writeSources(m.Root, m.Arch); err != nil {
 			return nil, err
 		}
@@ -197,13 +218,13 @@ func (m *Manager) InstallNvidia(a InstallArgs) (*Task, error) {
 		if _, err := c.run(ctx, aptEnv, "dpkg", "--configure", "-a"); err != nil {
 			return nil, err
 		}
-		c.step(12, "Updating the package lists")
-		if _, err := c.run(ctx, aptEnv, "apt-get", "update"); err != nil {
-			return nil, fmt.Errorf("updating the package lists (is the server online?): %w", err)
-		}
-		c.step(25, "Installing the NVIDIA driver and building it for this kernel (this takes several minutes)")
-		if _, err := c.run(ctx, aptEnv, "apt-get", aptInstallArgs(DriverPackages...)...); err != nil {
-			return nil, fmt.Errorf("installing the packages: %w", err)
+		// Exactly the packages downloaded and shown, from the download: the
+		// package lists aren't refreshed (that could bring a newer driver
+		// than the one agreed to) and nothing is fetched.
+		c.step(25, "Installing NVIDIA driver "+lic.Version+" and building it for this kernel (this takes several minutes)")
+		args := append([]string{"--no-download"}, aptInstallArgs(pinned(lic.Packages, lic.Versions)...)...)
+		if _, err := c.run(ctx, aptEnv, "apt-get", args...); err != nil {
+			return nil, fmt.Errorf("installing the downloaded packages (if they were cleaned up meanwhile, get the NVIDIA driver again): %w", err)
 		}
 		kernel := readTrim(m.path("/proc/sys/kernel/osrelease"))
 		c.step(85, "Checking the driver was built for kernel "+kernel)
@@ -262,6 +283,42 @@ func (m *Manager) RemoveNvidia() (*Task, error) {
 		}
 		return map[string]bool{"restartNeeded": true}, nil
 	})
+}
+
+func contains(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
+
+// SetSkipNextUpdate records (skip) or withdraws the admin's choice to
+// install the next update without the NVIDIA drivers HardyOS installed:
+// the update then goes ahead even if a driver can't be built for it, and
+// the new version asks for the drivers to be installed again.
+func (m *Manager) SetSkipNextUpdate(skip bool, by string) (*Record, error) {
+	if by == "" || len(by) > 200 {
+		return nil, errors.New("who chose this is missing")
+	}
+	rec, err := m.load()
+	if err != nil {
+		return nil, err
+	}
+	if skip {
+		if !(rec.Driver != nil && rec.Driver.Installed) && !(rec.VGPU != nil && rec.VGPU.Installed) {
+			return nil, errors.New("HardyOS hasn't installed an NVIDIA driver, so updates don't need it")
+		}
+		rec.SkipNextUpdate = &Skip{By: by, At: time.Now().UTC()}
+	} else {
+		rec.SkipNextUpdate = nil
+	}
+	if err := m.save(rec); err != nil {
+		return nil, err
+	}
+	m.log().Warn("NVIDIA drivers for the next update", "skip", skip, "by", by)
+	return rec, nil
 }
 
 // moduleBuilt reports whether kernel version kv under sysRoot has the

@@ -40,13 +40,5 @@ func Check(path string) error {
 	return nil
 }
 
-// ReadFile reads path if root wrote it.
-func ReadFile(path string) ([]byte, error) {
-	if err := Check(path); err != nil {
-		return nil, err
-	}
-	return os.ReadFile(path)
-}
-
 // IsNotExist reports whether err means the file isn't there.
 func IsNotExist(err error) bool { return errors.Is(err, fs.ErrNotExist) }

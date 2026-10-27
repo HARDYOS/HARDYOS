@@ -136,17 +136,24 @@ func TestNvidiaVFSlices(t *testing.T) {
 		t.Fatalf("type after release = %q", b)
 	}
 	f.run.OnPrefix("/usr/lib/nvidia/sriov-manage ", sysexec.Result{})
+	// Already on: nothing to do.
 	if err := h.SetVFs(ctx, "0000:06:00.0", 4); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(strings.Join(f.run.Lines(), "\n"), "/usr/lib/nvidia/sriov-manage -e 0000:06:00.0") {
+	if strings.Contains(strings.Join(f.run.Lines(), "\n"), "sriov-manage") {
+		t.Fatal("sriov-manage run for no change")
+	}
+	if err := h.SetVFs(ctx, "0000:06:00.0", 0); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(f.run.Lines(), "\n"), "/usr/lib/nvidia/sriov-manage -d 0000:06:00.0") {
 		t.Fatal("sriov-manage not run")
 	}
 }
 
 func TestIntelSRIOVSlices(t *testing.T) {
 	f := newFakeSys(t)
-	f.pci("0000:00:02.0", "8086", "a7a0", "0x030000", "i915", pciOpt{group: 2, bootVGA: true, reset: "flr", sub: map[string]string{"sriov_totalvfs": "7\n", "sriov_numvfs": "0\n"}})
+	f.pci("0000:00:02.0", "8086", "a7a0", "0x030000", "i915", pciOpt{group: 2, bootVGA: true, reset: "flr", sub: map[string]string{"sriov_totalvfs": "7\n", "sriov_numvfs": "0\n", "sriov_drivers_autoprobe": "1\n"}})
 	f.pci("0000:01:00.0", "1002", "73bf", "0x030000", "amdgpu", pciOpt{group: 3, reset: "flr"})
 	h := f.host()
 	ctx := context.Background()
@@ -178,8 +185,13 @@ func TestIntelSRIOVSlices(t *testing.T) {
 	if vf != "0000:00:02.1" || f.driver(vf) != "vfio-pci" || f.driver("0000:00:02.0") != "i915" {
 		t.Fatalf("vf %s on %s", vf, f.driver(vf))
 	}
-	if err := h.Release(ctx, "media"); err != nil || f.driver(vf) != "i915" {
+	// The new virtual functions came up without a host driver (autoprobe
+	// off) and go back to none.
+	if err := h.Release(ctx, "media"); err != nil || f.driver(vf) != "" {
 		t.Fatalf("release: %v %s", err, f.driver(vf))
+	}
+	if !strings.Contains(strings.Join(f.wrote(), "\n"), "/sriov_drivers_autoprobe < 0") {
+		t.Fatal("autoprobe not turned off")
 	}
 }
 

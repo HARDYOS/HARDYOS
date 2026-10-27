@@ -2793,6 +2793,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/devices/nvidia/skip-next-update": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Install the next update without the NVIDIA drivers (or withdraw that choice)
+         * @description For when a driver can't be built for a new version: the update then goes ahead, and the new version shows that its NVIDIA drivers need installing again. Used up by the next update. Skipping needs confirm; the choice is audited.
+         */
+        post: operations["skipNvidiaForNextUpdate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/devices/gpu-task": {
         parameters: {
             query?: never;
@@ -2821,7 +2841,7 @@ export interface paths {
         put?: never;
         /**
          * Upload NVIDIA's vGPU host driver (.run) you got from NVIDIA; returns its SHA-256
-         * @description The request body is the raw file; its name (NVIDIA-Linux-x86_64-<version>-vgpu-kvm.run) goes in X-HardyOS-Filename. Nothing is installed yet.
+         * @description The request body is the raw file; its name (NVIDIA-Linux-x86_64-<version>-vgpu-kvm.run) goes in X-HardyOS-Filename. The server computes the SHA-256 while receiving it and keeps it with the upload ID; installing names only that ID. Nothing is installed yet. `known` says whether the checksum is in HardyOS's list of checked NVIDIA installers (empty by default); `warning` explains when it isn't.
          */
         post: operations["uploadVGPUDriver"];
         delete?: never;
@@ -2839,7 +2859,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Install an uploaded vGPU host driver (checksum checked again, DKMS build) */
+        /**
+         * Install an uploaded vGPU host driver (checksum checked again, DKMS build)
+         * @description The file's name and checksum come from the server's record of the upload, never from the request. The admin types the driver's version (confirmVersion) to confirm.
+         */
         post: operations["installVGPUDriver"];
         delete?: never;
         options?: never;
@@ -5048,14 +5071,23 @@ export interface components {
             /** Format: date-time */
             at: string;
             licenceSha256: string;
+            /** @description The driver version the agreement covers */
             version: string;
             packages: string[];
+            /** @description Exact package versions installed */
+            versions?: {
+                [key: string]: string;
+            };
             installed: boolean;
         };
         NvidiaLicence: {
             sha256: string;
             version: string;
             packages: string[];
+            /** @description Exact versions downloaded (the ones installed) */
+            versions?: {
+                [key: string]: string;
+            };
             /** Format: date-time */
             prepared: string;
             source: string;
@@ -5108,19 +5140,49 @@ export interface components {
             vgpu: components["schemas"]["VGPUDriverRecord"] | null;
             vgpuHostDriver: boolean;
             task: components["schemas"]["GPUTask"] | null;
+            skipNextUpdate: components["schemas"]["NvidiaSkip"] | null;
+            reinstallNeeded: components["schemas"]["NvidiaReinstall"] | null;
         };
         VGPUUpload: {
             upload: string;
+            /** @description Computed by the server while receiving the file */
             sha256: string;
             /** Format: int64 */
             size: number;
             fileName: string;
             version: string;
+            /** @description The checksum is in HardyOS's list of checked NVIDIA vGPU installers */
+            known: boolean;
+            /** @description Shown when the checksum isn't in that list */
+            warning?: string;
+            by: string;
+        };
+        NvidiaSkipRequest: {
+            /** @description true: the next update leaves the NVIDIA drivers out; false: withdraw */
+            skip: boolean;
+            /** @description Must be true to skip */
+            confirm?: boolean;
+        };
+        NvidiaSkip: {
+            by: string;
+            /** Format: date-time */
+            at: string;
+        };
+        NvidiaReinstall: {
+            /** @description Debian's NVIDIA driver for Docker apps needs installing again */
+            driver: boolean;
+            /** @description NVIDIA's vGPU host driver needs installing again */
+            vgpu: boolean;
+            by: string;
+            /** Format: date-time */
+            at: string;
+            reason: string;
         };
         VGPUInstallRequest: {
+            /** @description The upload ID the upload returned */
             upload: string;
-            sha256: string;
-            fileName: string;
+            /** @description The driver's version, typed by the admin to confirm */
+            confirmVersion: string;
             /** @description You have NVIDIA's vGPU licence and agree to the licence in NVIDIA's installer */
             accept: boolean;
             /** @description Remove Debian's NVIDIA driver first */
@@ -9916,6 +9978,25 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["DeviceConfirmRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    skipNvidiaForNextUpdate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NvidiaSkipRequest"];
             };
         };
         responses: {

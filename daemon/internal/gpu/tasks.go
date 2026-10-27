@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
+	"github.com/hardyos/hardyos/daemon/internal/syslock"
 )
 
 // Task is a background driver job (apt and DKMS builds take longer than a
@@ -110,7 +111,18 @@ func (c *tc) run(ctx context.Context, env []string, name string, args ...string)
 	return out, nil
 }
 
-// start runs fn in the background as a new task. Only one runs at a time.
+// taskLabels name each kind of task for the system lock's refusals.
+var taskLabels = map[string]string{
+	TaskNvidiaPrepare: "Downloading the NVIDIA driver",
+	TaskNvidiaInstall: "Installing the NVIDIA driver",
+	TaskNvidiaRemove:  "Removing the NVIDIA driver",
+	TaskVGPUInstall:   "Installing NVIDIA's vGPU host driver",
+	TaskVGPURemove:    "Removing NVIDIA's vGPU host driver",
+}
+
+// start runs fn in the background as a new task. Only one runs at a time,
+// and never alongside an update or a boot menu change (syslock): apt and
+// DKMS must not run while an update builds a new system.
 func (m *Manager) start(kind string, fn func(ctx context.Context, c *tc) (any, error)) (*Task, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -121,6 +133,10 @@ func (m *Manager) start(kind string, fn func(ctx context.Context, c *tc) (any, e
 		if running {
 			return nil, ErrBusy
 		}
+	}
+	release, err := syslock.TryAcquireTask(firstNonEmpty(taskLabels[kind], "A graphics driver task"))
+	if err != nil {
+		return nil, err
 	}
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
@@ -135,7 +151,17 @@ func (m *Manager) start(kind string, fn func(ctx context.Context, c *tc) (any, e
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		c := &tc{m: m, tk: tk}
-		res, err := fn(ctx, c)
+		res, err := func() (res any, err error) {
+			// A bug must never leave the task "running" for ever (every
+			// later task would be refused as busy).
+			defer func() {
+				if p := recover(); p != nil {
+					err = fmt.Errorf("internal error: %v", p)
+				}
+			}()
+			return fn(ctx, c)
+		}()
+		release() // before the task shows as finished
 		tk.mu.Lock()
 		tk.t.Finished = time.Now().UTC()
 		if err != nil {
@@ -157,6 +183,15 @@ func (t *task) snapshot() Task {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.t
+}
+
+func firstNonEmpty(xs ...string) string {
+	for _, x := range xs {
+		if x != "" {
+			return x
+		}
+	}
+	return ""
 }
 
 // Task returns the running or last task (nil if none since start).

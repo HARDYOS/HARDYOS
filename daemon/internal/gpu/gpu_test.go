@@ -76,6 +76,16 @@ func (w *world) write(p, data string) {
 	}
 }
 
+// simulation is what apt-get -s says it would install after the download.
+const simulation = `NOTE: This is only a simulation!
+Inst nvidia-kernel-support (550.163.01-2 Debian:13/stable [amd64])
+Inst nvidia-kernel-dkms (550.163.01-2 Debian:13/stable [amd64])
+Inst nvidia-driver (550.163.01-2 Debian:13/stable [amd64])
+Inst firmware-nvidia-gsp (550.163.01-1 Debian:13/stable [amd64])
+Inst nvidia-container-toolkit [1.17.0-1] (1.17.8-1 nvidia.github.io [amd64])
+Conf nvidia-driver (550.163.01-2 Debian:13/stable [amd64])
+`
+
 const licenceText = "NVIDIA Software License\n\nThis license is a legal agreement between you and NVIDIA Corporation...\n"
 
 func newWorld(t *testing.T) *world {
@@ -94,10 +104,11 @@ func newWorld(t *testing.T) *world {
 		w.write(filepath.Join(args[2], "usr/share/doc/nvidia-kernel-support/copyright"), licenceText)
 		w.write(filepath.Join(args[2], "usr/share/doc/nvidia-kernel-support/changelog.gz"), "x")
 	})
-	w.r.on("apt-get -y --no-install-recommends -o Dpkg::Options::=--force-confdef", func([]string) {
+	w.r.on("apt-get --no-download -y --no-install-recommends -o Dpkg::Options::=--force-confdef", func([]string) {
 		w.write("/lib/modules/6.12.48+deb13-amd64/updates/dkms/nvidia.ko.xz", "ko")
 	})
 	w.r.OnPrefix("dpkg-query ", sysexec.Result{ExitCode: 1})
+	w.r.OnPrefix("apt-get -s --no-install-recommends install ", sysexec.Result{Stdout: []byte(simulation)})
 	w.r.OnPrefix("", sysexec.Result{})
 	w.m = &Manager{Runner: w.r, Root: w.root, Arch: "amd64"}
 	return w
@@ -213,7 +224,7 @@ func TestNvidiaPrepareAgreeInstall(t *testing.T) {
 		t.Fatalf("consent %+v", rec.Driver)
 	}
 	lines := strings.Join(w.r.Lines(), "\n")
-	order := []string{"dpkg --configure -a", "apt-get update", "Dpkg::Options::=--force-confold install nvidia-driver", "modprobe nvidia"}
+	order := []string{"dpkg --configure -a", "--no-download -y --no-install-recommends -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install nvidia-driver=550.163.01-2 nvidia-kernel-dkms=550.163.01-2 firmware-nvidia-gsp", "modprobe nvidia"}
 	last := -1
 	for _, o := range order {
 		i := strings.Index(lines[last+1:], o)
@@ -234,7 +245,7 @@ func TestNvidiaPrepareAgreeInstall(t *testing.T) {
 
 func TestNvidiaInstallFailsWhenNotBuilt(t *testing.T) {
 	w := newWorld(t)
-	w.r.on("apt-get -y --no-install-recommends -o Dpkg::Options::=--force-confdef", func([]string) {})
+	w.r.on("apt-get --no-download -y --no-install-recommends -o Dpkg::Options::=--force-confdef", func([]string) {})
 	if _, err := w.m.PrepareNvidia(); err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +313,7 @@ func TestVGPUInstall(t *testing.T) {
 	w.r.on("sh /var/lib/hardyos-gpu/vgpu/"+name+" --silent --dkms", func([]string) {
 		w.write("/lib/modules/6.12.48+deb13-amd64/updates/dkms/nvidia.ko", "ko")
 	})
-	args := VGPUArgs{Upload: upload, SHA256: sha, FileName: name, By: "cade"}
+	args := VGPUArgs{Upload: upload, SHA256: sha, FileName: name, By: "cade", ConfirmVersion: "550.90.05"}
 
 	bad := args
 	bad.Upload = "/etc/shadow"
@@ -403,7 +414,8 @@ func TestUpdateHook(t *testing.T) {
 		"chroot " + newRoot + " env DEBIAN_FRONTEND=noninteractive apt-get update",
 		"chroot " + newRoot + " env DEBIAN_FRONTEND=noninteractive apt-get -y --no-install-recommends -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install nvidia-driver",
 		"chroot " + newRoot + " update-initramfs -u -k 6.12.50+deb13-amd64",
-		"umount -R -l " + newRoot + "/dev",
+		"mount --make-rslave " + newRoot + "/dev",
+		"umount -R " + newRoot + "/dev",
 	} {
 		if !w.r.has(want) {
 			t.Errorf("missing %q", want)

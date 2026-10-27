@@ -3,7 +3,7 @@
     <source>
       <address domain='0x0000' bus='0x02' slot='0x00' function='0x0'/>
     </source>
-    <rom file='/var/lib/hardyos/vm-roms/rx580.rom'/>
+    <rom file='/run/hardyos-roms/2e33d39c6d1e08f6be4001e8347a1b06.rom'/>
   </hostdev>
   <hostdev mode='subsystem' type='pci' managed='no'>
     <driver name='vfio'/>

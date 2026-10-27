@@ -230,30 +230,70 @@ func stableUUID(vm, parent, typ string, n int) string {
 }
 
 // SetVFs switches a GPU's SR-IOV virtual functions on (count > 0) or off.
-// NVIDIA cards use the vGPU driver's sriov-manage tool; others the
-// kernel's sriov_numvfs. Refused while a VM uses one of them.
+// Only a graphics card's own physical function the server doesn't need
+// (no Critical reason) qualifies; nothing is done when the count is
+// already right. Refused while a VM uses the card or one of its virtual
+// functions, or while a virtual function is with a host driver (anything
+// but none or vfio-pci; NVIDIA's own vGPU driver keeps NVIDIA's). NVIDIA
+// cards use the vGPU driver's sriov-manage tool (NVIDIA cards only); others
+// the kernel's sriov_numvfs, with driver autoprobing off so the new
+// virtual functions don't go to a host driver first.
 func (h *Host) SetVFs(ctx context.Context, addr string, count int) error {
 	if !pciAddrRE.MatchString(addr) {
 		return fmt.Errorf("invalid PCI address %q", addr)
 	}
+	if count < 0 {
+		return fmt.Errorf("invalid count %d", count)
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if !h.exists(pciDev(addr)) {
+		return fmt.Errorf("no PCI device %s", addr)
+	}
+	if h.exists(pciDev(addr) + "/physfn") {
+		return fmt.Errorf("%s is a virtual function itself; turn slices on for its card", addr)
+	}
+	if !isDisplay(h.readTrim(pciDev(addr) + "/class")) {
+		return fmt.Errorf("%s isn't a graphics card; only graphics cards' slices are turned on here", addr)
+	}
+	pci := h.readPCI()
+	if crit, _ := h.critical(ctx, pci); crit[addr] != "" {
+		return fmt.Errorf("%s can't be split: %s", addr, crit[addr])
+	}
 	st := h.loadState()
 	owners := st.owners()
-	for _, vf := range h.virtfns(addr) {
+	if vm := owners[addr]; vm != "" {
+		return fmt.Errorf("the VM %s has this card; stop it first", vm)
+	}
+	nvidia := strings.TrimPrefix(h.readTrim(pciDev(addr)+"/vendor"), "0x") == vendorNVIDIA
+	vfs := h.virtfns(addr)
+	for _, vf := range vfs {
 		if vm := owners[vf]; vm != "" {
 			return fmt.Errorf("the VM %s is using one of this card's slices; stop it first", vm)
 		}
 		if cur := h.readTrim(pciDev(vf) + "/nvidia/current_vgpu_type"); cur != "" && cur != "0" {
 			return fmt.Errorf("slice %s still has a vGPU type set; remove it first", vf)
 		}
+		if h.hanging(vf) {
+			return fmt.Errorf("slice %s is still stuck in the kernel; restart the server", vf)
+		}
+		switch d := h.driverOf(vf); {
+		case d == "" || d == "vfio-pci":
+		case nvidia && d == "nvidia":
+		default:
+			return fmt.Errorf("slice %s is in use by the server's driver %s; it can't be changed while the server uses it", vf, d)
+		}
 	}
-	if !h.exists(pciDev(addr)) {
-		return fmt.Errorf("no PCI device %s", addr)
-	}
-	if strings.TrimPrefix(h.readTrim(pciDev(addr)+"/vendor"), "0x") == vendorNVIDIA {
+	total, _ := h.readInt(pciDev(addr) + "/sriov_totalvfs")
+	if nvidia {
 		if !h.exists("/usr/lib/nvidia/sriov-manage") {
 			return fmt.Errorf("NVIDIA's vGPU host driver isn't installed, so this card's slices can't be turned on")
+		}
+		if count > 0 && total == 0 {
+			return fmt.Errorf("%s can't be split (no SR-IOV)", addr)
+		}
+		if (count > 0) == (len(vfs) > 0) {
+			return nil // already on (or off)
 		}
 		flag := "-d"
 		if count > 0 {
@@ -264,27 +304,42 @@ func (h *Host) SetVFs(ctx context.Context, addr string, count int) error {
 		}
 		return nil
 	}
-	total, ok := h.readInt(pciDev(addr) + "/sriov_totalvfs")
-	if !ok || total == 0 {
+	if total == 0 {
 		return fmt.Errorf("%s can't be split (no SR-IOV)", addr)
 	}
-	if count < 0 || count > total {
+	if count > total {
 		return fmt.Errorf("this GPU offers 0 to %d virtual functions", total)
 	}
-	k := h.kernel()
+	current := len(vfs)
+	if n, ok := h.readInt(pciDev(addr) + "/sriov_numvfs"); ok {
+		current = n
+	}
+	if count == current {
+		return nil
+	}
+	if count > 0 && h.exists(pciDev(addr)+"/sriov_drivers_autoprobe") {
+		if err := h.write(addr, pciDev(addr)+"/sriov_drivers_autoprobe", "0"); err != nil {
+			return err
+		}
+	}
 	// The kernel only changes the count from zero.
-	if err := k.WriteSysfs(pciDev(addr)+"/sriov_numvfs", "0"); err != nil {
-		return err
+	if current > 0 {
+		if err := h.write(addr, pciDev(addr)+"/sriov_numvfs", "0"); err != nil {
+			return err
+		}
 	}
 	if count > 0 {
-		if err := k.WriteSysfs(pciDev(addr)+"/sriov_numvfs", strconv.Itoa(count)); err != nil {
+		if err := h.write(addr, pciDev(addr)+"/sriov_numvfs", strconv.Itoa(count)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// RemoveSlice removes a vGPU instance no running VM uses (a leftover).
+// RemoveSlice removes a vGPU instance nothing uses (a leftover). HardyOS's
+// own record isn't enough for an instance it didn't make: one that any
+// active VM's definition names, or whose IOMMU group a process (QEMU) has
+// open, is refused, and so is any when the active VMs can't be listed.
 func (h *Host) RemoveSlice(ctx context.Context, id string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -292,14 +347,39 @@ func (h *Host) RemoveSlice(ctx context.Context, id string) error {
 	if vm := st.owners()[id]; vm != "" {
 		return fmt.Errorf("the VM %s is using this slice; stop it first", vm)
 	}
+	var dev, path, value, needle string
 	switch {
 	case uuidRE.MatchString(id):
 		if !h.exists("/sys/bus/mdev/devices/" + id) {
 			return fmt.Errorf("no vGPU slice %s", id)
 		}
-		return h.kernel().WriteSysfs("/sys/bus/mdev/devices/"+id+"/remove", "1")
+		dev, path, value, needle = "/sys/bus/mdev/devices/"+id, "/sys/bus/mdev/devices/"+id+"/remove", "1", id
 	case pciAddrRE.MatchString(id) && h.exists(pciDev(id)+"/nvidia/current_vgpu_type"):
-		return h.kernel().WriteSysfs(pciDev(id)+"/nvidia/current_vgpu_type", "0")
+		dev, path, value = pciDev(id), pciDev(id)+"/nvidia/current_vgpu_type", "0"
+		needle = fmt.Sprintf("domain='0x%s' bus='0x%s' slot='0x%s' function='0x%s'", id[0:4], id[5:7], id[8:10], id[11:12])
+	default:
+		return fmt.Errorf("%q isn't a vGPU slice", id)
 	}
-	return fmt.Errorf("%q isn't a vGPU slice", id)
+	if g := h.linkBase(dev + "/iommu_group"); g != "" {
+		if users := h.openers(map[string]bool{"/dev/vfio/" + g: true}); len(users) > 0 {
+			return fmt.Errorf("the slice %s is open by %s (a running VM); stop it first", id, users[0].Process)
+		}
+	}
+	vms, err := h.running(ctx)
+	if err != nil {
+		return fmt.Errorf("can't tell which VMs are running (%v), so the slice stays", err)
+	}
+	for _, vm := range vms {
+		if !vmNameRE.MatchString(vm) {
+			continue
+		}
+		xml, err := sysexec.Output(ctx, h.Runner, "virsh", "-c", "qemu:///system", "dumpxml", "--", vm)
+		if err != nil {
+			return fmt.Errorf("can't read the VM %s's settings (%v), so the slice stays", vm, err)
+		}
+		if strings.Contains(strings.ToLower(string(xml)), strings.ToLower(needle)) {
+			return fmt.Errorf("the VM %s is using this slice; stop it first", vm)
+		}
+	}
+	return h.write(id, path, value)
 }

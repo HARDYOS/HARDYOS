@@ -573,27 +573,10 @@ func copyIfChanged(src, dst string) error {
 	return writeAtomic(dst, data, 0o644)
 }
 
-// writeAtomic writes via a temp file and rename, so a power cut never leaves
-// a half-written grub.cfg or kernel.
+// writeAtomic writes via a new temp file (random name, never through a
+// link someone planted) and a rename in the same directory, so a power cut
+// never leaves a half-written grub.cfg, kernel or state file
+// (rootfile.WriteAtomic).
 func writeAtomic(path string, data []byte, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return rootfile.WriteAtomic(path, data, mode)
 }
