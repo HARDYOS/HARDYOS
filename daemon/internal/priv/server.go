@@ -28,6 +28,8 @@ type Server struct {
 	OpTimeouts map[string]time.Duration
 	// OnListen runs once the socket is ready (systemd readiness notification).
 	OnListen func()
+	// QuietOps are logged at debug level (read-only operations hardyd polls).
+	QuietOps map[string]bool
 
 	mu  sync.RWMutex
 	ops map[string]HandlerFunc
@@ -153,7 +155,11 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 
 	start := time.Now()
 	result, err := fn(opCtx, req.Args)
-	log.Info("priv op", "op", req.Op, "uid", uid, "ok", err == nil, "duration", time.Since(start).String())
+	if s.QuietOps[req.Op] && err == nil {
+		log.Debug("priv op", "op", req.Op, "uid", uid, "ok", true, "duration", time.Since(start).String())
+	} else {
+		log.Info("priv op", "op", req.Op, "uid", uid, "ok", err == nil, "duration", time.Since(start).String())
+	}
 	if err != nil {
 		var pe *Error
 		if !errors.As(err, &pe) {

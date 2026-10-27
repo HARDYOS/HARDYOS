@@ -1,0 +1,14 @@
+  pool: media
+ state: ONLINE
+  scan: scrub in progress since Sun Oct 25 01:00:00 2026
+	1.20T / 9.10T scanned at 410M/s, 1.10T / 9.10T issued at 380M/s
+	0B repaired, 12.09% done, 06:07:42 to go
+config:
+
+	NAME                                          STATE     READ WRITE CKSUM
+	media                                         ONLINE       0     0     0
+	  mirror-0                                    ONLINE       0     0     0
+	    /dev/disk/by-id/wwn-0x5000cca2aaaaaaa1-part1  ONLINE       0     0     0
+	    /dev/disk/by-id/wwn-0x5000cca2aaaaaaa2-part1  ONLINE       0     0     0
+
+errors: No known data errors

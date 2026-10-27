@@ -1,0 +1,30 @@
+{
+  "json_format_version": [1, 0],
+  "smartctl": {"version": [7, 4], "exit_status": 0},
+  "device": {"name": "/dev/nvme0", "info_name": "/dev/nvme0", "type": "nvme", "protocol": "NVMe"},
+  "model_name": "WD Red SN700 1000GB",
+  "serial_number": "22AAAAAAAAAA",
+  "firmware_version": "111150WD",
+  "nvme_pci_vendor": {"id": 5559, "subsystem_id": 5559},
+  "nvme_total_capacity": 1000204886016,
+  "nvme_number_of_namespaces": 1,
+  "user_capacity": {"blocks": 1953525168, "bytes": 1000204886016},
+  "smart_support": {"available": true, "enabled": true},
+  "smart_status": {"passed": true, "nvme": {"value": 0}},
+  "nvme_smart_health_information_log": {
+    "critical_warning": 0, "temperature": 44, "available_spare": 100, "available_spare_threshold": 10, "percentage_used": 3,
+    "data_units_read": 18447731, "data_units_written": 41123004, "host_reads": 160000000, "host_writes": 610000000,
+    "controller_busy_time": 1170, "power_cycles": 31, "power_on_hours": 9122, "unsafe_shutdowns": 12, "media_errors": 0,
+    "num_err_log_entries": 0, "warning_temp_time": 0, "critical_comp_time": 0, "temperature_sensors": [44, 51]
+  },
+  "temperature": {"current": 44},
+  "power_cycle_count": 31,
+  "power_on_time": {"hours": 9122},
+  "nvme_self_test_log": {
+    "current_self_test_operation": {"value": 0, "string": "No self-test in progress"},
+    "table": [
+      {"self_test_code": {"value": 1, "string": "Short"}, "self_test_result": {"value": 0, "string": "Completed without error"}, "power_on_hours": 9100},
+      {"self_test_code": {"value": 2, "string": "Extended"}, "self_test_result": {"value": 0, "string": "Completed without error"}, "power_on_hours": 8800}
+    ]
+  }
+}

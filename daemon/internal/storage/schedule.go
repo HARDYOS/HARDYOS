@@ -78,6 +78,9 @@ func (s *Service) Tick(ctx context.Context, now time.Time) {
 	if err := s.runScrubs(ctx, now); err != nil {
 		s.log().Warn("scrub schedule", "err", err)
 	}
+	if s.HealthElsewhere {
+		return
+	}
 	if err := s.checkPools(ctx); err != nil {
 		s.log().Warn("pool health check", "err", err)
 	}
@@ -280,6 +283,9 @@ func (s *Service) runScrubs(ctx context.Context, now time.Time) error {
 		}
 		if last != nil && now.Sub(*last) < time.Duration(p.IntervalDays)*24*time.Hour {
 			continue
+		}
+		if s.ScrubAllowed != nil && !s.ScrubAllowed(ctx, p.Pool, now) {
+			continue // later, in the maintenance window and in turn
 		}
 		msg := ""
 		if err := s.Priv.Call(ctx, priv.OpPoolScrub, priv.PoolScrubArgs{Pool: p.Pool, Action: "start"}, nil); err != nil {
