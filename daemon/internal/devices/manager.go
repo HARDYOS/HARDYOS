@@ -326,7 +326,11 @@ func (h *Host) Prepare(ctx context.Context, vm string, ds []Device) ([]Prepared,
 	defer h.mu.Unlock()
 	st := h.loadState()
 	if st.VMs[vm] != nil {
-		// Left over from a start that never got its Release.
+		// Left over from a start that never got its Release. Never pull
+		// devices from under a VM that's still running.
+		if running, err := h.running(ctx); err == nil && contains(running, vm) {
+			return nil, fmt.Errorf("the VM %s is already running with its devices", vm)
+		}
 		if err := h.release(ctx, vm, st); err != nil {
 			return nil, fmt.Errorf("giving back the devices from the VM's last run: %w", err)
 		}

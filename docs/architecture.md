@@ -1184,6 +1184,63 @@ them on (`settings.json`: `sftpEnabled`, `webdavEnabled`) and per folder
   lockout after ten wrong passwords, and an overriding drop-in caught by
   the effective-config check (PAM off, problem shown) and recovered.
 
+## Devices and GPUs
+
+Phase 5 part D (decisions 126-130; user guide `docs/gpus.md`). Two packages
+run inside hardyd-priv: `internal/devices` (inventory, IOMMU, passthrough,
+GPU ownership, vGPU slices; `devices.Host` implements the `devices.Manager`
+contract in `contract.go` that the VM engine calls) and `internal/gpu`
+(NVIDIA driver and vGPU host driver installs, the update hook). Named ops in
+`priv/devices_ops.go`; API in `api/handlers_devices*.go`; web in
+`apps/vms/devices/` (the Control Panel's Devices & GPUs view and the device
+pickers the VM wizard imports).
+
+- **Inventory** reads sysfs and procfs only (any architecture): PCI functions
+  with vendor/device names from `pci.ids`, plain-words class, driver, IOMMU
+  group, `reset_method`; IOMMU groups with an explanation of what lending one
+  member means; USB devices (not root hubs or interfaces); GPUs grouped by
+  slot with their functions (HDMI audio, USB-C), VRAM (amdgpu sysfs,
+  `nvidia-smi`), owner, processes using them, vGPU slices and hints (AMD
+  reset bug list, no reset method, console card). Host-critical devices are
+  found from the boot configuration, `zpool list -v -H -P` and the default
+  routes (walking `lower_*` and `brif` links down to physical ports).
+- **Kernel arguments**: `boot.KernelArgsPath` on the shared dataset, rendered
+  by `boot.Sync` into every entry (`RenderGrubWithArgs`). "Turn on IOMMU"
+  (`devices.iommu.enable`, a job) adds the CPU vendor's flags.
+- **Lending** (`Prepare`, called by the VM engine before `virsh start`):
+  check everything first (`Check` returns every problem as `devices.Problems`),
+  record the plan in `/run/hardyos/devices/state.json`, then bind each
+  function and group companion to `vfio-pci`, create vGPU instances, and
+  return libvirt `<hostdev>` fragments (`managed='no'` for PCI; mdev by
+  UUID; USB by vendor:product with `startupPolicy='optional'`, or by the
+  bus/device a port has at start). A failure undoes everything.
+  `Release` (after the VM stops) removes slices and rebinds each device to
+  the driver recorded for it; a device that won't rebind is listed as
+  stuck. `Reconcile` (at start, and from the Devices view) releases devices
+  of VMs libvirt doesn't list as running.
+- **GPU drivers**: tasks in hardyd-priv (`gpu.nvidia.prepare`, `.install`,
+  `.remove`, `gpu.vgpu.install`, `.remove`), one at a time, each with a
+  64 KiB log; `gpu.task` reports progress and hardyd's jobs follow it every
+  2 s, so no privileged call is long. apt sources: Debian `non-free` (in the
+  image; added for older systems) and NVIDIA's container toolkit repository
+  with the pinned key embedded in hardyd-priv. Root's state, the licence
+  agreement and the admin's vGPU driver file are in `/var/lib/hardyos-gpu`
+  (root, 0700), never in hardyd's `/var/lib/hardyos`.
+- **Updates**: `update.Updater.Hooks` run after `install.FinishRoot` and
+  before `boot.Sync`. `gpu.Manager.PrepareNewRoot` copies root's GPU
+  directory into the new system, reinstalls the packages (or reruns NVIDIA's
+  vGPU installer per kernel) in a chroot, checks the DKMS module exists for
+  every kernel and rebuilds the initramfs; an error removes the new boot
+  environment and the current version stays.
+
+What only real hardware can verify (no GPUs in CI): rebinding NVIDIA cards
+with `nvidia_drm` loaded, AMD reset behaviour and vendor-reset, GPU ROM
+needs, `boot_vga` consoles going blank, NVIDIA's vGPU driver on Debian's
+kernel (mdev and per-VF type files, `sriov-manage`, the installer's
+`--kernel-name`/`--skip-module-load` in a chroot), Intel SR-IOV with
+i915/xe, the exact Debian package set and the licence file location in it,
+and IOMMU flags on real firmware.
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly
