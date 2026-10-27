@@ -1184,6 +1184,71 @@ them on (`settings.json`: `sftpEnabled`, `webdavEnabled`) and per folder
   lockout after ten wrong passwords, and an overriding drop-in caught by
   the effective-config check (PAM off, problem shown) and recovered.
 
+## Virtual machines
+
+Phase 5 part C (decisions 120-125; user guide `docs/vms.md`; plan
+`docs/plans/vms.md`). QEMU/KVM through libvirt, driven only by hardyd-priv.
+
+```
+ browser ──► hardyd  /api/v1/vms*  (admin, jobs + audit)   ──► hardyd-priv  vms.* ops ──► virsh / libvirt ──► QEMU
+                     /vms/{id}/console/ws  ◄── VNC socket fd (SCM_RIGHTS) ◄──┘     │
+                                                                                  ├─► zfs: <pool>/vms/<id>, zvol disks, snapshots
+                                                                                  ├─► ISOs shared folder (verified fds only)
+                                                                                  ├─► network.Manager.EnsureBridge (br0, rollback)
+                                                                                  └─► devices.Host (part D): Check / Prepare / Release
+```
+
+- **Code**: `internal/vms` (spec and validation, templates, domain XML,
+  manager, storage and snapshots, ISO library and downloads, imports,
+  cloud-init, console tokens), `priv/vms_ops.go`, `api/handlers_vms*.go`
+  and `api/vmconsole.go`, the bridge in `internal/network/bridge.go`, web
+  in `apps/vms/`.
+- **Spec, not XML**: hardyd sends a `vms.Spec`; hardyd-priv normalizes and
+  validates it against the host (CPUs, memory, pools, Secure Boot firmware
+  from QEMU's firmware descriptors, swtpm) and renders the domain XML with
+  `encoding/xml`. Architecture differences (machine type, SATA, TPM model,
+  Hyper-V enlightenments, SMM) are a table keyed by `GOARCH`; UEFI uses
+  libvirt's firmware auto-selection, so no firmware path is in the code.
+  Device fragments from part D must parse as 1-8 `<hostdev>` elements
+  without namespaces; the whole document is checked again before
+  `virsh define --validate`.
+- **Where a VM lives**: `<pool>/vms/<id>` (`org.hardyos:vm=<id>`, mounted,
+  `exec,setuid,devices` off, mode 0711) holds `vm.json` (0600), `nvram.fd`,
+  `tpm/` and `cloud-init.iso`; disks are sparse zvols
+  `<pool>/vms/<id>/diskN`. hardyd-priv finds VMs by listing datasets with
+  the property and reads `vm.json` only when root wrote it. At start it
+  waits for libvirt, defines every VM afresh, releases devices of VMs that
+  are off, and starts VMs set to start with the server in order.
+- **Lifecycle**: start = check media, give QEMU read access to the discs
+  (ACL on the descriptor), restore TPM state, `devices.Check` +
+  `Prepare`, define with the fragments, `virsh start`, put VLAN NICs on
+  their VLAN, then redefine without devices (the stored definition never
+  holds them). A watcher reads `virsh domstats` every 3 s: CPU use, memory
+  (balloon stats), and VMs that stopped by themselves get `afterStop`
+  (devices released, TPM state saved to the pool). Graceful stops ask the
+  agent, then ACPI; the stop job waits up to 3 minutes.
+- **Network**: `network.Config.Bridges` (`br0` over a port or bond, the
+  port's MAC kept, VLAN filtering on, VIDs 2-4094 on the uplink).
+  `EnsureBridge` builds it from the default route's interface, applies it
+  like any change (saved first), checks the bridge got the old address and
+  the router answers, and confirms or undoes it. The domain controller's
+  `HoldNetwork`/`ReleaseNetwork` run around any change that adds or removes
+  a bridge.
+- **ISO library**: the `isos` shared folder. Listing, downloads (https
+  only, internet addresses only, optional SHA-256, background task with
+  progress followed by the hardyd job) and deletes go through the folder's
+  verified mount and `openat2(RESOLVE_BENEATH|NO_SYMLINKS)`.
+- **Console**: `vms.console` issues a 60-second one-time token for one VM;
+  `vms.console.open` redeems it, finds the VNC socket in the live domain
+  (only libvirt's own folders accepted), connects and hands the
+  connection over. hardyd relays it over a WebSocket to noVNC.
+- **Tests**: golden XML files per template (`internal/vms/testdata`), a
+  ZFS/libvirt simulator for the manager, priv ops over a real socket, the
+  API with a stub root helper (including the console relay), the bridge
+  with rollback and the DC's move onto it, web component tests, and
+  `TestLibvirtIntegration` (real ZFS, libvirt and KVM; CI job "Virtual
+  machines (KVM)").
+
 ## Devices and GPUs
 
 Phase 5 part D (decisions 126-130; user guide `docs/gpus.md`). Two packages
