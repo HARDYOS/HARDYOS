@@ -447,3 +447,63 @@
 .inst__wordmark {
   font-size: 16px;
 }
+
+/* Restore from backup */
+.inst__choice {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.inst__choice label,
+.inst__versions label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--hos-radius-sm);
+  border: 1px solid var(--hos-surface-border);
+  background: var(--hos-surface);
+  cursor: pointer;
+}
+.inst__choice label.is-on,
+.inst__versions label.is-on {
+  border-color: transparent;
+  background:
+    linear-gradient(rgba(17, 21, 32, 0.92), rgba(17, 21, 32, 0.92)) padding-box,
+    var(--hos-accent-gradient) border-box;
+}
+.inst__choice input,
+.inst__versions input {
+  accent-color: var(--hos-accent);
+}
+.inst__restore {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.inst__kit {
+  width: 100%;
+  min-height: 110px;
+  resize: vertical;
+  font-size: 12px;
+}
+.inst__row2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.inst__versions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  max-height: 240px;
+  overflow: auto;
+}
+.inst__versions span {
+  display: flex;
+  flex-direction: column;
+}

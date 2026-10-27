@@ -40,6 +40,7 @@ tags:
   - name: remote
   - name: oidc
   - name: vms
+  - name: cloudbackup
   - name: replication
   - name: alerts
   - name: monitor
@@ -4469,6 +4470,422 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
   # ---- end of virtual machines API ----
+  # ---- versioned cloud backups (Phase 6 part A, docs/backup.md) ----
+  /backup:
+    get:
+      operationId: getCloudBackup
+      summary: Destinations, backup tasks and a pending rebuild (admin)
+      tags: [cloudbackup]
+      responses:
+        "200":
+          description: Overview
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CloudBackupOverview" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /backup/targets:
+    post:
+      operationId: createBackupTarget
+      summary: Add a destination (a job that tests the bucket and creates or opens the repository)
+      description: |
+        The access keys and a repository key typed in from a recovery kit
+        reach the job through memory only (never job parameters) and are
+        kept sealed by hardyd-priv; they're never returned. When the job's
+        result says `created`, download the recovery kit.
+      tags: [cloudbackup]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BackupTargetRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /backup/targets/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    put:
+      operationId: updateBackupTarget
+      summary: Change a destination (a job; empty keys keep the saved ones)
+      tags: [cloudbackup]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BackupTargetRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      operationId: removeBackupTarget
+      summary: Forget a destination on this server (a job; the backups in the bucket stay)
+      tags: [cloudbackup]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ConfirmRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /backup/targets/{id}/maintenance:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    put:
+      operationId: setBackupMaintenance
+      summary: When the destination is pruned and checked (weekly), and how much is read back
+      tags: [cloudbackup]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BackupMaintenance" }
+      responses:
+        "200":
+          description: Saved
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackupMaintenance" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /backup/targets/{id}/recovery-kit:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: getBackupRecoveryKit
+      summary: The destination's recovery kit (needs the administrator's password; audited)
+      description: |
+        The kit holds the repository's key: with it and the bucket's keys
+        anyone can read the backups. Every download needs the password
+        again and is recorded in the audit log.
+      tags: [cloudbackup]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PasswordRequest" }
+      responses:
+        "200":
+          description: The kit as a text file to save
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecoveryKit" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/Invalid" }
+  /backup/targets/{id}/prune:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: pruneBackupTarget
+      summary: Free the space no version needs any more, now (a job)
+      tags: [cloudbackup]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /backup/targets/{id}/check:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: checkBackupTarget
+      summary: Check the repository and read back part of its data, now (a job)
+      tags: [cloudbackup]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /backup/targets/{id}/versions:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: listBackupVersions
+      summary: Every version in the destination, newest first
+      tags: [cloudbackup]
+      responses:
+        "200":
+          description: Versions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [versions]
+                properties:
+                  versions: { type: array, items: { $ref: "#/components/schemas/BackupVersion" } }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /backup/targets/{id}/browse:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: snapshot, in: query, required: true, schema: { type: string } }
+      - { name: path, in: query, schema: { type: string } }
+    get:
+      operationId: browseBackupVersion
+      summary: One folder of a shared folder's or app's version
+      tags: [cloudbackup]
+      responses:
+        "200":
+          description: Entries
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackupEntries" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /backup/tasks:
+    get:
+      operationId: listBackupTasks
+      summary: The backup tasks
+      tags: [cloudbackup]
+      responses:
+        "200":
+          description: Tasks
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tasks]
+                properties:
+                  tasks: { type: array, items: { $ref: "#/components/schemas/BackupTask" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: createBackupTask
+      summary: Make a backup task (audited)
+      tags: [cloudbackup]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BackupTaskInput" }
+      responses:
+        "201":
+          description: Made
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackupTask" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /backup/tasks/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    put:
+      operationId: updateBackupTask
+      summary: Change a backup task (audited)
+      tags: [cloudbackup]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BackupTaskInput" }
+      responses:
+        "200":
+          description: Changed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackupTask" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: deleteBackupTask
+      summary: Delete a backup task (its versions stay in the destination; audited)
+      tags: [cloudbackup]
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /backup/tasks/{id}/run:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: runBackupTask
+      summary: Back up now (a job)
+      tags: [cloudbackup]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /backup/runs:
+    get:
+      operationId: listBackupRuns
+      summary: Recent runs of tasks, restores and upkeep, newest first
+      tags: [cloudbackup]
+      parameters:
+        - { name: task, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer } }
+      responses:
+        "200":
+          description: Runs
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [runs]
+                properties:
+                  runs: { type: array, items: { $ref: "#/components/schemas/BackupRun" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /backup/restore:
+    post:
+      operationId: restoreCloudBackup
+      summary: Restore from a version (a job; a rollback needs the item's name typed)
+      tags: [cloudbackup]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BackupRestoreRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /backup/rebuild:
+    get:
+      operationId: getBackupRebuild
+      summary: The rebuild a "Restore from backup" install left to finish, if any
+      tags: [cloudbackup]
+      responses:
+        "200":
+          description: Offer (null when there's nothing to finish)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [offer]
+                properties:
+                  offer:
+                    oneOf:
+                      - { $ref: "#/components/schemas/BackupRebuildOffer" }
+                      - { type: "null" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: startBackupRebuild
+      summary: Bring a version's shared folders, apps and VMs back onto a pool (a job)
+      tags: [cloudbackup]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BackupRebuildRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    delete:
+      operationId: dismissBackupRebuild
+      summary: Forget the pending rebuild
+      tags: [cloudbackup]
+      responses:
+        "204": { description: Dismissed }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /files/backups:
+    get:
+      operationId: listFileBackupVersions
+      summary: Cloud backup versions of a shared folder the person can open
+      description: |
+        For everyone signed in: only folders whose access rules let the
+        person in today. Restoring is checked again by hardyd-priv, as the
+        person (see /files/backups/restore).
+      tags: [files]
+      parameters:
+        - { name: share, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Versions with this folder
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [versions]
+                properties:
+                  versions: { type: array, items: { $ref: "#/components/schemas/FileBackupVersion" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /files/backups/browse:
+    get:
+      operationId: browseFileBackup
+      summary: One folder of a shared folder's version
+      tags: [files]
+      parameters:
+        - { name: share, in: query, required: true, schema: { type: string } }
+        - { name: target, in: query, required: true, schema: { type: string } }
+        - { name: snapshot, in: query, required: true, schema: { type: string } }
+        - { name: path, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Entries
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackupEntries" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /files/backups/restore:
+    post:
+      operationId: restoreFileBackup
+      summary: Restore files from a version, as the person (a job)
+      description: |
+        Each file is read from the version by a file worker running as the
+        person (the permissions it had then apply) and written by another
+        (their access today applies), so nobody gets more than they have.
+      tags: [files]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FileBackupRestoreRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /installer/cloud/probe:
+    post:
+      operationId: probeInstallerBackup
+      summary: Open a cloud backup from its recovery kit and list the versions to restore from
+      tags: [installer]
+      security: [{ installer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InstallRestore" }
+      responses:
+        "200":
+          description: Versions with settings, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [versions]
+                properties:
+                  versions: { type: array, items: { $ref: "#/components/schemas/InstallBackupVersion" } }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   # ---- replication API (phase 6 part B; docs/replication.md) ----
   /replication:
     get:
@@ -5785,6 +6202,13 @@ components:
             displayName: { type: string }
             password: { type: string, minLength: 10 }
         confirmWipe: { type: boolean, description: Must be true; the boot disks are erased }
+        restore:
+          $ref: "#/components/schemas/InstallRestore"
+          description: |
+            Restore from a cloud backup: the version's settings and domain are
+            applied at the first start (the administrator above is used only if
+            they can't be), and the Backup app then offers to bring back the
+            shared folders, apps and VMs.
     Error:
       type: object
       description: Body of every non-2xx response
@@ -7974,6 +8398,247 @@ components:
       properties:
         logs: { type: string }
     # ---- end of virtual machines API schemas ----
+    # ---- cloud backup API schemas (docs/backup.md) ----
+    ConfirmRequest:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: string, description: The name, typed to confirm }
+    PasswordRequest:
+      type: object
+      required: [password]
+      properties:
+        password: { type: string, description: The signed-in administrator's own password }
+    BackupItem:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string, enum: [share, app, vm, system] }
+        id: { type: string, description: The shared folder's, app's or VM's id (none for system) }
+    BackupSchedule:
+      type: object
+      required: [frequency]
+      properties:
+        frequency: { type: string, enum: [manual, hourly, daily, weekly] }
+        time: { type: string, description: "HH:MM, server time (hourly: the first hour and the minute)" }
+        everyHours: { type: integer, description: "hourly: 1, 2, 3, 4, 6, 8 or 12" }
+        weekdays: { type: array, items: { type: integer, minimum: 0, maximum: 6 }, description: "weekly: 0 = Sunday" }
+    BackupRetention:
+      type: object
+      required: [daily, weekly, monthly]
+      properties:
+        daily: { type: integer, minimum: 0 }
+        weekly: { type: integer, minimum: 0 }
+        monthly: { type: integer, minimum: 0 }
+    BackupMaintenance:
+      type: object
+      required: [weekday, time, checkPercent]
+      properties:
+        weekday: { type: integer, minimum: 0, maximum: 6 }
+        time: { type: string }
+        checkPercent: { type: integer, minimum: 0, maximum: 100, description: How much of the data a check reads back }
+    BackupTarget:
+      type: object
+      description: A destination. Credentials and the repository key are never returned.
+      required: [id, name, kind, bucket, createdAt, maintenance, kitDownloadedAt, lastCheck]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        kind: { type: string, enum: [s3, b2] }
+        endpoint: { type: string }
+        bucket: { type: string }
+        prefix: { type: string }
+        region: { type: string }
+        allowLan: { type: boolean }
+        limitUploadKiB: { type: integer }
+        limitDownloadKiB: { type: integer }
+        createdAt: { type: string, format: date-time }
+        accessKeyHint: { type: string, description: The access key's last four characters }
+        maintenance: { $ref: "#/components/schemas/BackupMaintenance" }
+        kitDownloadedAt: { type: [string, "null"], format: date-time }
+        lastCheck:
+          oneOf:
+            - { $ref: "#/components/schemas/BackupRun" }
+            - { type: "null" }
+    BackupTargetRequest:
+      type: object
+      required: [id, name, kind, bucket]
+      properties:
+        id: { type: string, description: "1-32 lower-case letters, digits or '-'" }
+        name: { type: string }
+        kind: { type: string, enum: [s3, b2] }
+        endpoint: { type: string, description: "S3: https://host[:port]" }
+        bucket: { type: string }
+        prefix: { type: string }
+        region: { type: string }
+        allowLan: { type: boolean, description: "Allow an endpoint on the local network (a MinIO on the LAN)" }
+        limitUploadKiB: { type: integer }
+        limitDownloadKiB: { type: integer }
+        accessKey: { type: string, description: "S3 access key ID / B2 key ID (empty on a change: keep)" }
+        secretKey: { type: string, description: "S3 secret key / B2 application key (empty on a change: keep)" }
+        repoKey: { type: string, description: "An existing repository's key, from its recovery kit (empty: create a new repository)" }
+    BackupRun:
+      type: object
+      required: [id, taskId, kind, target, jobId, trigger, state, startedAt, finishedAt, files, bytes, added, detail, error]
+      properties:
+        id: { type: string }
+        taskId: { type: string }
+        kind: { type: string, enum: [backup, restore, prune, check, rebuild] }
+        target: { type: string }
+        jobId: { type: string }
+        trigger: { type: string }
+        state: { type: string, enum: [running, succeeded, partial, failed, cancelled, missed] }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: [string, "null"], format: date-time }
+        files: { type: integer, format: int64 }
+        bytes: { type: integer, format: int64 }
+        added: { type: integer, format: int64, description: New data sent }
+        detail: { type: object, additionalProperties: true }
+        error: { type: string }
+    BackupTask:
+      type: object
+      required: [id, name, target, items, schedule, retention, enabled, createdAt, updatedAt, lastRun, nextRun, running]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        target: { type: string }
+        items: { type: array, items: { $ref: "#/components/schemas/BackupItem" } }
+        schedule: { $ref: "#/components/schemas/BackupSchedule" }
+        retention: { $ref: "#/components/schemas/BackupRetention" }
+        enabled: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        lastRun:
+          oneOf:
+            - { $ref: "#/components/schemas/BackupRun" }
+            - { type: "null" }
+        nextRun: { type: [string, "null"], format: date-time }
+        running: { type: boolean }
+    BackupTaskInput:
+      type: object
+      required: [name, target, items]
+      properties:
+        name: { type: string }
+        target: { type: string }
+        items: { type: array, items: { $ref: "#/components/schemas/BackupItem" } }
+        schedule: { $ref: "#/components/schemas/BackupSchedule" }
+        retention: { $ref: "#/components/schemas/BackupRetention" }
+        enabled: { type: boolean }
+    BackupRebuildOffer:
+      type: object
+      required: [target, run, since]
+      properties:
+        target: { type: string }
+        run: { type: string }
+        since: { type: string, format: date-time }
+    CloudBackupOverview:
+      type: object
+      required: [targets, tasks, offer]
+      properties:
+        targets: { type: array, items: { $ref: "#/components/schemas/BackupTarget" } }
+        tasks: { type: array, items: { $ref: "#/components/schemas/BackupTask" } }
+        offer:
+          oneOf:
+            - { $ref: "#/components/schemas/BackupRebuildOffer" }
+            - { type: "null" }
+    RecoveryKit:
+      type: object
+      required: [fileName, text]
+      properties:
+        fileName: { type: string }
+        text: { type: string, description: Instructions and the framed key block }
+    BackupVersionItem:
+      type: object
+      required: [item, snapshot, time, files, bytes]
+      properties:
+        item: { type: string, description: "share:<id>, app:<id>, vm:<id> or system" }
+        snapshot: { type: string, description: The snapshot to browse and restore }
+        disks: { type: object, additionalProperties: { type: string } }
+        time: { type: string, format: date-time }
+        files: { type: integer, format: int64 }
+        bytes: { type: integer, format: int64 }
+    BackupVersion:
+      type: object
+      required: [run, task, time, items, thisServer]
+      properties:
+        run: { type: string }
+        task: { type: string }
+        time: { type: string, format: date-time }
+        manifest: { type: string }
+        server: { type: string, description: Install id of the server that made the version }
+        thisServer: { type: boolean, description: "Made by this server (people only ever see these; others are another server's sharing the bucket)" }
+        items: { type: array, items: { $ref: "#/components/schemas/BackupVersionItem" } }
+    BackupEntry:
+      type: object
+      required: [name, path, dir, type, size, modified]
+      properties:
+        name: { type: string }
+        path: { type: string }
+        dir: { type: boolean }
+        type: { type: string }
+        size: { type: integer, format: int64 }
+        modified: { type: string, format: date-time }
+    BackupEntries:
+      type: object
+      required: [entries]
+      properties:
+        entries: { type: array, items: { $ref: "#/components/schemas/BackupEntry" } }
+    BackupRestoreRequest:
+      type: object
+      required: [target, snapshot, mode]
+      properties:
+        target: { type: string }
+        snapshot: { type: string }
+        paths: { type: array, items: { type: string }, description: Inside the item; none = all }
+        mode: { type: string, enum: [copy, in_place, rollback] }
+        folder: { type: string, description: "copy: the new folder's name" }
+        confirm: { type: string, description: "rollback: the shared folder's, app's or VM's name (settings: \"settings\")" }
+    BackupRebuildRequest:
+      type: object
+      required: [target, run, pool, confirm]
+      properties:
+        target: { type: string }
+        run: { type: string }
+        pool: { type: string }
+        items: { type: array, items: { type: string } }
+        confirm: { type: string, enum: [rebuild] }
+    FileBackupVersion:
+      type: object
+      required: [target, targetName, run, time, snapshot]
+      properties:
+        target: { type: string }
+        targetName: { type: string }
+        run: { type: string }
+        time: { type: string, format: date-time }
+        snapshot: { type: string }
+    FileBackupRestoreRequest:
+      type: object
+      required: [share, target, snapshot, mode]
+      properties:
+        share: { type: string }
+        target: { type: string }
+        snapshot: { type: string }
+        paths: { type: array, items: { type: string } }
+        mode: { type: string, enum: [copy, in_place] }
+        folder: { type: string }
+    InstallRestore:
+      type: object
+      required: [kit, accessKey, secretKey]
+      properties:
+        kit: { type: string, description: The recovery kit's text }
+        accessKey: { type: string }
+        secretKey: { type: string }
+        run: { type: string, description: The version (install only) }
+    InstallBackupVersion:
+      type: object
+      required: [run, time, hostname, items, target]
+      properties:
+        run: { type: string }
+        time: { type: string }
+        hostname: { type: string }
+        items: { type: array, items: { type: string } }
+        target: { type: string }
+    # ---- end of cloud backup API schemas ----
     # ---- replication API schemas ----
     ReplicationKind:
       type: string

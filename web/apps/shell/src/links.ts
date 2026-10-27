@@ -3,7 +3,8 @@ import { openApp } from "./wm/open";
 
 /** Where a notification's link opens: app id and arguments. Links are
  * written by hardyd ("storage/disks/sda", "storage/pool/tank", "ups",
- * "control/notifications", "apps/immich", "vms/haos", "monitor", "logs"). */
+ * "control/notifications", "apps/immich", "vms/haos", "monitor", "logs",
+ * "backup/tasks/<id>", "backup/replication"). */
 export function linkTarget(link: string): { app: string; args?: Record<string, string> } | null {
   const [head, a, b] = link.split("/");
   switch (head) {
@@ -23,6 +24,9 @@ export function linkTarget(link: string): { app: string; args?: Record<string, s
       return { app: "os.hardy.monitor", args: a ? { tab: a } : undefined };
     case "logs":
       return { app: "os.hardy.logs" };
+    case "backup":
+      // backup/tasks/<id>, backup/targets/<id>, backup/replication
+      return { app: "os.hardy.backup", args: a ? { tab: a, ...(b ? { id: b } : {}) } : undefined };
   }
   return null;
 }

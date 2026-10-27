@@ -1496,6 +1496,120 @@ kernel (mdev and per-VF type files, `sriov-manage`, the installer's
 i915/xe, the exact Debian package set and the licence file location in it,
 and IOMMU flags on real firmware.
 
+## Cloud backups
+
+Phase 6 part A (decisions 160-172, security review 223-233; user and developer guide
+[backup.md](backup.md)). Versioned, encrypted backups of shared folders,
+apps, VMs and the server's settings to S3-compatible storage or Backblaze
+B2, with restic doing the storage.
+
+```
+ browser ── /api/v1/backup*, /files/backups* ──► hardyd (internal/cloudbackups)
+                                                  tasks, runs, schedule, jobs ──► hardyd-priv cloudbackup.* ops
+                                                                                    │ internal/cloudbackup (Root)
+                                         ZFS snapshot ─► mount -t zfs (ro) at /run/hardyos-backup/mnt/<kind>/<id>
+                                         zvol snapshot ─► read-only clone ─► stream     │
+                                                                                    ▼
+                                    restic (/usr/lib/hardyos/restic) ── CONNECT proxy (egress guard) ──► bucket
+                                                                                    │
+                                  restore ─► restic into <pool>/hardyos-restore/<id> ─► fd-safe copy / file workers
+```
+
+- **Code.** Root side `internal/cloudbackup`: `target.go` (destinations,
+  validation), `egress.go` (address rules and the CONNECT proxy),
+  `restic.go` (the only place restic is run), `store.go` (sealed
+  destinations), `run.go` (backups), `versions.go` (versions, browsing),
+  `restore.go` and `copy_linux.go` (restores), `rebuild.go` and
+  `baremetal.go` (rebuilds and the installer), `tasks.go` (long work as
+  tasks), `volumes.go` (ZFS). Ops in `priv/cloudbackup_ops.go`; hooks in
+  `apps/backup.go`, `vms/backup.go`, `backup.Root.StageContents` and
+  `fileworker.Server.DoIn`. hardyd side `internal/cloudbackups` (tasks,
+  runs, schedule, upkeep, jobs, `Notifier`), `api/handlers_cloudbackup.go`,
+  and the installer's step in `installer`. Web: `apps/backup/` (tabs:
+  Tasks, Restore, Destinations, History; `tabs.ts` takes more, such as
+  replication), `apps/files/CloudVersions.tsx`, the installer's "Restore
+  from backup" step.
+- **Destinations** are root's: `/var/lib/hardyos/root/cloudbackup/targets.json`
+  holds each destination with its access keys and repository key sealed
+  (AES-256-GCM, key from `priv.RootKeyFor(keys, "cloud-backup")`, bound to
+  the id). Saving one is a job: hardyd-priv checks the endpoint's addresses,
+  then `restic cat config` (bounded to 90 s, since restic retries an
+  unknown key for minutes): no repository = `restic init` with a new key;
+  a repository there = refused unless its key is given. hardyd only knows
+  destinations by id; the API shows the access key's last four characters.
+- **restic** runs only in `Restic.run`: fixed binary, fixed environment
+  (PATH, cache `/var/cache/hardyos-restic`, `RESTIC_REPOSITORY`, the S3 or B2
+  keys), the repository key on fd 3, arguments from validated values, a
+  process group of its own (SIGINT on cancel, SIGKILL 15 s later), stderr
+  bounded. Every connection goes through a per-run CONNECT proxy on
+  127.0.0.1 that only reaches the destination's host and port and dials an
+  address it resolved and allowed itself (`AddrAllowed`, never this
+  server's own). In hardyd-priv restic is sandboxed (`sandbox_linux.go`):
+  its own network and PID namespaces, an allowlist root (tmpfs with only
+  the binary, the CA bundle, a minimal /dev, its own /proc and the run's
+  folders), the `hardyos-restic` user with only the run's capabilities,
+  and a seccomp filter allowing only internet sockets (decisions 232, 236).
+- **Recovery kit.** `cloudbackup.kit` is behind hardyd's re-auth, rate limit
+  and audit; hardyd-priv writes kits, new destinations and settings
+  backups to the journal (decision 235).
+- **Backups** run as a hardyd-priv task followed by the hardyd job
+  `backup.cloud.run` (polls `cloudbackup.task`, cancels with
+  `cloudbackup.cancel`). Per item: a snapshot `@hardyos-cloud-<run>`,
+  mounted read-only at its stable folder, backed up with `--one-file-system`
+  (`.recycle` and unfinished uploads left out), unmounted and destroyed;
+  VMs through `vms.Manager.BackupSnapshot` (frozen with the agent) and a
+  read-only clone per disk read as a stream; the settings as a sealed
+  `.hbak` from hardyd's database copy and `backup.Root.Collect(secrets)`.
+  Then the run's manifest and the task's retention (`forget --tag
+  task=<id> --group-by paths`). One task per destination at a time.
+- **Versions and browsing.** `cloudbackup.versions` groups the
+  repository's snapshots by run (cached 30 s); `cloudbackup.browse` lists
+  one folder of a share's or app's snapshot (`restic ls`, not recursive),
+  hidden names left out; for a person (Who set) only shared folders whose
+  rules let them in (`fileworker.Server.RulesLevel`).
+- **Restores** (`backup.cloud.restore`): restic restores the chosen paths
+  with their full paths into a new staging dataset on the target's pool;
+  administrators' restores then copy by descriptors (`copyEntry`: owner,
+  mode, ACLs, times kept; links re-made, never followed; in place, into a
+  new folder, or a rollback that also removes what the version doesn't
+  have, after a safety snapshot). A person's restore opens each file in the
+  staged copy as them (`DoIn`, a file worker with the copy as its root) and
+  creates it in the folder as them (`files.create`). Apps go through
+  `apps.RestoreData` (the rollback path), VMs through
+  `vms.RestoreFromBackup` (off, name typed, a VM snapshot first; disks
+  written with `O_EXCL` on the zvol), settings through
+  `backup.Root.StageContents` (applied at the next start). Staging has a
+  quota (the version's size plus headroom); links never come back into
+  apps' or VMs' own files; HardyOS's own ACL entries come from the
+  destination as it is now; an app's source, grants and user ID come from
+  the live install (or its package bytes); a VM's spec is checked before
+  anything changes and no disk is destroyed; people restore chosen files
+  of this server's versions, checked against their access today
+  (decisions 223-231).
+- **Schedule** (hardyd, every minute): each enabled task's latest slot
+  (manual, every N hours, daily, weekly; server time) starts a run, or is
+  reported missed when more than 30 minutes late or while the previous run
+  still runs; each destination's weekly upkeep starts `backup.cloud.prune`
+  and `backup.cloud.check`. Runs (backups, restores, upkeep) are rows in
+  `backup_runs`; runs left running by a stopped hardyd are marked failed
+  at start.
+- **Rebuilding a server.** The live installer's ops
+  `install.cloud.probe` / `install.cloud.stage` open the repository from
+  the recovery kit, list versions with settings, unpack the chosen one's
+  settings archive into the new system's `restore-pending` and leave
+  `connect.json`; at the first start `cloudbackup.Root.OnStart` seals it
+  into the targets file and records `rebuild.json`, which the Backup app
+  offers to finish (`backup.cloud.rebuild`: shared folders from the
+  manifest, apps with `apps.RestoreNew`, VMs with
+  `vms.RestoreNewFromBackup`).
+- **Tests.** restic's `local:` backend in temp folders with folders and
+  files as fake datasets and zvols (backups, browsing, every restore mode,
+  people's restores, retention, cancel, prune, check), a fake S3 over TLS
+  for the credential paths and the egress proxy, a fake restic for the
+  command line and environment, real file workers for `DoIn`, the API and
+  the schedule with a stub root helper, web component tests, and
+  `TestZFSIntegrationCloudBackup` on a file-backed pool in CI's ZFS job.
+
 ## Replication between servers
 
 Phase 6 part B (decisions 180-199; guide `docs/replication.md`, which has
@@ -1574,7 +1688,9 @@ another HardyOS server, over the LAN or NetBird. One way, no promotion yet
   (`Event{Kind, Severity, Title, Body, Link, Time}`): failure (warning,
   once), stale (critical, once; three intervals, at least an interval and
   an hour), recovered and restored (info). hardyd passes them to the
-  alert dispatcher (category `replication`, link `control/replication`).
+  alert dispatcher (category `replication`, link `backup/replication`:
+  the sending side is the Backup app's Replication tab; Control Panel ›
+  Replication keeps the receiving side, decision 234).
 - **Restore** pulls a replica's snapshot back (`repl.replica.send` on B,
   `repl.restore.recv` on A, the same stream check): a shared folder as a
   new one (`shares.Manager.RestoreProps`: administrators only, SMB off), a
@@ -1731,6 +1847,10 @@ hardyd ── /s/-/ds/* ──▶ Document Server  127.0.0.1:<port>  (catalog ap
 - Resource history: `metrics.db` next to the database (not in settings
   backups).
 - Web desktop assets: `/usr/share/hardyos/web`.
+- Cloud backups: destinations (sealed) in `/var/lib/hardyos/root/cloudbackup`,
+  tasks and runs in hardyd's database, restic's cache in
+  `/var/cache/hardyos-restic`, snapshots mounted and restores staged under
+  `/run/hardyos-backup` and `<pool>/hardyos-restore`.
 - OS: ZFS root with boot environments; each update installs into a new boot
   environment and falls back automatically if the health check fails.
 

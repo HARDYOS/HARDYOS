@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"github.com/hardyos/hardyos/daemon/internal/cloudbackup"
 	"net"
 	"net/http"
 	"os"
@@ -36,6 +37,7 @@ func (s *Server) installerRoutes() {
 	m.Handle("POST /api/v1/installer/check", s.installerAuthed(s.handleInstallerCheck))
 	m.Handle("POST /api/v1/installer/install", s.installerAuthed(s.handleInstallerInstall))
 	m.Handle("POST /api/v1/installer/reboot", s.installerAuthed(s.handleInstallerReboot))
+	m.Handle("POST /api/v1/installer/cloud/probe", s.installerAuthed(s.handleInstallerCloudProbe))
 	// The desktop's first request; answer it so the UI knows where it is.
 	m.HandleFunc("GET /api/v1/setup", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "installer", "this is the HardyOS installer")
@@ -189,6 +191,22 @@ func (s *Server) handleInstallerInstall(w http.ResponseWriter, r *http.Request) 
 		// Plan validation and confirmation errors are the person's to fix.
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
 	}
+}
+
+// handleInstallerCloudProbe opens a cloud backup from its recovery kit
+// (and the bucket's keys) and lists the versions to restore from.
+func (s *Server) handleInstallerCloudProbe(w http.ResponseWriter, r *http.Request) {
+	var req cloudbackup.ProbeArgs
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	req.Run = ""
+	v, err := s.cfg.Installer.Probe(r.Context(), req)
+	if err != nil {
+		s.writePrivError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"versions": v})
 }
 
 func (s *Server) handleInstallerReboot(w http.ResponseWriter, r *http.Request) {
