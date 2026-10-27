@@ -88,6 +88,27 @@ docker-cli
 apparmor
 xz-utils
 
+# Virtual machines: QEMU/KVM through libvirt, driven by hardyd-priv only.
+# UEFI firmware with Secure Boot (ovmf) and a virtual TPM (swtpm) for
+# Windows 11; qemu-utils imports disk images; xorriso makes cloud-init
+# seed discs; bridge-utils builds the bridge VMs share the home network
+# through; dnsmasq-base serves libvirt's NAT network. qemu-system-x86 is
+# this image's architecture (the Go and web code choose machine types and
+# firmware at run time).
+libvirt-daemon-system
+libvirt-daemon-driver-qemu
+libvirt-daemon-config-network
+libvirt-clients
+qemu-system-x86
+qemu-utils
+ovmf
+swtpm
+swtpm-tools
+xorriso
+bridge-utils
+dnsmasq-base
+iptables
+
 # Live system
 live-boot
 live-config

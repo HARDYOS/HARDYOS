@@ -51,6 +51,20 @@ systemctl disable nfs-server.service rpcbind.service rpcbind.socket >/dev/null 2
 mkdir -p /etc/systemd/system-generators
 ln -sf /dev/null /etc/systemd/system-generators/nfs-server-generator
 
+# Virtual machines: hardyd-priv defines every VM from its pool and starts
+# the ones set to start with the server, in order, once pools are mounted;
+# libvirt's own autostart stays unused. libvirt-guests only shuts running
+# VMs down cleanly when the server shuts down.
+mkdir -p /etc/default
+cat > /etc/default/libvirt-guests <<'GUESTS'
+# Written by HardyOS: VMs start through HardyOS (Virtual Machines > Settings).
+ON_BOOT=ignore
+ON_SHUTDOWN=shutdown
+PARALLEL_SHUTDOWN=4
+SHUTDOWN_TIMEOUT=180
+GUESTS
+systemctl enable libvirtd.service libvirt-guests.service >/dev/null 2>&1 || true
+
 # Load the zfs module at boot so pools can be imported right away.
 echo zfs > /etc/modules-load.d/zfs.conf
 
