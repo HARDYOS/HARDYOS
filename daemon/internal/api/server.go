@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"path"
 	"strings"
@@ -115,6 +116,12 @@ type Config struct {
 	// GPUUploadDir is where uploaded vGPU driver files are saved for
 	// hardyd-priv (default gpu.UploadDir; tests use a temp dir).
 	GPUUploadDir string
+	// OfficeInternal replaces looking the Document Server up among the
+	// apps (tests, the office integration job): its http://127.0.0.1:port.
+	OfficeInternal func() (*url.URL, error)
+	// OfficeCallbackBase replaces http://host.docker.internal:44251, how
+	// the Document Server reaches hardyd (tests, the integration job).
+	OfficeCallbackBase string
 }
 
 // Server is hardyd's HTTP handler.
@@ -141,6 +148,8 @@ type Server struct {
 	// waits hands a job's in-memory outcome (a new client secret) back to
 	// the request that started it.
 	waits jobWaits
+	// office is the office suite (Control Panel › Office, the editor).
+	office *officeRuntime
 	// photos keeps Photos (Immich set up by HardyOS) state; nil without
 	// a database or the sign-in provider.
 	photos    *photos.Store
@@ -203,6 +212,9 @@ func New(cfg Config) *Server {
 	}
 	if cfg.CloudBackups != nil && cfg.Jobs != nil && cfg.Installer == nil {
 		s.registerCloudJobs(cfg.Jobs)
+	}
+	if cfg.DB != nil && cfg.Installer == nil {
+		s.office = s.newOffice()
 	}
 	s.routes()
 	return s
@@ -273,6 +285,7 @@ func (s *Server) routes() {
 		if _, ok := s.cfg.Files.(files.Service); ok {
 			s.fileRoutes()
 			s.davRoutes() // WebDAV at /dav/, outside /api and the desktop session
+			s.officeRoutes()
 		}
 	}
 

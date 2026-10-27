@@ -15,6 +15,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/appstore"
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
+	"github.com/hardyos/hardyos/daemon/internal/office"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 )
 
@@ -167,6 +168,11 @@ func (s *Server) handleAppReconfigure(w http.ResponseWriter, r *http.Request, u 
 	}
 	mf := cur.Manifest
 	var p apps.Problems
+	if a.ID == office.AppID {
+		if _, ok := req.Settings["JWT_SECRET"]; ok {
+			p = append(p, "the Document Server's secret is set by HardyOS (Control Panel › Office)")
+		}
+	}
 	checkPorts(&p, mf, req.Ports)
 	plain, secret := splitSettings(&p, mf, req.Settings)
 	for k, v := range secret {

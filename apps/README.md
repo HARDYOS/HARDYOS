@@ -55,6 +55,7 @@ shared folders, `HARDY_UID` and the `gpu`/`hostNetwork` permissions are in
 | Bazarr | `linuxserver/bazarr:1.6.2` | MEDIA write | none | Saves subtitle files next to the videos |
 | Seerr (id `jellyseerr`) | `seerr-team/seerr:v3.5.1` | none | none | Jellyseerr merged into Seerr; the id stays `jellyseerr`. Runs as the image's own user 1000 (its config folder is owned by 1000) because other users aren't documented |
 | KinCast | `hardynetworks/kintube:${KINCAST_TAG}` | none | none | Unchanged |
+| Office (id `onlyoffice`) | `onlyoffice/documentserver:9.4.0.1@sha256:3ab6ebc7…` (multi-arch index) | FONTS read (`/usr/share/fonts/truetype/custom`, optional) | none | The office suite's engine ([docs/office.md](../docs/office.md)). Installed only from Control Panel › Office, which sets `JWT_SECRET`; no published port (hardyd reaches it at its container address, firewalled by hardyd-priv's `office.dsnet`, decision 266); no `web` entry, so no App Store window. Runs as root inside (its own PostgreSQL, RabbitMQ and nginx under supervisord) |
 | Apex RMM | `hardynetworks/apex-rmm:${APEX_TAG}`, `rustdesk-server:1.1.16` | none | none | RustDesk server pinned (was `latest`) |
 
 All images publish amd64 and arm64.

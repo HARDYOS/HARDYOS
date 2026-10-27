@@ -16,11 +16,11 @@ import (
 // at <app>.<base>) can neither set nor overwrite it. Over plain HTTP
 // (development) browsers refuse __Host- cookies, so the old name is used.
 //
-// Migration: for one release a desktop reached over HTTPS still accepts a
-// session under the old name, except on published hosts (anything the app
-// gateway serves), where the old name is never read: a sibling app could
-// have planted it. A new sign-in sets the new name and expires the old one.
-// TODO(next release): stop reading LegacySessionCookie over HTTPS.
+// Over HTTPS the old name is never read (decision 268, ending the migration
+// of decision 155): pages on another port of the desktop's host (app
+// windows, the office origin) can set a plain cookie for the host, and it
+// would sign the desktop in as whoever they chose. A new sign-in still
+// expires the old name.
 const (
 	SessionCookie       = "__Host-hardyos_session"
 	LegacySessionCookie = "hardyos_session"
@@ -43,12 +43,6 @@ func (s *Server) sessionToken(r *http.Request) (string, bool) {
 		return "", false
 	}
 	if c, err := r.Cookie(SessionCookie); err == nil {
-		return c.Value, true
-	}
-	if viaGateway(r) || s.remote.publishedHost(r.Host) {
-		return "", false
-	}
-	if c, err := r.Cookie(LegacySessionCookie); err == nil {
 		return c.Value, true
 	}
 	return "", false
@@ -188,6 +182,7 @@ func (s *Server) endUserEverywhere(ctx context.Context, id int64) {
 	}
 	s.proxy.endUser(id)
 	s.endOIDCUser(ctx, id)
+	s.office.dropUser(id, "the account's sessions were ended")
 }
 
 // record writes an audit entry, logging (not failing) if the write fails.

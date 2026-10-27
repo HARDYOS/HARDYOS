@@ -83,6 +83,8 @@ type Public struct {
 	// (defaults 1 and 2); more get 429.
 	ZipsPerLink, ZipsPerIP int
 	Now                    func() time.Time
+	// Office opens documents in the browser editor (nil: no office suite).
+	Office OfficeOpener
 
 	key  []byte
 	mu   sync.Mutex
@@ -135,6 +137,65 @@ func (p *Public) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /s/{token}/unlock", p.unlock)
 	mux.HandleFunc("GET /s/{token}/download", p.download)
 	mux.HandleFunc("POST /s/{token}/upload", p.upload)
+	mux.HandleFunc("GET /s/{token}/office", p.ServeOffice)
+}
+
+// OfficeOpener is the office suite as link pages use it (decision 256).
+type OfficeOpener interface {
+	// Opens reports whether a file of this name opens in the editor now
+	// (the office suite is on and it's a document type it opens).
+	Opens(name string) bool
+	// Serve answers /s/<token>/office for a link checked on this request:
+	// owner is who the link reads and writes as, target the file's path in
+	// the share, visitor the name the visitor gave.
+	Serve(w http.ResponseWriter, r *http.Request, l *Link, owner files.Who, target string, e *files.Entry, visitor string)
+}
+
+// ServeOffice opens a document of the link in the browser editor, after
+// asking the visitor for a name to show the other people in it.
+func (p *Public) ServeOffice(w http.ResponseWriter, r *http.Request) {
+	v := p.open(w, r, true, false)
+	if v == nil {
+		return
+	}
+	sub, ok := p.subPath(w, r, v)
+	if !ok {
+		return
+	}
+	l := v.link
+	target := Join(l.Path, sub)
+	e := v.root
+	if sub != "" {
+		var err error
+		if e, err = p.Files.Stat(r.Context(), v.who, l.Share, target); err != nil {
+			p.errorPage(w, http.StatusNotFound, "Not found", "That file isn't there any more.", l)
+			return
+		}
+	}
+	if e.Dir || p.Office == nil || !p.Office.Opens(e.Name) {
+		p.errorPage(w, http.StatusNotFound, "Can't open this here", "This file doesn't open in the browser editor. Download it instead.", l)
+		return
+	}
+	name, asked := r.URL.Query()["name"]
+	if !asked {
+		pv := view{Kind: "office-name", Title: e.Name, OfficeURL: "/s/" + v.token + "/office", OfficePath: sub, OfficeEdit: l.Access == AccessEdit}
+		p.render(w, http.StatusOK, pv, l)
+		return
+	}
+	visitor := ""
+	if len(name) > 0 {
+		visitor = name[0]
+	}
+	p.Office.Serve(w, r, l, v.who, target, e, visitor)
+}
+
+// officeURL is the editor address for a file in a link (sub inside it), or
+// "" when it doesn't open there.
+func (p *Public) officeURL(token, sub, name string) string {
+	if p.Office == nil || !p.Office.Opens(name) {
+		return ""
+	}
+	return linkURL(token, "office", sub)
 }
 
 func (p *Public) static(w http.ResponseWriter, r *http.Request) {
@@ -268,12 +329,18 @@ type view struct {
 	Size, Modified       string
 	Crumbs               []crumb
 	Entries              []row
+	// OfficeURL opens the file in the browser editor; OfficeEdit: the link
+	// allows editing. OfficePath is the file inside a folder link.
+	OfficeURL  string
+	OfficePath string
+	OfficeEdit bool
 }
 
 type crumb struct{ Name, URL string }
 type row struct {
 	Name, URL, Size, Modified string
 	Dir                       bool
+	OfficeURL                 string
 }
 
 func (p *Public) render(w http.ResponseWriter, status int, v view, l *Link) {
@@ -333,6 +400,7 @@ func (p *Public) page(w http.ResponseWriter, r *http.Request) {
 		p.render(w, http.StatusOK, view{
 			Kind: "file", Title: title, DownloadURL: linkURL(v.token, "download", ""),
 			Size: humanBytes(v.root.Size), Modified: v.root.Modified.Local().Format("Jan 2, 2006 15:04"),
+			OfficeURL: p.officeURL(v.token, "", v.root.Name), OfficeEdit: l.Access == AccessEdit,
 		}, l)
 		return
 	}
@@ -360,6 +428,7 @@ func (p *Public) page(w http.ResponseWriter, r *http.Request) {
 		} else {
 			rw.URL = linkURL(v.token, "download", child)
 			rw.Size = humanBytes(e.Size)
+			rw.OfficeURL = p.officeURL(v.token, child, e.Name)
 		}
 		entries = append(entries, rw)
 	}
@@ -371,7 +440,8 @@ func (p *Public) page(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	crumbs[len(crumbs)-1].URL = ""
-	pv := view{Kind: "folder", Title: title, Crumbs: crumbs, Entries: entries, DownloadURL: linkURL(v.token, "download", sub)}
+	pv := view{Kind: "folder", Title: title, Crumbs: crumbs, Entries: entries, DownloadURL: linkURL(v.token, "download", sub),
+		OfficeEdit: l.Access == AccessEdit}
 	if l.AllowUpload {
 		pv.UploadURL = linkURL(v.token, "upload", sub)
 		left := l.MaxUploadBytes - l.UploadedBytes
