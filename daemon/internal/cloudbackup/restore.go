@@ -429,13 +429,13 @@ func addNote(res *RestoreResult, format string, a ...any) {
 // fillFrom copies a staged item folder over a dataset's folder (all of
 // it, removing what the version doesn't have; hidden names at the top
 // are kept unless keepHidden is false).
-func (r *Root) fillFrom(ctx context.Context, st *staged, dir string, dev uint64, keepHidden bool) (*copyStats, error) {
+func (r *Root) fillFrom(ctx context.Context, st *staged, dir string, dev uint64, keepHidden bool, allowLink func([]string) bool) (*copyStats, error) {
 	dfd, err := openFolder(dir, dev)
 	if err != nil {
 		return nil, err
 	}
 	defer closeFD(dfd)
-	cs := &copyStats{keepOwner: true}
+	cs := &copyStats{keepOwner: true, allowLink: allowLink}
 	names, err := readNames(st.fd)
 	if err != nil {
 		return nil, err
@@ -472,7 +472,7 @@ func (r *Root) restoreApp(ctx context.Context, tc taskCtx, repo *Repo, snap *Sna
 		if err != nil {
 			return err
 		}
-		cs, err := r.fillFrom(ctx, st, dir, dev, false)
+		cs, err := r.fillFrom(ctx, st, dir, dev, false, linksOnlyInData)
 		if cs != nil {
 			res.Files, res.Folders, res.Bytes, res.Skipped = cs.Files+cs.Links, cs.Dirs, cs.Bytes, cs.Skipped
 			res.Notes = append(res.Notes, cs.Notes...)
@@ -526,7 +526,7 @@ func (r *Root) vmFill(ctx context.Context, tc taskCtx, repo *Repo, snap *Snapsho
 			return err
 		}
 		defer closeFD(dfd)
-		cs := &copyStats{keepOwner: true}
+		cs := &copyStats{keepOwner: true, allowLink: noLinks}
 		names, err := readNames(st.fd)
 		if err != nil {
 			return err
@@ -578,11 +578,11 @@ func (r *Root) restoreVM(ctx context.Context, tc taskCtx, repo *Repo, snap *Snap
 		return nil, err
 	}
 	res := &RestoreResult{Notes: []string{}}
+	f.Note = func(msg string) { res.Notes = append(res.Notes, msg) }
 	if newPool != "" {
 		_, err = r.VMs.RestoreNewFromBackup(ctx, newPool, f)
 	} else {
 		_, err = r.VMs.RestoreFromBackup(ctx, it.ID, confirm, f)
-		res.Notes = append(res.Notes, "A VM snapshot \"Before restoring from a backup\" has the VM as it was.")
 	}
 	return res, err
 }

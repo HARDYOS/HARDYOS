@@ -4,7 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 
+	"golang.org/x/sys/unix"
+
+	"github.com/hardyos/hardyos/daemon/internal/rootfile"
 	"github.com/hardyos/hardyos/daemon/internal/zfs"
 )
 
@@ -49,6 +54,13 @@ func (m *Manager) BackupSources(ctx context.Context) ([]BackupSource, error) {
 	return out, nil
 }
 
+// readMeta reads one of an app's own files (.hardyos/...): never through a
+// link, a regular file root wrote (under rootfile.Enforce), at most
+// rootfile.MaxStateBytes. An app's dataset can come back from a backup, so
+// nothing in it is followed (a link there must not make root read, say,
+// the master key as the app's icon).
+func readMeta(path string) ([]byte, error) { return rootfile.ReadFile(path) }
+
 // Fill writes an app's data into its mounted dataset (dir is the
 // dataset's mountpoint, dataset its name).
 type Fill func(ctx context.Context, dir, dataset string) error
@@ -78,6 +90,33 @@ func (m *Manager) RestoreData(ctx context.Context, id, confirm string, fill Fill
 	}
 	if err := fill(ctx, ia.dir, ia.dataset); err != nil {
 		return fmt.Errorf("restoring %s's data (the snapshot %s has it as it was): %w", ia.manifest.Name, safety, err)
+	}
+	// The version's state.json says where the app came from, what it may
+	// do and which user it is: none of that is taken from a backup. The
+	// live install's source, grants and user ID stay.
+	back, err := m.load(ctx, c, id)
+	if err != nil || back.state.ID != id || back.manifest.ID != id {
+		return fmt.Errorf("the restored %s can't be read (the snapshot %s has it as it was)", ia.manifest.Name, safety)
+	}
+	oldUID := back.state.UID
+	// The source is decided again from the restored package's bytes, with
+	// the live install as the previous state: catalog only if those bytes
+	// are shipped (or are the package root found in the catalog), else the
+	// live label (upload when the live app was a catalog one).
+	raw, _ := readMeta(back.meta(packageFile))
+	src, name, sum, err := m.deriveSource(raw, "", "", &ia.state)
+	if err != nil {
+		return err
+	}
+	back.state.Source, back.state.SourceName, back.state.CatalogSHA256 = src, name, sum
+	back.state.Grants = append([]string(nil), ia.state.Grants...)
+	back.state.UID = ia.state.UID
+	back.state.Removed = false
+	if err := writeFileAtomic(back.meta(stateFile), mustJSON(back.state), 0o600); err != nil {
+		return err
+	}
+	if err := remapOwner(filepath.Join(back.dir, dataDirName), oldUID, back.state.UID); err != nil {
+		return fmt.Errorf("giving the restored data to %s's user: %w", ia.manifest.Name, err)
 	}
 	return m.bringBack(ctx, ia, c, "the backup")
 }
@@ -134,9 +173,134 @@ func (m *Manager) RestoreNew(ctx context.Context, id, pool string, fill Fill) er
 	if ia.state.ID != id || ia.manifest.ID != id {
 		return Problems{"the backup holds a different app"}
 	}
+	// Nothing about trust comes from the backup: the source is decided
+	// again from the package bytes (catalog only if they match the shipped
+	// catalog, otherwise an upload whose extra permissions an
+	// administrator grants again), no grants, and the user ID is kept only
+	// when no other app has it.
+	raw, _ := readMeta(ia.meta(packageFile))
+	src, name, sum, err := m.deriveSource(raw, "", "", nil)
+	if err != nil {
+		return err
+	}
+	ia.state.Source, ia.state.SourceName, ia.state.CatalogSHA256 = src, name, sum
+	ia.state.Grants = nil
 	ia.state.Removed = false
+	oldUID := ia.state.UID
+	if !m.uidFree(ctx, c, id, oldUID) {
+		ia.state.UID = 0
+		uid, err := m.allocUID(ctx, c, ia)
+		if err != nil {
+			return err
+		}
+		ia.state.UID = uid
+	}
 	if err := writeFileAtomic(ia.meta(stateFile), mustJSON(ia.state), 0o600); err != nil {
 		return err
 	}
+	if err := remapOwner(filepath.Join(dir, dataDirName), oldUID, ia.state.UID); err != nil {
+		return fmt.Errorf("giving the restored data to %s's user: %w", id, err)
+	}
 	return m.bringBack(ctx, ia, c, "the backup")
+}
+
+// uidFree reports whether uid is a valid app user ID no other app on the
+// pool has.
+func (m *Manager) uidFree(ctx context.Context, c *EngineConfig, id string, uid int) bool {
+	if uid < FirstAppUID || uid > LastAppUID {
+		return false
+	}
+	l, err := m.installed(ctx, c)
+	if err != nil {
+		return false
+	}
+	for _, o := range l {
+		if o.state.ID != id && o.state.UID == uid {
+			return false
+		}
+	}
+	return true
+}
+
+// remapOwner gives everything below dir that from owns (user and group)
+// to to, by descriptor, never following a link.
+func remapOwner(dir string, from, to int) error {
+	if from == to || from <= 0 || to <= 0 {
+		return nil
+	}
+	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if errors.Is(err, unix.ENOENT) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+	return remapAt(fd, from, to, 0)
+}
+
+func remapAt(dirfd, from, to, depth int) error {
+	if depth > 256 {
+		return errors.New("folders nested too deep")
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(dirfd, &st); err != nil {
+		return err
+	}
+	if err := remapOne(dirfd, "", &st, from, to); err != nil {
+		return err
+	}
+	f := os.NewFile(uintptr(mustDup(dirfd)), "dir")
+	names, err := f.Readdirnames(-1)
+	f.Close()
+	if err != nil {
+		return err
+	}
+	for _, n := range names {
+		var cst unix.Stat_t
+		if err := unix.Fstatat(dirfd, n, &cst, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			continue
+		}
+		if cst.Mode&unix.S_IFMT == unix.S_IFDIR {
+			cfd, err := unix.Openat(dirfd, n, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+			if err != nil {
+				continue
+			}
+			err = remapAt(cfd, from, to, depth+1)
+			unix.Close(cfd)
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		if err := remapOne(dirfd, n, &cst, from, to); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func remapOne(dirfd int, name string, st *unix.Stat_t, from, to int) error {
+	uid, gid := -1, -1
+	if int(st.Uid) == from {
+		uid = to
+	}
+	if int(st.Gid) == from {
+		gid = to
+	}
+	if uid < 0 && gid < 0 {
+		return nil
+	}
+	if name == "" {
+		return unix.Fchown(dirfd, uid, gid)
+	}
+	return unix.Fchownat(dirfd, name, uid, gid, unix.AT_SYMLINK_NOFOLLOW)
+}
+
+func mustDup(fd int) int {
+	n, err := unix.Dup(fd)
+	if err != nil {
+		return -1
+	}
+	return n
 }

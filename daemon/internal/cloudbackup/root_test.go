@@ -251,6 +251,17 @@ func TestBackupVMAndApp(t *testing.T) {
 	appDir := filepath.Join(e.base, "app-kincast")
 	write(t, filepath.Join(appDir, "data", "db.sqlite"), "app data v1")
 	write(t, filepath.Join(appDir, ".hardyos", "app.env"), "SECRET=1")
+	// Links root would follow when it reads an app's or VM's own files
+	// (decision 173): only links under an app's data/ come back.
+	for _, l := range [][2]string{
+		{"/etc/shadow", filepath.Join(appDir, ".hardyos", "icon.png")},
+		{"/etc/hostname", filepath.Join(appDir, "data", "host")},
+		{"/etc/shadow", filepath.Join(vmDir, "evil.fd")},
+	} {
+		if err := os.Symlink(l[0], l[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
 	e.vol.ds["tank/apps/kincast"] = appDir
 	e.apps.srcs["kincast"] = appSource("kincast", "KinCast")
 	e.apps.dirs["kincast"] = appDir
@@ -274,6 +285,11 @@ func TestBackupVMAndApp(t *testing.T) {
 	}
 
 	// Change both, then restore.
+	for _, p := range []string{filepath.Join(appDir, ".hardyos", "icon.png"), filepath.Join(appDir, "data", "host"), filepath.Join(vmDir, "evil.fd")} {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
 	write(t, filepath.Join(vmDir, "nvram.fd"), "nvram v2")
 	write(t, filepath.Join(appDir, "data", "db.sqlite"), "app data v2")
 	write(t, filepath.Join(appDir, "data", "extra"), "x")
@@ -308,6 +324,15 @@ func TestBackupVMAndApp(t *testing.T) {
 	}
 	if got := read(t, filepath.Join(appDir, ".hardyos", "app.env")); got != "SECRET=1" {
 		t.Fatal("app settings not restored")
+	}
+	if _, err := os.Lstat(filepath.Join(appDir, ".hardyos", "icon.png")); !errors.Is(err, os.ErrNotExist) {
+		t.Error("a link in the app's own files was restored")
+	}
+	if l, err := os.Readlink(filepath.Join(appDir, "data", "host")); err != nil || l != "/etc/hostname" {
+		t.Errorf("a link in the app's data didn't come back: %q %v", l, err)
+	}
+	if _, err := os.Lstat(filepath.Join(vmDir, "evil.fd")); !errors.Is(err, os.ErrNotExist) {
+		t.Error("a link in the VM's folder was restored")
 	}
 }
 

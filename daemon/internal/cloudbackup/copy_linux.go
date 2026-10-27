@@ -73,7 +73,20 @@ type copyStats struct {
 	// keepOwner: restore owners and permissions as in the backup (root
 	// restores). Otherwise new entries keep root's defaults (not used).
 	keepOwner bool
+	// allowLink says whether a link in the backup may be made again at
+	// path (components below the folder restored into); nil allows every
+	// link. Apps' and VMs' own files are read by root, so links there are
+	// never restored (only below an app's data/).
+	allowLink func(path []string) bool
+	// cur is the folder being copied, below the one restored into.
+	cur []string
 }
+
+// linksOnlyInData allows links only below an app's data folder.
+func linksOnlyInData(path []string) bool { return len(path) > 1 && path[0] == "data" }
+
+// noLinks allows no links at all (a VM's folder).
+func noLinks([]string) bool { return false }
 
 func (s *copyStats) note(format string, a ...any) {
 	if len(s.Notes) < 20 {
@@ -197,6 +210,10 @@ func place(dir int, tmp, name string, replace bool) error {
 }
 
 func copyLink(srcDir int, name string, dstDir int, dstName string, replace bool, st *unix.Stat_t, s *copyStats) error {
+	if s.allowLink != nil && !s.allowLink(append(append([]string{}, s.cur...), dstName)) {
+		s.note("%s: links aren't restored here", joinPath(s.cur, dstName))
+		return nil
+	}
 	buf := make([]byte, unix.PathMax)
 	n, err := unix.Readlinkat(srcDir, name, buf)
 	if err != nil {
@@ -252,6 +269,8 @@ func copyDir(ctx context.Context, srcDir int, name string, dstDir int, dstName s
 	if err != nil {
 		return err
 	}
+	s.cur = append(s.cur, dstName)
+	defer func() { s.cur = s.cur[:len(s.cur)-1] }()
 	for _, n := range names {
 		if err := copyEntry(ctx, sfd, n, dfd, n, replace, s); err != nil {
 			if ctx.Err() != nil {
@@ -466,4 +485,11 @@ func removeInRootDir(p string) error {
 		return &os.PathError{Op: "remove", Path: p, Err: err}
 	}
 	return nil
+}
+
+func joinPath(dir []string, name string) string {
+	if len(dir) == 0 {
+		return name
+	}
+	return strings.Join(dir, "/") + "/" + name
 }

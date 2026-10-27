@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -142,13 +143,31 @@ type RestoreFill struct {
 	Files func(ctx context.Context, dir string, dev uint64) error
 	// Disk writes one disk's image onto its block device.
 	Disk func(ctx context.Context, name, device string) error
+	// Note, when set, is told what the restore did besides the version
+	// (disks it kept, the safety snapshot).
+	Note func(msg string)
+}
+
+func (f *RestoreFill) note(format string, args ...any) {
+	if f.Note != nil {
+		f.Note(fmt.Sprintf(format, args...))
+	}
 }
 
 // RestoreFromBackup puts a VM back to a version from a backup. It must be
-// off and confirm must be its name. A VM snapshot is taken first (so the
-// restore can be undone from the VM's snapshots); disks not in the
-// version are destroyed, disks it has are resized to it and overwritten.
+// off and confirm must be its name. The version's spec is checked as
+// strictly as one read from a pool before anything changes. A VM snapshot
+// is taken first (so the restore can be undone from the VM's snapshots);
+// the disks the version has are resized to it and overwritten. Disks the
+// VM has now and the version doesn't are never destroyed: they stay
+// attached, after the version's, so the safety snapshot keeps every
+// dataset it was taken of (decision 175).
 func (m *Manager) RestoreFromBackup(ctx context.Context, id, confirm string, f RestoreFill) (*VM, error) {
+	spec := f.Spec
+	spec.Normalize()
+	if spec.ID != id {
+		return nil, Problems{"that backup is of another VM"}
+	}
 	check := func() (*stored, error) {
 		st, err := m.find(ctx, id)
 		if err != nil {
@@ -162,10 +181,31 @@ func (m *Manager) RestoreFromBackup(ctx context.Context, id, confirm string, f R
 		}
 		return st, nil
 	}
-	if _, err := check(); err != nil {
+	prepare := func(st *stored) error {
+		pool, _, _ := strings.Cut(st.dataset, "/")
+		if spec.UUID != st.spec.UUID {
+			return Problems{"that backup is of another VM"}
+		}
+		spec.Pool = pool
+		if err := m.checkStored(&spec); err != nil {
+			return Problems{"the VM in the backup isn't valid here: " + err.Error()}
+		}
+		for _, d := range spec.Disks {
+			if f.DiskBytes[d.Name] <= 0 {
+				return fmt.Errorf("the backup has no image of %s", d.Name)
+			}
+		}
+		return nil
+	}
+	st, err := check()
+	if err != nil {
 		return nil, err
 	}
-	if _, err := m.TakeSnapshot(ctx, SnapshotArgs{ID: id, Label: "Before restoring from a backup"}); err != nil {
+	if err := prepare(st); err != nil {
+		return nil, err
+	}
+	snap, err := m.TakeSnapshot(ctx, SnapshotArgs{ID: id, Label: "Before restoring from a backup"})
+	if err != nil {
 		return nil, err
 	}
 	unlock, err := m.lockValid(id)
@@ -173,17 +213,36 @@ func (m *Manager) RestoreFromBackup(ctx context.Context, id, confirm string, f R
 		return nil, err
 	}
 	defer unlock()
-	st, err := check()
-	if err != nil {
+	if st, err = check(); err != nil {
 		return nil, err
 	}
-	spec := f.Spec
-	pool, _, _ := strings.Cut(st.dataset, "/")
-	if spec.ID != id || spec.UUID != st.spec.UUID {
-		return nil, Problems{"that backup is of another VM"}
+	if err := prepare(st); err != nil {
+		return nil, err
 	}
-	spec.Pool = pool
-	return m.fillFromBackup(ctx, st, &spec, f, false)
+	// Disks the version doesn't have stay, attached after its own.
+	have := map[string]bool{}
+	for _, d := range spec.Disks {
+		have[d.Name] = true
+	}
+	var kept []string
+	for _, d := range st.spec.Disks {
+		if !have[d.Name] {
+			spec.Disks = append(spec.Disks, d)
+			kept = append(kept, d.Name)
+		}
+	}
+	if len(kept) > 0 {
+		if err := m.checkStored(&spec); err != nil {
+			return nil, Problems{fmt.Sprintf("the version doesn't have %s, which can't stay attached: %v; remove it first", strings.Join(kept, ", "), err)}
+		}
+		f.note("kept %s, which the version doesn't have, attached after its disks", strings.Join(kept, ", "))
+	}
+	f.note("the VM's snapshot %s has it as it was before the restore", snap.Name)
+	v, err := m.fillFromBackup(ctx, st, &spec, f, kept)
+	if err != nil {
+		return nil, fmt.Errorf("%w (the VM's snapshot %s has it as it was)", err, snap.Name)
+	}
+	return v, nil
 }
 
 // RestoreNewFromBackup creates a VM from a backup on pool (a rebuilt
@@ -225,35 +284,27 @@ func (m *Manager) RestoreNewFromBackup(ctx context.Context, pool string, f Resto
 		return nil, err
 	}
 	st.spec = s
-	v, err := m.fillFromBackup(ctx, st, &s, f, true)
+	v, err := m.fillFromBackup(ctx, st, &s, f, nil)
 	if err != nil {
 		m.log().Warn("vms: a VM restored from a backup is incomplete", "id", s.ID, "err", err)
 	}
 	return v, err
 }
 
-func (m *Manager) fillFromBackup(ctx context.Context, st *stored, spec *Spec, f RestoreFill, fresh bool) (*VM, error) {
+// fillFromBackup writes the files and the version's disks; kept are disks
+// already there that the version doesn't have (left as they are).
+func (m *Manager) fillFromBackup(ctx context.Context, st *stored, spec *Spec, f RestoreFill, kept []string) (*VM, error) {
 	pool, _, _ := strings.Cut(st.dataset, "/")
 	if f.Files != nil {
 		if err := f.Files(ctx, st.dir, st.dev); err != nil {
 			return nil, fmt.Errorf("restoring the VM's files: %w", err)
 		}
 	}
-	// Disks: the version's set, at the version's sizes.
-	want := map[string]bool{}
+	// Disks: the version's, at the version's sizes; nothing is destroyed.
 	for _, d := range spec.Disks {
-		want[d.Name] = true
-	}
-	if !fresh {
-		for _, d := range st.spec.Disks {
-			if !want[d.Name] {
-				if _, err := m.zfs(ctx, "destroy", "-r", DiskDataset(pool, spec.ID, d.Name)); err != nil {
-					return nil, fmt.Errorf("removing %s, which the version doesn't have: %w", d.Name, err)
-				}
-			}
+		if slices.Contains(kept, d.Name) {
+			continue
 		}
-	}
-	for _, d := range spec.Disks {
 		ds := DiskDataset(pool, spec.ID, d.Name)
 		size := f.DiskBytes[d.Name]
 		if size <= 0 {
@@ -300,11 +351,14 @@ func (m *Manager) fillFromBackup(ctx context.Context, st *stored, spec *Spec, f 
 	return m.Get(ctx, spec.ID)
 }
 
+// zvolReady says whether a zvol's node is there (a device; tests use files).
+var zvolReady = func(fi os.FileInfo) bool { return fi.Mode()&os.ModeDevice != 0 }
+
 // waitZvol waits for a zvol's device node (udev makes it).
 func (m *Manager) waitZvol(ctx context.Context, pool, id, disk string) (string, error) {
 	p := ZvolPath(pool, id, disk)
 	for i := 0; i < 120; i++ {
-		if fi, err := os.Stat(m.sys(p)); err == nil && fi.Mode()&os.ModeDevice != 0 {
+		if fi, err := os.Stat(m.sys(p)); err == nil && zvolReady(fi) {
 			return m.sys(p), nil
 		}
 		select {
