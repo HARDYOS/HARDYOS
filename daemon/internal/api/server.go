@@ -17,6 +17,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/backups"
 	"github.com/hardyos/hardyos/daemon/internal/clientip"
+	"github.com/hardyos/hardyos/daemon/internal/cloudbackups"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/files"
 	"github.com/hardyos/hardyos/daemon/internal/installer"
@@ -59,6 +60,8 @@ type Config struct {
 	Updates *updates.Service
 	// Backups enables settings backups (nil disables them).
 	Backups *backups.Service
+	// CloudBackups enables versioned cloud backups (nil disables them).
+	CloudBackups *cloudbackups.Service
 	// Apps finds Docker app packages and keeps app access, imported
 	// catalogs and window proxy ports; nil uses the default folders and DB.
 	Apps *appstore.Store
@@ -198,6 +201,9 @@ func New(cfg Config) *Server {
 			s.cfg.SSOIssuer = s.oidc.Issuer
 		}
 	}
+	if cfg.CloudBackups != nil && cfg.Jobs != nil && cfg.Installer == nil {
+		s.registerCloudJobs(cfg.Jobs)
+	}
 	s.routes()
 	return s
 }
@@ -259,6 +265,9 @@ func (s *Server) routes() {
 		}
 		if s.cfg.Backups != nil {
 			s.backupRoutes()
+		}
+		if s.cfg.CloudBackups != nil {
+			s.cloudBackupRoutes()
 		}
 		s.oidcRoutes() // Control Panel > Sign-in (OIDC); the provider itself is routed in ServeHTTP
 		if _, ok := s.cfg.Files.(files.Service); ok {

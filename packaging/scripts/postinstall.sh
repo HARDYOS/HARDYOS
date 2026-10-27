@@ -29,6 +29,16 @@ if ! getent passwd hardyos-import >/dev/null; then
     --shell /usr/sbin/nologin --gecos "HardyOS VM image imports" hardyos-import
 fi
 
+# Cloud backups run restic as this user, in a sandbox with only the
+# capabilities each run needs, never as root (decision 236).
+if ! getent group hardyos-restic >/dev/null; then
+  addgroup --system hardyos-restic
+fi
+if ! getent passwd hardyos-restic >/dev/null; then
+  adduser --system --ingroup hardyos-restic --home /nonexistent --no-create-home \
+    --shell /usr/sbin/nologin --gecos "HardyOS cloud backups (restic)" hardyos-restic
+fi
+
 if [ -d /run/systemd/system ]; then
   systemctl daemon-reload
   systemctl enable hardyos-issue.service hardyd-priv.service hardyd.service >/dev/null

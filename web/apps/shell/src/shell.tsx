@@ -1,7 +1,7 @@
 import type { AppManifest, ShellBridge } from "@hardy/sdk";
 import type { User } from "@hardy/api-client";
 import { type ComponentType, type LazyExoticComponent, type ReactNode, createContext, lazy, useContext } from "react";
-import { ActivityIcon, BagIcon, FolderIcon, ListIcon, PhotoIcon, ScreenIcon, SlidersIcon, StorageIcon, TerminalIcon, VMIcon } from "./icons";
+import { ActivityIcon, BagIcon, CloudUpIcon, FolderIcon, ListIcon, PhotoIcon, ScreenIcon, SlidersIcon, StorageIcon, TerminalIcon, VMIcon } from "./icons";
 
 /** Props every app window receives. */
 export interface AppProps {
@@ -78,6 +78,16 @@ export const APPS: AppDef[] = [
     color: "#0B7285",
     glyph: (s) => <VMIcon size={s} />,
     component: lazy(() => import("./apps/vms/VirtualMachines")),
+    defaultSize: { width: 1140, height: 760 },
+    adminOnly: true,
+  },
+  {
+    id: "os.hardy.backup",
+    name: "Backup",
+    icon: "cloud",
+    color: "#0891B2",
+    glyph: (s) => <CloudUpIcon size={s} />,
+    component: lazy(() => import("./apps/backup/Backup")),
     defaultSize: { width: 1140, height: 760 },
     adminOnly: true,
   },

@@ -260,6 +260,14 @@ func (m *Manager) Rollback(ctx context.Context, a RollbackArgs) error {
 	if _, err := m.run(ctx, "zfs", "rollback", "-r", ia.dataset+"@"+a.Snapshot); err != nil {
 		return fmt.Errorf("rolling back %s: %w", ia.dataset, err)
 	}
+	return m.bringBack(ctx, ia, c, a.Snapshot)
+}
+
+// bringBack starts an app again after its dataset was put back to an
+// earlier state (a snapshot, or a version from a cloud backup), with m.mu
+// held and the app stopped. label names that state in messages.
+func (m *Manager) bringBack(ctx context.Context, ia *installedApp, c *EngineConfig, label string) error {
+	a := struct{ ID, Snapshot string }{ia.state.ID, label}
 	back, err := m.load(ctx, c, a.ID)
 	if err != nil {
 		return fmt.Errorf("reading %s after the rollback: %w", ia.manifest.Name, err)

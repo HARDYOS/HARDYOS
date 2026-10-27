@@ -3892,6 +3892,376 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/backup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Destinations, backup tasks and a pending rebuild (admin) */
+        get: operations["getCloudBackup"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/backup/targets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Add a destination (a job that tests the bucket and creates or opens the repository)
+         * @description The access keys and a repository key typed in from a recovery kit
+         *     reach the job through memory only (never job parameters) and are
+         *     kept sealed by hardyd-priv; they're never returned. When the job's
+         *     result says `created`, download the recovery kit.
+         */
+        post: operations["createBackupTarget"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/backup/targets/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /** Change a destination (a job; empty keys keep the saved ones) */
+        put: operations["updateBackupTarget"];
+        post?: never;
+        /** Forget a destination on this server (a job; the backups in the bucket stay) */
+        delete: operations["removeBackupTarget"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/backup/targets/{id}/maintenance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /** When the destination is pruned and checked (weekly), and how much is read back */
+        put: operations["setBackupMaintenance"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/backup/targets/{id}/recovery-kit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * The destination's recovery kit (needs the administrator's password; audited)
+         * @description The kit holds the repository's key: with it and the bucket's keys
+         *     anyone can read the backups. Every download needs the password
+         *     again and is recorded in the audit log.
+         */
+        post: operations["getBackupRecoveryKit"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/backup/targets/{id}/prune": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Free the space no version needs any more, now (a job) */
+        post: operations["pruneBackupTarget"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/backup/targets/{id}/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Check the repository and read back part of its data, now (a job) */
+        post: operations["checkBackupTarget"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/backup/targets/{id}/versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Every version in the destination, newest first */
+        get: operations["listBackupVersions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/backup/targets/{id}/browse": {
+        parameters: {
+            query: {
+                snapshot: string;
+                path?: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** One folder of a shared folder's or app's version */
+        get: operations["browseBackupVersion"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/backup/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The backup tasks */
+        get: operations["listBackupTasks"];
+        put?: never;
+        /** Make a backup task (audited) */
+        post: operations["createBackupTask"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/backup/tasks/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /** Change a backup task (audited) */
+        put: operations["updateBackupTask"];
+        post?: never;
+        /** Delete a backup task (its versions stay in the destination; audited) */
+        delete: operations["deleteBackupTask"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/backup/tasks/{id}/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Back up now (a job) */
+        post: operations["runBackupTask"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/backup/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Recent runs of tasks, restores and upkeep, newest first */
+        get: operations["listBackupRuns"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/backup/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Restore from a version (a job; a rollback needs the item's name typed) */
+        post: operations["restoreCloudBackup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/backup/rebuild": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The rebuild a "Restore from backup" install left to finish, if any */
+        get: operations["getBackupRebuild"];
+        put?: never;
+        /** Bring a version's shared folders, apps and VMs back onto a pool (a job) */
+        post: operations["startBackupRebuild"];
+        /** Forget the pending rebuild */
+        delete: operations["dismissBackupRebuild"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/files/backups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Cloud backup versions of a shared folder the person can open
+         * @description For everyone signed in: only folders whose access rules let the
+         *     person in today. Restoring is checked again by hardyd-priv, as the
+         *     person (see /files/backups/restore).
+         */
+        get: operations["listFileBackupVersions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/files/backups/browse": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One folder of a shared folder's version */
+        get: operations["browseFileBackup"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/files/backups/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Restore files from a version, as the person (a job)
+         * @description Each file is read from the version by a file worker running as the
+         *     person (the permissions it had then apply) and written by another
+         *     (their access today applies), so nobody gets more than they have.
+         */
+        post: operations["restoreFileBackup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/installer/cloud/probe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Open a cloud backup from its recovery kit and list the versions to restore from */
+        post: operations["probeInstallerBackup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/replication": {
         parameters: {
             query?: never;
@@ -5070,6 +5440,13 @@ export interface components {
             };
             /** @description Must be true; the boot disks are erased */
             confirmWipe: boolean;
+            /**
+             * @description Restore from a cloud backup: the version's settings and domain are
+             *     applied at the first start (the administrator above is used only if
+             *     they can't be), and the Backup app then offers to bring back the
+             *     shared folders, apps and VMs.
+             */
+            restore?: components["schemas"]["InstallRestore"];
         };
         /** @description Body of every non-2xx response */
         Error: {
@@ -7266,6 +7643,246 @@ export interface components {
         };
         VMLogs: {
             logs: string;
+        };
+        ConfirmRequest: {
+            /** @description The name */
+            confirm: string;
+        };
+        PasswordRequest: {
+            /** @description The signed-in administrator's own password */
+            password: string;
+        };
+        BackupItem: {
+            /** @enum {string} */
+            kind: "share" | "app" | "vm" | "system";
+            /** @description The shared folder's */
+            id?: string;
+        };
+        BackupSchedule: {
+            /** @enum {string} */
+            frequency: "manual" | "hourly" | "daily" | "weekly";
+            /** @description HH:MM, server time (hourly: the first hour and the minute) */
+            time?: string;
+            /** @description hourly: 1, 2, 3, 4, 6, 8 or 12 */
+            everyHours?: number;
+            /** @description weekly: 0 = Sunday */
+            weekdays?: number[];
+        };
+        BackupRetention: {
+            daily: number;
+            weekly: number;
+            monthly: number;
+        };
+        BackupMaintenance: {
+            weekday: number;
+            time: string;
+            /** @description How much of the data a check reads back */
+            checkPercent: number;
+        };
+        /** @description A destination. Credentials and the repository key are never returned. */
+        BackupTarget: {
+            id: string;
+            name: string;
+            /** @enum {string} */
+            kind: "s3" | "b2";
+            endpoint?: string;
+            bucket: string;
+            prefix?: string;
+            region?: string;
+            allowLan?: boolean;
+            limitUploadKiB?: number;
+            limitDownloadKiB?: number;
+            /** Format: date-time */
+            createdAt: string;
+            /** @description The access key's last four characters */
+            accessKeyHint?: string;
+            maintenance: components["schemas"]["BackupMaintenance"];
+            /** Format: date-time */
+            kitDownloadedAt: string | null;
+            lastCheck: components["schemas"]["BackupRun"] | null;
+        };
+        BackupTargetRequest: {
+            /** @description 1-32 lower-case letters, digits or '-' */
+            id: string;
+            name: string;
+            /** @enum {string} */
+            kind: "s3" | "b2";
+            /** @description S3: https://host[:port] */
+            endpoint?: string;
+            bucket: string;
+            prefix?: string;
+            region?: string;
+            /** @description Allow an endpoint on the local network (a MinIO on the LAN) */
+            allowLan?: boolean;
+            limitUploadKiB?: number;
+            limitDownloadKiB?: number;
+            /** @description S3 access key ID / B2 key ID (empty on a change: keep) */
+            accessKey?: string;
+            /** @description S3 secret key / B2 application key (empty on a change: keep) */
+            secretKey?: string;
+            /** @description An existing repository's key, from its recovery kit (empty: create a new repository) */
+            repoKey?: string;
+        };
+        BackupRun: {
+            id: string;
+            taskId: string;
+            /** @enum {string} */
+            kind: "backup" | "restore" | "prune" | "check" | "rebuild";
+            target: string;
+            jobId: string;
+            trigger: string;
+            /** @enum {string} */
+            state: "running" | "succeeded" | "partial" | "failed" | "cancelled" | "missed";
+            /** Format: date-time */
+            startedAt: string;
+            /** Format: date-time */
+            finishedAt: string | null;
+            /** Format: int64 */
+            files: number;
+            /** Format: int64 */
+            bytes: number;
+            /**
+             * Format: int64
+             * @description New data sent
+             */
+            added: number;
+            detail: {
+                [key: string]: unknown;
+            };
+            error: string;
+        };
+        BackupTask: {
+            id: string;
+            name: string;
+            target: string;
+            items: components["schemas"]["BackupItem"][];
+            schedule: components["schemas"]["BackupSchedule"];
+            retention: components["schemas"]["BackupRetention"];
+            enabled: boolean;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+            lastRun: components["schemas"]["BackupRun"] | null;
+            /** Format: date-time */
+            nextRun: string | null;
+            running: boolean;
+        };
+        BackupTaskInput: {
+            name: string;
+            target: string;
+            items: components["schemas"]["BackupItem"][];
+            schedule?: components["schemas"]["BackupSchedule"];
+            retention?: components["schemas"]["BackupRetention"];
+            enabled?: boolean;
+        };
+        BackupRebuildOffer: {
+            target: string;
+            run: string;
+            /** Format: date-time */
+            since: string;
+        };
+        CloudBackupOverview: {
+            targets: components["schemas"]["BackupTarget"][];
+            tasks: components["schemas"]["BackupTask"][];
+            offer: components["schemas"]["BackupRebuildOffer"] | null;
+        };
+        RecoveryKit: {
+            fileName: string;
+            /** @description Instructions and the framed key block */
+            text: string;
+        };
+        BackupVersionItem: {
+            /** @description share:<id>, app:<id>, vm:<id> or system */
+            item: string;
+            /** @description The snapshot to browse and restore */
+            snapshot: string;
+            disks?: {
+                [key: string]: string;
+            };
+            /** Format: date-time */
+            time: string;
+            /** Format: int64 */
+            files: number;
+            /** Format: int64 */
+            bytes: number;
+        };
+        BackupVersion: {
+            run: string;
+            task: string;
+            /** Format: date-time */
+            time: string;
+            manifest?: string;
+            /** @description Install id of the server that made the version */
+            server?: string;
+            /** @description Made by this server (people only ever see these; others are another server's sharing the bucket) */
+            thisServer: boolean;
+            items: components["schemas"]["BackupVersionItem"][];
+        };
+        BackupEntry: {
+            name: string;
+            path: string;
+            dir: boolean;
+            type: string;
+            /** Format: int64 */
+            size: number;
+            /** Format: date-time */
+            modified: string;
+        };
+        BackupEntries: {
+            entries: components["schemas"]["BackupEntry"][];
+        };
+        BackupRestoreRequest: {
+            target: string;
+            snapshot: string;
+            /** @description Inside the item; none = all */
+            paths?: string[];
+            /** @enum {string} */
+            mode: "copy" | "in_place" | "rollback";
+            /** @description copy: the new folder's name */
+            folder?: string;
+            /** @description rollback: the shared folder's, app's or VM's name (settings: "settings") */
+            confirm?: string;
+        };
+        BackupRebuildRequest: {
+            target: string;
+            run: string;
+            pool: string;
+            items?: string[];
+            /** @enum {string} */
+            confirm: "rebuild";
+        };
+        FileBackupVersion: {
+            target: string;
+            targetName: string;
+            run: string;
+            /** Format: date-time */
+            time: string;
+            snapshot: string;
+        };
+        FileBackupRestoreRequest: {
+            share: string;
+            target: string;
+            snapshot: string;
+            paths?: string[];
+            /** @enum {string} */
+            mode: "copy" | "in_place";
+            folder?: string;
+        };
+        InstallRestore: {
+            /** @description The recovery kit's text */
+            kit: string;
+            accessKey: string;
+            secretKey: string;
+            /** @description The version (install only) */
+            run?: string;
+        };
+        InstallBackupVersion: {
+            run: string;
+            time: string;
+            hostname: string;
+            items: string[];
+            target: string;
         };
         /** @enum {string} */
         ReplicationKind: "share" | "app" | "vm";
@@ -13672,6 +14289,571 @@ export interface operations {
             400: components["responses"]["Invalid"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    getCloudBackup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Overview */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CloudBackupOverview"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    createBackupTarget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BackupTargetRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    updateBackupTarget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BackupTargetRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    removeBackupTarget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConfirmRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    setBackupMaintenance: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BackupMaintenance"];
+            };
+        };
+        responses: {
+            /** @description Saved */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupMaintenance"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    getBackupRecoveryKit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PasswordRequest"];
+            };
+        };
+        responses: {
+            /** @description The kit as a text file to save */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecoveryKit"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            429: components["responses"]["Invalid"];
+        };
+    };
+    pruneBackupTarget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    checkBackupTarget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listBackupVersions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Versions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        versions: components["schemas"]["BackupVersion"][];
+                    };
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    browseBackupVersion: {
+        parameters: {
+            query: {
+                snapshot: string;
+                path?: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Entries */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupEntries"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    listBackupTasks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tasks */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        tasks: components["schemas"]["BackupTask"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    createBackupTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BackupTaskInput"];
+            };
+        };
+        responses: {
+            /** @description Made */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupTask"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    updateBackupTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BackupTaskInput"];
+            };
+        };
+        responses: {
+            /** @description Changed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupTask"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteBackupTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    runBackupTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listBackupRuns: {
+        parameters: {
+            query?: {
+                task?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Runs */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        runs: components["schemas"]["BackupRun"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    restoreCloudBackup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BackupRestoreRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    getBackupRebuild: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Offer (null when there's nothing to finish) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        offer: components["schemas"]["BackupRebuildOffer"] | null;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    startBackupRebuild: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BackupRebuildRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    dismissBackupRebuild: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Dismissed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    listFileBackupVersions: {
+        parameters: {
+            query: {
+                share: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Versions with this folder */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        versions: components["schemas"]["FileBackupVersion"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    browseFileBackup: {
+        parameters: {
+            query: {
+                share: string;
+                target: string;
+                snapshot: string;
+                path?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Entries */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupEntries"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    restoreFileBackup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FileBackupRestoreRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    probeInstallerBackup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InstallRestore"];
+            };
+        };
+        responses: {
+            /** @description Versions with settings, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        versions: components["schemas"]["InstallBackupVersion"][];
+                    };
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
         };
     };
     getReplication: {

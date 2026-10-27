@@ -46,17 +46,7 @@ func (m *Manager) AdoptRestored(ctx context.Context, id string) error {
 	// Its user ID came with the data: keep it only when it's an app ID no
 	// other app here has, else the reinstall picks a free one.
 	if ia.state.UID != 0 {
-		others, err := m.installed(ctx, c)
-		if err != nil {
-			return err
-		}
-		clash := ia.state.UID < FirstAppUID || ia.state.UID > LastAppUID
-		for _, o := range others {
-			if o.state.ID != id && o.state.UID == ia.state.UID {
-				clash = true
-			}
-		}
-		if clash {
+		if !m.uidFree(ctx, c, id, ia.state.UID) {
 			m.log().Warn("apps: the restored app's user ID is taken or invalid; a new one is chosen when it's reinstalled", "app", id, "uid", ia.state.UID)
 			ia.state.UID = 0
 		}

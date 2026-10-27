@@ -723,7 +723,7 @@ func (s *Service) Tick(ctx context.Context) {
 				last = t.LastSuccessAt.Format("2006-01-02 15:04 UTC")
 			}
 			s.notifier().Notify(ctx, Event{Kind: EventStale, Severity: SeverityCritical, Title: "Replication " + t.Name + " is behind",
-				Body: "Its last successful run was " + last + ". " + t.LastError, Link: "control/replication", Time: now})
+				Body: "Its last successful run was " + last + ". " + t.LastError, Link: "backup/replication", Time: now})
 			_ = s.st.setAlert(ctx, t.ID, "stale")
 		}
 	}
