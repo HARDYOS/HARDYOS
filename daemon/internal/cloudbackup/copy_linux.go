@@ -370,6 +370,17 @@ func openFolder(path string, dev uint64) (int, error) {
 	return fd, nil
 }
 
+// openNoLinks opens a regular file for reading from /, following no link
+// on the way.
+func openNoLinks(path string) (int, error) {
+	how := &unix.OpenHow{Flags: uint64(unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_CLOEXEC), Resolve: unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS}
+	fd, err := unix.Openat2(unix.AT_FDCWD, path, how)
+	if err != nil {
+		return -1, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	return fd, nil
+}
+
 // requireBlockDevice is off only in tests, which write "disks" to files.
 var requireBlockDevice = true
 

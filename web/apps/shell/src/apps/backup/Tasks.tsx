@@ -290,7 +290,7 @@ export function TaskWizard({ task, targets, onClose }: { task: BackupTask | null
                 <label className={`bk-pick__item ${items.includes("system") ? "is-on" : ""}`}>
                   <input type="checkbox" checked={items.includes("system")} onChange={(e) => toggleItem("system", e.target.checked)} />
                   <span>
-                    Settings and domain <span className="small muted">(accounts, network, shares' settings, the domain controller: enough to rebuild this server)</span>
+                    Settings and domain <span className="small muted">(accounts, network, encryption keys, the domain controller: with the folders, apps and VMs, enough to rebuild this server)</span>
                   </span>
                 </label>
               </fieldset>

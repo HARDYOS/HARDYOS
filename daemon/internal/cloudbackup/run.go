@@ -13,7 +13,6 @@ import (
 
 	"github.com/hardyos/hardyos/daemon/internal/apps"
 	"github.com/hardyos/hardyos/daemon/internal/backup"
-	"github.com/hardyos/hardyos/daemon/internal/rootfile"
 	"github.com/hardyos/hardyos/daemon/internal/shares"
 	"github.com/hardyos/hardyos/daemon/internal/vms"
 )
@@ -157,6 +156,7 @@ func (r *Root) mountDir(it Item) string {
 }
 
 func (r *Root) runBackup(ctx context.Context, tc taskCtx, repo *Repo, a BackupArgs) (*RunResult, error) {
+	defer snapshotCache.drop(repo.Target.ID)
 	res := &RunResult{Run: a.Run}
 	m := Manifest{Format: 1, Run: a.Run, Task: a.Task, Time: r.now(), Hostname: a.System.Hostname, Version: a.System.Version,
 		Shares: []ShareRecord{}, Apps: []apps.BackupSource{}, VMs: []VMRecord{}}
@@ -376,16 +376,12 @@ func (r *Root) systemDB(path string) ([]byte, error) {
 	if filepath.Dir(path) != work || !dbNameRE.MatchString(filepath.Base(path)) {
 		return nil, fmt.Errorf("the database copy must be in %s", work)
 	}
-	f, err := rootfile.OpenRegular(path, backup.MaxBytes)
+	// hardyd owns the folder: no link anywhere on the way is followed.
+	fd, err := openNoLinks(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-	var b bytes.Buffer
-	if _, err := b.ReadFrom(f); err != nil {
-		return nil, err
-	}
-	return b.Bytes(), nil
+	return readAllFD(fd, backup.MaxBytes)
 }
 
 func (r *Root) backupSystem(ctx context.Context, repo *Repo, a BackupArgs, tags []string, ir *ItemResult, step func(Progress, string)) error {
