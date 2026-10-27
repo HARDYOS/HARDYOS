@@ -209,7 +209,7 @@ func main() {
 		// the settings; the destination an installer's "Restore from
 		// backup" left is taken over now (after the settings restore above).
 		cb := &cloudbackup.Root{
-			Restic: &cloudbackup.Restic{Sandbox: &cloudbackup.Sandbox{}}, Vol: &cloudbackup.ZFS{Runner: sysexec.Exec{}},
+			Restic: &cloudbackup.Restic{Sandbox: &cloudbackup.Sandbox{}}, Vol: &cloudbackup.ZFS{Runner: sysexec.Exec{}}, DBOwner: hardydUID,
 			Shares: shm, Apps: am, VMs: vmm, System: bk, Log: log,
 			Key: func() ([]byte, error) { return priv.RootKeyFor(zfs.KeyDir, "cloud-backup") },
 		}

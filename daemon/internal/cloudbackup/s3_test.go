@@ -244,6 +244,11 @@ func TestS3CredentialsAndEgress(t *testing.T) {
 	if _, err := e.root.Save(ctx, SaveArgs{Target: moved, Update: true}); err == nil {
 		t.Fatal("moved a destination without its key")
 	}
+	// Even with the repository's key, the saved access keys don't go to
+	// another host (decision 183).
+	if _, err := e.root.Save(ctx, SaveArgs{Target: moved, Update: true, RepoPassword: strings.Repeat("k", 43)}); err == nil || !strings.Contains(err.Error(), "access keys again") {
+		t.Fatalf("saved keys sent to a new host: %v", err)
+	}
 }
 
 func keysOf(m map[string][]byte) []string {

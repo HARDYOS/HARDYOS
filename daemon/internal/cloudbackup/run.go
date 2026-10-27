@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/hardyos/hardyos/daemon/internal/apps"
 	"github.com/hardyos/hardyos/daemon/internal/backup"
 	"github.com/hardyos/hardyos/daemon/internal/shares"
@@ -381,6 +383,17 @@ func (r *Root) systemDB(path string) ([]byte, error) {
 	fd, err := openNoLinks(path)
 	if err != nil {
 		return nil, err
+	}
+	// A regular file hardyd made, with one name (not a hard link to a file
+	// hardyd can't read, such as root's keys).
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		closeFD(fd)
+		return nil, err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Nlink != 1 || (r.DBOwner > 0 && int(st.Uid) != r.DBOwner) {
+		closeFD(fd)
+		return nil, errors.New("the database copy isn't hardyd's own file")
 	}
 	return readAllFD(fd, backup.MaxBytes)
 }

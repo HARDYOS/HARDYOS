@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -79,6 +80,9 @@ type Root struct {
 	WorkDir string
 	// Key returns the 32-byte sealing key (derived from the master key).
 	Key func() ([]byte, error)
+	// DBOwner is hardyd's user ID: the database copy for a settings backup
+	// must be its own (0: not checked, tests).
+	DBOwner int
 	// AllowLocal permits local: repositories (tests only).
 	AllowLocal bool
 	// Resolver checks endpoints when a destination is saved; nil = DNS.
@@ -210,6 +214,10 @@ func (r *Root) Save(ctx context.Context, a SaveArgs) (*SaveResult, error) {
 		}
 		creds = old.Creds
 		t.CreatedAt = old.Target.CreatedAt
+		// The saved keys never go to another host (decision 183).
+		if endpointHost(&old.Target) != endpointHost(&t) && (a.AccessKey == "" || a.SecretKey == "") {
+			return nil, problemf("the destination's address changed: enter its access keys again")
+		}
 		if old.Target.Repository() != t.Repository() && a.RepoPassword == "" {
 			return nil, problemf("this is another repository now: enter the key from its recovery kit, or add it as a new destination")
 		}
@@ -273,6 +281,18 @@ func (r *Root) Save(ctx context.Context, a SaveArgs) (*SaveResult, error) {
 	}
 	r.log().Info("cloud backup: destination saved", "target", t.ID, "kind", t.Kind, "created", created)
 	return &SaveResult{Target: t, Created: created}, nil
+}
+
+// endpointHost is where a destination's keys are sent.
+func endpointHost(t *Target) string {
+	if t.Kind != KindS3 {
+		return string(t.Kind)
+	}
+	h, p, err := ParseEndpoint(t.Endpoint)
+	if err != nil {
+		return t.Endpoint
+	}
+	return strings.ToLower(h) + ":" + strconv.Itoa(p)
 }
 
 // accessTimeout bounds testing a destination (restic retries some

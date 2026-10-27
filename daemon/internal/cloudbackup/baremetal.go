@@ -52,6 +52,10 @@ func (r *Root) probeRepo(a ProbeArgs) (*Repo, error) {
 
 // Probe lists the versions in the repository that hold the settings,
 // newest first.
+//
+// It runs on the installer before anything is set up, against whatever the
+// kit names, so it's bounded (Root.AccessTimeout, 90 s) and its errors are
+// HardyOS's own words: nothing the far end sends is shown (decision 183).
 func (r *Root) Probe(ctx context.Context, a ProbeArgs) ([]ProbeVersion, error) {
 	repo, err := r.probeRepo(a)
 	if err != nil {
@@ -60,16 +64,28 @@ func (r *Root) Probe(ctx context.Context, a ProbeArgs) ([]ProbeVersion, error) {
 	if err := CheckEndpoint(ctx, &repo.Target, r.resolver(), r.TestAllow); err != nil {
 		return nil, err
 	}
+	ctx, cancel := context.WithTimeout(ctx, r.accessTimeout())
+	defer cancel()
+	generic := func(err error) error {
+		r.log().Warn("installer: opening the backups", "target", repo.Target.ID, "err", err)
+		switch {
+		case errors.Is(err, ErrWrongKey):
+			return problemf("the recovery kit's key doesn't open these backups")
+		case ctx.Err() != nil:
+			return problemf("the destination didn't answer in time: check the network and the keys")
+		}
+		return problemf("couldn't open the backups with this recovery kit and these keys")
+	}
 	ok, err := r.Restic.Exists(ctx, repo)
 	if err != nil {
-		return nil, accessError(err)
+		return nil, generic(err)
 	}
 	if !ok {
 		return nil, problemf("there are no backups at that destination")
 	}
 	snaps, err := r.Restic.Snapshots(ctx, repo)
 	if err != nil {
-		return nil, err
+		return nil, generic(err)
 	}
 	out := []ProbeVersion{}
 	for _, v := range GroupVersions(snaps) {

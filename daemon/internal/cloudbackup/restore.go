@@ -122,6 +122,9 @@ func (r *Root) StartRestore(ctx context.Context, a RestoreArgs) (*Task, error) {
 		if strings.TrimSpace(a.Confirm) == "" {
 			return nil, problemf("type the name to confirm")
 		}
+		if it.Kind == ItemSystem && !strings.EqualFold(strings.TrimSpace(a.Confirm), "settings") {
+			return nil, problemf("type settings to confirm replacing this server's settings")
+		}
 	default:
 		return nil, problemf("choose how to restore")
 	}

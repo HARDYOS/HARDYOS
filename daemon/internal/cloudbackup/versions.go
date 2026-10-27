@@ -172,13 +172,25 @@ func (r *Root) findSnapshot(ctx context.Context, repo *Repo, id string) (*Snapsh
 	for i := range l {
 		if l[i].ID == id || (len(id) >= 8 && l[i].ShortID == id) {
 			it, err := ParseItem(l[i].Tag("item"))
-			if err != nil || len(l[i].Paths) != 1 {
+			if err != nil || len(l[i].Paths) != 1 || l[i].Paths[0] != r.snapshotPath(&l[i], it) {
 				return nil, Item{}, problemf("that version isn't one HardyOS made")
 			}
 			return &l[i], it, nil
 		}
 	}
 	return nil, Item{}, problemf("there's no such version (it may have been removed by the task's retention)")
+}
+
+// snapshotPath is the one path a HardyOS snapshot of it holds: the item's
+// stable mount folder, or the stream's name (a disk image, the settings).
+func (r *Root) snapshotPath(s *Snapshot, it Item) string {
+	if d, ok := strings.CutPrefix(s.Tag("part"), "disk:"); ok {
+		return "/" + DiskName(it.ID, d)
+	}
+	if it.Kind == ItemSystem {
+		return "/" + SettingsName
+	}
+	return r.mountDir(it)
 }
 
 // Entry is a file or folder in a version.
