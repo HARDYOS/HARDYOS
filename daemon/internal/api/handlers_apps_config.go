@@ -331,6 +331,9 @@ type AppOpen struct {
 	// (so the desktop can show it in a window); false is the app's own
 	// address, for a new tab.
 	Proxied bool `json:"proxied"`
+	// Published: URL is the app's own published address
+	// (https://<app>.<base>, through NetBird's reverse proxy).
+	Published bool `json:"published,omitempty"`
 }
 
 func (s *Server) handleAppOpen(w http.ResponseWriter, r *http.Request, u *auth.User) {
@@ -351,6 +354,12 @@ func (s *Server) handleAppOpen(w http.ResponseWriter, r *http.Request, u *auth.U
 	}
 	if a.Web == nil {
 		writeError(w, http.StatusBadRequest, "invalid", a.Name+" has no web page")
+		return
+	}
+	// Through the desktop's published address, published apps open at
+	// their own (the app gateway signs the person in there).
+	if u, ok := s.remote.publishedURL(r, a.ID); ok {
+		writeJSON(w, http.StatusOK, AppOpen{URL: u, Proxied: true, Published: true})
 		return
 	}
 	host := requestHost(r)

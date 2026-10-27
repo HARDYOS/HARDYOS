@@ -1,0 +1,6 @@
+[
+  {"id": "ds8i4ug6lnn4g9hqv7m1", "domain": "proxy.hardynetworks.net", "validated": true, "type": "free", "target_cluster": "proxy.hardynetworks.net",
+   "supports_custom_ports": true, "require_subdomain": true, "supports_crowdsec": false, "supports_private": false},
+  {"id": "ds8i4ug6lnn4g9hqv7m2", "domain": "home.hardynetworks.net", "validated": true, "type": "custom", "target_cluster": "proxy.hardynetworks.net",
+   "supports_custom_ports": true, "require_subdomain": true, "supports_crowdsec": false, "supports_private": false}
+]

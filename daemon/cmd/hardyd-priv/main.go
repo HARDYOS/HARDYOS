@@ -23,6 +23,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/fileworker"
 	"github.com/hardyos/hardyos/daemon/internal/hw"
 	"github.com/hardyos/hardyos/daemon/internal/install"
+	"github.com/hardyos/hardyos/daemon/internal/netbird"
 	"github.com/hardyos/hardyos/daemon/internal/network"
 	"github.com/hardyos/hardyos/daemon/internal/nfs"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
@@ -137,6 +138,15 @@ func main() {
 		go snaps.Run(ctx)
 		am := &apps.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log, Shares: shm}
 		priv.RegisterApps(s, am)
+		// Remote access: the NetBird client (off until the server joins a
+		// NetBird network; back on after an update if it had joined).
+		nbm := &netbird.Manager{Runner: sysexec.Exec{}, Root: "/"}
+		priv.RegisterNetBird(s, nbm)
+		go func() {
+			if err := nbm.OnStart(ctx); err != nil {
+				log.Warn("starting NetBird", "err", err)
+			}
+		}()
 		// File Manager and share links: files read and written as the person.
 		if err := priv.StartFiles(ctx, s, shm, fsm.HomesPool, log); err != nil {
 			log.Error("file access isn't available", "err", err)

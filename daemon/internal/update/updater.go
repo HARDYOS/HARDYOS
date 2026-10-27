@@ -262,8 +262,12 @@ var carryOver = []string{
 	"etc/zfs/zpool.cache", "etc/modprobe.d/hardyos-zfs.conf",
 }
 
-// carryOverGlobs are copied when present.
-var carryOverGlobs = []string{"etc/ssh/ssh_host_*", "etc/network/interfaces.d/*", TrustedKeysDir[1:] + "/*.pub"}
+// carryOverGlobs are copied when present. NetBird's state (this server's
+// WireGuard key and peer registration, and HardyOS's join marker) keeps the
+// server in its NetBird network across versions; files keep their modes
+// (0600).
+var carryOverGlobs = []string{"etc/ssh/ssh_host_*", "etc/network/interfaces.d/*", TrustedKeysDir[1:] + "/*.pub",
+	"var/lib/netbird/*.json", "var/lib/netbird/*.txt", "etc/netbird/*.json"}
 
 // StageResult is returned by Stage.
 type StageResult struct {

@@ -122,6 +122,10 @@ type proxyToken struct {
 	desktopToken string
 	next         string
 	expires      time.Time
+	// gateway: for a published app's host (appgateway.go), bound to the
+	// state cookie whose hash is state; never good on a window proxy port.
+	gateway bool
+	state   string
 }
 
 type proxySession struct {
@@ -130,6 +134,8 @@ type proxySession struct {
 	desktopToken string
 	expires      time.Time
 	checked      time.Time
+	// gateway: a published app host's session (appgateway.go).
+	gateway bool
 	// conns are the session's hijacked connections (WebSockets).
 	conns map[*trackedConn]struct{}
 }
@@ -152,11 +158,10 @@ func (s *Server) RunAppProxy(ctx context.Context, opts AppProxyOptions) {
 	// Finished app jobs change what the proxy serves: watch for them.
 	sub := s.cfg.Events.Subscribe(0, true, 256)
 	defer s.cfg.Events.Unsubscribe(sub)
+	p.init()
 	p.mu.Lock()
 	p.opts, p.running = opts, true
 	p.listeners = map[string]*proxyListener{}
-	p.tokens = map[string]proxyToken{}
-	p.sessions = map[string]*proxySession{}
 	p.mu.Unlock()
 	defer p.stop()
 	t := time.NewTicker(opts.Interval)
@@ -205,6 +210,21 @@ func finishedAppJob(e events.Event) string {
 		return j.Params.ID
 	}
 	return ""
+}
+
+// init makes the token and session maps (shared with the app gateway).
+func (p *appProxy) init() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.tokens == nil {
+		p.tokens = map[string]proxyToken{}
+	}
+	if p.sessions == nil {
+		p.sessions = map[string]*proxySession{}
+	}
+	if p.listeners == nil {
+		p.listeners = map[string]*proxyListener{}
+	}
 }
 
 func (p *appProxy) stop() {
@@ -513,7 +533,12 @@ func (p *appProxy) handler(l *proxyListener) http.Handler {
 // The app's own requests are same-origin and pass; navigations (opening the
 // app, links into it) pass, everything else from another origin doesn't.
 func (p *appProxy) crossAppRequest(r *http.Request) string {
-	own := p.scheme() + "://" + r.Host
+	return crossSiteRequest(r, p.scheme()+"://"+r.Host)
+}
+
+// crossSiteRequest says why a request to the origin own looks like it
+// comes from another page, or "".
+func crossSiteRequest(r *http.Request, own string) string {
 	origin := r.Header.Get("Origin")
 	upgrade := r.Header.Get("Upgrade") != "" && headerHasToken(r.Header, "Connection", "upgrade")
 	if origin != "" && !strings.EqualFold(origin, own) {
@@ -580,7 +605,7 @@ func (p *appProxy) signIn(w http.ResponseWriter, r *http.Request, l *proxyListen
 	t, ok := p.tokens[tok]
 	delete(p.tokens, tok) // single use, even when it's for another app
 	p.mu.Unlock()
-	if !ok || now.After(t.expires) || t.appID != l.appID {
+	if !ok || t.gateway || now.After(t.expires) || t.appID != l.appID {
 		proxyPage(w, http.StatusForbidden, "This link has expired",
 			"Open the app again from the HardyOS desktop.")
 		return
@@ -622,7 +647,7 @@ func (p *appProxy) session(r *http.Request, l *proxyListener) (*proxySession, st
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	ss := p.sessions[c.Value]
-	if ss == nil || ss.appID != l.appID || time.Now().After(ss.expires) || !sameSecret(desk, ss.desktopToken) {
+	if ss == nil || ss.gateway || ss.appID != l.appID || time.Now().After(ss.expires) || !sameSecret(desk, ss.desktopToken) {
 		return nil, ""
 	}
 	return ss, c.Value

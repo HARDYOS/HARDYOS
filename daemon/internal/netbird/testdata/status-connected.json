@@ -1,0 +1,44 @@
+{
+  "peers": {
+    "total": 4,
+    "connected": 3,
+    "details": [
+      {
+        "fqdn": "proxy-eu.netbird.selfhosted",
+        "netbirdIp": "100.83.12.7",
+        "publicKey": "5Ys9rKoN3Yq8lL0b6WcKq6nLq3cG8v6V4tY2w3l9QhM=",
+        "status": "Connected",
+        "lastStatusUpdate": "2026-10-26T18:40:11.231Z",
+        "connectionType": "P2P",
+        "iceCandidateType": {"local": "host", "remote": "srflx"},
+        "iceCandidateEndpoint": {"local": "192.168.1.20:51820", "remote": "203.0.113.7:51820"},
+        "relayAddress": "",
+        "lastWireguardHandshake": "2026-10-26T18:40:09.002Z",
+        "transferReceived": 18273,
+        "transferSent": 9123,
+        "latency": 21000000,
+        "quantumResistance": false,
+        "networks": []
+      }
+    ]
+  },
+  "cliVersion": "0.81.5",
+  "daemonVersion": "0.81.5",
+  "daemonStatus": "Connected",
+  "management": {"url": "https://vpn.hardynetworks.net:443", "connected": true, "error": ""},
+  "signal": {"url": "https://vpn.hardynetworks.net:443", "connected": true, "error": ""},
+  "relays": {"total": 1, "available": 1, "details": [{"uri": "rels://vpn.hardynetworks.net:443/relay", "available": true, "error": ""}]},
+  "netbirdIp": "100.83.40.2/16",
+  "publicKey": "3m2VvGf3o4i5tZ0bqQ6r6hYq0rWbS8G0xE1V7Jk9d1Y=",
+  "usesKernelInterface": true,
+  "wireguardPort": 51820,
+  "fqdn": "nas.netbird.selfhosted",
+  "quantumResistance": false,
+  "quantumResistancePermissive": false,
+  "networks": [],
+  "dnsServers": [],
+  "events": [],
+  "lazyConnectionEnabled": false,
+  "profileName": "default",
+  "sshServer": {"enabled": false, "sessions": []}
+}

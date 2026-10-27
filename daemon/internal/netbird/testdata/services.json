@@ -1,0 +1,21 @@
+[
+  {
+    "id": "cs8i4ug6lnn4g9hqv7mg",
+    "name": "grafana.example.net",
+    "domain": "grafana.home.hardynetworks.net",
+    "mode": "http",
+    "listen_port": 0,
+    "port_auto_assigned": false,
+    "proxy_cluster": "proxy.hardynetworks.net",
+    "targets": [{"target_id": "cs8i4ug6lnn4g9hqv7m9", "target_type": "peer", "path": "/", "access_action": "inherit", "protocol": "http", "host": "100.83.9.9", "port": 3000, "enabled": true}],
+    "enabled": true,
+    "terminated": false,
+    "pass_host_header": false,
+    "rewrite_redirects": false,
+    "auth": {"password_auth": {"enabled": true, "password": ""}},
+    "access_restrictions": {"allowed_cidrs": [], "blocked_cidrs": [], "allowed_countries": ["US"], "blocked_countries": [], "crowdsec_mode": "off"},
+    "meta": {"created_at": "2026-10-20T10:30:00Z", "certificate_issued_at": "2026-10-20T10:35:00Z", "status": "active"},
+    "private": false,
+    "access_groups": []
+  }
+]

@@ -24,6 +24,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/metrics"
 	"github.com/hardyos/hardyos/daemon/internal/notify"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
+	"github.com/hardyos/hardyos/daemon/internal/publish"
 	"github.com/hardyos/hardyos/daemon/internal/sharelinks"
 	"github.com/hardyos/hardyos/daemon/internal/storage"
 	"github.com/hardyos/hardyos/daemon/internal/store"
@@ -71,6 +72,15 @@ type Config struct {
 	// /files endpoints are served.
 	Files files.Access
 
+	// Remote publishes the desktop and apps through NetBird's reverse
+	// proxy (Control Panel › Remote Access); nil leaves publishing out.
+	Remote *publish.Publisher
+	// SSOIssuer is HardyOS's own OIDC provider's issuer, for the setup
+	// check (part B, internal/oidc, plugs in here; nil: none yet).
+	SSOIssuer publish.SSOIssuer
+	// Resolver looks up the base domain's CNAME (nil: the system's DNS).
+	Resolver publish.Resolver
+
 	// TrustedProxies are the reverse proxies whose X-Forwarded-For is
 	// believed for the client's address (sign-in limits, audit, share link
 	// limits). Empty (the default): the header is never read.
@@ -87,6 +97,7 @@ type Server struct {
 	mux      *http.ServeMux
 	tickets  terminalTickets
 	proxy    *appProxy
+	remote   *remoteRuntime
 	links    *sharelinks.Store
 	uploads  uploads
 	dav      davState
@@ -112,6 +123,7 @@ func New(cfg Config) *Server {
 	s := &Server{cfg: cfg, mux: http.NewServeMux(), started: time.Now(), log: cfg.Logger,
 		ips: &clientip.Resolver{Trusted: cfg.TrustedProxies}}
 	s.proxy = &appProxy{s: s}
+	s.remote = &remoteRuntime{s: s}
 	if cfg.DB != nil {
 		s.users = &auth.Users{DB: cfg.DB}
 		s.sessions = &auth.Sessions{DB: cfg.DB}
@@ -170,6 +182,7 @@ func (s *Server) routes() {
 			s.terminalRoutes()
 			s.domainRoutes()
 			s.appRoutes()
+			s.remoteRoutes()
 			s.shareRoutes()
 			s.fileServiceRoutes()
 			s.snapshotRoutes()
@@ -199,7 +212,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Frame-Options", "SAMEORIGIN")
 	h.Set("Referrer-Policy", "same-origin")
-	h.Set("Content-Security-Policy", "default-src 'self'; font-src 'self' data:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; frame-src "+frameSrc(r)+"; frame-ancestors 'self'")
+	h.Set("Content-Security-Policy", "default-src 'self'; font-src 'self' data:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; frame-src "+frameSrc(r)+s.remote.frameSrc()+"; frame-ancestors 'self'")
 
 	rw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 	if strings.HasPrefix(r.URL.Path, "/api/") && !csrfSafe(r) {

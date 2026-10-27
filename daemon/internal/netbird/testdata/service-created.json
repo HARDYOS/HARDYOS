@@ -1,0 +1,18 @@
+{
+  "id": "cs9newservice00000001",
+  "name": "hardyos-a1b2c3-jellyfin",
+  "domain": "jellyfin.home.hardynetworks.net",
+  "mode": "http",
+  "listen_port": 0,
+  "port_auto_assigned": false,
+  "proxy_cluster": "proxy.hardynetworks.net",
+  "targets": [{"target_id": "chacbco6lnnbn6cg5s90", "target_type": "peer", "access_action": "inherit", "protocol": "https", "host": "100.83.40.2", "port": 44200, "enabled": true,
+               "options": {"skip_tls_verify": true, "custom_headers": {"X-Hardyos-Gateway": "secret"}}}],
+  "enabled": true,
+  "terminated": false,
+  "pass_host_header": true,
+  "rewrite_redirects": false,
+  "auth": {"bearer_auth": {"enabled": true, "distribution_groups": []}},
+  "meta": {"created_at": "2026-10-26T18:45:00Z", "status": "certificate_pending"},
+  "private": false
+}

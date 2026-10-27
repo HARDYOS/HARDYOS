@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"syscall"
@@ -32,6 +33,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/metrics"
 	"github.com/hardyos/hardyos/daemon/internal/notify"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
+	"github.com/hardyos/hardyos/daemon/internal/publish"
 	"github.com/hardyos/hardyos/daemon/internal/storage"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 	"github.com/hardyos/hardyos/daemon/internal/tlscert"
@@ -121,6 +123,15 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 	if !live {
 		api.RegisterAppJobs(manager, pc, appStore)
 	}
+	// Remote access: the NetBird client and publishing through NetBird's
+	// reverse proxy. Secrets kept in the database (the access token) are
+	// sealed with a key next to it.
+	var remote *publish.Publisher
+	if !live {
+		remote = &publish.Publisher{Store: &publish.Store{DB: db,
+			Sealer: &publish.Sealer{KeyFile: filepath.Join(filepath.Dir(dbPath), "secrets", "hardyd.key")}}}
+	}
+	api.RegisterRemoteJobs(manager, pc, remote)
 	// File Manager and share links: files read and written as the person.
 	var fileAccess files.Service
 	if !live {
@@ -143,7 +154,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		DB: db, Jobs: manager, Events: broker, Priv: pc, Logger: log,
 		Storage: stor, Notify: notifications, Metrics: collector,
 		WebRoot: webRoot, Insecure: httpsAddr == "", Installer: inst, Updates: upd, Backups: bk,
-		Apps: appStore, Files: fileAccess, TrustedProxies: trustedProxies,
+		Apps: appStore, Files: fileAccess, TrustedProxies: trustedProxies, Remote: remote,
 	})
 
 	go housekeeping(ctx, log, &auth.Sessions{DB: db})
@@ -191,6 +202,11 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 				TLS:         &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
 				DesktopPort: port,
 				ListenHost:  host,
+			})
+			// The app gateway on the NetBird address, for NetBird's reverse
+			// proxy, and the publishing sync.
+			go handler.RunRemote(ctx, api.RemoteOptions{
+				TLS: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
 			})
 		}
 		serve(&http.Server{
