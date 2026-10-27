@@ -181,7 +181,7 @@ func (in *Installer) squashfs() (string, error) {
 
 // Reset undoes a previous, interrupted attempt so a new one can start.
 func (in *Installer) Reset(ctx context.Context) {
-	unbindSystemDirs(ctx, in.Runner, in.target())
+	_ = unbindSystemDirs(ctx, in.Runner, in.Root, in.target())
 	if res, err := in.Runner.Run(ctx, nil, "zpool", "list", "-H", in.pool()); err == nil && res.ExitCode == 0 {
 		in.try(ctx, "zpool", "export", "-f", in.pool())
 	}
@@ -495,7 +495,24 @@ func (in *Installer) InstallBootloader(ctx context.Context, p Plan) error {
 // Finish unmounts the target and exports the pool so the new system imports
 // it cleanly on first boot.
 func (in *Installer) Finish(ctx context.Context) error {
-	unbindSystemDirs(ctx, in.Runner, in.target())
-	_, err := in.run(ctx, "zpool", "export", in.pool())
-	return err
+	uerr := unbindSystemDirs(ctx, in.Runner, in.Root, in.target())
+	if _, err := in.run(ctx, "zpool", "export", in.pool()); err != nil {
+		// Say what keeps the pool busy: mounts left under the target and
+		// the processes holding files there.
+		var why []string
+		if uerr != nil {
+			why = append(why, uerr.Error())
+		}
+		if left := mountsUnder(in.Root, in.target(), false); len(left) > 0 {
+			why = append(why, "still mounted: "+strings.Join(left, ", "))
+		}
+		if h := Holders(in.Root, in.target()); len(h) > 0 {
+			why = append(why, "in use by "+strings.Join(h, ", "))
+		}
+		if len(why) > 0 {
+			return fmt.Errorf("%w (%s)", err, strings.Join(why, "; "))
+		}
+		return err
+	}
+	return nil
 }
