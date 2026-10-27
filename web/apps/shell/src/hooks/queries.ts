@@ -46,12 +46,28 @@ export const useJobs = (limit = 50) =>
 export const useJob = (id: string | null) =>
   useQuery({
     queryKey: ["job", id],
-    queryFn: () => unwrap(api.GET("/jobs/{id}", { params: { path: { id: id! } } })),
+    // A request that hangs (a dropped connection) would stop the polling for
+    // good, since a new one only starts when the last one ends: give up after
+    // 15 s and let the next poll try again.
+    queryFn: ({ signal }) => {
+      const ctl = new AbortController();
+      const stop = () => ctl.abort();
+      signal.addEventListener("abort", stop);
+      const timer = setTimeout(stop, 15_000);
+      return unwrap(api.GET("/jobs/{id}", { params: { path: { id: id! } }, signal: ctl.signal })).finally(() => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", stop);
+      });
+    },
     enabled: !!id,
+    retry: true,
     refetchInterval: (q) => {
       const s = q.state.data?.state;
-      return s === "queued" || s === "running" ? 2_000 : false;
+      return s === "queued" || s === "running" || (!s && q.state.status === "error") ? 2_000 : false;
     },
+    // Keep following a job while the window is in the background (installs
+    // take minutes; people switch away), so it isn't stuck when they return.
+    refetchIntervalInBackground: true,
   });
 
 export const useDatasets = (root?: string) =>

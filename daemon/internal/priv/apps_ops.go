@@ -29,6 +29,7 @@ const (
 	OpAppsSnapshots   = "apps.snapshots"
 	OpAppsRollback    = "apps.rollback"
 	OpAppsConfig      = "apps.config"
+	OpAppsPullStatus  = "apps.pull_progress"
 )
 
 // AppRef names an installed app.
@@ -120,6 +121,9 @@ func RegisterApps(s *Server, m *apps.Manager) {
 	}))
 	s.Handle(OpAppsRollback, typed(func(ctx context.Context, a apps.RollbackArgs) (any, error) {
 		return appDone(appsErr(m.Rollback(ctx, a)))
+	}))
+	s.Handle(OpAppsPullStatus, typed(func(ctx context.Context, a AppPullArgs) (any, error) {
+		return m.PullStatus(a.ID, a.Service), nil
 	}))
 	s.Handle(OpAppsConfig, typed(func(ctx context.Context, a AppRef) (any, error) {
 		c, err := m.Config(ctx, a.ID)
