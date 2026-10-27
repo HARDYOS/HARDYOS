@@ -23,6 +23,8 @@ export interface WizardDisk {
 export interface WizardNIC {
   mode: VMNIC["mode"];
   vlan: number;
+  /** Let the card use other computers' addresses (routers); off by default. */
+  allowSpoofing: boolean;
 }
 
 export interface WizardState {
@@ -55,6 +57,8 @@ export interface WizardState {
   tpm: boolean;
   start: boolean;
   autostart: boolean;
+  /** Make the VM even if its thin disks are bigger than the pool's free space. */
+  allowOvercommit: boolean;
 }
 
 /** A short name from a display name: "Dad's Windows" -> "dads-windows". */
@@ -126,13 +130,14 @@ export function initialState(t: VMTemplate, caps?: VMCapabilities, arch = "x86_6
     sshKeys: "",
     password: "",
     hostname: "",
-    nics: Array.from({ length: Math.max(1, t.nics) }, () => ({ mode: "bridge" as const, vlan: 0 })),
+    nics: Array.from({ length: Math.max(1, t.nics) }, () => ({ mode: "bridge" as const, vlan: 0, allowSpoofing: t.allowSpoofing })),
     nicModel: t.nicModel as WizardState["nicModel"],
     devices: [],
     firmware: t.firmware.type as WizardState["firmware"],
     secureBoot: t.firmware.secureBoot,
     tpm: t.firmware.tpm,
     start: true,
+    allowOvercommit: false,
     autostart: t.group === "appliance",
   };
 }
@@ -245,7 +250,12 @@ export function toRequest(s: WizardState, t: VMTemplate): VMCreateRequest {
       firmware: { type: s.firmware, secureBoot: s.firmware === "uefi" && s.secureBoot, tpm: s.tpm },
       disks,
       media,
-      nics: s.nics.map((n) => ({ mode: n.mode, model: s.nicModel, ...(n.mode === "vlan" ? { vlan: n.vlan } : {}) })),
+      nics: s.nics.map((n) => ({
+        mode: n.mode,
+        model: s.nicModel,
+        ...(n.mode === "vlan" ? { vlan: n.vlan } : {}),
+        ...(n.mode !== "nat" && n.allowSpoofing ? { allowSpoofing: true } : {}),
+      })),
       video: t.video as VMCreateRequest["spec"]["video"],
       guestAgent: true,
       boot: iso ? ["cdrom", "disk"] : ["disk"],
@@ -253,6 +263,7 @@ export function toRequest(s: WizardState, t: VMTemplate): VMCreateRequest {
       devices: s.devices,
     },
     start: s.start,
+    ...(s.allowOvercommit ? { allowOvercommit: true } : {}),
   };
   if (t.cloudInit) {
     req.spec.cloudInit = { user: s.user, sshKeys: sshKeyList(s.sshKeys), installAgent: true, ...(s.hostname ? { hostname: s.hostname } : {}) };

@@ -10,14 +10,14 @@ export const presets = [
 
 export const win11: VMTemplate = {
   id: "windows11", name: "Windows 11", summary: "With Secure Boot and a TPM.", group: "windows", os: "windows", install: "iso",
-  firmware: { type: "uefi", secureBoot: true, tpm: true }, diskBus: "virtio-scsi", nicModel: "virtio", nics: 1, video: "vga",
+  firmware: { type: "uefi", secureBoot: true, tpm: true }, diskBus: "virtio-scsi", nicModel: "virtio", nics: 1, allowSpoofing: false, video: "vga",
   virtio: true, cloudInit: false, balloon: true, gpu: false, presets, defaultPreset: "standard", minMemoryMB: 4096, minDiskGB: 64,
   images: [{ name: "Windows 11", kind: "iso", urls: null, page: "https://www.microsoft.com/software-download/windows11" }], notes: [],
 };
 
 export const linux: VMTemplate = {
   id: "linux", name: "Linux server", summary: "Ubuntu or Debian with cloud-init.", group: "linux", os: "linux", install: "cloud",
-  firmware: { type: "uefi", secureBoot: false, tpm: false }, diskBus: "virtio-scsi", nicModel: "virtio", nics: 1, video: "virtio",
+  firmware: { type: "uefi", secureBoot: false, tpm: false }, diskBus: "virtio-scsi", nicModel: "virtio", nics: 1, allowSpoofing: false, video: "virtio",
   virtio: false, cloudInit: true, balloon: true, gpu: false,
   presets: [
     { id: "light", name: "Light", summary: "", cores: 1, threads: 1, memoryMB: 1024, diskGB: 16 },
@@ -29,10 +29,10 @@ export const linux: VMTemplate = {
   notes: [],
 };
 
-export const opnsense: VMTemplate = { ...win11, id: "opnsense", name: "OPNsense or pfSense", group: "appliance", os: "other", nics: 2, virtio: false, firmware: { type: "uefi", secureBoot: false, tpm: false }, minMemoryMB: 1024, minDiskGB: 8, images: [] };
+export const opnsense: VMTemplate = { ...win11, id: "opnsense", name: "OPNsense or pfSense", group: "appliance", os: "other", nics: 2, allowSpoofing: true, virtio: false, firmware: { type: "uefi", secureBoot: false, tpm: false }, minMemoryMB: 1024, minDiskGB: 8, images: [] };
 
 export const caps: VMCapabilities = {
   supported: true, problem: "", kvm: true, arch: { arch: "x86_64", machine: "q35", sata: true, legacyBios: true },
   cpus: 16, memoryMB: 65536, pools: ["tank", "fast"], uefi: true, secureBoot: true, tpm: true, libvirt: "11.3.0",
-  bridge: "", library: "tank", virtio: false, devices: null, committedMB: 0,
+  bridge: "", library: "tank", virtio: false, devices: null, committedMB: 0, security: "apparmor", spoofingFilter: true,
 };

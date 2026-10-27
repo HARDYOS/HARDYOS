@@ -307,8 +307,9 @@ function cloneSpec(vm: VM): VMSpec {
   return s;
 }
 
-async function saveSpec(spec: VMSpec, removeDisks: string[] = []): Promise<Job> {
-  const r = await unwrap(api.PUT("/vms/{id}", { params: { path: { id: spec.id } }, body: { spec, ...(removeDisks.length ? { removeDisks } : {}) } }));
+async function saveSpec(spec: VMSpec, removeDisks: string[] = [], confirm = "", allowOvercommit = false): Promise<Job> {
+  const body = { spec, ...(removeDisks.length ? { removeDisks, confirm } : {}), ...(allowOvercommit ? { allowOvercommit } : {}) };
+  const r = await unwrap(api.PUT("/vms/{id}", { params: { path: { id: spec.id } }, body }));
   return r.job;
 }
 
@@ -317,15 +318,21 @@ function HardwareTab({ vm, onJob }: { vm: VM; onJob: (j: Job) => void }) {
   const [remove, setRemove] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [picking, setPicking] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [overcommit, setOvercommit] = useState(false);
   const library = useLibrary();
   const on = isOn(vm);
   const dirty = JSON.stringify(spec) !== JSON.stringify(cloneSpec(vm)) || remove.length > 0;
   const set = (p: Partial<VMSpec>) => setSpec((s) => ({ ...s, ...p }));
   const isos = (library.data?.files ?? []).filter((f) => f.kind === "iso");
-  const save = async () => {
+  const save = async (confirm = "") => {
+    if (remove.length > 0 && !confirm) {
+      setConfirming(true);
+      return;
+    }
     setBusy(true);
     try {
-      onJob(await saveSpec(spec, remove));
+      onJob(await saveSpec(spec, remove, confirm, overcommit));
       setRemove([]);
     } catch (e) {
       toast("error", "The changes weren't saved", errorMessage(e));
@@ -440,6 +447,14 @@ function HardwareTab({ vm, onJob }: { vm: VM; onJob: (j: Job) => void }) {
           </table>
         </div>
         {remove.length > 0 && <Alert tone="warn">Saving deletes {remove.join(", ")} and everything on it, including its snapshots.</Alert>}
+        <div style={{ marginTop: 10 }}>
+          <Toggle
+            label="Allow more than the pool has free"
+            description="Disks are thin and only fill up as the VM writes. Without this, new disk space must fit in the pool's free space."
+            checked={overcommit}
+            onChange={setOvercommit}
+          />
+        </div>
       </Card>
       <Card title={<>CD/DVD drives {later}</>}>
         <div className="stack">
@@ -524,6 +539,14 @@ function HardwareTab({ vm, onJob }: { vm: VM; onJob: (j: Job) => void }) {
                 <option value="virtio">VirtIO</option>
                 <option value="e1000e">Intel e1000e</option>
               </Select>
+              {n.mode !== "nat" && (
+                <Toggle
+                  label="Allow address spoofing"
+                  description="For routers and firewalls only."
+                  checked={!!n.allowSpoofing}
+                  onChange={(v) => set({ nics: spec.nics.map((x, j) => (j === i ? { ...x, allowSpoofing: v || undefined } : x)) })}
+                />
+              )}
               <span className="small muted mono">{n.mac || "new"}</span>
               <IconButton label={`Remove card ${i + 1}`} onClick={() => set({ nics: spec.nics.filter((_, j) => j !== i) })}>
                 <TrashIcon size={15} />
@@ -546,7 +569,7 @@ function HardwareTab({ vm, onJob }: { vm: VM; onJob: (j: Job) => void }) {
         )}
       </Card>
       <div className="row">
-        <Button variant="primary" disabled={!dirty} busy={busy} onClick={save}>
+        <Button variant="primary" disabled={!dirty} busy={busy} onClick={() => save()}>
           Save changes
         </Button>
         {dirty && (
@@ -561,6 +584,20 @@ function HardwareTab({ vm, onJob }: { vm: VM; onJob: (j: Job) => void }) {
           </Button>
         )}
       </div>
+      {confirming && (
+        <ConfirmDialog
+          title={`Delete ${remove.join(", ")}?`}
+          confirmLabel="Delete and save"
+          typeToConfirm={vm.name}
+          onClose={() => setConfirming(false)}
+          onConfirm={async () => {
+            setConfirming(false);
+            await save(vm.name);
+          }}
+        >
+          <p>The disk and everything on it, including its snapshots, are deleted for good.</p>
+        </ConfirmDialog>
+      )}
       {picking && (
         <Dialog title="Devices" onClose={() => setPicking(false)} width={640} footer={<Button variant="primary" onClick={() => setPicking(false)}>Done</Button>}>
           <DevicePicker vm={vm.id} value={spec.devices} onChange={(devices) => set({ devices })} />
@@ -577,6 +614,7 @@ function SnapshotsTab({ vm, onJob }: { vm: VM; onJob: (j: Job) => void }) {
   const [label, setLabel] = useState("");
   const [busy, setBusy] = useState(false);
   const [rollback, setRollback] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<string | null>(null);
   const take = async () => {
     setBusy(true);
     try {
@@ -638,17 +676,7 @@ function SnapshotsTab({ vm, onJob }: { vm: VM; onJob: (j: Job) => void }) {
                     <Button size="sm" disabled={isOn(vm)} title={isOn(vm) ? "Turn the VM off first" : undefined} onClick={() => setRollback(s.name)}>
                       <RefreshIcon size={14} /> Go back
                     </Button>
-                    <IconButton
-                      label={`Delete snapshot ${s.name}`}
-                      onClick={async () => {
-                        try {
-                          const r = await unwrap(api.DELETE("/vms/{id}/snapshots/{name}", { params: { path: { id: vm.id, name: s.name } } }));
-                          onJob(r.job);
-                        } catch (e) {
-                          toast("error", "Not deleted", errorMessage(e));
-                        }
-                      }}
-                    >
+                    <IconButton label={`Delete snapshot ${s.name}`} onClick={() => setDeleting(s.name)}>
                       <TrashIcon size={15} />
                     </IconButton>
                   </td>
@@ -657,6 +685,20 @@ function SnapshotsTab({ vm, onJob }: { vm: VM; onJob: (j: Job) => void }) {
             </tbody>
           </table>
         </div>
+      )}
+      {deleting && (
+        <ConfirmDialog
+          title={`Delete snapshot ${deleting}?`}
+          confirmLabel="Delete snapshot"
+          typeToConfirm={vm.name}
+          onClose={() => setDeleting(null)}
+          onConfirm={async () => {
+            const r = await unwrap(api.DELETE("/vms/{id}/snapshots/{name}", { params: { path: { id: vm.id, name: deleting } }, body: { confirm: vm.name } }));
+            onJob(r.job);
+          }}
+        >
+          <p>The VM can't go back to that moment afterwards.</p>
+        </ConfirmDialog>
       )}
       {rollback && (
         <ConfirmDialog

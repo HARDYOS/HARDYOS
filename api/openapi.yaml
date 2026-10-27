@@ -3591,10 +3591,16 @@ paths:
       - { name: name, in: path, required: true, schema: { type: string } }
     delete:
       operationId: deleteVMSnapshot
-      summary: Delete one snapshot (a job)
+      summary: Delete one snapshot (a job; the VM's name typed to confirm)
       tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMSnapshotDeleteRequest" }
       responses:
         "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -5818,6 +5824,7 @@ components:
         vlan: { type: integer, minimum: 1, maximum: 4094 }
         model: { type: string, enum: [virtio, e1000e] }
         mac: { type: string, description: Empty for a new card (one is made up) }
+        allowSpoofing: { type: boolean, description: "On the home network or a VLAN: let the card use MAC and IP addresses other than its own (needed by routers such as OPNsense). Off by default: the card is filtered (libvirt clean-traffic)" }
     VMCloudInit:
       type: object
       required: [user, sshKeys, installAgent]
@@ -5912,7 +5919,7 @@ components:
         page: { type: string }
     VMTemplate:
       type: object
-      required: [id, name, summary, group, os, install, firmware, diskBus, nicModel, nics, video, virtio, cloudInit, balloon, gpu, presets, defaultPreset, minMemoryMB, minDiskGB, images, notes]
+      required: [id, name, summary, group, os, install, firmware, diskBus, nicModel, nics, allowSpoofing, video, virtio, cloudInit, balloon, gpu, presets, defaultPreset, minMemoryMB, minDiskGB, images, notes]
       properties:
         id: { type: string }
         name: { type: string }
@@ -5924,6 +5931,7 @@ components:
         diskBus: { type: string }
         nicModel: { type: string }
         nics: { type: integer }
+        allowSpoofing: { type: boolean, description: "The template's cards may use other addresses (routers); others are kept to their own" }
         video: { type: string }
         virtio: { type: boolean }
         cloudInit: { type: boolean }
@@ -5951,7 +5959,7 @@ components:
         pit: { type: boolean }
     VMCapabilities:
       type: object
-      required: [supported, problem, kvm, arch, cpus, memoryMB, pools, uefi, secureBoot, tpm, libvirt, bridge, library, virtio, devices, committedMB]
+      required: [supported, problem, kvm, arch, cpus, memoryMB, pools, uefi, secureBoot, tpm, libvirt, bridge, library, virtio, devices, committedMB, security, spoofingFilter]
       properties:
         supported: { type: boolean }
         problem: { type: string, description: Why VMs can't run, in plain words }
@@ -5969,6 +5977,8 @@ components:
         virtio: { type: boolean, description: The VirtIO drivers disc is downloaded }
         devices: { description: The devices code's overview (IOMMU, GPUs) when it's there }
         committedMB: { type: integer, description: Memory of the running VMs }
+        security: { type: string, description: "How libvirt confines QEMU: apparmor, or empty when it doesn't (then VMs are unsupported)" }
+        spoofingFilter: { type: boolean, description: "libvirt's clean-traffic filter is installed (cards on the home network need it unless they allow spoofing)" }
     VMTask:
       type: object
       required: [id, kind, vm, file, progress, message, done, error, started, finished]
@@ -6016,13 +6026,16 @@ components:
         password: { type: string, description: The cloud-init user's password (never stored as typed) }
         start: { type: boolean }
         downloads: { type: array, items: { $ref: "#/components/schemas/VMDownload" }, maxItems: 4, description: Files to download into the ISO library first }
+        allowOvercommit: { type: boolean, description: "Create the VM even when its (thin) disks are bigger than the pool's free space" }
     VMUpdateRequest:
       type: object
       required: [spec]
       properties:
         spec: { $ref: "#/components/schemas/VMSpec" }
         password: { type: string }
-        removeDisks: { type: array, items: { type: string }, description: Disks left out of the spec that may be deleted (the VM must be off) }
+        removeDisks: { type: array, items: { type: string }, description: Disks left out of the spec that may be deleted (the VM must be off; confirm required) }
+        confirm: { type: string, description: "The VM's name or display name, required when removeDisks is set" }
+        allowOvercommit: { type: boolean, description: "Add or grow disks even past the pool's free space" }
     VMDeleteRequest:
       type: object
       required: [confirm]
@@ -6044,6 +6057,11 @@ components:
         created: { type: string, format: date-time }
         bytes: { type: integer, format: int64 }
         consistent: { type: boolean, description: The guest's file systems were frozen first (or it was off) }
+    VMSnapshotDeleteRequest:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: string, description: "The VM's name or display name" }
     VMSnapshotRequest:
       type: object
       properties:

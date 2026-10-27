@@ -429,6 +429,12 @@ function DisksStep({ s, t, caps, set }: { s: WizardState; t: VMTemplate; caps: V
           </Button>
         </div>
       )}
+      <Toggle
+        label="Allow more than the pool has free"
+        description="Disks are thin and only fill up as the VM writes. Without this, the disks must fit in the pool's free space."
+        checked={s.allowOvercommit}
+        onChange={(v) => set({ allowOvercommit: v })}
+      />
       {t.os === "windows" && s.disks[0]?.bus !== "sata" && (
         <div className="tip">
           <DiscIcon size={16} />
@@ -609,6 +615,14 @@ function NetworkStep({ s, caps, set }: { s: WizardState; caps: VMCapabilities; s
             <Field label="VLAN ID">
               {(id) => <TextInput id={id} type="number" min={1} max={4094} className="input mono" style={{ width: 120 }} value={n.vlan} onChange={(e) => setNIC(i, { vlan: Number(e.target.value) })} />}
             </Field>
+          )}
+          {n.mode !== "nat" && (
+            <Toggle
+              label="Allow address spoofing"
+              description="Lets the card use MAC and IP addresses other than its own. Only routers and firewalls (OPNsense, pfSense) need this."
+              checked={n.allowSpoofing}
+              onChange={(v) => setNIC(i, { allowSpoofing: v })}
+            />
           )}
         </div>
       ))}

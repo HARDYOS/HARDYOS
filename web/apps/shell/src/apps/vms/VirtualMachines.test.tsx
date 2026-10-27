@@ -165,10 +165,33 @@ describe("Virtual Machines", () => {
     fireEvent.click(screen.getByRole("button", { name: "Remove disk1" }));
     expect(screen.getByText(/Saving deletes disk1/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    // Deleting a disk needs the VM's name typed.
+    const dialog = await screen.findByRole("dialog");
+    expect(calls.some((c) => c.method === "PUT")).toBe(false);
+    const confirm = within(dialog).getByRole("button", { name: "Delete and save" }) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    fireEvent.change(within(dialog).getByLabelText(/Type Windows 11 to confirm/), { target: { value: "Windows 11" } });
+    fireEvent.click(confirm);
     await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
-    const body = calls.find((c) => c.method === "PUT")!.body as { spec: { disks: unknown[] }; removeDisks: string[] };
+    const body = calls.find((c) => c.method === "PUT")!.body as { spec: { disks: unknown[] }; removeDisks: string[]; confirm: string };
     expect(body.removeDisks).toEqual(["disk1"]);
+    expect(body.confirm).toBe("Windows 11");
     expect(body.spec.disks).toEqual([{ name: "disk0", sizeGB: 64, bus: "virtio-scsi" }]);
+  });
+
+  it("deletes a snapshot only with the VM's name typed", async () => {
+    const calls: Call[] = [];
+    serve(routes({ "DELETE /vms/win/snapshots/vm-20261020-101500": () => accepted("j5", "vms.snapshot.delete"), "/jobs/j5": () => job("j5", "vms.snapshot.delete") }), calls);
+    wrap(<VirtualMachinesView onOpenConsole={() => {}} />);
+    fireEvent.click(await screen.findByRole("article", { name: "Windows 11" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Snapshots" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete snapshot vm-20261020-101500" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+    fireEvent.change(within(dialog).getByLabelText(/Type Windows 11 to confirm/), { target: { value: "Windows 11" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete snapshot" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "DELETE")).toBe(true));
+    expect(calls.find((c) => c.method === "DELETE")!.body).toEqual({ confirm: "Windows 11" });
   });
 });
 

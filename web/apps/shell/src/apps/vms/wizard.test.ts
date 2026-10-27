@@ -52,10 +52,13 @@ describe("the New VM wizard's model", () => {
   it("gives routers two network cards, and VLANs their tag", () => {
     let s = initialState(opnsense, caps);
     expect(s.nics).toHaveLength(2);
-    s = { ...s, nics: [{ mode: "vlan", vlan: 99 }, { mode: "bridge", vlan: 0 }] };
+    // Routers forward other computers' traffic: no anti-spoofing filter by default.
+    expect(s.nics.every((n) => n.allowSpoofing)).toBe(true);
+    expect(initialState(win11, caps).nics.every((n) => !n.allowSpoofing)).toBe(true);
+    s = { ...s, nics: [{ mode: "vlan", vlan: 99, allowSpoofing: false }, { mode: "bridge", vlan: 0, allowSpoofing: true }] };
     expect(toRequest(s, opnsense).spec.nics).toEqual([
       { mode: "vlan", model: "virtio", vlan: 99 },
-      { mode: "bridge", model: "virtio" },
+      { mode: "bridge", model: "virtio", allowSpoofing: true },
     ]);
   });
 
@@ -86,7 +89,7 @@ describe("the New VM wizard's model", () => {
     expect(stepProblems(l, "media", lctx).join()).toMatch(/SSH key or a password/);
     expect(stepProblems({ ...l, password: "short" }, "media", lctx).join()).toMatch(/8 characters/);
     expect(stepProblems({ ...l, sshKeys: "ssh-ed25519 AAAA me" }, "media", lctx)).toEqual([]);
-    expect(stepProblems({ ...l, nics: [{ mode: "vlan", vlan: 0 }] }, "network", lctx).join()).toMatch(/VLAN/);
+    expect(stepProblems({ ...l, nics: [{ mode: "vlan", vlan: 0, allowSpoofing: false }] }, "network", lctx).join()).toMatch(/VLAN/);
   });
 });
 

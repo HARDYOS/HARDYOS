@@ -3129,7 +3129,7 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Delete one snapshot (a job) */
+        /** Delete one snapshot (a job; the VM's name typed to confirm) */
         delete: operations["deleteVMSnapshot"];
         options?: never;
         head?: never;
@@ -5238,6 +5238,8 @@ export interface components {
             model: "virtio" | "e1000e";
             /** @description Empty for a new card (one is made up) */
             mac?: string;
+            /** @description On the home network or a VLAN: let the card use MAC and IP addresses other than its own (needed by routers such as OPNsense). Off by default: the card is filtered (libvirt clean-traffic) */
+            allowSpoofing?: boolean;
         };
         VMCloudInit: {
             user: string;
@@ -5344,6 +5346,8 @@ export interface components {
             diskBus: string;
             nicModel: string;
             nics: number;
+            /** @description The template's cards may use other addresses (routers); others are kept to their own */
+            allowSpoofing: boolean;
             video: string;
             virtio: boolean;
             cloudInit: boolean;
@@ -5391,6 +5395,10 @@ export interface components {
             devices: unknown;
             /** @description Memory of the running VMs */
             committedMB: number;
+            /** @description How libvirt confines QEMU: apparmor, or empty when it doesn't (then VMs are unsupported) */
+            security: string;
+            /** @description libvirt's clean-traffic filter is installed (cards on the home network need it unless they allow spoofing) */
+            spoofingFilter: boolean;
         };
         VMTask: {
             id: string;
@@ -5441,12 +5449,18 @@ export interface components {
             start?: boolean;
             /** @description Files to download into the ISO library first */
             downloads?: components["schemas"]["VMDownload"][];
+            /** @description Create the VM even when its (thin) disks are bigger than the pool's free space */
+            allowOvercommit?: boolean;
         };
         VMUpdateRequest: {
             spec: components["schemas"]["VMSpec"];
             password?: string;
-            /** @description Disks left out of the spec that may be deleted (the VM must be off) */
+            /** @description Disks left out of the spec that may be deleted (the VM must be off; confirm required) */
             removeDisks?: string[];
+            /** @description The VM's name or display name, required when removeDisks is set */
+            confirm?: string;
+            /** @description Add or grow disks even past the pool's free space */
+            allowOvercommit?: boolean;
         };
         VMDeleteRequest: {
             /** @description The VM's name or display name */
@@ -5467,6 +5481,10 @@ export interface components {
             bytes: number;
             /** @description The guest's file systems were frozen first (or it was off) */
             consistent: boolean;
+        };
+        VMSnapshotDeleteRequest: {
+            /** @description The VM's name or display name */
+            confirm: string;
         };
         VMSnapshotRequest: {
             label?: string;
@@ -10456,9 +10474,14 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMSnapshotDeleteRequest"];
+            };
+        };
         responses: {
             202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
