@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
-	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 )
@@ -25,42 +27,39 @@ func FinishRoot(ctx context.Context, r sysexec.Runner, root, target string) erro
 	for _, rel := range []string{"etc/hardyos/live-installer", "var/lib/dbus/machine-id"} {
 		_ = os.Remove(path(rel))
 	}
-	if err := bindSystemDirs(ctx, r, root, target); err != nil {
-		return err
-	}
-	defer unbindSystemDirs(context.WithoutCancel(ctx), r, target)
-
-	run := func(args ...string) error {
-		_, err := sysexec.Output(ctx, r, "chroot", append([]string{target}, args...)...)
-		var ce *sysexec.CommandError
-		if errors.As(err, &ce) {
-			return errors.New(ce.Error())
+	return WithSystemDirs(ctx, r, root, target, func() error {
+		run := func(args ...string) error {
+			_, err := sysexec.Output(ctx, r, "chroot", append([]string{target}, args...)...)
+			var ce *sysexec.CommandError
+			if errors.As(err, &ce) {
+				return errors.New(ce.Error())
+			}
+			return err
 		}
-		return err
-	}
-	if live := installedLivePackages(ctx, r, target); len(live) > 0 {
-		if err := run(append([]string{"env", "DEBIAN_FRONTEND=noninteractive", "dpkg", "--purge"}, live...)...); err != nil {
-			return fmt.Errorf("remove live-system packages: %w", err)
+		if live := installedLivePackages(ctx, r, target); len(live) > 0 {
+			if err := run(append([]string{"env", "DEBIAN_FRONTEND=noninteractive", "dpkg", "--purge"}, live...)...); err != nil {
+				return fmt.Errorf("remove live-system packages: %w", err)
+			}
 		}
-	}
-	// Creates only the host keys that are missing (kept keys stay).
-	if err := run("ssh-keygen", "-A"); err != nil {
-		return err
-	}
-	kernels, err := os.ReadDir(path("lib/modules"))
-	if err != nil {
-		return err
-	}
-	for _, k := range kernels {
-		if _, err := os.Stat(path("boot/vmlinuz-" + k.Name())); err != nil {
-			continue
+		// Creates only the host keys that are missing (kept keys stay).
+		if err := run("ssh-keygen", "-A"); err != nil {
+			return err
 		}
-		_ = os.Remove(path("boot/initrd.img-" + k.Name()))
-		if err := run("update-initramfs", "-c", "-k", k.Name()); err != nil {
-			return fmt.Errorf("build initramfs for %s: %w", k.Name(), err)
+		kernels, err := os.ReadDir(path("lib/modules"))
+		if err != nil {
+			return err
 		}
-	}
-	return nil
+		for _, k := range kernels {
+			if _, err := os.Stat(path("boot/vmlinuz-" + k.Name())); err != nil {
+				continue
+			}
+			_ = os.Remove(path("boot/initrd.img-" + k.Name()))
+			if err := run("update-initramfs", "-c", "-k", k.Name()); err != nil {
+				return fmt.Errorf("build initramfs for %s: %w", k.Name(), err)
+			}
+		}
+		return nil
+	})
 }
 
 func installedLivePackages(ctx context.Context, r sysexec.Runner, target string) []string {
@@ -113,7 +112,7 @@ func bindSystemDirs(ctx context.Context, r sysexec.Runner, root, target string) 
 			}
 		}
 		if err != nil {
-			unbindSystemDirs(context.WithoutCancel(ctx), r, target)
+			_ = unbindSystemDirs(context.WithoutCancel(ctx), r, root, target)
 			return err
 		}
 	}
@@ -131,33 +130,226 @@ func mountCmd(ctx context.Context, r sysexec.Runner, args ...string) error {
 
 // WithSystemDirs runs fn with /dev, /proc, /sys and /run mounted inside
 // target (an unpacked system under root), for work done with chroot, and
-// unmounts them afterwards. Update hooks (the GPU drivers) use it.
+// unmounts them afterwards. The installer, updates and the GPU drivers'
+// update hook use it.
+//
+// On a server (the real command runner) all of it happens in a mount
+// namespace of its own (privateMountNS): fn must run its commands from the
+// calling goroutine, so they're born in that namespace. Nothing mounted
+// there reaches the server or its services' namespaces, and it all goes
+// away with the namespace.
 func WithSystemDirs(ctx context.Context, r sysexec.Runner, root, target string, fn func() error) error {
+	if _, real := r.(sysexec.Exec); real && root == "/" {
+		return privateMountNS(func() error { return withSystemDirs(ctx, r, root, target, fn) })
+	}
+	return withSystemDirs(ctx, r, root, target, fn)
+}
+
+func withSystemDirs(ctx context.Context, r sysexec.Runner, root, target string, fn func() error) error {
 	if err := bindSystemDirs(ctx, r, root, target); err != nil {
 		return err
 	}
-	defer unbindSystemDirs(context.WithoutCancel(ctx), r, target)
-	return fn()
+	err := fn()
+	var te *TeardownError
+	if uerr := unbindSystemDirs(context.WithoutCancel(ctx), r, root, target); errors.As(uerr, &te) && te.fatal() && err == nil {
+		err = uerr
+	}
+	return err
 }
 
-// unbindSystemDirs unmounts what bindSystemDirs mounted, recursively and
-// never lazily: a lazy unmount detaches whatever is still busy and can't
-// be checked. Something still busy (a process left in the chroot) is
-// retried briefly and then left mounted; that only keeps the new system's
-// directory busy, never touches the server's own /dev.
-func unbindSystemDirs(ctx context.Context, r sysexec.Runner, target string) {
+// unbindSystemDirs unmounts what bindSystemDirs mounted, and anything
+// else still mounted below those directories, so the target's own
+// filesystems (the new system's ZFS datasets) can be unmounted next.
+//
+// Each tree is first made private (mount --make-rprivate): from then on
+// nothing done to it can reach the server's own mounts, whatever the
+// propagation was. It is then unmounted recursively; when that fails
+// because something is still busy, the processes holding files under the
+// target are reported, and the tree, private by now, is detached lazily:
+// a lazy unmount of a private copy only ever affects that copy. Whatever
+// is still mounted under the target afterwards (per /proc/self/mountinfo)
+// is unmounted deepest first. The error lists what couldn't be unmounted
+// and which processes still hold files under the target.
+func unbindSystemDirs(ctx context.Context, r sysexec.Runner, root, target string) error {
+	var problems []string
+	var holders []string
 	for _, m := range []string{"run", "sys", "proc", "dev"} {
 		dir := filepath.Join(target, m)
-		for attempt := 0; attempt < 3; attempt++ {
-			res, err := r.Run(ctx, nil, "umount", "-R", dir)
-			if err == nil && (res.ExitCode == 0 || !strings.Contains(string(res.Stderr), "busy")) {
-				break
+		if !mountedAt(root, dir) {
+			continue
+		}
+		if res, err := r.Run(ctx, nil, "mount", "--make-rprivate", dir); err != nil || res.ExitCode != 0 {
+			// Not private: never fall back to a lazy unmount for it.
+			if res, err := r.Run(ctx, nil, "umount", "-R", dir); err != nil || res.ExitCode != 0 {
+				problems = append(problems, fmt.Sprintf("%s: %s", dir, strings.TrimSpace(string(res.Stderr))))
 			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(time.Duration(attempt+1) * 500 * time.Millisecond):
+			continue
+		}
+		res, err := r.Run(ctx, nil, "umount", "-R", dir)
+		if err == nil && res.ExitCode == 0 {
+			continue
+		}
+		// Busy: say who holds it (before detaching it, while the paths
+		// still read as under the target), then detach the private copy.
+		if holders == nil {
+			holders = Holders(root, target)
+			if holders == nil {
+				holders = []string{}
 			}
 		}
+		if res, err := r.Run(ctx, nil, "umount", "-R", "-l", dir); err != nil || res.ExitCode != 0 {
+			problems = append(problems, fmt.Sprintf("%s: %s", dir, strings.TrimSpace(string(res.Stderr))))
+		}
 	}
+	// Anything left below the system directories, deepest first.
+	for _, mp := range mountsUnder(root, target, true) {
+		if res, err := r.Run(ctx, nil, "umount", mp); err != nil || res.ExitCode != 0 {
+			problems = append(problems, fmt.Sprintf("%s: %s", mp, strings.TrimSpace(string(res.Stderr))))
+		}
+	}
+	for _, mp := range mountsUnder(root, target, true) {
+		problems = append(problems, mp+" is still mounted")
+	}
+	if holders != nil && len(holders) == 0 {
+		holders = []string{"an unknown process"}
+	}
+	if len(problems) > 0 || holders != nil {
+		return &TeardownError{Target: target, Left: problems, Holders: holders}
+	}
+	return nil
+}
+
+// TeardownError says what unbindSystemDirs found. With Left empty
+// everything was unmounted, but only by detaching copies that processes
+// (Holders) still used: harmless for the server, worth reporting.
+type TeardownError struct {
+	Target  string
+	Left    []string // couldn't be unmounted
+	Holders []string // processes holding files under the target
+}
+
+func (e *TeardownError) Error() string {
+	var parts []string
+	if len(e.Left) > 0 {
+		parts = append(parts, strings.Join(e.Left, "; "))
+	}
+	if len(e.Holders) > 0 {
+		parts = append(parts, "in use by "+strings.Join(e.Holders, ", ")+" (detached; the server's own mounts are untouched)")
+	}
+	return fmt.Sprintf("unmounting the system directories in %s: %s", e.Target, strings.Join(parts, "; "))
+}
+
+// fatal reports whether something is still mounted.
+func (e *TeardownError) fatal() bool { return len(e.Left) > 0 }
+
+// mountInfo lists mount points from /proc/self/mountinfo (under root).
+func mountInfo(root string) []string {
+	b, err := os.ReadFile(filepath.Join(root, "proc/self/mountinfo"))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		if f := strings.Fields(line); len(f) > 4 {
+			out = append(out, unescapeOctal(f[4]))
+		}
+	}
+	return out
+}
+
+func mountedAt(root, dir string) bool {
+	info := mountInfo(root)
+	if info == nil {
+		return true // can't tell (tests without procfs): try
+	}
+	for _, mp := range info {
+		if mp == dir {
+			return true
+		}
+	}
+	return false
+}
+
+// mountsUnder lists mount points below target's system directories (or,
+// with sysOnly false, anywhere below target), deepest first.
+func mountsUnder(root, target string, sysOnly bool) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, mp := range mountInfo(root) {
+		ok := false
+		if sysOnly {
+			for _, m := range []string{"run", "sys", "proc", "dev"} {
+				d := filepath.Join(target, m)
+				if mp == d || strings.HasPrefix(mp, d+"/") {
+					ok = true
+				}
+			}
+		} else {
+			ok = strings.HasPrefix(mp, strings.TrimSuffix(target, "/")+"/")
+		}
+		if ok && !seen[mp] {
+			seen[mp] = true
+			out = append(out, mp)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		di, dj := strings.Count(out[i], "/"), strings.Count(out[j], "/")
+		if di != dj {
+			return di > dj
+		}
+		return out[i] > out[j]
+	})
+	return out
+}
+
+// Holders lists the processes with their working directory, root or an
+// open file under target ("1234 dpkg (cwd /target/var/lib)"), like fuser.
+func Holders(root, target string) []string {
+	procs, _ := os.ReadDir(filepath.Join(root, "proc"))
+	prefix := strings.TrimSuffix(target, "/")
+	under := func(p string) bool { return p == prefix || strings.HasPrefix(p, prefix+"/") }
+	var out []string
+	for _, p := range procs {
+		pid, err := strconv.Atoi(p.Name())
+		if err != nil || pid == os.Getpid() {
+			continue
+		}
+		dir := filepath.Join(root, "proc", p.Name())
+		what := ""
+		for _, l := range []string{"root", "cwd"} {
+			if t, err := os.Readlink(filepath.Join(dir, l)); err == nil && under(t) && t != "/" {
+				what = l + " " + t
+				break
+			}
+		}
+		if what == "" {
+			fds, _ := os.ReadDir(filepath.Join(dir, "fd"))
+			for _, fd := range fds {
+				if t, err := os.Readlink(filepath.Join(dir, "fd", fd.Name())); err == nil && under(t) {
+					what = "open " + t
+					break
+				}
+			}
+		}
+		if what == "" {
+			continue
+		}
+		comm, _ := os.ReadFile(filepath.Join(dir, "comm"))
+		out = append(out, fmt.Sprintf("%d %s (%s)", pid, strings.TrimSpace(string(comm)), what))
+		if len(out) >= 20 {
+			out = append(out, "…")
+			break
+		}
+	}
+	return out
+}
+
+func unescapeOctal(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	return regexp.MustCompile(`\\([0-7]{3})`).ReplaceAllStringFunc(s, func(m string) string {
+		n, _ := strconv.ParseUint(m[1:], 8, 8)
+		return string(rune(n))
+	})
 }
