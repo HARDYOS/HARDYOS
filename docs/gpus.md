@@ -56,7 +56,11 @@ to a VM together with everything else in its group:
 
 These are never given to a VM, and the pickers say why:
 
-- The controller of the boot disks, and of disks in your storage pools.
+- The controller of the boot disks, of disks in your storage pools, and of
+  disks with a filesystem the server has mounted or with its swap. HardyOS
+  looks through every layer: encrypted (LUKS) disks, software RAID (md),
+  multipath and LVM devices, and NVMe drives with more than one path, so
+  every controller such a disk is reached through stays with the server.
 - The network port the server's own address uses (also under a bridge,
   bond or VLAN).
 - USB devices on those paths (a boot USB stick, a USB network adapter), and
@@ -70,7 +74,9 @@ These are never given to a VM, and the pickers say why:
 Pick a device and choose how the VM finds it:
 
 - **This device, in any port**: by its vendor and product ID. The VM still
-  starts when it's unplugged and gets it when it's plugged in.
+  starts when it's unplugged and gets it when it's plugged in. If two
+  devices with the same ID are plugged in, or the server itself uses one
+  with that ID (a boot stick), pick by port instead.
 - **Whatever is plugged into port 1-4.2**: handy for two identical sticks.
 
 ## NVIDIA cards for Docker apps
@@ -83,15 +89,33 @@ it for you (it doesn't come with HardyOS because of NVIDIA's licence):
    (about 400 MB). Nothing is installed yet.
 2. **Read NVIDIA's licence**: the text comes from the downloaded packages.
    Tick *I have read NVIDIA's licence and agree to it* and click **Agree and
-   install**. HardyOS records who agreed and when (also in the audit log).
-3. The driver is installed and built for the server's kernel (a few
-   minutes; the log is shown). Restart if asked (the basic open-source
-   driver was running).
+   install**. HardyOS records who agreed, when and to which driver version
+   (also in the audit log).
+3. Exactly the packages that were downloaded and shown are installed (the
+   same versions, nothing fetched again) and built for the server's kernel
+   (a few minutes; the log is shown). Restart if asked (the basic
+   open-source driver was running).
+
+Only NVIDIA's container toolkit is taken from NVIDIA's repository; HardyOS
+pins everything else there away, so it can never replace one of Debian's
+packages.
 
 Updates rebuild the driver inside the new version before it's offered. If
 that fails (for example the server is offline), the update isn't installed
 and HardyOS stays on the current version, with the reason on the Updates
-page. **Remove the driver** in the same card undoes it.
+page. Two more cases:
+
+- **The new version would bring another driver version.** Your agreement
+  covers the version you agreed to, so the update stops and says so. Click
+  **Get the NVIDIA driver** again, read and agree to the new licence (that
+  installs the new driver here too), then install the update.
+- **The driver can't be built for the new version.** Click **Update without
+  the NVIDIA driver this time** and confirm (it's recorded in the audit
+  log). The next update then goes ahead without the NVIDIA drivers; on the
+  new version the card says *Install the NVIDIA driver again*. Until then
+  Docker apps can't use NVIDIA cards and vGPU slices don't work.
+
+**Remove the driver** in the same card undoes it.
 
 A card lent to a VM uses the VM's own driver; that's unaffected.
 
@@ -108,10 +132,17 @@ which you license from NVIDIA:
 - Get NVIDIA's **KVM host driver** (`NVIDIA-Linux-x86_64-<version>-vgpu-kvm.run`)
   from NVIDIA's licensing portal (R535 or newer). The guest driver goes
   inside each VM; licensing the guests is between you and NVIDIA.
-- In **vGPU slices with NVIDIA's vGPU software**, upload the file. HardyOS
-  shows its SHA-256 (compare it with NVIDIA's), you confirm you have the
-  licence, and it's installed and built for the kernel. It replaces the
-  NVIDIA driver for Docker apps (the two can't be installed together).
+- In **vGPU slices with NVIDIA's vGPU software**, upload the file. The
+  server works out its SHA-256 while receiving it; compare it with the one
+  on NVIDIA's licensing portal. If the checksum isn't in HardyOS's list of
+  checked NVIDIA drivers (the list is empty unless HardyOS's maintainers
+  have added NVIDIA's checksums), you're warned: the file runs as root now
+  and again on every update. Type the driver's version to confirm, confirm
+  you have the licence, and it's installed and built for the kernel. Who
+  installed which file (name, version, SHA-256) is written to the system
+  journal and to an install log that is only ever added to
+  (`/var/lib/hardyos-gpu/vgpu-install.log`). It replaces the NVIDIA driver
+  for Docker apps (the two can't be installed together).
 - Each supported card then lists its slice types with how many are free
   (*GRID RTX6000-4Q · 4 GB each · 5 of 6 free*). On newer cards, click
   **Turn on slices** first.
@@ -129,6 +160,16 @@ which you license from NVIDIA:
 - **Intel** integrated graphics can be split into virtual GPUs when its
   driver supports SR-IOV (newer chips with i915/xe SR-IOV). HardyOS detects
   it and offers **Turn on slices**; otherwise the iGPU stays with Docker apps.
+  The new slices come up without a host driver, so they only ever go to
+  VMs. Slices can't be switched while a VM or the server's own driver uses
+  one, or on a card the server needs.
+
+## GPU ROM files
+
+Some cards need a ROM file to start inside a VM. Put it, as root, in
+`/var/lib/hardyos/root/vm-roms/` (named `something.rom` or `.bin`, at most
+8 MB) and choose it for the card in the VM's devices. HardyOS only uses
+regular files root put there, and gives the VM a checked copy.
 
 ## Cade's cards
 
@@ -147,3 +188,7 @@ which you license from NVIDIA:
   install vendor-reset for AMD cards), then **Try again**.
 - **The NVIDIA install failed**: open *Show the log* in the card; most often
   the server was offline or the kernel headers were missing.
+- **"another system task is running"**: an update, a boot menu change or a
+  driver install is in progress; they take turns. Try again when it's done.
+- **A device "is still hanging in the kernel"**: its driver didn't let go of
+  it. Restart the server to get it back.

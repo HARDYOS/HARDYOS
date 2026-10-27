@@ -1267,8 +1267,20 @@ pickers the VM wizard imports).
   slot with their functions (HDMI audio, USB-C), VRAM (amdgpu sysfs,
   `nvidia-smi`), owner, processes using them, vGPU slices and hints (AMD
   reset bug list, no reset method, console card). Host-critical devices are
-  found from the boot configuration, `zpool list -v -H -P` and the default
-  routes (walking `lower_*` and `brif` links down to physical ports).
+  found from the boot configuration, `zpool list -v -H -P`, mounted block
+  filesystems (`/proc/self/mountinfo` device numbers) and swap, following
+  `slaves/` (dm, md, LUKS, multipath) and NVMe multipath heads
+  (`multipath/`, the subsystem's controllers) down to controllers, and the
+  default routes (walking `lower_*` and `brif` links down to physical ports).
+- **Root's state on the shared dataset**: `rootfile.RootStateDir`
+  (`/var/lib/hardyos/root`, root 0755, checked on every access) holds
+  `kernel-args.json` and the ROM library; every root write into hardyd's
+  directory goes through `rootfile.WriteAtomic` (no symlinks followed, random
+  `O_EXCL` temp file, `renameat`), reads through `rootfile.ReadFile`
+  (decision 131).
+- **System lock**: `syslock` serialises boot menu writers, update ops and GPU
+  tasks (in-process, plus an flock on `/run/hardyos/system.lock` shared with
+  `hardyctl boot-sync`; decision 133).
 - **Kernel arguments**: `boot.KernelArgsPath` on the shared dataset, rendered
   by `boot.Sync` into every entry (`RenderGrubWithArgs`). "Turn on IOMMU"
   (`devices.iommu.enable`, a job) adds the CPU vendor's flags.
@@ -1282,7 +1294,9 @@ pickers the VM wizard imports).
   `Release` (after the VM stops) removes slices and rebinds each device to
   the driver recorded for it; a device that won't rebind is listed as
   stuck. `Reconcile` (at start, and from the Devices view) releases devices
-  of VMs libvirt doesn't list as running.
+  of VMs libvirt doesn't list as active (`virsh list --name`, any active
+  state); when the list can't be read nothing is released. Sysfs writes have
+  a 30 s deadline; a hanging one leaves the device stuck, not the lock held.
 - **GPU drivers**: tasks in hardyd-priv (`gpu.nvidia.prepare`, `.install`,
   `.remove`, `gpu.vgpu.install`, `.remove`), one at a time, each with a
   64 KiB log; `gpu.task` reports progress and hardyd's jobs follow it every
@@ -1296,7 +1310,10 @@ pickers the VM wizard imports).
   directory into the new system, reinstalls the packages (or reruns NVIDIA's
   vGPU installer per kernel) in a chroot, checks the DKMS module exists for
   every kernel and rebuilds the initramfs; an error removes the new boot
-  environment and the current version stays.
+  environment and the current version stays. The driver goes in only at the
+  version the licence was agreed to (else `gpu.ConsentError`), unless the
+  admin chose `gpu.nvidia.skip-next-update`, which leaves the drivers out
+  once and marks the new system's record `reinstallNeeded`.
 
 What only real hardware can verify (no GPUs in CI): rebinding NVIDIA cards
 with `nvidia_drm` loaded, AMD reset behaviour and vendor-reset, GPU ROM
