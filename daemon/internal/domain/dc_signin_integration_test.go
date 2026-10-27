@@ -43,6 +43,13 @@ func signInIntegration(t *testing.T, m *Manager, c *Config, adminPW string) {
 	if !g.Exists || !g.Enabled || g.Expired || !slices.Contains(g.Groups, "Family") || !slices.Contains(g.Groups, "Domain Users") {
 		t.Errorf("alice = %+v", g)
 	}
+	// The sign-in provider's subject: the account's own objectGUID and SID.
+	if len(g.ObjectGUID) != 36 || strings.Count(g.ObjectGUID, "-") != 4 || g.ObjectGUID != strings.ToLower(g.ObjectGUID) {
+		t.Errorf("alice's objectGUID = %q", g.ObjectGUID)
+	}
+	if !strings.HasPrefix(g.SID, g.DomainSID+"-") {
+		t.Errorf("alice's SID = %q (domain %s)", g.SID, g.DomainSID)
+	}
 	adm, err := m.UserGroups(ctx, "Administrator")
 	if err != nil || !slices.Contains(adm.Groups, "Domain Admins") {
 		t.Fatalf("Administrator = %+v, %v", adm, err)

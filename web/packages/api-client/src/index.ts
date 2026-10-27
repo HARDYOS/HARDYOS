@@ -143,3 +143,11 @@ export type FileListing = S["FileListing"];
 export type FileBulkResult = S["FileBulkResult"];
 export type FileItemResult = S["FileItemResult"];
 export type FileUploadRequest = S["FileUploadRequest"];
+// Sign-in provider (OIDC), Control Panel > Sign-in (OIDC) (remote access part B)
+export type OidcStatus = S["OidcStatus"];
+export type OidcKey = S["OidcKey"];
+export type OidcClient = S["OidcClient"];
+export type OidcClientSpec = S["OidcClientSpec"];
+export type OidcClientResult = S["OidcClientResult"];
+export type OidcPreset = S["OidcPreset"];
+export type OidcPresetStep = S["OidcPresetStep"];

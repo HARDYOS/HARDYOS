@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { initials } from "../../format";
-import { CalendarIcon, CpuIcon, DomainIcon, FolderIcon, GridIcon, LayersIcon, NetworkIcon, RefreshIcon, ShareIcon, ShieldIcon, UsersIcon } from "../../icons";
+import { CalendarIcon, CpuIcon, DomainIcon, FolderIcon, GridIcon, KeyIcon, LayersIcon, NetworkIcon, RefreshIcon, ShareIcon, ShieldIcon, UsersIcon } from "../../icons";
 import { type AppProps, useShell } from "../../shell";
 import { AppLayout, PageHeader, SideNav } from "../../ui";
 import { AuditLog } from "../shared";
@@ -11,6 +11,7 @@ import { FileServices } from "./FileServices";
 import { Hardware } from "./Hardware";
 import { Network } from "./Network";
 import { SharedFolders } from "./SharedFolders";
+import { SignIn } from "./SignIn";
 import { TerminalSwitch } from "./TerminalSwitch";
 import { Overview } from "./Overview";
 import { Updates } from "./Updates";
@@ -20,6 +21,7 @@ const SECTIONS = [
   { id: "overview", label: "Overview", icon: <GridIcon size={16} /> },
   { id: "users", label: "Users & Groups", icon: <UsersIcon size={16} /> },
   { id: "domain", label: "Domain", icon: <DomainIcon size={16} /> },
+  { id: "signin", label: "Sign-in (OIDC)", icon: <KeyIcon size={16} /> },
   { id: "shares", label: "Shared Folders", icon: <FolderIcon size={16} /> },
   { id: "files", label: "File Services", icon: <ShareIcon size={16} /> },
   { id: "network", label: "Network", icon: <NetworkIcon size={16} /> },
@@ -58,6 +60,7 @@ export default function ControlPanel({ args }: AppProps) {
       {section === "overview" && <Overview onNavigate={setSection} />}
       {section === "users" && <Users />}
       {section === "domain" && <Domain />}
+      {section === "signin" && <SignIn />}
       {section === "shares" && <SharedFolders admin={user.role === "admin"} />}
       {section === "files" && <FileServices admin={user.role === "admin"} />}
       {section === "network" && <Network />}

@@ -131,6 +131,7 @@ type settingsCache struct {
 	at            time.Time
 	issuer        string
 	issuerSet     bool
+	derived       string
 	localAccounts bool
 }
 
@@ -318,10 +319,17 @@ func (p *Provider) loadSettings(ctx context.Context) settingsCache {
 	if v, err := p.cfg.DB.GetSetting(ctx, settingLocalAccounts); err == nil {
 		s.localAccounts = v == "true"
 	}
+	// Every request to hardyd asks whether it's the provider's: the derived
+	// issuer is cached with the settings rather than read each time.
+	s.derived = p.DerivedIssuer(ctx)
 	s.at = p.now()
 	p.settings = s
 	return s
 }
+
+// NamesChanged tells the provider Remote Access's names changed (it would
+// notice within 5 seconds anyway).
+func (p *Provider) NamesChanged() { p.dropSettings() }
 
 func (p *Provider) dropSettings() {
 	p.mu.Lock()
@@ -339,7 +347,7 @@ func (p *Provider) Issuer(ctx context.Context) string {
 	if s.issuerSet {
 		return s.issuer
 	}
-	return p.DerivedIssuer(ctx)
+	return s.derived
 }
 
 // DerivedIssuer is the issuer when the administrator hasn't chosen one.

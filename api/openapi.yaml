@@ -34,6 +34,7 @@ tags:
   - name: apps
   - name: sharelinks
   - name: files
+  - name: oidc
 paths:
   /health:
     get:
@@ -3096,6 +3097,199 @@ paths:
       responses:
         "202": { description: Restarting }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  # ---- sign-in provider (OIDC), Control Panel > Sign-in (OIDC) (remote access part B) ----
+  /oidc:
+    get:
+      operationId: getOidc
+      summary: The sign-in provider's issuer, settings and signing keys (admin)
+      tags: [oidc]
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OidcStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    patch:
+      operationId: updateOidc
+      summary: Choose the issuer or let HardyOS accounts sign in to apps (admin)
+      tags: [oidc]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                issuer: { type: string, description: "The issuer URL; empty goes back to the one HardyOS works out" }
+                localAccounts: { type: boolean, description: "HardyOS (non-domain) accounts may sign in to apps (off by default)" }
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OidcStatus" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /oidc/keys/rotate:
+    post:
+      operationId: rotateOidcKeys
+      summary: Sign with the next key now; the current one stays published for 2 days (admin)
+      tags: [oidc]
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OidcStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /oidc/presets:
+    get:
+      operationId: listOidcPresets
+      summary: Ready-made clients (NetBird) with what to paste where (admin)
+      tags: [oidc]
+      parameters:
+        - { name: netbirdUrl, in: query, schema: { type: string }, description: "NetBird's dashboard address (default https://vpn.hardynetworks.net)" }
+      responses:
+        "200":
+          description: Presets
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [presets]
+                properties:
+                  presets: { type: array, items: { $ref: "#/components/schemas/OidcPreset" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /oidc/clients:
+    get:
+      operationId: listOidcClients
+      summary: Apps that sign people in through HardyOS (admin)
+      tags: [oidc]
+      responses:
+        "200":
+          description: Clients
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [clients]
+                properties:
+                  clients: { type: array, items: { $ref: "#/components/schemas/OidcClient" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: createOidcClient
+      summary: Add a client; a confidential client's secret is in the answer, once (admin)
+      tags: [oidc]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OidcClientSpec" }
+      responses:
+        "201":
+          description: The client and its secret
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OidcClientResult" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /oidc/clients/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getOidcClient
+      summary: One client (admin)
+      tags: [oidc]
+      responses:
+        "200":
+          description: The client
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OidcClient" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      operationId: updateOidcClient
+      summary: Change a client (all fields); a client made confidential gets a secret, returned once (admin)
+      tags: [oidc]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OidcClientSpec" }
+      responses:
+        "200":
+          description: The client
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OidcClientResult" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      operationId: deleteOidcClient
+      summary: Remove a client, its sign-ins, tokens and consents (admin)
+      tags: [oidc]
+      responses:
+        "204": { description: Removed }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /oidc/clients/{id}/secret:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: newOidcClientSecret
+      summary: Replace a confidential client's secret; the new one is in the answer, once (admin)
+      tags: [oidc]
+      responses:
+        "200":
+          description: The new secret
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [secret]
+                properties:
+                  secret: { type: string }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /oidc/clients/{id}/revoke:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: revokeOidcClient
+      summary: End every sign-in at a client (its tokens stop working) (admin)
+      tags: [oidc]
+      responses:
+        "200":
+          description: How many sign-ins were ended
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revoked]
+                properties:
+                  revoked: { type: integer }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  # ---- end of sign-in provider paths ----
 components:
   securitySchemes:
     session:
@@ -4881,3 +5075,79 @@ components:
         overwrite: { type: boolean, description: Replace a file that's already there (never a folder) }
         modified: { type: integer, format: int64, description: The file's modification time in ms since 1970 (File.lastModified) }
     # ---- end of files API schemas (part C) ----
+    # ---- sign-in provider (OIDC) schemas ----
+    OidcStatus:
+      type: object
+      required: [issuer, issuerChosen, derivedIssuer, discovery, localAccounts, keys]
+      properties:
+        issuer: { type: string, description: "The issuer apps are configured with" }
+        issuerChosen: { type: boolean, description: An administrator chose it (else it follows Remote Access) }
+        derivedIssuer: { type: string, description: "https://sso.<base>, or https://<desktop>/oidc without a base domain" }
+        discovery: { type: string }
+        localAccounts: { type: boolean }
+        keys: { type: array, items: { $ref: "#/components/schemas/OidcKey" } }
+    OidcKey:
+      type: object
+      required: [id, algorithm, state, createdAt]
+      properties:
+        id: { type: string }
+        algorithm: { type: string }
+        state: { type: string, enum: [next, active, retired] }
+        createdAt: { type: string, format: date-time }
+        activatedAt: { type: string, format: date-time }
+        retiredAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+    OidcClientSpec:
+      type: object
+      required: [name, kind, redirectUris]
+      properties:
+        name: { type: string, maxLength: 64 }
+        kind: { type: string, enum: [confidential, public], description: "Public clients (browser apps, CLIs) have no secret and must use PKCE" }
+        redirectUris: { type: array, items: { type: string }, maxItems: 20, description: "Matched exactly; https (http only to localhost, for public clients)" }
+        postLogoutRedirectUris: { type: array, items: { type: string }, maxItems: 20 }
+        allowedGroups: { type: array, items: { type: string }, description: "DOMAIN\\group; empty lets every account in" }
+        firstParty: { type: boolean, description: No consent screen }
+        preset: { type: string }
+        disabled: { type: boolean }
+    OidcClient:
+      type: object
+      required: [id, name, kind, redirectUris, postLogoutRedirectUris, allowedGroups, firstParty, preset, managedBy, disabled, hasSecret, createdAt, updatedAt]
+      properties:
+        id: { type: string, description: The client ID }
+        name: { type: string }
+        kind: { type: string, enum: [confidential, public] }
+        redirectUris: { type: array, items: { type: string } }
+        postLogoutRedirectUris: { type: array, items: { type: string } }
+        allowedGroups: { type: array, items: { type: string } }
+        firstParty: { type: boolean }
+        preset: { type: string }
+        managedBy: { type: string, description: "Set when Remote Access keeps this client (read-only here)" }
+        disabled: { type: boolean }
+        hasSecret: { type: boolean }
+        createdAt: { type: string }
+        updatedAt: { type: string }
+    OidcClientResult:
+      type: object
+      required: [client]
+      properties:
+        client: { $ref: "#/components/schemas/OidcClient" }
+        secret: { type: string, description: "Only when a secret was just made: shown once, only a hash is kept" }
+    OidcPresetStep:
+      type: object
+      required: [where]
+      properties:
+        where: { type: string }
+        field: { type: string }
+        value: { type: string, description: "May hold {clientId}, {clientSecret} and {issuer}" }
+    OidcPreset:
+      type: object
+      required: [id, name, description, client, steps, notes]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        client: { $ref: "#/components/schemas/OidcClientSpec" }
+        redirectFromApp: { type: string, description: "The app shows the exact redirect URL (starting with this) once it has the client ID: paste it into the client" }
+        steps: { type: array, items: { $ref: "#/components/schemas/OidcPresetStep" } }
+        notes: { type: array, items: { type: string } }
+    # ---- end of sign-in provider schemas ----
