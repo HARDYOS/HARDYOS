@@ -45,6 +45,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/secretbox"
 	"github.com/hardyos/hardyos/daemon/internal/sharelinks"
+	"github.com/hardyos/hardyos/daemon/internal/zfs"
 )
 
 // Office job kinds.
@@ -397,6 +398,10 @@ type OfficeStatus struct {
 	Sessions  []OfficeSessionView  `json:"sessions,omitempty"`
 	Fonts     []OfficeFontsChoice  `json:"fontsChoices,omitempty"`
 	Listeners *OfficeListenerState `json:"listeners,omitempty"`
+	// EnginePool is the pool apps live on; while there is none, Pools are
+	// the pools turning the office suite on can put them on.
+	EnginePool string   `json:"enginePool,omitempty"`
+	Pools      []string `json:"pools,omitempty"`
 }
 
 // OfficeSessionView is one open document.
@@ -455,6 +460,17 @@ func (s *Server) handleOfficeStatus(w http.ResponseWriter, r *http.Request, u *a
 		if o, err := s.appsStatus(ctx); err == nil {
 			if a := findApp(o, office.AppID); a != nil {
 				out.Installed, out.AppState, out.Version = true, a.State, a.Version
+			}
+			out.EnginePool = o.Pool
+			if o.Pool == "" {
+				var pools []zfs.Pool
+				if err := s.cfg.Priv.Call(ctx, priv.OpPools, nil, &pools); err == nil {
+					for _, p := range pools {
+						if p.Health == "ONLINE" || p.Health == "DEGRADED" {
+							out.Pools = append(out.Pools, p.Name)
+						}
+					}
+				}
 			}
 		} else if out.Problem == "" {
 			out.Problem = err.Error()

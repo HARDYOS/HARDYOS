@@ -1,7 +1,7 @@
 import type { AppManifest, ShellBridge } from "@hardy/sdk";
 import type { User } from "@hardy/api-client";
 import { type ComponentType, type LazyExoticComponent, type ReactNode, createContext, lazy, useContext } from "react";
-import { ActivityIcon, BagIcon, FolderIcon, ListIcon, ScreenIcon, SlidersIcon, StorageIcon, TerminalIcon, VMIcon } from "./icons";
+import { ActivityIcon, BagIcon, DocumentIcon, FolderIcon, ListIcon, NotesIcon, ScreenIcon, SlidersIcon, StorageIcon, TerminalIcon, VMIcon } from "./icons";
 
 /** Props every app window receives. */
 export interface AppProps {
@@ -32,6 +32,15 @@ export const APPS: AppDef[] = [
     glyph: (s) => <FolderIcon size={s} />,
     component: lazy(() => import("./apps/files/FileManager")),
     defaultSize: { width: 1080, height: 700 },
+  },
+  {
+    id: "os.hardy.notes",
+    name: "Notes",
+    icon: "notes",
+    color: "#0E9F75",
+    glyph: (s) => <NotesIcon size={s} />,
+    component: lazy(() => import("./apps/notes/Notes")),
+    defaultSize: { width: 980, height: 660 },
   },
   {
     id: "os.hardy.storage",
@@ -129,8 +138,23 @@ const vmConsole: AppDef = {
   adminOnly: true,
 };
 
+/** A document's editor opens in a window with this id prefix plus ":" share ":" path. */
+export const OFFICE_EDITOR = "os.hardy.office";
+
+const officeEditor: AppDef = {
+  id: OFFICE_EDITOR,
+  name: "Document",
+  icon: "document",
+  color: "#22D3EE",
+  glyph: (s) => <DocumentIcon size={s} />,
+  component: lazy(() => import("./apps/office/OfficeEditor")),
+  defaultSize: { width: 1200, height: 800 },
+  hidden: true,
+};
+
 export function appById(id: string): AppDef | undefined {
   if (id === APP_WINDOW || id.startsWith(`${APP_WINDOW}:`)) return appWindow;
+  if (id === OFFICE_EDITOR || id.startsWith(`${OFFICE_EDITOR}:`)) return officeEditor;
   if (id === VM_CONSOLE || id.startsWith(`${VM_CONSOLE}:`)) return vmConsole;
   return APPS.find((a) => a.id === id);
 }

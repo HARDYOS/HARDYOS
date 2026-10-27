@@ -157,6 +157,13 @@ export type CustomAppRequest = S["CustomAppRequest"];
 export type ShareLink = S["ShareLink"];
 export type ShareLinkRequest = S["ShareLinkRequest"];
 export type ShareLinkCreated = S["ShareLinkCreated"];
+export type ShareLinkAccess = S["ShareLinkAccess"];
+export type OfficeStatus = S["OfficeStatus"];
+export type OfficeFormat = S["OfficeFormat"];
+export type OfficeSettings = S["OfficeSettings"];
+export type OfficeSessionView = S["OfficeSessionView"];
+export type OfficeOpened = S["OfficeOpened"];
+export type OfficeNewRequest = S["OfficeNewRequest"];
 // Files API as the File Manager consumes it (owned by part C)
 export type FileShare = S["FileShare"];
 export type FileEntry = S["FileEntry"];

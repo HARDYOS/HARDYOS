@@ -35,6 +35,7 @@ tags:
   - name: shares
   - name: apps
   - name: sharelinks
+  - name: office
   - name: files
   - name: remote
   - name: oidc
@@ -2006,6 +2007,112 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
   # ---- end of share links ------------------------------------------------
+  # ---- Office (phase 7 part B; docs/office.md, decisions 250-262) ---------
+  # The editor page (/s/-/office/editor on the office origin), the Document
+  # Server proxy (/s/-/ds/...) and share link editors (/s/<token>/office)
+  # are served outside /api/v1; the Document Server calls hardyd on its own
+  # internal listener. None of those are part of this API.
+  /office:
+    get:
+      operationId: getOffice
+      summary: The office suite's state (administrators also get settings, the app and open documents)
+      tags: [office]
+      responses:
+        "200":
+          description: State
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OfficeStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /office/settings:
+    put:
+      operationId: setOfficeSettings
+      summary: Change Control Panel › Office's settings (a job, audited)
+      tags: [office]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OfficeSettingsRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /office/enable:
+    post:
+      operationId: enableOffice
+      summary: Turn the office suite on (installs or reconfigures the Document Server app; a job)
+      tags: [office]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OfficeEnableRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /office/disable:
+    post:
+      operationId: disableOffice
+      summary: Turn the office suite off (stops the Document Server; its data is kept; a job)
+      tags: [office]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OfficeDisableRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /office/open:
+    post:
+      operationId: openOfficeDocument
+      summary: Open a file in the editor, as the signed-in person
+      tags: [office]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OfficeOpenRequest" }
+      responses:
+        "200":
+          description: Where the editor window goes
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OfficeOpened" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { $ref: "#/components/responses/Invalid" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /office/new:
+    post:
+      operationId: newOfficeDocument
+      summary: Make an empty document, spreadsheet or presentation (never over an existing file)
+      tags: [office]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OfficeNewRequest" }
+      responses:
+        "201":
+          description: The new file
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileEntry" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  # ---- end of office --------------------------------------------------------
   # ---- files API (consumed by File Manager; owned by part C) -------------
   # docs/plans/file-sharing.md section 3.
   # Files are read and written as the signed-in person (domain accounts as
@@ -6695,7 +6802,7 @@ components:
     # ---- Share links (part D) ----
     ShareLink:
       type: object
-      required: [id, share, path, name, dir, createdById, createdBy, createdAt, expiresAt, hasPassword, allowUpload, maxDownloads, downloadCount, lastUsedAt, revoked, status, maxUploadBytes, uploadedBytes, maxZipBytes]
+      required: [id, share, path, name, dir, createdById, createdBy, createdAt, expiresAt, hasPassword, allowUpload, maxDownloads, downloadCount, lastUsedAt, revoked, status, maxUploadBytes, uploadedBytes, maxZipBytes, access]
       properties:
         id: { type: integer, format: int64 }
         share: { type: string, description: 'Shared folder id, or "~home"' }
@@ -6716,6 +6823,15 @@ components:
         maxUploadBytes: { type: integer, format: int64, description: "What an upload link may take in, in all (bytes); 0 for links without uploads" }
         uploadedBytes: { type: integer, format: int64, description: What it has taken in so far }
         maxZipBytes: { type: integer, format: int64, description: "The most one \"download all\" zip of a folder link holds (bytes)" }
+        access: { $ref: "#/components/schemas/ShareLinkAccess" }
+    ShareLinkAccess:
+      type: string
+      enum: [view, edit]
+      description: |
+        What visitors may do with office documents in the link: view (open
+        them read only in the browser editor) or edit (edit in the browser;
+        saves are written as the link's creator, who must still be allowed
+        to change the file). Edit must be asked for explicitly (decision 256).
     ShareLinkRequest:
       type: object
       required: [share, path]
@@ -6738,6 +6854,7 @@ components:
           minimum: 0
           maximum: 1000000000000
           description: "Folder links: the most one \"download all\" zip holds, 1 MB to 1 TB; 0 or left out for 20 GB"
+        access: { $ref: "#/components/schemas/ShareLinkAccess" }
     ShareLinkCreated:
       type: object
       required: [link, url, token]
@@ -6747,6 +6864,106 @@ components:
         token: { type: string }
         publicUrl: { type: string, description: "The link at https://files.<base>/s/<token> (through NetBird's reverse proxy, for people without NetBird) while publishing is on; it can take a minute to open the first time" }
     # ---- end of share link schemas ----
+    # ---- Office (phase 7 part B; docs/office.md, decisions 250-262) ----
+    OfficeFormat:
+      type: object
+      required: [ext, documentType, editable, lossy]
+      properties:
+        ext: { type: string, description: "File extension without the dot, e.g. docx" }
+        documentType: { type: string, enum: [word, cell, slide] }
+        editable: { type: boolean, description: The editor saves it back in this format }
+        lossy: { type: boolean, description: Formatting the editor doesn't support is lost on save (ODF, CSV, plain text) }
+    OfficeSettings:
+      type: object
+      required: [enabled, maxFileMB, fontsShare]
+      properties:
+        enabled: { type: boolean }
+        maxFileMB: { type: integer, minimum: 1, maximum: 1000, description: The largest document opened or saved }
+        fontsShare: { type: string, description: 'Shared folder with extra fonts (read only into the Document Server); "" for none' }
+    OfficeSessionView:
+      type: object
+      required: [share, path, editors, opened, saves, state]
+      properties:
+        share: { type: string }
+        path: { type: string }
+        editors: { type: array, items: { type: string }, description: Names of the people in it now }
+        opened: { type: string, format: date-time }
+        saves: { type: integer }
+        state: { type: string, enum: [open, closed, error] }
+        error: { type: string }
+    OfficeFontsChoice:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string }
+        name: { type: string }
+    OfficeListenerState:
+      type: object
+      required: [officePort, office, internal]
+      properties:
+        officePort: { type: integer, description: "The editor's own origin, https://<server>:<port>" }
+        office: { type: boolean, description: That origin is listening }
+        internal: { type: string, description: "Where the Document Server reaches hardyd (empty until Docker is up)" }
+    OfficeStatus:
+      type: object
+      required: [enabled, ready, editorLimit, activeEditors, openDocuments, maxFileMB, formats, installed]
+      properties:
+        enabled: { type: boolean }
+        ready: { type: boolean, description: Documents open now (on, and the Document Server answers) }
+        editorLimit: { type: integer, description: "People editing at once that the free Document Server allows (20)" }
+        activeEditors: { type: integer }
+        openDocuments: { type: integer }
+        maxFileMB: { type: integer }
+        formats: { type: array, items: { $ref: "#/components/schemas/OfficeFormat" } }
+        settings: { $ref: "#/components/schemas/OfficeSettings" }
+        installed: { type: boolean, description: "The Document Server app is installed (administrators)" }
+        appState: { type: string }
+        version: { type: string }
+        problem: { type: string }
+        sessions: { type: array, items: { $ref: "#/components/schemas/OfficeSessionView" } }
+        fontsChoices: { type: array, items: { $ref: "#/components/schemas/OfficeFontsChoice" } }
+        listeners: { $ref: "#/components/schemas/OfficeListenerState" }
+        enginePool: { type: string, description: The pool apps live on }
+        pools: { type: array, items: { type: string }, description: "While no app is installed: the pools apps can go on" }
+    OfficeSettingsRequest:
+      type: object
+      required: [maxFileMB]
+      properties:
+        maxFileMB: { type: integer, minimum: 1, maximum: 1000 }
+        fontsShare: { type: string, description: 'Shared folder id, or "" for none; left out keeps it' }
+    OfficeEnableRequest:
+      type: object
+      properties:
+        pool: { type: string, description: The pool for Docker and apps, only when no app is installed yet }
+        fontsShare: { type: string }
+    OfficeDisableRequest:
+      type: object
+      properties:
+        confirm: { type: boolean, description: "Needed while people are editing: what they haven't saved is lost" }
+    OfficeOpenRequest:
+      type: object
+      required: [share, path]
+      properties:
+        share: { type: string }
+        path: { type: string }
+        mode: { type: string, enum: [edit, view], description: "edit (default; read only when the person can't change the file) or view" }
+    OfficeOpened:
+      type: object
+      required: [url, mode, title]
+      properties:
+        url: { type: string, description: "The editor window's address on the office origin, with a one-minute single-use ticket" }
+        mode: { type: string, enum: [edit, view] }
+        title: { type: string }
+        viewReason: { type: string, description: Why it opened read only when editing was asked for }
+    OfficeNewRequest:
+      type: object
+      required: [share, kind]
+      properties:
+        share: { type: string }
+        dir: { type: string, description: The folder it goes in }
+        kind: { type: string, enum: [document, spreadsheet, presentation] }
+        name: { type: string, description: The extension is added when missing }
+    # ---- end of office schemas ----
     # ---- files API schemas (consumed by File Manager; owned by part C) ----
     FileShare:
       type: object

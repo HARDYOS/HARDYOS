@@ -1572,3 +1572,14 @@
 .window:not(.is-focused) .app-frame__view {
   pointer-events: none;
 }
+/* The office editor: the Document Server's own dark page fills it. */
+.office-frame .app-frame__view {
+  background: #05070d;
+}
+.office-frame__why {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  padding-left: 6px;
+}
