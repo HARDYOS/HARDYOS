@@ -89,7 +89,13 @@ func copyMeta(src, dst int, st *unix.Stat_t, isDir bool) error {
 	if err := unix.Fchown(dst, int(st.Uid), int(st.Gid)); err != nil && !errors.Is(err, unix.EPERM) {
 		return err
 	}
-	if err := unix.Fchmod(dst, st.Mode&0o7777); err != nil {
+	mode := st.Mode & 0o7777
+	if !isDir {
+		// Never a setuid file from a backup (setgid folders stay: group
+		// inheritance is common in shared folders).
+		mode &^= unix.S_ISUID | unix.S_ISGID
+	}
+	if err := unix.Fchmod(dst, mode); err != nil {
 		return err
 	}
 	buf := make([]byte, 64<<10)
