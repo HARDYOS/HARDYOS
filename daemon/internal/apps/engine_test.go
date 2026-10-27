@@ -90,6 +90,8 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 	must(t, os.MkdirAll(filepath.Join(e.root, "usr/bin"), 0o755))
 	must(t, os.WriteFile(filepath.Join(e.root, "usr/bin/docker"), nil, 0o755))
+	must(t, os.MkdirAll(filepath.Join(e.root, "usr/sbin"), 0o755))
+	must(t, os.WriteFile(filepath.Join(e.root, "usr/sbin/dockerd"), nil, 0o755))
 	e.m = &Manager{Runner: e.fake, Root: e.root, Shares: e.shares, MemTotal: func() uint64 { return 8 << 30 },
 		clock: func() time.Time { return time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC) }}
 	must(t, os.MkdirAll(e.m.stateDir(), 0o700))

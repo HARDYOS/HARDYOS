@@ -197,6 +197,8 @@ func TestDockerIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = os.WriteFile(filepath.Join(root, "usr/bin/docker"), nil, 0o755)
+	_ = os.MkdirAll(filepath.Join(root, "usr/sbin"), 0o755)
+	_ = os.WriteFile(filepath.Join(root, "usr/sbin/dockerd"), nil, 0o755)
 	sim := &zfsSim{base: t.TempDir(), ds: map[string]bool{"tank": true}, real: sysexec.Exec{}}
 	m := &Manager{Runner: sim, Root: root, CatalogDir: t.TempDir()}
 	pkg := catalogPackage(t, "kincast")
@@ -372,6 +374,8 @@ func TestDockerIntegrationEngine(t *testing.T) {
 	root := t.TempDir()
 	must(t, os.MkdirAll(filepath.Join(root, "usr/bin"), 0o755))
 	must(t, os.WriteFile(filepath.Join(root, "usr/bin/docker"), nil, 0o755))
+	must(t, os.MkdirAll(filepath.Join(root, "usr/sbin"), 0o755))
+	must(t, os.WriteFile(filepath.Join(root, "usr/sbin/dockerd"), nil, 0o755))
 	sim := &zfsSim{base: t.TempDir(), ds: map[string]bool{"tank": true}, real: sysexec.Exec{}}
 	shares := &fakeShares{root: t.TempDir()}
 	for _, d := range []string{"media", "dl"} {

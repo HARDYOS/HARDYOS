@@ -81,6 +81,12 @@ nfs-kernel-server
 # data on that pool.
 docker.io
 docker-compose
+# Debian 13 ships the docker command separately, and dockerd needs
+# AppArmor's parser on Debian's kernel; both are only "recommended" by
+# docker.io, and the image is built without recommends.
+docker-cli
+apparmor
+xz-utils
 
 # Live system
 live-boot

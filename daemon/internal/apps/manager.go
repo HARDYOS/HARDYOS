@@ -262,8 +262,14 @@ func (m *Manager) runCompose(ctx context.Context, args ...string) ([]byte, error
 
 // Available reports whether Docker is installed.
 func (m *Manager) Available() bool {
-	_, err := os.Stat(m.sys("/usr/bin/docker"))
-	return err == nil
+	// The engine (docker.io) and the docker command (docker-cli: a separate
+	// package in Debian 13) are both needed.
+	for _, p := range []string{"/usr/sbin/dockerd", "/usr/bin/docker"} {
+		if _, err := os.Stat(m.sys(p)); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *Manager) engine() (*EngineConfig, error) {

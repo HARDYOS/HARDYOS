@@ -189,6 +189,8 @@ bootpool=$(api GET /storage/boot) || fail "boot disks"
 [ "$(jq -r '.disks | length' <<<"$bootpool")" = 2 ] || fail "boot mirror: $bootpool"
 [ "$(jq -r .status.state <<<"$bootpool")" = ONLINE ] || fail "boot pool not ONLINE: $(jq -r .status.state <<<"$bootpool")"
 api GET /network > /dev/null || fail "network settings"
+# The App Store needs the docker command (docker-cli in Debian 13).
+api GET /apps | jq -e '.available == true' > /dev/null || fail "apps aren't available: the image has no docker command"
 
 # --- 3. storage and backups ---------------------------------------------------------
 
