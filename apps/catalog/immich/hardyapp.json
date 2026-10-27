@@ -12,7 +12,7 @@
   "minMemoryMB": 6144,
   "web": { "port": "WEB", "path": "/" },
   "ports": [
-    { "name": "WEB", "label": "Website and phone apps", "default": 2283 }
+    { "name": "WEB", "label": "Website (on the server only; reached through HardyOS)", "default": 2283 }
   ],
   "settings": [
     { "env": "DB_PASSWORD", "generate": "secret" },
@@ -22,6 +22,7 @@
   ],
   "folders": [
     { "path": "postgres", "mode": "0700" },
+    { "path": "db-dump", "mode": "0700" },
     { "path": "redis", "mode": "0700" },
     { "path": "model-cache", "mode": "0750" },
     { "path": "model-cache-cuda", "mode": "0750" },
@@ -62,5 +63,12 @@
       "access": "read"
     }
   ],
-  "permissions": { "gpu": true }
+  "permissions": { "gpu": true, "rocm": true },
+  "backup": {
+    "dump": {
+      "service": "database",
+      "command": ["pg_dump", "--username=postgres", "--dbname=immich", "--format=custom", "--file=/dump/immich.dump"],
+      "timeoutSeconds": 1800
+    }
+  }
 }

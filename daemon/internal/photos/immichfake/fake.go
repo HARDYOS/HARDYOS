@@ -59,7 +59,46 @@ type Fake struct {
 	Scans    []string
 	Partners map[string][]string // sharer -> shared with
 	Calls    []string
-	n        int
+	// Updates are the accounts PUT /admin/users changed, in order.
+	Updates []string
+	n       int
+}
+
+// SetOwnEmail is a person changing their own address (PUT /api/users/me,
+// which HardyOS's proxies refuse but Immich allows).
+func (f *Fake) SetOwnEmail(id, email string) {
+	f.Mu.Lock()
+	defer f.Mu.Unlock()
+	f.User(id).Email = email
+}
+
+// Unlink is a person unlinking OAuth (POST /api/oauth/unlink).
+func (f *Fake) Unlink(id string) {
+	f.Mu.Lock()
+	defer f.Mu.Unlock()
+	f.User(id).OAuthID = ""
+}
+
+// AddUser adds an account as if someone made it in Immich.
+func (f *Fake) AddUser(u User, password string) string {
+	f.Mu.Lock()
+	defer f.Mu.Unlock()
+	if u.ID == "" {
+		u.ID = f.id()
+	}
+	f.Users = append(f.Users, u)
+	f.Password[u.ID] = password
+	return u.ID
+}
+
+// Get returns a copy of an account.
+func (f *Fake) Get(id string) User {
+	f.Mu.Lock()
+	defer f.Mu.Unlock()
+	if u := f.User(id); u != nil {
+		return *u
+	}
+	return User{}
 }
 
 // New starts a fake Immich with Immich's default configuration (the parts
@@ -158,6 +197,11 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		me, perms = f.User(uid), []string{"all"}
 	}
+	if me != nil && me.DeletedAt != "" {
+		// A soft-deleted account's keys and sessions stop working.
+		fail(401, "Invalid user token")
+		return
+	}
 	need := func(perm string, admin bool) bool {
 		if me == nil {
 			fail(401, "Authentication required")
@@ -198,7 +242,7 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, u := range f.Users {
-			if strings.EqualFold(u.Email, str("email")) && f.Password[u.ID] == str("password") {
+			if u.DeletedAt == "" && strings.EqualFold(u.Email, str("email")) && f.Password[u.ID] == str("password") {
 				tok := "tok-" + f.id()
 				f.Sessions[tok] = u.ID
 				reply(201, map[string]any{"accessToken": tok, "userId": u.ID})
@@ -239,7 +283,13 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		}
 	case path == "/admin/users" && r.Method == "GET":
 		if need("adminUser.read", true) {
-			reply(200, f.Users)
+			out := []User{}
+			for _, u := range f.Users {
+				if u.DeletedAt == "" || r.URL.Query().Get("withDeleted") == "true" {
+					out = append(out, u)
+				}
+			}
+			reply(200, out)
 		}
 	case path == "/admin/users" && r.Method == "POST":
 		if !need("adminUser.create", true) {
@@ -256,6 +306,33 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		f.Users = append(f.Users, u)
 		f.Password[u.ID] = str("password")
 		reply(201, u)
+	case strings.HasPrefix(path, "/admin/users/") && strings.HasSuffix(path, "/restore") && r.Method == "POST":
+		if !need("adminUser.delete", true) {
+			return
+		}
+		u := f.User(strings.TrimSuffix(strings.TrimPrefix(path, "/admin/users/"), "/restore"))
+		if u == nil {
+			fail(400, "User not found")
+			return
+		}
+		u.DeletedAt = ""
+		reply(200, u)
+	case strings.HasPrefix(path, "/admin/users/") && r.Method == "DELETE":
+		if !need("adminUser.delete", true) {
+			return
+		}
+		u := f.User(strings.TrimPrefix(path, "/admin/users/"))
+		switch {
+		case u == nil:
+			fail(400, "User not found")
+		case u.ID == me.ID:
+			fail(403, "Cannot delete your own account")
+		case u.IsAdmin:
+			fail(403, "Cannot delete admin user")
+		default:
+			u.DeletedAt = "2026-10-27T00:00:00.000Z"
+			reply(200, u)
+		}
 	case strings.HasPrefix(path, "/admin/users/") && r.Method == "PUT":
 		if !need("adminUser.update", true) {
 			return
@@ -265,9 +342,25 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 			fail(400, "User not found")
 			return
 		}
+		if e, ok := body["email"].(string); ok && !strings.EqualFold(e, u.Email) {
+			for _, o := range f.Users {
+				if strings.EqualFold(o.Email, e) {
+					fail(400, "Email already in use by another account")
+					return
+				}
+			}
+			u.Email = e
+		}
 		if n, ok := body["name"].(string); ok {
 			u.Name = n
 		}
+		if a, ok := body["isAdmin"].(bool); ok {
+			u.IsAdmin = a
+		}
+		if p, ok := body["password"].(string); ok {
+			f.Password[u.ID] = p
+		}
+		f.Updates = append(f.Updates, u.ID)
 		reply(200, u)
 	case path == "/libraries" && r.Method == "GET":
 		if need("library.read", true) {
@@ -371,12 +464,12 @@ func (f *Fake) SignInWithOAuth(sub, email, name string) string {
 	f.Mu.Lock()
 	defer f.Mu.Unlock()
 	for i := range f.Users {
-		if f.Users[i].OAuthID == sub {
+		if f.Users[i].OAuthID == sub && f.Users[i].DeletedAt == "" {
 			return f.Users[i].ID
 		}
 	}
 	for i := range f.Users {
-		if strings.EqualFold(f.Users[i].Email, email) && f.Users[i].OAuthID == "" {
+		if strings.EqualFold(f.Users[i].Email, email) && f.Users[i].OAuthID == "" && f.Users[i].DeletedAt == "" {
 			f.Users[i].OAuthID = sub
 			return f.Users[i].ID
 		}

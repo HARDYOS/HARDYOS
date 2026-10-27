@@ -33,6 +33,9 @@ type Shares interface {
 // Apps is what backups need of the apps engine (apps.Manager).
 type Apps interface {
 	BackupSource(ctx context.Context, id string) (*apps.BackupSource, error)
+	// PreBackup runs the app's backup dump (manifest backup.dump) before
+	// its snapshot; ran is false when it has none or isn't running.
+	PreBackup(ctx context.Context, id string) (ran bool, err error)
 	BackupSources(ctx context.Context) ([]apps.BackupSource, error)
 	RestoreData(ctx context.Context, id, confirm string, fill apps.Fill) error
 	RestoreNew(ctx context.Context, id, pool string, fill apps.Fill) error

@@ -294,22 +294,47 @@ func (p *Provider) fillUserinfo(ctx context.Context, info *oidc.UserInfo, u *aut
 		label := StorageLabel(short)
 		info.AppendClaims(ClaimPhotosRole, role)
 		info.AppendClaims(ClaimStorageLabel, label)
-		if slices.Contains(scopes, oidc.ScopeEmail) && info.Email == "" {
+		// Only HardyOS's own accounts get a placeholder: a domain account
+		// without an address has none (Immich then refuses it), so a
+		// placeholder can never name one account in one place and another
+		// elsewhere.
+		if slices.Contains(scopes, oidc.ScopeEmail) && info.Email == "" && u.IdentitySource() != auth.SourceDomain {
 			info.Email = PlaceholderEmail(label)
 			info.AppendClaims("email_verified", false)
 		}
 	}
 }
 
-// PlaceholderEmail is the address an account without one has in apps that
-// need an address to tell people apart (Immich): <label>@hardyos.invalid
-// (.invalid never resolves, RFC 2606).
-func PlaceholderEmail(label string) string { return label + "@hardyos.invalid" }
+// PlaceholderDomain is the domain of placeholder addresses. Addresses
+// HardyOS gives its own Immich accounts are in other .invalid domains, so
+// no placeholder can be one of them.
+const PlaceholderDomain = "local.hardyos.invalid"
+
+// PlaceholderEmail is the address a HardyOS account without one has in
+// apps that need an address to tell people apart (Immich):
+// <label>@local.hardyos.invalid (.invalid never resolves, RFC 2606).
+func PlaceholderEmail(label string) string { return label + "@" + PlaceholderDomain }
+
+// reservedLabels are storage labels of HardyOS's own Immich accounts and
+// Immich's first administrator.
+var reservedLabels = map[string]bool{"admin": true, "family": true, "user": true}
 
 // StorageLabel turns an account's short name into a folder name: lower
 // case letters, digits, '.', '_' and '-' (anything else becomes '-'), at
-// most 64 characters, never starting or ending with '.'.
+// most 64 characters, never starting or ending with '.'. Labels HardyOS's
+// own accounts use (admin, family, hardyos*, unlinked*) get a "u-" prefix.
 func StorageLabel(short string) string {
+	l := storageLabel(short)
+	if reservedLabels[l] || strings.HasPrefix(l, "hardyos") || strings.HasPrefix(l, "unlinked") {
+		l = "u-" + l
+		if len(l) > 64 {
+			l = l[:64]
+		}
+	}
+	return l
+}
+
+func storageLabel(short string) string {
 	var b strings.Builder
 	for _, r := range strings.ToLower(short) {
 		if b.Len() >= 64 {
@@ -349,5 +374,20 @@ func (p *Provider) ProfileFor(ctx context.Context, u *auth.User) (*AppProfile, e
 	info := new(oidc.UserInfo)
 	p.fillUserinfo(ctx, info, u, sub, []string{oidc.ScopeOpenID, oidc.ScopeProfile, oidc.ScopeEmail, ScopePhotos})
 	label, _ := info.Claims[ClaimStorageLabel].(string)
-	return &AppProfile{Subject: sub, Email: strings.ToLower(strings.TrimSpace(info.Email)), Name: info.Name, StorageLabel: label, Admin: u.IsAdmin()}, nil
+	email := strings.ToLower(strings.TrimSpace(info.Email))
+	if email == "" {
+		return nil, ErrNoEmail
+	}
+	return &AppProfile{Subject: sub, Email: email, Name: info.Name, StorageLabel: label, Admin: u.IsAdmin()}, nil
+}
+
+// ErrNoEmail: a domain account with no e-mail address (and no domain DNS
+// name for its user principal name) can't be given to an app that tells
+// people apart by address.
+var ErrNoEmail = errors.New("the account has no e-mail address (set one in the domain)")
+
+// SubjectOf is the subject a sign-in gives u, if it has one already
+// (empty otherwise; nothing is recorded).
+func (p *Provider) SubjectOf(ctx context.Context, u *auth.User) string {
+	return p.subjectOf(ctx, u.ID)
 }

@@ -131,6 +131,20 @@ func TestPhotosSync(t *testing.T) {
 	if a := auditActions(e.admin, "oidc.client.create"); len(a) == 0 {
 		t.Fatal("client creation not audited")
 	}
+	// Everyone who may use Immich has an account holding their address
+	// before their first sign-in (HardyOS's own accounts: placeholders).
+	imm.Mu.Lock()
+	var emails []string
+	for _, u := range imm.Users {
+		emails = append(emails, u.Email)
+	}
+	imm.Mu.Unlock()
+	if !slices.Contains(emails, "kid@local.hardyos.invalid") || !slices.Contains(emails, "cade@local.hardyos.invalid") {
+		t.Fatalf("accounts made ahead: %v", emails)
+	}
+	if a := auditActions(e.admin, "photos.account.create"); len(a) < 3 {
+		t.Fatalf("account creation audit %v", a)
+	}
 
 	// Only people who may use Immich sign in to it with HardyOS.
 	kid, err := e.server.users.GetByName(ctx, "kid")
@@ -171,5 +185,39 @@ func TestPhotosSync(t *testing.T) {
 	_, id := e.submit(t, "POST", "/api/v1/photos/link", PhotosLinkRequest{APIKey: key})
 	if strings.Contains(jobText(t, e.admin, id), key) {
 		t.Fatal("the API key is in the job")
+	}
+}
+
+// An Immich HardyOS installed with new data that already has an
+// administrator HardyOS didn't make is an incident, not a link prompt.
+func TestPhotosUnexpectedAdmin(t *testing.T) {
+	e := newRemoteEnv(t)
+	imm := immichfake.New()
+	t.Cleanup(imm.Close)
+	imm.AddUser(immichfake.User{Email: "first@example.com", IsAdmin: true}, "pw")
+	port := imm.Srv.Listener.Addr().(*net.TCPAddr).Port
+	e.stub.mu.Lock()
+	e.stub.apps["immich"] = apps.App{ID: "immich", Name: "Immich", Version: "3.3.5.1", Source: apps.SourceCatalog, State: "running",
+		Web: &apps.AppWeb{Port: port, Path: "/", Scheme: "http"}}
+	e.stub.mu.Unlock()
+	if err := e.db.SetSetting(context.Background(), AppNewDataSetting("immich"), "1"); err != nil {
+		t.Fatal(err)
+	}
+	e.submit(t, "POST", "/api/v1/photos/sync", nil)
+	var view PhotosView
+	e.admin.do("GET", "/api/v1/photos/settings", nil, &view)
+	if view.Status == nil || view.Status.Incident == "" || view.Status.NeedsLink {
+		t.Fatalf("status %+v", view.Status)
+	}
+	if a := auditActions(e.admin, "photos.incident"); len(a) == 0 {
+		t.Fatal("incident not audited")
+	}
+	// Kept data reinstalled: the same thing is a link to ask for.
+	_ = e.db.SetSetting(context.Background(), AppNewDataSetting("immich"), "")
+	e.submit(t, "POST", "/api/v1/photos/sync", nil)
+	view = PhotosView{}
+	e.admin.do("GET", "/api/v1/photos/settings", nil, &view)
+	if !view.Status.NeedsLink || view.Status.Incident != "" {
+		t.Fatalf("kept data: %+v", view.Status)
 	}
 }

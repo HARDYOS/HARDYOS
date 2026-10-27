@@ -25,13 +25,14 @@ import (
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/appstore"
+	"github.com/hardyos/hardyos/daemon/internal/oidc"
 )
 
 // AppID is the catalog app Photos sets up.
 const AppID = "immich"
 
 // ClientKey is the managed OIDC client's key (oidc.Clients.Ensure).
-const ClientKey = "photos-immich"
+const ClientKey = oidc.PhotosClientKey
 
 // KeyPurpose seals Photos' secrets (secretbox purpose).
 const KeyPurpose = "photos"
@@ -427,9 +428,12 @@ type Status struct {
 	// administrator links it.
 	NeedsLink bool `json:"needsLink"`
 	// Problem is why the last sync stopped ("" when it finished).
-	Problem string   `json:"problem,omitempty"`
-	Notes   []string `json:"notes"`
-	SSO     SSOState `json:"sso"`
+	Problem string `json:"problem,omitempty"`
+	// Incident: something happened in Immich that only an attacker (or
+	// someone bypassing HardyOS) could have done; also sent as an alert.
+	Incident string   `json:"incident,omitempty"`
+	Notes    []string `json:"notes"`
+	SSO      SSOState `json:"sso"`
 	// PublishedURL is Immich's address through NetBird ("" when not
 	// published); phones back up through it from anywhere.
 	PublishedURL string `json:"publishedUrl,omitempty"`
@@ -477,4 +481,7 @@ type PersonState struct {
 	Email    string `json:"email"`
 	ImmichID string `json:"immichId"`
 	Linked   bool   `json:"linked"` // has signed in with HardyOS
+	// Flag is what HardyOS did about the account ("" for nothing): moved
+	// aside for holding a HardyOS address, suspended, restored.
+	Flag string `json:"flag,omitempty"`
 }

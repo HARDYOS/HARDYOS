@@ -104,7 +104,8 @@ export function Photos() {
         <Alert key={i} tone="bad" title={errorMessage(e)} />
       ))}
       {job.data?.state === "failed" && <Alert tone="bad" title="Setting Immich up failed">{job.data.error}</Alert>}
-      {st?.problem && !st.needsLink && <Alert tone={st.catalog ? "bad" : "warn"} title={st.problem} />}
+      {st?.incident && <Alert tone="bad" title="Security: Immich has an administrator HardyOS didn't make">{st.incident}</Alert>}
+      {st?.problem && !st.needsLink && !st.incident && <Alert tone={st.catalog ? "bad" : "warn"} title={st.problem} />}
       {problems.map((p) => (
         <Alert key={p} tone="warn" title={p} />
       ))}
@@ -171,7 +172,7 @@ export function Photos() {
               {st.sso.active ? " and Sign in with HardyOS." : "."}
             </p>
           ) : (
-            <p className="small muted">At home, phones use this server's address with port 2283. To back up from anywhere, publish Immich through Remote Access.</p>
+            <p className="small muted">Phones reach Immich at its HTTPS address once it's published (Immich only listens on the server itself).</p>
           )}
           {!st?.phoneReady && (
             <div>
@@ -265,7 +266,10 @@ export function Photos() {
                 <span>
                   <strong>{p.username || p.email}</strong> <span className="small muted mono">{p.email}</span>
                 </span>
-                <Badge tone={p.linked ? "good" : "neutral"}>{p.linked ? "Signs in with HardyOS" : "Not signed in yet"}</Badge>
+                <span className="row" style={{ gap: 6 }}>
+                  {p.flag && <Badge tone={p.flag.startsWith("restored") ? "good" : "warn"}>{p.flag}</Badge>}
+                  <Badge tone={p.linked ? "good" : "neutral"}>{p.linked ? "Signs in with HardyOS" : "Not signed in yet"}</Badge>
+                </span>
               </div>
             ))}
           </div>

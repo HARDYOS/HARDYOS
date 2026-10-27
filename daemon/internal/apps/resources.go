@@ -191,7 +191,7 @@ func (r Resolved) adaptGPU(hw gpuHardware, sys func(string) string, appName stri
 				case map[string]any:
 					src, _ = d["source"].(string)
 				}
-				if driRE.MatchString(src) {
+				if gpuDevice(src) {
 					fi, err := os.Stat(sys(src))
 					if err != nil || (src == "/dev/dri" && !hw.DRI) {
 						if src == "/dev/kfd" {

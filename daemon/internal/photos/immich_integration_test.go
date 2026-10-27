@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -23,6 +24,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/oidc"
 	"github.com/hardyos/hardyos/daemon/internal/secretbox"
+	"github.com/hardyos/hardyos/daemon/internal/shares"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 )
 
@@ -60,25 +62,30 @@ func TestImmichIntegration(t *testing.T) {
 	}
 	must(os.Chmod(tmp, 0o755))
 	data := mkdir(filepath.Join(tmp, "data"), 0o755)
-	for _, d := range []string{"postgres", "redis"} {
+	for _, d := range []string{"postgres", "redis", "db-dump"} {
 		mkdir(filepath.Join(data, d), 0o700)
 	}
 	for _, d := range []string{"model-cache", "model-cache-cuda", "model-cache-openvino", "model-cache-rocm"} {
 		mkdir(filepath.Join(data, d), 0o750)
 	}
-	shares := map[string]string{}
+	shareDirs := map[string]string{}
 	for _, s := range []string{"PHOTOS", "EXISTING", "EXISTING_2", "EXISTING_3", "FAMILY"} {
-		shares[s] = mkdir(filepath.Join(tmp, "share-"+strings.ToLower(s)), 0o755)
+		shareDirs[s] = mkdir(filepath.Join(tmp, "share-"+strings.ToLower(s)), 0o755)
 	}
-	writeJPEG(t, filepath.Join(mkdir(filepath.Join(shares["EXISTING"], "Bob"), 0o755), "beach.jpg"), color.RGBA{0, 120, 200, 255})
-	writeJPEG(t, filepath.Join(shares["FAMILY"], "picnic.jpg"), color.RGBA{30, 160, 60, 255})
+	writeJPEG(t, filepath.Join(mkdir(filepath.Join(shareDirs["EXISTING"], "Bob"), 0o755), "beach.jpg"), color.RGBA{0, 120, 200, 255})
+	writeJPEG(t, filepath.Join(shareDirs["FAMILY"], "picnic.jpg"), color.RGBA{30, 160, 60, 255})
+	// Links leading out of their share: in the container they reach the
+	// family folder. EXISTING_2 isn't checked (a probe showing that Immich
+	// follows such links); EXISTING is, and Bob's library excludes it.
+	must(os.Symlink("/mnt/family/picnic.jpg", filepath.Join(shareDirs["EXISTING"], "Bob", "evil.jpg")))
+	must(os.Symlink("/mnt/family/picnic.jpg", filepath.Join(shareDirs["EXISTING_2"], "evil.jpg")))
 
 	port := freePort(t)
 	env := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + tmp, "HARDY_APP_ID=immich", "HARDY_APP_DATA=" + data,
 		"HARDY_HOST=127.0.0.1", "HARDY_TZ=UTC", fmt.Sprintf("HARDY_UID=%d", uid), fmt.Sprintf("HARDY_GID=%d", uid),
 		fmt.Sprintf("HARDY_PORT_WEB=%d", port), "DB_PASSWORD=" + RandomPassword()[:24],
 		"ML_CUDA_REPLICAS=0", "ML_OPENVINO_REPLICAS=0", "ML_ROCM_REPLICAS=0"}
-	for s, p := range shares {
+	for s, p := range shareDirs {
 		env = append(env, "HARDY_SHARE_"+s+"="+p)
 	}
 	compose := func(args ...string) ([]byte, error) {
@@ -171,8 +178,17 @@ func TestImmichIntegration(t *testing.T) {
 			MLURLs: MLURLs(MLCPU), ScanCron: set.ScanCron(), ExternalDomain: published},
 		Access: []appstore.Principal{},
 		Shares: map[string]bool{"PHOTOS": true, "EXISTING": true, "FAMILY": true},
+		Links:  map[string]*shares.LinkScan{},
 		// Immich reads the provider's discovery document to answer.
 		CheckOAuthFrom: published + "/auth/login",
+	}
+	for _, s := range []string{"EXISTING", "FAMILY"} {
+		scan, err := shares.ScanLinksIn(ctx, shareDirs[s])
+		must(err)
+		plan.Links[s] = scan
+	}
+	if plan.Links["EXISTING"].Count != 1 {
+		t.Fatalf("scan of EXISTING: %+v", plan.Links["EXISTING"])
 	}
 	status := &Status{Notes: []string{}}
 	if err := rec.Run(ctx, plan, status); err != nil {
@@ -226,32 +242,124 @@ func TestImmichIntegration(t *testing.T) {
 	if len(libs) != 2 {
 		t.Fatalf("libraries %+v", libs)
 	}
+	bobLib := ""
+	for _, l := range libs {
+		if slices.Equal(l.ImportPaths, []string{"/mnt/existing/Bob"}) {
+			bobLib = l.ID
+			if !slices.Contains(l.ExclusionPatterns, "/mnt/existing/Bob/evil.jpg") {
+				t.Fatalf("Bob's library doesn't exclude the link: %v", l.ExclusionPatterns)
+			}
+		}
+	}
+	probe, err := admin.CreateLibrary(ctx, acct.AdminUserID, "probe", []string{"/mnt/existing-2"}, nil)
+	must(err)
+	must(admin.ScanLibrary(ctx, probe.ID))
+	count := func(id string) int {
+		var stats struct {
+			Total int `json:"total"`
+		}
+		if err := admin.do(ctx, http.MethodGet, "/libraries/"+id+"/statistics", nil, &stats); err != nil {
+			return -1
+		}
+		return stats.Total
+	}
 	deadline := time.Now().Add(3 * time.Minute)
 	for {
 		libs, err = admin.Libraries(ctx)
 		must(err)
 		found := 0
 		for _, l := range libs {
-			var stats struct {
-				Total  int `json:"total"`
-				Photos int `json:"photos"`
-			}
-			if err := admin.do(ctx, http.MethodGet, "/libraries/"+l.ID+"/statistics", nil, &stats); err == nil && stats.Total+stats.Photos > 0 {
+			if count(l.ID) > 0 {
 				found++
 			}
 		}
-		if found == 2 {
+		if found == 3 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("library scans found photos in %d of 2 libraries: %+v", found, libs)
+			t.Fatalf("library scans found photos in %d of 3 libraries: %+v", found, libs)
 		}
 		time.Sleep(5 * time.Second)
 	}
+	// Immich does follow a link out of a share (the probe found the family
+	// photo through one); Bob's library, with HardyOS's exclusion, didn't.
+	if n := count(probe.ID); n != 1 {
+		t.Fatalf("probe library has %d assets", n)
+	}
+	time.Sleep(5 * time.Second)
+	if n := count(bobLib); n != 1 {
+		t.Fatalf("Bob's library has %d assets, want only beach.jpg", n)
+	}
+	must(admin.DeleteLibrary(ctx, probe.ID))
+
 	// A second sync changes nothing.
 	again := &Status{Notes: []string{}}
 	if err := rec.Run(ctx, plan, again); err != nil || len(again.Notes) != 0 {
 		t.Fatalf("second sync: %v %v", err, again.Notes)
+	}
+
+	// Carol may no longer use Photos: her account is soft-deleted, and a
+	// session she had stops working; she gets it back with access again.
+	plan.Wanted.PasswordLogin = true // so the test can sign in as her
+	must(rec.Run(ctx, plan, &Status{}))
+	var carol User
+	all, err := admin.Users(ctx)
+	must(err)
+	for _, u := range all {
+		if u.Email == "carol@home.example.net" {
+			carol = u
+		}
+	}
+	if carol.ID == "" {
+		t.Fatalf("no account made for carol: %+v", all)
+	}
+	must(admin.UpdateUser(ctx, carol.ID, map[string]any{"password": "known-password-123"}))
+	tok, _, err := rec.Immich.Login(ctx, carol.Email, "known-password-123")
+	must(err)
+	if _, err := rec.Immich.WithToken(tok).Me(ctx); err != nil {
+		t.Fatalf("carol's session before: %v", err)
+	}
+	plan.Access = []appstore.Principal{{Kind: "user", Name: `HOME\alice`}, {Kind: "user", Name: "bob"}}
+	must(rec.Run(ctx, plan, &Status{}))
+	if _, err := rec.Immich.WithToken(tok).Me(ctx); !IsStatus(err, http.StatusUnauthorized) {
+		t.Fatalf("carol's session after suspending: %v", err)
+	}
+	all, err = admin.Users(ctx)
+	must(err)
+	for _, u := range all {
+		if u.ID == carol.ID && u.DeletedAt == "" {
+			t.Fatalf("carol not soft-deleted: %+v", u)
+		}
+	}
+	plan.Access = []appstore.Principal{}
+	must(rec.Run(ctx, plan, &Status{}))
+	all, err = admin.Users(ctx)
+	must(err)
+	for _, u := range all {
+		if u.ID == carol.ID && (u.DeletedAt != "" || u.Email != "carol@home.example.net") {
+			t.Fatalf("carol not restored: %+v", u)
+		}
+	}
+
+	// The package's backup dump runs in the database container as the
+	// app's user and leaves a dump in the app's folder.
+	var mf struct {
+		Backup struct {
+			Dump struct {
+				Service string   `json:"service"`
+				Command []string `json:"command"`
+			} `json:"dump"`
+		} `json:"backup"`
+	}
+	mb, err := os.ReadFile(filepath.Join(cwd, "..", "..", "..", "apps", "catalog", "immich", "hardyapp.json"))
+	must(err)
+	must(json.Unmarshal(mb, &mf))
+	args := append([]string{"-f", file, "exec", "-T", "--user", fmt.Sprintf("%d:%d", uid, uid), mf.Backup.Dump.Service}, mf.Backup.Dump.Command...)
+	if _, err := compose(args...); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(filepath.Join(data, "db-dump", "immich.dump")); err != nil || fi.Size() < 1024 {
+		t.Fatalf("dump: %v %v", fi, err)
 	}
 }
 

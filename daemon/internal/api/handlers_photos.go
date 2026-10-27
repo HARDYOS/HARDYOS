@@ -10,8 +10,11 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"runtime"
 	"slices"
@@ -26,10 +29,12 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/devices"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/notify"
 	"github.com/hardyos/hardyos/daemon/internal/oidc"
 	"github.com/hardyos/hardyos/daemon/internal/photos"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/publish"
+	"github.com/hardyos/hardyos/daemon/internal/shares"
 )
 
 // Photos job kinds.
@@ -53,17 +58,26 @@ type photosLinkParams struct {
 	KeyRef string `json:"keyRef"`
 }
 
-// photosState is RunPhotos' bookkeeping: the last job it started.
+// photosState is RunPhotos' bookkeeping: the last job it started, and the
+// nudge that starts a sync soon (an account or who may use Immich
+// changed).
 type photosState struct {
-	mu      sync.Mutex
-	lastJob string
+	mu          sync.Mutex
+	lastJob     string
+	nudge       chan struct{}
+	accessPrint string
 }
+
+// AppNewDataSetting is set ("1") by an install that started the app from
+// empty data, "" by one that picked kept data back up.
+func AppNewDataSetting(appID string) string { return "apps.new_data." + appID }
 
 func (s *Server) newPhotos() {
 	if s.cfg.DB == nil || s.oidc == nil {
 		return
 	}
 	s.photos = &photos.Store{DB: s.cfg.DB, Secrets: s.cfg.Secrets}
+	s.photosRun.nudge = make(chan struct{}, 1)
 	if s.cfg.Jobs != nil {
 		s.registerPhotosJobs(s.cfg.Jobs)
 	}
@@ -158,12 +172,31 @@ func (s *Server) photosOverview(ctx context.Context) (*apps.Overview, error) {
 	return &o, nil
 }
 
+// photosNudge asks RunPhotos for a sync soon: a HardyOS account, its
+// role, or who may use Immich changed, and Immich must follow.
+func (s *Server) photosNudge() {
+	if s.photos == nil || s.photosRun.nudge == nil {
+		return
+	}
+	select {
+	case s.photosRun.nudge <- struct{}{}:
+	default:
+	}
+}
+
+// photosConfirmRedirect: a sign-in for Immich's phone app (its mobile
+// redirect) is always confirmed on HardyOS's page.
+func photosConfirmRedirect(key, uri string) bool {
+	return key == photos.ClientKey && strings.HasSuffix(uri, "/api/oauth/mobile-redirect")
+}
+
 func (s *Server) photosReconciler(a *apps.App) *photos.Reconciler {
 	return &photos.Reconciler{
 		Immich: &photos.Immich{Base: "http://127.0.0.1:" + strconv.Itoa(a.Web.Port)},
 		Store:  s.photos,
 		Dir:    photosDirectory{s},
 		Log:    s.log,
+		Audit:  s.recordSystem,
 	}
 }
 
@@ -186,6 +219,10 @@ func (d photosDirectory) UserForSubject(ctx context.Context, sub string) (*auth.
 	return d.s.oidc.UserForSubject(ctx, sub)
 }
 
+func (d photosDirectory) People(ctx context.Context) ([]*auth.User, error) {
+	return d.s.users.List(ctx)
+}
+
 // photosSync runs one sync and saves its status. Immich not installed,
 // not the catalog's, or needing a link aren't failures: the status says so.
 func (s *Server) photosSync(jc *jobs.Context) (*photos.Status, error) {
@@ -200,6 +237,13 @@ func (s *Server) photosSync(jc *jobs.Context) (*photos.Status, error) {
 	}
 	if len(st.Notes) > 0 {
 		s.recordSystem(context.WithoutCancel(jc), "photos.sync", photos.AppID, strings.Join(st.Notes, "; "))
+	}
+	if st.Incident != "" {
+		s.recordSystem(context.WithoutCancel(jc), "photos.incident", photos.AppID, st.Incident)
+		if s.cfg.Alerts != nil {
+			s.cfg.Alerts.Notify(context.WithoutCancel(jc), notify.Event{Kind: "security.photos", Severity: notify.SeverityCritical,
+				Title: "Photos: Immich has an administrator HardyOS didn't make", Body: st.Incident, Link: "control-panel/photos"})
+		}
 	}
 	if err != nil && !errors.Is(err, photos.ErrNeedsLink) && !errors.Is(err, errPhotosNotInstalled) && !errors.Is(err, errPhotosNotCatalog) {
 		return st, err
@@ -242,6 +286,17 @@ func (s *Server) photosSyncInto(jc *jobs.Context, st *photos.Status) error {
 	}
 	set, err := s.photos.Settings(ctx)
 	if err != nil {
+		return err
+	}
+	// HardyOS's administrator account first, before anything slow: in a
+	// fresh Immich nobody else may make one.
+	fresh := false
+	if v, err := s.cfg.DB.GetSetting(ctx, AppNewDataSetting(a.ID)); err == nil && v == "1" {
+		fresh = true
+	}
+	jc.Progress(8, "Signing in to Immich")
+	rec := s.photosReconciler(a)
+	if _, err := rec.EnsureAdmin(ctx, fresh, st); err != nil {
 		return err
 	}
 
@@ -289,10 +344,30 @@ func (s *Server) photosSyncInto(jc *jobs.Context, st *photos.Status) error {
 	ssoReady := pset.Enabled && pset.BaseDomain != "" && issuer == publish.SSOIssuerFor(pset.BaseDomain)
 	w := photos.Wanted{PasswordLogin: set.PasswordLogin, DefaultQuotaGiB: set.DefaultQuotaGiB,
 		MLURLs: photos.MLURLs(st.ML.Mode), ScanCron: set.ScanCron(), Watch: set.Watch, ExternalDomain: st.PublishedURL}
-	plan := photos.Plan{Settings: set, Shares: map[string]bool{}}
+	plan := photos.Plan{Settings: set, Shares: map[string]bool{}, FreshInstall: fresh,
+		Links: map[string]*shares.LinkScan{}, LinkErrors: map[string]string{}}
+	used := map[string]bool{}
+	for _, l := range set.Libraries {
+		used[l.Share] = true
+	}
+	if set.Family.Enabled {
+		used[photos.FamilyShare] = true
+	}
 	for _, sh := range a.Shares {
-		if sh.Share != "" {
-			plan.Shares[sh.Name] = true
+		if sh.Share == "" {
+			continue
+		}
+		plan.Shares[sh.Name] = true
+		if used[sh.Name] {
+			// Links leading out of the folder: Immich's crawler would follow
+			// them to whatever the container has there.
+			jc.Progress(20, "Checking "+sh.Share+" for links that lead out of it")
+			var scan shares.LinkScan
+			if err := s.cfg.Priv.Call(ctx, priv.OpSharesLinks, priv.ShareLinksArgs{ID: sh.Share}, &scan); err != nil {
+				plan.LinkErrors[sh.Name] = err.Error()
+			} else {
+				plan.Links[sh.Name] = &scan
+			}
 		}
 	}
 	if plan.Access, err = s.appStore().Access(ctx, a.ID); err != nil {
@@ -324,7 +399,6 @@ func (s *Server) photosSyncInto(jc *jobs.Context, st *photos.Status) error {
 	plan.Wanted = w
 
 	jc.Progress(40, "Configuring Immich")
-	rec := s.photosReconciler(a)
 	return rec.Run(ctx, plan, st)
 }
 
@@ -559,6 +633,10 @@ func (s *Server) RunPhotos(ctx context.Context, opts PhotosOptions) {
 		case <-debounce:
 			debounce = nil
 			s.photosKick(ctx)
+		case <-s.photosRun.nudge:
+			if _, err := s.photosApp(ctx); err == nil {
+				debounce = time.After(opts.Debounce)
+			}
 		case e, ok := <-sub.C:
 			if !ok {
 				return
@@ -585,8 +663,34 @@ func photosTrigger(e events.Event) bool {
 	if json.Unmarshal(e.Data, &j) != nil || !j.State.Done() {
 		return false
 	}
-	return strings.HasPrefix(j.Kind, "remote.") || strings.HasPrefix(j.Kind, "vms.") ||
+	return strings.HasPrefix(j.Kind, "remote.") || strings.HasPrefix(j.Kind, "vms.") || strings.HasPrefix(j.Kind, "domain.") ||
 		j.Kind == JobKindOIDCSettings || j.Kind == JobKindNvidiaInstall || j.Kind == JobKindNvidiaRemove
+}
+
+// photosAccessPrint sums up what decides who has an Immich account and
+// who is an Immich administrator: every HardyOS account's state, role and
+// groups, and Immich's access list. A change starts a sync.
+func (s *Server) photosAccessPrint(ctx context.Context) string {
+	users, err := s.users.List(ctx)
+	if err != nil {
+		return ""
+	}
+	rules, err := s.appStore().Access(ctx, photos.AppID)
+	if err != nil {
+		return ""
+	}
+	h := sha256.New()
+	lines := make([]string, 0, len(users)+1)
+	for _, u := range users {
+		lines = append(lines, fmt.Sprintf("%d\x00%s\x00%s\x00%v\x00%s\x00%s", u.ID, u.IdentityPrincipal(), u.Role, u.Disabled, u.Email, strings.Join(u.IdentityGroups(), "\x01")))
+	}
+	slices.Sort(lines)
+	b, _ := json.Marshal(rules)
+	lines = append(lines, string(b))
+	for _, l := range lines {
+		h.Write([]byte(l + "\n"))
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // photosKick starts a sync unless one is already waiting or running.
@@ -617,6 +721,19 @@ func (s *Server) photosNeedsSync(ctx context.Context) bool {
 	last, err := s.photos.Status(ctx)
 	if err != nil || last == nil || last.Version != a.Version {
 		return true
+	}
+	if !last.Linked && !last.NeedsLink && last.Incident == "" {
+		// HardyOS hasn't made its administrator yet: keep trying.
+		return true
+	}
+	if fp := s.photosAccessPrint(ctx); fp != "" {
+		s.photosRun.mu.Lock()
+		changed := fp != s.photosRun.accessPrint
+		s.photosRun.accessPrint = fp
+		s.photosRun.mu.Unlock()
+		if changed {
+			return true
+		}
 	}
 	if svc := photos.MLService(last.ML.Mode); svc != "" {
 		up, down := false, false

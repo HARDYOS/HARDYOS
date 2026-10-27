@@ -125,6 +125,11 @@ type Config struct {
 	// lets only the people who may use the Immich app in. An error refuses
 	// the sign-in (and, at refresh, revokes the grant) with its message.
 	ManagedAccess func(ctx context.Context, managedBy string, u *auth.User) error
+	// ConfirmRedirect, when set, names redirect URIs of a managed client
+	// whose sign-ins the person always confirms on a page of HardyOS's
+	// (never finished silently on an existing session): Immich's mobile
+	// redirect, which hands the code to an app on another device.
+	ConfirmRedirect func(managedBy, redirectURI string) bool
 	// Insecure allows an http:// issuer (development without TLS).
 	Insecure bool
 	Log      *slog.Logger
@@ -240,9 +245,13 @@ const (
 	// (the folder Immich files the person's photos in) and an email
 	// address for every account (Immich registers people by email): one
 	// that has none gets PlaceholderEmail, marked unverified.
+	// Only the Photos client (PhotosClientKey) may ask for it.
 	ScopePhotos       = "hardyos_photos"
 	ClaimPhotosRole   = "hardyos_photos_role"
 	ClaimStorageLabel = "hardyos_storage_label"
+
+	// PhotosClientKey is the managed client Photos keeps for Immich.
+	PhotosClientKey = "photos-immich"
 )
 
 func (p *Provider) now() time.Time {

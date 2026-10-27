@@ -151,6 +151,14 @@ func TestApplyKeepsTheRest(t *testing.T) {
 	if _, again := Apply(next, w); len(again) != 0 {
 		t.Fatalf("not idempotent: %v", again)
 	}
+	if lookup(next, "user.deleteDelay") != MinDeleteDelayDays {
+		t.Fatalf("delete delay %v", lookup(next, "user.deleteDelay"))
+	}
+	longer := deepCopy(next)
+	longer["user"] = map[string]any{"deleteDelay": float64(90)}
+	if out, _ := Apply(longer, w); lookup(out, "user.deleteDelay") != float64(90) {
+		t.Fatal("a longer delete delay was shortened")
+	}
 	// Off: the secret goes, passwords come back.
 	off, _ := Apply(next, Wanted{})
 	if lookup(off, "oauth.enabled") != false || lookup(off, "oauth.clientSecret") != "" || lookup(off, "passwordLogin.enabled") != true || lookup(off, "oauth.defaultStorageQuota") != nil {

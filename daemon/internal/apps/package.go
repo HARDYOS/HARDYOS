@@ -81,6 +81,26 @@ type Manifest struct {
 	Shares []ShareMount `json:"shares,omitempty"`
 	// Permissions beyond a plain container. Anything not declared here is refused.
 	Permissions Permissions `json:"permissions,omitempty"`
+	// Backup is what to do before the app's data is backed up.
+	Backup *BackupHooks `json:"backup,omitempty"`
+}
+
+// BackupHooks prepare an app's data for a backup.
+type BackupHooks struct {
+	// Dump runs in one of the app's own running containers, as the app's
+	// user, right before the snapshot a backup copies (a database dump
+	// into one of the app's folders, so the backup holds a consistent
+	// copy next to the crash-consistent files).
+	Dump *BackupDump `json:"dump,omitempty"`
+}
+
+// BackupDump is a command run in a service's container (no shell: the
+// command is the argv exec'd there).
+type BackupDump struct {
+	Service string   `json:"service"`
+	Command []string `json:"command"`
+	// TimeoutSeconds bounds it (10-3600, default 600).
+	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
 }
 
 // Web is where the app's web page is.
@@ -138,6 +158,10 @@ type Permissions struct {
 	HostNetwork bool `json:"hostNetwork,omitempty"`
 	// GPU lets the app use /dev/dri render nodes and NVIDIA GPUs if present.
 	GPU bool `json:"gpu,omitempty"`
+	// ROCm also lets it use /dev/kfd, AMD's compute interface (ROCm needs
+	// it next to /dev/dri). It's separate from GPU: /dev/kfd is a much
+	// larger kernel interface than a render node. Needs GPU too.
+	ROCm bool `json:"rocm,omitempty"`
 }
 
 // Package is a read and checked .hardyapp file.
@@ -375,8 +399,32 @@ func (m *Manifest) Validate() error {
 			p.addf("device %s isn't available to apps", d)
 		}
 	}
+	if m.Permissions.ROCm && !m.Permissions.GPU {
+		p.addf("the rocm permission needs the gpu permission too")
+	}
+	if b := m.Backup; b != nil && b.Dump != nil {
+		d := b.Dump
+		if !serviceNameRE.MatchString(d.Service) {
+			p.addf("backup.dump.service must name one of the app's services")
+		}
+		if len(d.Command) == 0 || len(d.Command) > 32 {
+			p.addf("backup.dump.command is 1 to 32 arguments")
+		}
+		for _, a := range d.Command {
+			if a == "" || len(a) > 512 || strings.ContainsAny(a, "\x00\n\r") {
+				p.addf("backup.dump.command: each argument is 1-512 characters on one line")
+				break
+			}
+		}
+		if d.TimeoutSeconds != 0 && (d.TimeoutSeconds < 10 || d.TimeoutSeconds > 3600) {
+			p.addf("backup.dump.timeoutSeconds is 10 to 3600")
+		}
+	}
 	return p.err()
 }
+
+// serviceNameRE is a Compose service name.
+var serviceNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,62}$`)
 
 func minPort(hostNetwork bool) int {
 	if hostNetwork {

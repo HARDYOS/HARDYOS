@@ -198,18 +198,20 @@ func (c *Immich) AdminSignUp(ctx context.Context, email, name, password string) 
 	return c.do(ctx, http.MethodPost, "/auth/admin-sign-up", map[string]string{"email": email, "name": name, "password": password}, nil)
 }
 
-// Login signs in with a password and returns the session token.
-func (c *Immich) Login(ctx context.Context, email, password string) (string, error) {
+// Login signs in with a password and returns the session token and the
+// account's id.
+func (c *Immich) Login(ctx context.Context, email, password string) (string, string, error) {
 	var r struct {
 		AccessToken string `json:"accessToken"`
+		UserID      string `json:"userId"`
 	}
 	if err := c.do(ctx, http.MethodPost, "/auth/login", map[string]string{"email": email, "password": password}, &r); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if r.AccessToken == "" {
-		return "", errors.New("Immich's sign-in gave no token")
+		return "", "", errors.New("Immich's sign-in gave no token")
 	}
-	return r.AccessToken, nil
+	return r.AccessToken, r.UserID, nil
 }
 
 // Logout ends the session the client signs in with.
@@ -267,10 +269,22 @@ type User struct {
 	DeletedAt    string `json:"deletedAt"`
 }
 
-// Users lists every account.
+// Users lists every account, soft-deleted ones too (DeletedAt set).
 func (c *Immich) Users(ctx context.Context) ([]User, error) {
 	var r []User
-	return r, c.do(ctx, http.MethodGet, "/admin/users", nil, &r)
+	return r, c.do(ctx, http.MethodGet, "/admin/users?withDeleted=true", nil, &r)
+}
+
+// DeleteUser soft-deletes an account: it can't sign in or use its keys
+// and sessions any more, and RestoreUser brings it back with everything
+// in it (until Immich's own deletion delay ends).
+func (c *Immich) DeleteUser(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodDelete, "/admin/users/"+url.PathEscape(id), map[string]bool{"force": false}, nil)
+}
+
+// RestoreUser undoes DeleteUser.
+func (c *Immich) RestoreUser(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodPost, "/admin/users/"+url.PathEscape(id)+"/restore", nil, nil)
 }
 
 // NewUser is an account to create.
@@ -315,6 +329,9 @@ func (c *Immich) Libraries(ctx context.Context) ([]ImmichLibrary, error) {
 // CreateLibrary makes an external library owned by ownerID.
 func (c *Immich) CreateLibrary(ctx context.Context, ownerID, name string, importPaths, exclusions []string) (*ImmichLibrary, error) {
 	var r ImmichLibrary
+	if exclusions == nil {
+		exclusions = []string{}
+	}
 	return &r, c.do(ctx, http.MethodPost, "/libraries", map[string]any{
 		"ownerId": ownerID, "name": name, "importPaths": importPaths, "exclusionPatterns": exclusions,
 	}, &r)
@@ -322,6 +339,9 @@ func (c *Immich) CreateLibrary(ctx context.Context, ownerID, name string, import
 
 // UpdateLibrary changes a library's name and folders.
 func (c *Immich) UpdateLibrary(ctx context.Context, id, name string, importPaths, exclusions []string) error {
+	if exclusions == nil {
+		exclusions = []string{}
+	}
 	return c.do(ctx, http.MethodPut, "/libraries/"+url.PathEscape(id), map[string]any{
 		"name": name, "importPaths": importPaths, "exclusionPatterns": exclusions,
 	}, nil)

@@ -7107,6 +7107,7 @@ components:
         email: { type: string }
         immichId: { type: string }
         linked: { type: boolean, description: Has signed in with HardyOS }
+        flag: { type: string, description: "What HardyOS did about the account (moved aside for holding a HardyOS address, suspended, restored)" }
     PhotosStatus:
       type: object
       required: [at, installed, catalog, linked, needsLink, notes, sso, phoneReady, ml, libraries, family, people]
@@ -7118,6 +7119,7 @@ components:
         linked: { type: boolean, description: "HardyOS has its Immich service account's key" }
         needsLink: { type: boolean, description: "Immich was set up before Photos: link it with an administrator's API key" }
         problem: { type: string }
+        incident: { type: string, description: "Something only an attacker could have done in Immich (also sent as a critical alert)" }
         notes: { type: array, items: { type: string } }
         sso: { $ref: "#/components/schemas/PhotosSSO" }
         publishedUrl: { type: string }

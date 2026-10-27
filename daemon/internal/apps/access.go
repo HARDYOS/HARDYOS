@@ -119,6 +119,9 @@ func neededGrants(mf Manifest) []string {
 	if mf.Permissions.GPU {
 		out = append(out, GrantGPU)
 	}
+	if mf.Permissions.ROCm {
+		out = append(out, GrantROCm)
+	}
 	for _, d := range mf.Permissions.Devices {
 		out = append(out, GrantDevice+d)
 	}
@@ -139,6 +142,8 @@ func grantWords(mf Manifest, g string) string {
 		return "the server's own network (host network)"
 	case g == GrantGPU:
 		return "the graphics card (GPU)"
+	case g == GrantROCm:
+		return "AMD's compute interface (/dev/kfd, for ROCm)"
 	case strings.HasPrefix(g, GrantDevice):
 		return "the device " + strings.TrimPrefix(g, GrantDevice)
 	default:
@@ -148,7 +153,7 @@ func grantWords(mf Manifest, g string) string {
 
 func validGrant(g string) bool {
 	switch {
-	case g == GrantHostNetwork || g == GrantGPU:
+	case g == GrantHostNetwork || g == GrantGPU || g == GrantROCm:
 		return true
 	case strings.HasPrefix(g, GrantDevice):
 		_, ok := deviceAllowed(strings.TrimPrefix(g, GrantDevice))

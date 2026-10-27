@@ -6367,6 +6367,8 @@ export interface components {
             immichId: string;
             /** @description Has signed in with HardyOS */
             linked: boolean;
+            /** @description What HardyOS did about the account (moved aside for holding a HardyOS address, suspended, restored) */
+            flag?: string;
         };
         PhotosStatus: {
             /** Format: date-time */
@@ -6379,6 +6381,8 @@ export interface components {
             /** @description Immich was set up before Photos: link it with an administrator's API key */
             needsLink: boolean;
             problem?: string;
+            /** @description Something only an attacker could have done in Immich (also sent as a critical alert) */
+            incident?: string;
             notes: string[];
             sso: components["schemas"]["PhotosSSO"];
             publishedUrl?: string;

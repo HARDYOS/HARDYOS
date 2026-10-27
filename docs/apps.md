@@ -105,8 +105,12 @@ catalog in `apps/catalog/`) and check it with `hardyctl app-check`.
   - `hostNetwork`: services may use `network_mode: host`. The app's ports
     are then fixed at their defaults (HardyOS can't move them) and must be
     free; such apps may also use ports below 1024 (DNS on 53).
+  - `rocm` (with `gpu`): services may also use `/dev/kfd`, AMD's compute
+    interface for ROCm (a much larger kernel interface than a render node,
+    so it's its own permission and grant, `gpu.rocm`); dropped with a
+    warning on a server without it.
   - `gpu`: services may use the graphics devices (`/dev/dri`,
-    `/dev/dri/renderD*`, and `/dev/kfd` for AMD's ROCm) and NVIDIA reservations
+    `/dev/dri/renderD*`) and NVIDIA reservations
     (`deploy.resources.reservations.devices` with `driver: nvidia` and
     `capabilities: [gpu]`). HardyOS looks for the hardware when installing:
     without render nodes the devices are dropped, without `/dev/nvidia0` and
@@ -157,6 +161,15 @@ runs. Anything not allowed is refused:
   folder mounted twice is fine. No named volumes (data goes in folders
   HardyOS can snapshot); anonymous volumes and tmpfs are fine.
 - Published ports only as declared in the manifest.
+- `backup.dump` (optional): a command HardyOS runs before a cloud backup of
+  the app takes its snapshot, for a consistent database dump next to the
+  crash-consistent files: `{"service": "database", "command": ["pg_dump",
+  "--file=/dump/app.dump", ...], "timeoutSeconds": 600}`. It runs with
+  `docker compose exec -T --user <app uid>` in that service's running
+  container (no shell, no TTY; 1-32 arguments, 10-3600 s), so it can only
+  do what the app's own processes can, and writes into one of the app's
+  folders. Skipped while the service isn't running; a failure or timeout
+  is a warning on the backup, which goes on.
 - A service with `deploy.replicas: 0` runs nothing, and installs and updates
   don't download its image; give it `pull_policy: never` so Compose
   doesn't either. Turning it on (a managed setting) downloads it first.

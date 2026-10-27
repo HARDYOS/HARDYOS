@@ -210,6 +210,15 @@ func RegisterAppJobs(m *jobs.Manager, pc *priv.Client, store *appstore.Store) {
 		if err != nil {
 			return nil, err
 		}
+		if store.DB != nil && !prep.Upgrade {
+			// Whether this install started from empty data (Photos treats
+			// a stranger's administrator in such an Immich as an incident).
+			v := ""
+			if prep.NewData {
+				v = "1"
+			}
+			_ = store.DB.SetSetting(jc, AppNewDataSetting(p.ID), v)
+		}
 		notes := append([]string{}, prep.Warnings...)
 		pulled, err := pullImages(jc, pc, p.ID, prep.Services, 10, 85)
 		notes = append(notes, pulled...)

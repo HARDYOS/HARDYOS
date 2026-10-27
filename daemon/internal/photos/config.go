@@ -121,12 +121,21 @@ func Apply(cur map[string]any, w Wanted) (map[string]any, []string) {
 	// Immich's nightly database dumps (into the photos folder's backups/)
 	// are what a backup of the photos folder restores the database from.
 	set("backup.database.enabled", true)
+	// Accounts HardyOS suspends (soft-deletes) wait this long before Immich
+	// deletes them for good: at least a month, never shortened.
+	if d, _ := lookup(out, "user.deleteDelay").(float64); d < MinDeleteDelayDays {
+		set("user.deleteDelay", MinDeleteDelayDays)
+	}
 	if w.ExternalDomain != "" {
 		set("server.externalDomain", w.ExternalDomain)
 	}
 	sort.Strings(changed)
 	return out, changed
 }
+
+// MinDeleteDelayDays is the shortest wait Photos lets Immich have before it
+// deletes a soft-deleted account for good.
+const MinDeleteDelayDays = 30
 
 func lookup(m map[string]any, p string) any {
 	var cur any = m

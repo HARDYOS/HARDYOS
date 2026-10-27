@@ -89,6 +89,9 @@ func DescribePermissions(m Manifest) []string {
 	if m.Permissions.GPU {
 		out = append(out, "Uses the server's graphics card or chip, for hardware video transcoding (GPU)")
 	}
+	if m.Permissions.ROCm {
+		out = append(out, "Uses AMD's compute interface (/dev/kfd), for machine learning on an AMD graphics card (ROCm)")
+	}
 	for _, s := range m.Shares {
 		what := "Read files in"
 		if s.Access == AccessWrite {
@@ -111,10 +114,15 @@ var basicCapabilities = map[string]bool{
 	"KILL": true, "AUDIT_WRITE": true,
 }
 
-// driRE matches the graphics devices the gpu permission allows: DRM
-// (/dev/dri) and AMD's compute interface (/dev/kfd, which ROCm needs next
-// to /dev/dri).
-var driRE = regexp.MustCompile(`^(/dev/dri(/(card|renderD)[0-9]{1,3})?|/dev/kfd)$`)
+// driRE matches the graphics devices the gpu permission allows (DRM).
+var driRE = regexp.MustCompile(`^/dev/dri(/(card|renderD)[0-9]{1,3})?$`)
+
+// kfdDevice is AMD's compute interface, allowed by the rocm permission.
+const kfdDevice = "/dev/kfd"
+
+// gpuDevice reports whether a device is one the GPU permissions handle
+// (and so is dropped, with a warning, on a server without it).
+func gpuDevice(src string) bool { return driRE.MatchString(src) || src == kfdDevice }
 
 // nvidiaCapabilities may be asked for in an NVIDIA device reservation.
 var nvidiaCapabilities = map[string]bool{"gpu": true, "compute": true, "utility": true, "video": true, "graphics": true, "display": true}
@@ -407,7 +415,7 @@ func checkService(p *Problems, name string, svc map[string]any, services map[str
 		case map[string]any:
 			src, _ = d["source"].(string)
 		}
-		if !devices[src] && !(perms.GPU && driRE.MatchString(src)) {
+		if !devices[src] && !(perms.GPU && driRE.MatchString(src)) && !(perms.GPU && perms.ROCm && src == kfdDevice) {
 			p.addf("service %s: device %s isn't declared in the manifest's permissions", name, src)
 		}
 	}

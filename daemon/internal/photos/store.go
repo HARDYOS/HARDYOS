@@ -32,6 +32,8 @@ type Account struct {
 	// Linked: the key came from an administrator (Immich was set up before
 	// Photos); HardyOS has no password for that account.
 	Linked bool `json:"linked,omitempty"`
+	// AdminUserID is that account's Immich id.
+	AdminUserID string `json:"adminUserId,omitempty"`
 
 	FamilyUserID   string `json:"familyUserId,omitempty"`
 	FamilyEmail    string `json:"familyEmail,omitempty"`
@@ -51,6 +53,19 @@ type LibRecord struct {
 	ImmichID   string
 	OwnerID    string
 	ImportPath string
+	// Subject is the owner's sign-in subject when it was made.
+	Subject string
+}
+
+// AccountRec is an Immich account of a person HardyOS looks after.
+type AccountRec struct {
+	ImmichID string
+	Subject  string
+	// Made: HardyOS made it ahead of the person's first sign-in.
+	Made bool
+	// Suspended: HardyOS soft-deleted it (the person may no longer use
+	// Photos).
+	Suspended bool
 }
 
 // Store keeps Photos' state in hardyd's database. Secrets are sealed with
@@ -215,7 +230,7 @@ func (s *Store) SaveStatus(ctx context.Context, st *Status) error {
 
 // Libraries are the libraries HardyOS made, by key.
 func (s *Store) Libraries(ctx context.Context) (map[string]LibRecord, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT key, immich_id, owner_id, import_path FROM photos_libraries`)
+	rows, err := s.DB.QueryContext(ctx, `SELECT key, immich_id, owner_id, import_path, subject FROM photos_libraries`)
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +238,7 @@ func (s *Store) Libraries(ctx context.Context) (map[string]LibRecord, error) {
 	out := map[string]LibRecord{}
 	for rows.Next() {
 		var r LibRecord
-		if err := rows.Scan(&r.Key, &r.ImmichID, &r.OwnerID, &r.ImportPath); err != nil {
+		if err := rows.Scan(&r.Key, &r.ImmichID, &r.OwnerID, &r.ImportPath, &r.Subject); err != nil {
 			return nil, err
 		}
 		out[r.Key] = r
@@ -233,9 +248,41 @@ func (s *Store) Libraries(ctx context.Context) (map[string]LibRecord, error) {
 
 // SaveLibrary records a library HardyOS made.
 func (s *Store) SaveLibrary(ctx context.Context, r LibRecord) error {
-	_, err := s.DB.ExecContext(ctx, `INSERT INTO photos_libraries (key, immich_id, owner_id, import_path, created_at) VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(key) DO UPDATE SET immich_id = excluded.immich_id, owner_id = excluded.owner_id, import_path = excluded.import_path`,
-		r.Key, r.ImmichID, r.OwnerID, r.ImportPath, store.Now())
+	_, err := s.DB.ExecContext(ctx, `INSERT INTO photos_libraries (key, immich_id, owner_id, import_path, subject, created_at) VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(key) DO UPDATE SET immich_id = excluded.immich_id, owner_id = excluded.owner_id, import_path = excluded.import_path, subject = excluded.subject`,
+		r.Key, r.ImmichID, r.OwnerID, r.ImportPath, r.Subject, store.Now())
+	return err
+}
+
+// Accounts are the Immich accounts HardyOS looks after, by Immich id.
+func (s *Store) Accounts(ctx context.Context) (map[string]AccountRec, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT immich_id, subject, made, suspended FROM photos_accounts`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]AccountRec{}
+	for rows.Next() {
+		var r AccountRec
+		if err := rows.Scan(&r.ImmichID, &r.Subject, &r.Made, &r.Suspended); err != nil {
+			return nil, err
+		}
+		out[r.ImmichID] = r
+	}
+	return out, rows.Err()
+}
+
+// SaveAccountRec records an account HardyOS looks after.
+func (s *Store) SaveAccountRec(ctx context.Context, r AccountRec) error {
+	_, err := s.DB.ExecContext(ctx, `INSERT INTO photos_accounts (immich_id, subject, made, suspended, created_at) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(immich_id) DO UPDATE SET subject = excluded.subject, made = excluded.made, suspended = excluded.suspended`,
+		r.ImmichID, r.Subject, r.Made, r.Suspended, store.Now())
+	return err
+}
+
+// ForgetAccountRec drops an account's record.
+func (s *Store) ForgetAccountRec(ctx context.Context, id string) error {
+	_, err := s.DB.ExecContext(ctx, `DELETE FROM photos_accounts WHERE immich_id = ?`, id)
 	return err
 }
 
@@ -283,6 +330,9 @@ func (s *Store) ForgetImmich(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.DB.ExecContext(ctx, `DELETE FROM photos_partners`); err != nil {
+		return err
+	}
+	if _, err := s.DB.ExecContext(ctx, `DELETE FROM photos_accounts`); err != nil {
 		return err
 	}
 	if err := s.DB.SetSetting(ctx, settingMLMode, ""); err != nil {

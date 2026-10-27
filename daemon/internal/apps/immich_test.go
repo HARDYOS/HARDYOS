@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 )
 
 // The Immich package Photos sets up (docs/photos.md): every image pinned
@@ -73,6 +75,74 @@ func TestManagedSettingRules(t *testing.T) {
 		if _, err := ReadPackage(tarGz(t, files, nil)); err == nil || !strings.Contains(err.Error(), "managed") {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+// rocm is its own permission: gpu alone doesn't allow /dev/kfd.
+func TestROCmPermission(t *testing.T) {
+	svc := `"devices":["/dev/kfd:/dev/kfd","/dev/dri:/dev/dri"]`
+	r := resolved(t, svc, "")
+	err := r.Check(testMF(t, `"permissions":{"gpu":true},`), "hardyos-notes", dataDir, ports)
+	if err == nil || !strings.Contains(problemText(err), "/dev/kfd") {
+		t.Fatalf("gpu alone allowed /dev/kfd: %v", err)
+	}
+	if err := r.Check(testMF(t, `"permissions":{"gpu":true,"rocm":true},`), "hardyos-notes", dataDir, ports); err != nil && strings.Contains(problemText(err), "/dev/") {
+		t.Fatalf("gpu+rocm refused: %v", err)
+	}
+	mf := Manifest{Permissions: Permissions{ROCm: true}}
+	if g := neededGrants(mf); !contains(g, GrantROCm) || !validGrant(GrantROCm) {
+		t.Fatalf("grants %v", g)
+	}
+	base := `{"format":1,"id":"abc","name":"X","version":"1","summary":"x","icon":"icon.svg","ports":[],"permissions":{"rocm":true}}`
+	if _, err := ReadPackage(tarGz(t, map[string]string{ManifestFile: base, ComposeFile: "services: {}\n", "icon.svg": "<svg/>"}, nil)); err == nil || !strings.Contains(err.Error(), "rocm") {
+		t.Fatalf("rocm without gpu: %v", err)
+	}
+}
+
+func TestBackupDumpRules(t *testing.T) {
+	base := `{"format":1,"id":"abc","name":"X","version":"1","summary":"x","icon":"icon.svg","ports":[],"backup":{"dump":DUMP}}`
+	for name, d := range map[string]string{
+		"no service":  `{"command":["pg_dump"]}`,
+		"no command":  `{"service":"db","command":[]}`,
+		"line break":  `{"service":"db","command":["a\nb"]}`,
+		"bad timeout": `{"service":"db","command":["x"],"timeoutSeconds":5}`,
+	} {
+		files := map[string]string{ManifestFile: strings.Replace(base, "DUMP", d, 1), ComposeFile: "services: {}\n", "icon.svg": "<svg/>"}
+		if _, err := ReadPackage(tarGz(t, files, nil)); err == nil || !strings.Contains(err.Error(), "backup.dump") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// PreBackup execs the manifest's argv in the running service as the
+// app's user, and does nothing while the service isn't running.
+func TestPreBackup(t *testing.T) {
+	e := newTestEnv(t)
+	mf := strings.Replace(strings.Replace(engineManifest, "PERMS", "", 1), `"folders":`,
+		`"backup":{"dump":{"service":"app","command":["pg_dump","--file=/db/x.dump"]}},"folders":`, 1)
+	pkg := tarGz(t, map[string]string{"hardyapp.json": mf, "compose.yaml": "services: {}\n"}, nil)
+	if _, err := e.install(PrepareArgs{Package: pkg, Settings: map[string]string{"ADMIN_PASSWORD": "pw"},
+		Shares: map[string]ShareChoice{"MEDIA": {Share: "media"}}, Source: SourceUpload}); err != nil {
+		t.Fatal(problemText(err))
+	}
+	data := filepath.Join(e.dir("notes"), dataDirName)
+	pre := "docker compose -p hardyos-notes --project-directory " + data + " -f " + filepath.Join(e.dir("notes"), metaDir, resolvedFile)
+	ctx := context.Background()
+	if ran, err := e.m.PreBackup(ctx, "notes"); ran || err != nil {
+		t.Fatalf("stopped app: %v %v", ran, err)
+	}
+	e.fake.On(pre+" ps --status running --services", "app\n")
+	ran, err := e.m.PreBackup(ctx, "notes")
+	if !ran || err != nil {
+		t.Fatalf("running app: %v %v", ran, err)
+	}
+	want := pre + " exec -T --user 30001:30001 app pg_dump --file=/db/x.dump"
+	if !contains(e.fake.Lines(), want) {
+		t.Fatalf("no %q in %v", want, e.fake.Lines())
+	}
+	e.fake.OnResult(want, sysexec.Result{ExitCode: 1, Stderr: []byte("boom")})
+	if _, err := e.m.PreBackup(ctx, "notes"); err == nil {
+		t.Fatal("a failing dump reported success")
 	}
 }
 
@@ -147,6 +217,12 @@ func TestImmichCompose(t *testing.T) {
 	}
 	// Existing photos and the family folder are mounted read-only.
 	srv, _ := services["immich-server"].(map[string]any)
+	// Immich is reached only through HardyOS's proxies (docs/photos.md).
+	for _, raw := range anyList(srv["ports"]) {
+		if pm, _ := raw.(map[string]any); pm["host_ip"] != "127.0.0.1" {
+			t.Errorf("immich-server publishes %v beyond 127.0.0.1", pm)
+		}
+	}
 	ro := map[string]bool{}
 	for _, v := range anyList(srv["volumes"]) {
 		m, _ := v.(map[string]any)

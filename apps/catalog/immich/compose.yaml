@@ -18,8 +18,11 @@ services:
       DB_PASSWORD: ${DB_PASSWORD}
       DB_DATABASE_NAME: immich
       REDIS_HOSTNAME: redis
+    # Only on the server itself: people and phones reach Immich through
+    # HardyOS (the window proxy at home, the app gateway when published),
+    # which keep a few of Immich's requests away from it (docs/photos.md).
     ports:
-      - "${HARDY_PORT_WEB}:2283"
+      - "127.0.0.1:${HARDY_PORT_WEB}:2283"
     volumes:
       # Uploads, thumbnails, encoded video and Immich's own database dumps
       # (backups/). The storage template files each person's photos under
@@ -164,5 +167,8 @@ services:
       POSTGRES_INITDB_ARGS: "--data-checksums"
     volumes:
       - ${HARDY_APP_DATA}/postgres:/var/lib/postgresql/data
+      # pg_dump's copy, made right before each backup of the app
+      # (hardyapp.json backup.dump).
+      - ${HARDY_APP_DATA}/db-dump:/dump
     shm_size: 128mb
     # The image's own health check applies (Immich's compose enables it).
