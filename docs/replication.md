@@ -4,7 +4,7 @@ Phase 6 part B. Keep a copy of chosen shared folders, apps and VMs on a
 second HardyOS server, updated on a schedule, over your home network or
 NetBird. After the first full copy only the changes travel (ZFS incremental
 send). Architecture: [architecture.md](architecture.md#replication-between-servers);
-decisions 180-192.
+decisions 180-199.
 
 Not in this part: failing over to the copy (promotion), two-way
 replication, and raw (still encrypted) sends. The layout and records are
@@ -18,13 +18,18 @@ On the server that will **keep** the copies (call it B): Control Panel ›
 Replication › **Accept from another server** › **Make a pairing code…**
 
 - **Keep its replicas on**: the pool the copies go to (`<pool>/replicas`).
-- **Space limit**: a quota for everything that server sends (0 = none).
+- **Space limit** (required): a quota for everything that server sends.
 - **Snapshots kept at least**: per item, whatever the sending server asks
-  (default 3). A sending server can never make B delete more than that.
+  (default 3).
+- **Keep every snapshot for**: nothing B received less than this many days
+  ago is ever pruned (default 7). Together with the minimum count, a
+  sending server that goes bad can't wipe its history on B.
 
 B shows the code (`XXXXX-XXXXX-XXXXX-XXXXX-XXXXXX`) once. It works one
-time, for 30 minutes; five wrong tries close it. While a code is open or a
-server is paired, B listens on port **44400** (TCP) on all its addresses.
+time, for 30 minutes; one address may get it wrong 3 times, and 10 wrong
+tries in all close it. While a code is open or a server is paired, B
+listens on port **44400** (TCP) on its own LAN and NetBird addresses (the
+page lists them), never on Docker's or the VMs' networks.
 
 ### 2. Pair from the server that sends
 
@@ -58,15 +63,20 @@ picks up where it stopped). **History** lists each run with what it sent.
 ### 4. Restore
 
 On A: **Restore from a replica** lists what B keeps of A. **Browse &
-restore…** shows the copies by time and the files in one (B mounts that
-snapshot read-only for the moment it takes), then copies it back:
+restore…** shows the copies by time and, if B's administrator allows
+browsing for A (off by default, see below), the files in one; then it
+copies the chosen copy back:
 
 - **Shared folder**: as a **new** shared folder (name and id you choose,
   on the pool you choose). Only administrators can open it and SMB is off
   until you change its settings: nothing is published before you look.
 - **VM**: back under its own name, off, on the pool its settings name,
   only if no VM with that name exists on A (delete or rename the broken
-  one first).
+  one first). What came with it that could reach beyond the VM is reset,
+  and the restore lists it: it doesn't start with the server, its host
+  devices (GPUs, USB, PCI), game streaming and cloud-init are gone, the
+  network filter is on again, and it gets new MAC addresses and a new UUID
+  (some guests ask to be activated again).
 - **App**: its data comes back as the app's kept data, only if the app
   isn't installed; reinstall it from the App Store to use it (the package
   is checked like any install; restored compose files never run as they
@@ -79,10 +89,17 @@ Nothing on A is overwritten. A restore that fails removes what it copied.
 Control Panel › Replication › Accept from another server lists the
 servers that send here: the pool, space used and limit, when each was last
 seen, and each replica's size, newest copy and whether an interrupted
-transfer waits to be resumed. **Limits** changes the space limit and the
-minimum kept snapshots. **Delete** (type the server's name) stops
-accepting from it, and with "Delete its replicas" destroys everything it
-sent.
+transfer waits to be resumed. **Rules** changes, for that server: the
+space limit, the snapshots kept at least, how many days every snapshot is
+kept, how often a new snapshot of an item is accepted at most, how many
+datasets and snapshots it may have here, and whether it may browse its
+replicas here. **Delete** (type the server's name) stops accepting from
+it, and with "Delete its replicas" destroys everything it sent.
+
+**Browsing** is off by default. To show A the files in a copy, B mounts
+that snapshot for a moment, so B's kernel reads file system structures
+that A wrote. Allow it only for servers you trust; A can always restore a
+copy and look at it on its own side.
 
 Replicas are never mounted, shared over SMB/NFS, listed as shared folders,
 VMs or apps, and they're read only.
@@ -106,8 +123,10 @@ Per item, each run:
    promotion).
 3. For each dataset of the item (the item first, then a VM's disks): A asks
    B for the replica's snapshots (with GUIDs) and any resume token.
-   - A token: A's root checks what it names (`zfs send -nvt`) is this
-     dataset and one of this task's snapshots, then sends the rest
+   - A token: A's root decodes it itself and checks that its snapshot
+     (by GUID, which is how zfs finds it) is one of this task's snapshots
+     of exactly this dataset, its base another, and it asks for nothing
+     HardyOS doesn't send (raw, saved, redacted); then it sends the rest
      (`zfs send -t`). If it can't, B discards the partial state
      (`zfs receive -A`).
    - Otherwise the newest local snapshot whose GUID B has is the base:
@@ -116,8 +135,8 @@ Per item, each run:
      reported (delete it on B to start over); nothing is ever forced
      (`-F`).
 4. When every dataset has the new snapshot, B prunes (keeping
-   max(task's keep, its own minimum)), then A prunes (always keeping the
-   new snapshot).
+   max(task's keep, its own minimum) and everything it received within
+   its minimum age), then A prunes (always keeping the new snapshot).
 
 Only snapshots whose names parse exactly as this task's replication
 snapshots are pruned; user, automatic, app and VM snapshots are never
@@ -134,7 +153,10 @@ before `zfs receive` sees a byte, and refuses:
   (allowed by a switch for later);
 - a stream for another snapshot than the one asked for, a full stream over
   an existing replica, an incremental for a new one, a volume over a file
-  system.
+  system, a first record carrying more than 1 MiB;
+- a snapshot that isn't newer than the replica's newest, is more than an
+  hour in the future, or comes sooner than the source's minimum interval;
+  a source past its space, dataset or snapshot limits.
 
 Whatever the stream says, the dataset name is B's: `<pool>/replicas/<source
 id>/<kind>/<item>[/<child>]`, built from B's own record of the source
@@ -144,7 +166,13 @@ leading). Received file systems get `canmount=off`,
 `-x sharenfs -x sharesmb` and `-x` for every HardyOS service property;
 volumes get `readonly=on`, `volmode=none` (no device nodes: the host never
 looks at a guest's partitions) and `refreservation=none`. Each carries
-`org.hardyos:replica=<source id>`.
+`org.hardyos:replica=<source id>`, and each received snapshot
+`org.hardyos:received=<when B got it>` (B's clock: pruning by age never
+trusts the source's names or times). ZFS's own `filesystem_limit` and
+`snapshot_limit` aren't enforced for root, which runs every receive, so B
+counts datasets and snapshots itself. A pool that keeps replicas gets a
+2 GiB reservation on its `system` dataset, so replicas can't fill it under
+HardyOS's own data.
 
 ### Security
 
@@ -159,17 +187,44 @@ looks at a guest's partitions) and `refreservation=none`. Each carries
   would have to know the code.
 - The receiving port takes TLS 1.3 with a client certificate only; every
   request is matched to a paired source by its key. A source can add to
-  its own replicas, read them back (restore) and nothing else: it can't
-  delete replicas, choose a pool, or reach another source's.
-- Every change through the API is a job and audited; pairing attempts on B
-  (good and bad) are audited with the caller's address.
+  its own replicas, read them back (restore) and, if allowed, browse them;
+  nothing else: it can't delete replicas, choose a pool, or reach another
+  source's. At most 64 connections, 8 per address, 4 transfers per source;
+  requests have deadlines, streams an idle limit.
+- Neither side follows HTTP redirects; requests to the other server have
+  time limits (streams: 5 minutes without a byte).
+- Every change through the API is a job and audited; on B, pairing
+  attempts (good and bad) and everything a source does (receives, refused
+  streams, prunes, aborts, browses, restores) are audited with its address
+  and name. Names a server sends are stripped of control and invisible
+  characters before they're shown.
+- What comes back in a restore is checked as untrusted: the same stream
+  checks, VMs reset (above), app files read without following links or
+  FIFOs and with a size cap, no setuid or device files usable (nosuid,
+  nodev), volumes only for VMs.
+
+#### Threat model
+
+A paired server is authenticated, not trusted. A compromised **source**
+can send junk or large data (bounded by its space, dataset and snapshot
+limits and B's minimum count and age, which it can't change), but can't
+delete or overwrite what B keeps, reach another source's replicas, or
+place data outside `<pool>/replicas/<source>`. Its streams are parsed by
+B's kernel in `zfs receive` (single datasets, no properties, known
+features only); browsing adds the file system code (ZPL) to that, which is
+why it's an opt-in per source. A compromised **receiver** can refuse,
+delay or corrupt copies (A notices a failed or stalled run, and restored
+data is treated as untrusted as above) and could send a crafted resume
+token, which A's root decodes and checks before zfs uses it.
 
 ### Limits and what's not verified here
 
 - Integration test: two file-backed pools on one machine, through two
   hardyd services over loopback (`TestZFSReplicationIntegration`, CI's ZFS
-  job). Real networks, NetBird, large pools, encrypted pools and VMs with
-  real guest agents are not covered by CI.
+  job): full and incremental copies, a cancelled transfer resumed from its
+  real token, refused streams, browsing (snapshot mounts of `canmount=off`
+  replicas work), restoring. Real networks, NetBird, large pools,
+  encrypted pools and VMs with real guest agents are not covered by CI.
 - Browsing mounts a replica snapshot with `mount -t zfs` (read-only,
   nosuid, nodev, noexec) in a root-only folder under `/run/hardyos`.
 - Pools encrypted with HardyOS's native encryption are sent decrypted (not

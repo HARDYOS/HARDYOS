@@ -88,6 +88,8 @@ func TestPrivRootOverTheSocket(t *testing.T) {
 	f.On("zfs get -H -p -o value org.hardyos:replica tank/replicas/a1b2c3d4", "a1b2c3d4\n")
 	f.On("zfs get -H -p -o value quota tank/replicas/a1b2c3d4", "0\n")
 	f.On("zfs list -H -o type tank/replicas/a1b2c3d4/share", "filesystem\n")
+	f.OnPrefix("zfs set ", sysexec.Result{})
+	f.OnPrefix("zfs list -H -o name -r -t ", sysexec.Result{})
 	st := &echoStarter{}
 	m := &replica.Manager{Runner: f, Starter: st, Items: oneItem{}}
 
@@ -125,7 +127,7 @@ func TestPrivRootOverTheSocket(t *testing.T) {
 	waitOK(t, root, ss.Stream)
 
 	tg := replica.Target{Pool: "tank", Source: "a1b2c3d4", Kind: replica.KindShare, Item: "media"}
-	rs, w, err := root.Recv(ctx, replica.RecvArgs{Target: tg, Task: "abc123", Snapshot: label})
+	rs, w, err := root.Recv(ctx, replica.RecvArgs{Target: tg, Limits: replica.Limits{QuotaBytes: 1 << 30}, Task: "abc123", Snapshot: label})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +148,7 @@ func TestPrivRootOverTheSocket(t *testing.T) {
 	// Names outside the confined path never reach root's commands.
 	bad := tg
 	bad.Item = "../../etc"
-	_, _, err = root.Recv(ctx, replica.RecvArgs{Target: bad, Task: "abc123", Snapshot: label})
+	_, _, err = root.Recv(ctx, replica.RecvArgs{Target: bad, Limits: replica.Limits{QuotaBytes: 1 << 30}, Task: "abc123", Snapshot: label})
 	var pe *priv.Error
 	if !errors.As(err, &pe) || pe.Code != priv.CodeBadArgs {
 		t.Fatalf("bad target: %v", err)

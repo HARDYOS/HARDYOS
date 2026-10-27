@@ -51,8 +51,13 @@ const receive = {
       id: "src0001",
       name: "alpha",
       pool: "tank",
-      quotaBytes: 0,
+      quotaBytes: 100 * 2 ** 30,
       minKeep: 3,
+      minAgeDays: 7,
+      minIntervalMinutes: 0,
+      maxDatasets: 1000,
+      maxSnapshots: 20000,
+      allowBrowse: false,
       createdAt: "2026-10-27T09:00:00Z",
       lastSeenAt: "2026-10-27T10:00:00Z",
       items: [],
@@ -197,7 +202,7 @@ describe("AcceptPanel", () => {
     fireEvent.change(within(dialog).getByLabelText("Space limit (GiB)"), { target: { value: "500" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "Make code" }));
     expect(await screen.findByText("ABCDE-FGHIJ-KLMNO-PQRST-UVWXYZ")).toBeTruthy();
-    expect(calls.find((c) => c.path === "/replication/receive/pairing")?.body).toEqual({ pool: "tank", quotaBytes: 500 * 2 ** 30, minKeep: 3 });
+    expect(calls.find((c) => c.path === "/replication/receive/pairing")?.body).toEqual({ pool: "tank", quotaBytes: 500 * 2 ** 30, minKeep: 3, minAgeDays: 7 });
   });
 
   it("deletes a source's replicas with its name typed", async () => {
@@ -212,6 +217,28 @@ describe("AcceptPanel", () => {
     fireEvent.click(btn);
     await waitFor(() =>
       expect(calls.find((c) => c.method === "DELETE" && c.path === "/replication/receive/sources/src0001")?.body).toEqual({ confirm: "alpha", deleteReplicas: true }),
+    );
+  });
+
+  it("changes a source's rules, browsing included", async () => {
+    const calls: Call[] = [];
+    serve(calls);
+    wrap(<AcceptPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "Rules for alpha" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("switch", { name: /browse its replicas/ }));
+    fireEvent.change(within(dialog).getByLabelText("Keep every snapshot for (days)"), { target: { value: "30" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(calls.find((c) => c.method === "PATCH")?.body).toEqual({
+        quotaBytes: 100 * 2 ** 30,
+        minKeep: 3,
+        minAgeDays: 30,
+        minIntervalMinutes: 0,
+        maxDatasets: 1000,
+        maxSnapshots: 20000,
+        allowBrowse: true,
+      }),
     );
   });
 });

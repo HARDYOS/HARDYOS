@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/replica"
@@ -91,7 +92,94 @@ func (s *Service) peer(ctx context.Context, t *Target) (*peer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &peer{base: "https://" + t.Address, hc: &http.Client{Transport: newTransport(id, pinCheck(t.Pin, nil))}}, nil
+	return &peer{base: "https://" + t.Address, hc: newClient(newTransport(id, pinCheck(t.Pin, nil)), 0)}, nil
+}
+
+// newClient never follows redirects: another server's answer can't send
+// this one anywhere else (a 3xx is an error).
+func newClient(tr *http.Transport, timeout time.Duration) *http.Client {
+	return &http.Client{Transport: tr, Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+}
+
+// Time limits on requests to another server: ordinary calls end after
+// PeerTimeout (browsing, which mounts a snapshot there, after
+// PeerBrowseTimeout); streams after PeerIdle without a byte moving, and
+// PeerFinish after the last byte for the other side's answer.
+var (
+	PeerTimeout       = 2 * time.Minute
+	PeerBrowseTimeout = 3 * time.Minute
+	PeerIdle          = 5 * time.Minute
+	PeerFinish        = 31 * time.Minute
+)
+
+// watchdog cancels a stream's context when nothing moved for idle, or,
+// once finished, after the finish allowance.
+type watchdog struct {
+	last   atomic.Int64 // unix nanoseconds of the last progress
+	done   atomic.Int64 // when the body finished (0: not yet)
+	cancel context.CancelFunc
+	stop   chan struct{}
+}
+
+func newWatchdog(parent context.Context, idle, finish time.Duration) (context.Context, *watchdog) {
+	ctx, cancel := context.WithCancel(parent)
+	w := &watchdog{cancel: cancel, stop: make(chan struct{})}
+	w.touch()
+	tick := min(idle/4, time.Second)
+	go func() {
+		t := time.NewTicker(tick)
+		defer t.Stop()
+		for {
+			select {
+			case <-w.stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				now := time.Now().UnixNano()
+				if d := w.done.Load(); d != 0 {
+					if now-d > int64(finish) {
+						cancel()
+						return
+					}
+				} else if now-w.last.Load() > int64(idle) {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return ctx, w
+}
+
+func (w *watchdog) touch()  { w.last.Store(time.Now().UnixNano()) }
+func (w *watchdog) finish() { w.done.CompareAndSwap(0, time.Now().UnixNano()) }
+func (w *watchdog) close() {
+	select {
+	case <-w.stop:
+	default:
+		close(w.stop)
+	}
+	w.cancel()
+}
+
+// watched reports progress to a watchdog.
+type watched struct {
+	r io.Reader
+	w *watchdog
+}
+
+func (x watched) Read(p []byte) (int, error) {
+	n, err := x.r.Read(p)
+	if n > 0 {
+		x.w.touch()
+	}
+	if err == io.EOF {
+		x.w.finish()
+	}
+	return n, err
 }
 
 func (p *peer) close() { p.hc.CloseIdleConnections() }
@@ -120,6 +208,12 @@ func decodeReply(resp *http.Response, out any) error {
 }
 
 func (p *peer) do(ctx context.Context, method, path string, q url.Values, body any, out any) error {
+	limit := PeerTimeout
+	if path == "/repl/v1/browse" {
+		limit = PeerBrowseTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
 	var rd io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -228,7 +322,9 @@ func (p *peer) stream(ctx context.Context, task, kind, id, child, snapshot strin
 	q := itemQuery(kind, id, child)
 	q.Set("task", task)
 	q.Set("snapshot", snapshot)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, p.url("/repl/v1/stream", q), body)
+	ctx, wd := newWatchdog(ctx, PeerIdle, PeerFinish)
+	defer wd.close()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, p.url("/repl/v1/stream", q), watched{r: body, w: wd})
 	if err != nil {
 		return nil, err
 	}
@@ -242,22 +338,38 @@ func (p *peer) stream(ctx context.Context, task, kind, id, child, snapshot strin
 	return &r, decodeReply(resp, &r)
 }
 
-// send downloads a replica's snapshot as a zfs stream.
+// send downloads a replica's snapshot as a zfs stream. The body is
+// watched: no byte for PeerIdle ends it.
 func (p *peer) send(ctx context.Context, kind, id, child, snapshot string) (*http.Response, error) {
 	q := itemQuery(kind, id, child)
 	q.Set("snapshot", snapshot)
+	ctx, wd := newWatchdog(ctx, PeerIdle, PeerFinish)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.url("/repl/v1/send", q), nil)
 	if err != nil {
+		wd.close()
 		return nil, err
 	}
 	resp, err := p.hc.Do(req)
 	if err != nil {
+		wd.close()
 		return nil, reachErr(err)
 	}
 	if resp.StatusCode != http.StatusOK {
+		defer wd.close()
 		return nil, decodeReply(resp, nil)
 	}
+	resp.Body = watchedBody{watched: watched{r: resp.Body, w: wd}, c: resp.Body}
 	return resp, nil
+}
+
+type watchedBody struct {
+	watched
+	c io.Closer
+}
+
+func (b watchedBody) Close() error {
+	b.w.close()
+	return b.c.Close()
 }
 
 // Pair connects to a receiving server with a pairing code it showed, and
@@ -280,7 +392,7 @@ func (s *Service) Pair(ctx context.Context, address, code string) (*Target, erro
 	var seen string
 	tr := newTransport(id, pinCheck("", &seen))
 	tr.DisableKeepAlives = true
-	hc := &http.Client{Transport: tr, Timeout: time.Minute}
+	hc := newClient(tr, time.Minute)
 	defer hc.CloseIdleConnections()
 	// The receiver's key is learned on the TLS connection and bound into
 	// the proof; the proof itself is sent on that same connection.
@@ -294,7 +406,7 @@ func (s *Service) Pair(ctx context.Context, address, code string) (*Target, erro
 	body, _ := json.Marshal(pairRequest{Proof: hex.EncodeToString(sourceProof(raw, id.Pin, receiverPin)), Name: s.hostname()})
 	tr2 := newTransport(id, pinCheck(receiverPin, nil))
 	tr2.DisableKeepAlives = true
-	hc2 := &http.Client{Transport: tr2, Timeout: time.Minute}
+	hc2 := newClient(tr2, time.Minute)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+addr+"/repl/v1/pair", bytes.NewReader(body))
 	if err != nil {
 		return nil, err

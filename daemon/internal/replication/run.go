@@ -369,6 +369,8 @@ type RestoreResult struct {
 	ID      string `json:"id"`
 	Dataset string `json:"dataset"`
 	Bytes   int64  `json:"bytes"`
+	// Notes say what was changed on the way back (a VM's reset settings).
+	Notes []string `json:"notes"`
 }
 
 func (s *Service) restore(jc *jobs.Context, a RestoreParams) (any, error) {
@@ -392,6 +394,10 @@ func (s *Service) restore(jc *jobs.Context, a RestoreParams) (any, error) {
 		}
 	} else {
 		msg = fmt.Sprintf("%s/%s restored as %s", a.Kind, a.ID, res.Dataset)
+		if len(res.Notes) > 0 {
+			msg += ". Changed: " + strings.Join(res.Notes, "; ")
+			jc.Progress(100, "Restored. Changed: "+strings.Join(res.Notes, "; "))
+		}
 		s.notifier().Notify(context.Background(), Event{Kind: EventRestored, Severity: SeverityInfo, Title: "Restored " + a.ID + " from " + tgt.Name,
 			Body: msg, Link: "replication:restore", Time: s.now()})
 	}
@@ -444,7 +450,11 @@ func (s *Service) restoreItem(jc *jobs.Context, p *peer, tgt *Target, a RestoreP
 		cleanup()
 		return nil, err
 	}
-	return &RestoreResult{Kind: a.Kind, ID: r.ID, Dataset: r.Dataset, Bytes: pr.total.Load()}, nil
+	notes := r.Notes
+	if notes == nil {
+		notes = []string{}
+	}
+	return &RestoreResult{Kind: a.Kind, ID: r.ID, Dataset: r.Dataset, Bytes: pr.total.Load(), Notes: notes}, nil
 }
 
 // pull receives one dataset of a replica's snapshot back here.

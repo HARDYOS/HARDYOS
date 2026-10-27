@@ -46,14 +46,46 @@ func receiveArgs(t Target, label string, objset uint32) []string {
 	return append(args, t.Dataset()+"@"+label)
 }
 
-// RecvArgs starts receiving a stream into a replica. Pool, quota and
-// MinKeep come from hardyd's record of the source (chosen on this
-// server); everything else from the sending server, validated here.
+// Limits are the receiving server's own rules for one source, set by its
+// administrator (never by the source).
+type Limits struct {
+	// QuotaBytes is the source's space limit; required (no unlimited).
+	QuotaBytes uint64 `json:"quotaBytes"`
+	// MinAgeDays: snapshots received less than this long ago are never
+	// pruned, whatever the source asks.
+	MinAgeDays int `json:"minAgeDays"`
+	// MinIntervalMinutes: a new snapshot of an item is refused until this
+	// long after the last one was received (0: no limit).
+	MinIntervalMinutes int `json:"minIntervalMinutes"`
+	// MaxDatasets and MaxSnapshots bound what the source can create here
+	// (0: DefaultMaxDatasets, DefaultMaxSnapshots). ZFS's own
+	// filesystem_limit and snapshot_limit don't apply to root, which runs
+	// every receive, so they're counted here instead.
+	MaxDatasets  int `json:"maxDatasets"`
+	MaxSnapshots int `json:"maxSnapshots"`
+}
+
+// Defaults for Limits.
+const (
+	DefaultMaxDatasets  = 1000
+	DefaultMaxSnapshots = 20000
+	// SystemReserve is kept for <pool>/system (hardyd's database, backups)
+	// on a pool that holds replicas.
+	SystemReserve = 2 << 30
+	// PropReceived is set on every received snapshot: when this server got
+	// it (Unix seconds). Snapshot names and creation times come from the
+	// source; this doesn't.
+	PropReceived = "org.hardyos:received"
+)
+
+// RecvArgs starts receiving a stream into a replica. The pool and limits
+// come from hardyd's record of the source (chosen on this server);
+// everything else from the sending server, validated here.
 type RecvArgs struct {
 	Target
-	Task       string `json:"task"`
-	Snapshot   string `json:"snapshot"`
-	QuotaBytes uint64 `json:"quotaBytes"`
+	Limits
+	Task     string `json:"task"`
+	Snapshot string `json:"snapshot"`
 }
 
 // RecvStart is a started receive; the file handed over is where the
@@ -63,10 +95,23 @@ type RecvStart struct {
 }
 
 // ensureLayout makes <pool>/replicas/<source>/<kind> as needed (never
-// mounted, read only) and applies the source's quota.
+// mounted, read only), applies the source's quota (required) and keeps a
+// reservation for <pool>/system so replicas can't starve the server's own
+// data on that pool.
 func (m *Manager) ensureLayout(ctx context.Context, t Target, quota uint64) error {
+	if quota == 0 {
+		return invalid("a source needs a space limit on this server")
+	}
 	if _, err := m.zfs(ctx, "list", "-H", "-o", "name", t.Pool); err != nil {
 		return fmt.Errorf("there's no pool called %s", t.Pool)
+	}
+	if sys := t.Pool + "/system"; m.prop(ctx, sys, "type") == "filesystem" {
+		if n, _ := strconv.ParseUint(m.prop(ctx, sys, "reservation"), 10, 64); n < SystemReserve {
+			if _, err := m.zfs(ctx, "set", "reservation="+strconv.Itoa(SystemReserve), sys); err != nil {
+				return fmt.Errorf("%s keeps HardyOS's own data and needs 2 GiB kept free before it can hold replicas: %w", t.Pool, err)
+			}
+			m.log().Info("replication: reserved space for the system dataset", "dataset", sys)
+		}
 	}
 	root := RootDataset(t.Pool)
 	if _, ok := m.exists(ctx, root); !ok {
@@ -85,11 +130,8 @@ func (m *Manager) ensureLayout(ctx context.Context, t Target, quota uint64) erro
 	} else if v := m.prop(ctx, src, PropReplica); v != t.Source {
 		return fmt.Errorf("%s isn't this source's replicas", src)
 	}
-	q := "none"
-	if quota > 0 {
-		q = strconv.FormatUint(quota, 10)
-	}
-	if v := m.prop(ctx, src, "quota"); v != q && !(q == "none" && v == "0") {
+	q := strconv.FormatUint(quota, 10)
+	if v := m.prop(ctx, src, "quota"); v != q {
 		if _, err := m.zfs(ctx, "set", "quota="+q, src); err != nil {
 			return fmt.Errorf("setting the source's quota: %w", err)
 		}
@@ -137,6 +179,14 @@ func (m *Manager) Recv(ctx context.Context, a RecvArgs) (*RecvStart, *os.File, e
 	}
 	ds := a.Dataset()
 	pol := Policy{Label: a.Snapshot}
+	_, at, _ := ParseSnap(a.Snapshot)
+	now := m.now()
+	if at.After(now.Add(time.Hour)) {
+		return nil, nil, invalid("the snapshot %s is from the future", a.Snapshot)
+	}
+	if err := m.checkCounts(ctx, a); err != nil {
+		return nil, nil, err
+	}
 	if a.Child != "" {
 		parent := ds[:strings.LastIndex(ds, "/")]
 		if _, ok := m.exists(ctx, parent); !ok {
@@ -160,8 +210,13 @@ func (m *Manager) Recv(ctx context.Context, a RecvArgs) (*RecvStart, *os.File, e
 		// A full stream that was interrupted leaves the new dataset with
 		// a resume token: only the rest of that stream may follow.
 		pol.Incremental = true
+		if m.prop(ctx, ds, "receive_resume_token") == "" {
+			if err := m.checkNewer(ctx, ds, at, now, a.Limits); err != nil {
+				return nil, nil, err
+			}
+		}
 	}
-	s, err := m.streams.add(ds)
+	s, err := m.streams.add(ds, kindRecv)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -175,10 +230,72 @@ func (m *Manager) Recv(ctx context.Context, a RecvArgs) (*RecvStart, *os.File, e
 	s.mu.Unlock()
 	go func() {
 		defer pr.Close()
-		s.finish(m.receive(pr, s, a.Target, pol))
+		err := m.receive(pr, s, a.Target, pol)
+		if err == nil {
+			m.markReceived(ds, a.Snapshot)
+		}
+		s.finish(err)
 	}()
 	m.log().Info("replication: receive", "stream", s.id, "dataset", ds, "snapshot", a.Snapshot)
 	return &RecvStart{Stream: s.id}, pw, nil
+}
+
+// checkCounts refuses a new dataset or snapshot past the source's limits.
+func (m *Manager) checkCounts(ctx context.Context, a RecvArgs) error {
+	src := SourceDataset(a.Pool, a.Source)
+	maxDS, maxSnap := a.MaxDatasets, a.MaxSnapshots
+	if maxDS <= 0 {
+		maxDS = DefaultMaxDatasets
+	}
+	if maxSnap <= 0 {
+		maxSnap = DefaultMaxSnapshots
+	}
+	if _, ok := m.exists(ctx, a.Dataset()); !ok {
+		out, err := m.zfs(ctx, "list", "-H", "-o", "name", "-r", "-t", "filesystem,volume", src)
+		if err != nil {
+			return err
+		}
+		if len(lines(out)) >= maxDS {
+			return invalid("this source already has %d datasets here, its limit", maxDS)
+		}
+	}
+	out, err := m.zfs(ctx, "list", "-H", "-o", "name", "-r", "-t", "snapshot", src)
+	if err != nil {
+		return err
+	}
+	if len(lines(out)) >= maxSnap {
+		return invalid("this source already has %d snapshots here, its limit", maxSnap)
+	}
+	return nil
+}
+
+// checkNewer refuses a snapshot that isn't newer than the replica's
+// newest, or that comes sooner than the source's minimum interval.
+func (m *Manager) checkNewer(ctx context.Context, ds string, at, now time.Time, lim Limits) error {
+	snaps, err := m.listSnaps(ctx, ds, "")
+	if err != nil || len(snaps) == 0 {
+		return err
+	}
+	last := snaps[len(snaps)-1]
+	if _, lt, _ := ParseSnap(last.Name); !at.After(lt) {
+		return invalid("the replica already has %s; a new snapshot must be newer", last.Name)
+	}
+	if lim.MinIntervalMinutes > 0 {
+		got, _ := strconv.ParseInt(m.prop(ctx, ds+"@"+last.Name, PropReceived), 10, 64)
+		if wait := time.Unix(got, 0).Add(time.Duration(lim.MinIntervalMinutes) * time.Minute).Sub(now); wait > 0 {
+			return invalid("this server accepts a new snapshot of this item every %d minutes; try again in %s", lim.MinIntervalMinutes, wait.Round(time.Second))
+		}
+	}
+	return nil
+}
+
+// markReceived records when this server got a snapshot.
+func (m *Manager) markReceived(ds, label string) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if _, err := m.zfs(ctx, "set", PropReceived+"="+strconv.FormatInt(m.now().Unix(), 10), ds+"@"+label); err != nil {
+		m.log().Warn("replication: recording when a snapshot was received", "snapshot", ds+"@"+label, "err", err)
+	}
 }
 
 // receive checks the stream's first record and runs zfs receive on it.
@@ -290,11 +407,13 @@ func (m *Manager) Abort(ctx context.Context, t Target) error {
 }
 
 // RecvPruneArgs prunes a replica: keep the newest Keep of the task's
-// snapshots (never fewer than 1).
+// snapshots (never fewer than 1), and every snapshot received less than
+// MinAgeDays ago.
 type RecvPruneArgs struct {
 	Target
-	Task string `json:"task"`
-	Keep int    `json:"keep"`
+	Task       string `json:"task"`
+	Keep       int    `json:"keep"`
+	MinAgeDays int    `json:"minAgeDays"`
 }
 
 // PruneReplica removes a task's older snapshots of a replicated item.
@@ -319,9 +438,39 @@ func (m *Manager) PruneReplica(ctx context.Context, a RecvPruneArgs) (*PruneResu
 	if v := m.prop(ctx, ds, PropReplica); v != a.Source {
 		return nil, fmt.Errorf("%s isn't a replica from this source", ds)
 	}
+	young, err := m.young(ctx, ds, time.Duration(a.MinAgeDays)*24*time.Hour)
+	if err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.pruneTree(ctx, ds, a.Task, a.Keep, nil)
+	return m.pruneTree(ctx, ds, a.Task, a.Keep, nil, young)
+}
+
+// young lists the labels any dataset under top received less than minAge
+// ago (or without a record of when: kept too).
+func (m *Manager) young(ctx context.Context, top string, minAge time.Duration) (map[string]bool, error) {
+	out, err := m.zfs(ctx, "list", "-H", "-p", "-o", "name,"+PropReceived, "-t", "snapshot", "-r", top)
+	if err != nil {
+		return nil, err
+	}
+	cut := m.now().Add(-minAge)
+	res := map[string]bool{}
+	for _, l := range lines(out) {
+		f := strings.Split(l, "\t")
+		if len(f) != 2 {
+			continue
+		}
+		_, label, ok := strings.Cut(f[0], "@")
+		if !ok {
+			continue
+		}
+		n, err := strconv.ParseInt(f[1], 10, 64)
+		if err != nil || time.Unix(n, 0).After(cut) {
+			res[label] = true
+		}
+	}
+	return res, nil
 }
 
 // ReplicaItem is one replicated item on this server.

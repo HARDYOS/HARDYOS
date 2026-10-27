@@ -2,7 +2,7 @@ package api
 
 import (
 	"errors"
-	"net"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -453,40 +453,8 @@ type ReplicationReceive struct {
 	Pairing   *replication.Pairing    `json:"pairing"`
 	Sources   []ReplicationSourceView `json:"sources"`
 	// Addresses are where other servers can reach this one.
-	Addresses []ReplicationAddress `json:"addresses"`
-	Problem   string               `json:"problem,omitempty"`
-}
-
-// ReplicationAddress is one of this server's addresses.
-type ReplicationAddress struct {
-	Address   string `json:"address"`
-	Interface string `json:"interface"`
-	NetBird   bool   `json:"netbird"`
-}
-
-// localAddresses lists this server's global unicast addresses (the
-// NetBird interface is wt0).
-func localAddresses() []ReplicationAddress {
-	out := []ReplicationAddress{}
-	ifs, err := net.Interfaces()
-	if err != nil {
-		return out
-	}
-	for _, ifc := range ifs {
-		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 || strings.HasPrefix(ifc.Name, "docker") || strings.HasPrefix(ifc.Name, "veth") ||
-			strings.HasPrefix(ifc.Name, "br-") || strings.HasPrefix(ifc.Name, "virbr") || strings.HasPrefix(ifc.Name, "hdc") {
-			continue
-		}
-		addrs, _ := ifc.Addrs()
-		for _, a := range addrs {
-			ipn, ok := a.(*net.IPNet)
-			if !ok || !ipn.IP.IsGlobalUnicast() {
-				continue
-			}
-			out = append(out, ReplicationAddress{Address: ipn.IP.String(), Interface: ifc.Name, NetBird: ifc.Name == "wt0"})
-		}
-	}
-	return out
+	Addresses []replication.Address `json:"addresses"`
+	Problem   string                `json:"problem,omitempty"`
 }
 
 func (s *Server) handleReplicationReceive(w http.ResponseWriter, r *http.Request, _ *auth.User) {
@@ -509,7 +477,7 @@ func (s *Server) handleReplicationReceive(w http.ResponseWriter, r *http.Request
 		return
 	}
 	out := ReplicationReceive{Receiving: pairing != nil || len(sources) > 0, Hostname: hostnameOf(), Port: replication.DefaultPort,
-		Pin: id.Pin, Pairing: pairing, Sources: []ReplicationSourceView{}, Addresses: localAddresses()}
+		Pin: id.Pin, Pairing: pairing, Sources: []ReplicationSourceView{}, Addresses: replication.LocalAddresses()}
 	reps, err := svc.Root.Replicas(ctx)
 	if err != nil {
 		out.Problem = "the replicas' sizes can't be read: " + err.Error()
@@ -543,6 +511,7 @@ type replicationPairingRequest struct {
 	Pool       string `json:"pool"`
 	QuotaBytes uint64 `json:"quotaBytes"`
 	MinKeep    int    `json:"minKeep"`
+	MinAgeDays *int   `json:"minAgeDays"`
 }
 
 // ReplicationPairingCode is a new pairing code, shown once.
@@ -563,11 +532,16 @@ func (s *Server) handleReplicationPairingCreate(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusBadRequest, "invalid", "choose the pool that keeps the replicas")
 		return
 	}
-	if req.MinKeep == 0 {
-		req.MinKeep = 3
+	rules := replication.DefaultRules
+	rules.QuotaBytes = req.QuotaBytes
+	if req.MinKeep != 0 {
+		rules.MinKeep = req.MinKeep
 	}
-	if req.MinKeep < 1 || req.MinKeep > replication.MaxKeep {
-		writeError(w, http.StatusBadRequest, "invalid", "keep at least 1 snapshot")
+	if req.MinAgeDays != nil {
+		rules.MinAgeDays = *req.MinAgeDays
+	}
+	if err := rules.Check(); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
 	if !s.jobsReady(w) {
@@ -577,7 +551,7 @@ func (s *Server) handleReplicationPairingCreate(w http.ResponseWriter, r *http.R
 	ref := jobSecrets.put(code)
 	id := u.ID
 	j, err := s.cfg.Jobs.Submit(r.Context(), replication.JobPairingCreate, "Open a replication pairing code",
-		replication.PairingParams{Pool: req.Pool, QuotaBytes: req.QuotaBytes, MinKeep: req.MinKeep, SecretRef: ref}, &id)
+		replication.PairingParams{Pool: req.Pool, QuotaBytes: rules.QuotaBytes, MinKeep: rules.MinKeep, MinAgeDays: &rules.MinAgeDays, SecretRef: ref}, &id)
 	if err != nil {
 		internalError(s, w, err)
 		return
@@ -591,13 +565,8 @@ func (s *Server) handleReplicationPairingCancel(w http.ResponseWriter, r *http.R
 	s.submit(w, r, u, replication.JobPairingCancel, "Close the replication pairing code", map[string]string{}, "replication.receive.pairing.cancel", "", nil)
 }
 
-type replicationSourceUpdate struct {
-	QuotaBytes uint64 `json:"quotaBytes"`
-	MinKeep    int    `json:"minKeep"`
-}
-
 func (s *Server) handleReplicationSourceUpdate(w http.ResponseWriter, r *http.Request, u *auth.User) {
-	var req replicationSourceUpdate
+	var req replication.SourceRules
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -606,12 +575,13 @@ func (s *Server) handleReplicationSourceUpdate(w http.ResponseWriter, r *http.Re
 		s.replErr(w, err)
 		return
 	}
-	if req.MinKeep < 1 || req.MinKeep > replication.MaxKeep {
-		writeError(w, http.StatusBadRequest, "invalid", "keep at least 1 snapshot")
+	if err := req.Check(); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
+	detail := fmt.Sprintf("quota %d, keep %d, min age %d days, min interval %d min, browse %v", req.QuotaBytes, req.MinKeep, req.MinAgeDays, req.MinIntervalMinutes, req.AllowBrowse)
 	s.submit(w, r, u, replication.JobSourceUpdate, "Change replication from "+src.Name,
-		replication.SourceUpdateParams{Source: src.ID, QuotaBytes: req.QuotaBytes, MinKeep: req.MinKeep}, "replication.source.update", src.ID+" "+src.Name, nil)
+		replication.SourceUpdateParams{Source: src.ID, SourceRules: req}, "replication.source.update", src.ID+" "+src.Name+" ("+detail+")", nil)
 }
 
 type replicationSourceDelete struct {

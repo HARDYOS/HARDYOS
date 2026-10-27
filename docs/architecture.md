@@ -1497,7 +1497,8 @@ and IOMMU flags on real firmware.
 
 ## Replication between servers
 
-Phase 6 part B (decisions 180-192; guide `docs/replication.md`). Scheduled
+Phase 6 part B (decisions 180-199; guide `docs/replication.md`, which has
+the threat model). Scheduled
 incremental ZFS replication of chosen shared folders, apps and VMs to
 another HardyOS server, over the LAN or NetBird. One way, no promotion yet
 (phase 8).
@@ -1544,7 +1545,13 @@ another HardyOS server, over the LAN or NetBird. One way, no promotion yet
 - **Confinement on B.** `<pool>/replicas` (role `replicas`, never mounted,
   read only), `<pool>/replicas/<source>` (quota), `/<kind>/<item>[/<child>]`;
   every component validated (`replica.Target`), existing datasets checked
-  for HardyOS's role/replica properties before use. Receive options:
+  for HardyOS's role/replica properties before use. The receiving
+  administrator's rules per source (`repl_sources`): a required quota,
+  minimum kept snapshots and minimum age (received snapshots are stamped
+  `org.hardyos:received`; younger ones are never pruned), an optional
+  minimum interval, dataset and snapshot counts (root counts them; ZFS's
+  limits don't bind root), and browsing (off by default). A pool with
+  replicas keeps a 2 GiB reservation on `<pool>/system`. Receive options:
   `-u -s`, file systems `canmount=off`, a mountpoint under
   `/mnt/<pool>/replicas`, `readonly=on`, `exec/setuid/devices=off`,
   `-x sharenfs/sharesmb` and every HardyOS service property; volumes
@@ -1554,8 +1561,8 @@ another HardyOS server, over the LAN or NetBird. One way, no promotion yet
   asked-for snapshot, incremental over an existing replica, never `-F`.
 - **Runs.** Per item: `zfs snapshot -r` (`hardyos-repl-<task>-<UTC>`; VMs
   through `vms.Manager.Frozen`, the guest agent's freeze), then per
-  dataset, parent first: resume a token (validated on A against the
-  dataset and the task's snapshots) or send `-i` from the newest snapshot
+  dataset, parent first: resume a token (decoded by A's root and accepted
+  only for the task's snapshots of that dataset, by GUID) or send `-i` from the newest snapshot
   whose GUID B has, or the whole snapshot for a new replica. Pruning (both
   sides) only touches the task's labels and only below the newest label
   every dataset of the item has. Runs are jobs (`replication.run`, one per

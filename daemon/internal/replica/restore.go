@@ -30,8 +30,9 @@ type Restorer interface {
 	ShareAdopt(ctx context.Context, pool, id string) error
 	// VMFree reports whether no VM uses the id.
 	VMFree(ctx context.Context, id string) error
-	// VMAdopt defines a restored VM with libvirt (off).
-	VMAdopt(ctx context.Context, id string) error
+	// VMAdopt defines a restored VM with libvirt (off), after resetting
+	// what could reach beyond it; notes say what was reset.
+	VMAdopt(ctx context.Context, id string) ([]string, error)
 	// AppsPool is the pool apps live on.
 	AppsPool(ctx context.Context) (string, error)
 	// AppAdopt marks a restored app's data as kept (reinstall it from
@@ -121,7 +122,7 @@ func (m *Manager) RestoreRecv(ctx context.Context, a RestoreArgs) (*RecvStart, *
 			}
 			props = []string{"org.hardyos:vm=" + a.ID, "canmount=on", "devices=off", "setuid=off", "exec=off"}
 		case KindApp:
-			props = []string{"canmount=on"}
+			props = []string{"canmount=on", "devices=off", "setuid=off"}
 		}
 		if _, ok := m.exists(ctx, top[:strings.LastIndex(top, "/")]); !ok {
 			if _, err := m.zfs(ctx, "create", top[:strings.LastIndex(top, "/")]); err != nil {
@@ -144,7 +145,7 @@ func (m *Manager) RestoreRecv(ctx context.Context, a RestoreArgs) (*RecvStart, *
 		from = from[:120]
 	}
 	props = append(props, PropRestoring+"=1", PropRestored+"="+from+"@"+a.Snapshot)
-	s, err := m.streams.add(ds)
+	s, err := m.streams.add(ds, kindRestore)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -179,6 +180,9 @@ func (m *Manager) receiveRestore(r *os.File, s *stream, ds string, a RestoreArgs
 	}
 	if a.Child == "" && b.Objset != ObjsetFilesystem {
 		return invalid("the item's own dataset must be a file system")
+	}
+	if b.Objset == ObjsetVolume && a.Kind != KindVM {
+		return invalid("only VMs have volumes; a %s doesn't", a.Kind)
 	}
 	args := []string{"receive", "-u"}
 	for _, p := range props {
@@ -223,6 +227,8 @@ type RestoreFinishResult struct {
 	Dataset string `json:"dataset"`
 	// ID is the new shared folder's, VM's or app's id.
 	ID string `json:"id"`
+	// Notes say what was changed on the way back (a VM's reset settings).
+	Notes []string `json:"notes"`
 }
 
 // RestoreFinish mounts the copy and hands it to its manager: a new shared
@@ -255,8 +261,8 @@ func (m *Manager) RestoreFinish(ctx context.Context, a RestoreFinishArgs) (*Rest
 	}
 	for _, k := range kids {
 		ds := top + childSuffix(k.Child)
-		if _, err := m.zfs(ctx, "inherit", PropRestoring, ds); err != nil {
-			return nil, err
+		if k.Type == "volume" && a.Kind != KindVM {
+			return nil, invalid("only VMs have volumes; %s is one", ds)
 		}
 		if k.Type == "filesystem" && m.prop(ctx, ds, "mounted") != "yes" && m.prop(ctx, ds, "canmount") != "off" {
 			if _, err := m.zfs(ctx, "mount", ds); err != nil {
@@ -265,20 +271,30 @@ func (m *Manager) RestoreFinish(ctx context.Context, a RestoreFinishArgs) (*Rest
 		}
 	}
 	id := a.ID
+	notes := []string{}
 	switch a.Kind {
 	case KindShare:
 		id = a.NewID
 		err = m.Restore.ShareAdopt(ctx, ra.Pool, a.NewID)
 	case KindVM:
-		err = m.Restore.VMAdopt(ctx, a.ID)
+		var n []string
+		n, err = m.Restore.VMAdopt(ctx, a.ID)
+		notes = append(notes, n...)
 	case KindApp:
 		err = m.Restore.AppAdopt(ctx, a.ID)
 	}
 	if err != nil {
+		// Still marked as being restored: RestoreAbort can clean it up.
 		return nil, err
 	}
+	// Only now is it no longer "being restored".
+	for _, k := range kids {
+		if _, err := m.zfs(ctx, "inherit", PropRestoring, top+childSuffix(k.Child)); err != nil {
+			return nil, err
+		}
+	}
 	m.log().Info("replication: restored", "kind", a.Kind, "dataset", top)
-	return &RestoreFinishResult{Dataset: top, ID: id}, nil
+	return &RestoreFinishResult{Dataset: top, ID: id, Notes: notes}, nil
 }
 
 // RestoreAbort removes a restore that didn't finish (only datasets still

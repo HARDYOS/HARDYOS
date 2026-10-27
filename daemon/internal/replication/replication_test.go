@@ -141,7 +141,7 @@ func pairOn(t *testing.T, a, b *node, pool string) *Target {
 	t.Helper()
 	ctx := context.Background()
 	raw, code := NewCode()
-	if _, err := b.svc.OpenPairing(ctx, raw, PairingParams{Pool: pool, MinKeep: 3}); err != nil {
+	if _, err := b.svc.OpenPairing(ctx, raw, PairingParams{Pool: pool, QuotaBytes: 1 << 34, MinKeep: 3}); err != nil {
 		t.Fatal(err)
 	}
 	a.mu.Lock()
@@ -199,7 +199,7 @@ func TestPairing(t *testing.T) {
 	}
 	// Five wrong codes close a pairing code.
 	raw, code = NewCode()
-	_, _ = b.svc.OpenPairing(ctx, raw, PairingParams{Pool: "tank"})
+	_, _ = b.svc.OpenPairing(ctx, raw, PairingParams{Pool: "tank", QuotaBytes: 1 << 30})
 	c := newNode(t, "charlie")
 	for range MaxPairFailures {
 		_, wrong := NewCode()
@@ -340,6 +340,11 @@ func TestReplicateResumeRestore(t *testing.T) {
 	if err != nil || len(snaps) == 0 {
 		t.Fatal(snaps, err)
 	}
+	// Browsing mounts the source's data on B: off until B's admin allows it.
+	if _, err := a.svc.TargetBrowse(ctx, tgt.ID, replica.KindShare, "media", "", snaps[0].Name, "/"); err == nil || !strings.Contains(err.Error(), "browsing replicas is off") {
+		t.Fatalf("browse allowed by default: %v", err)
+	}
+	allowBrowse(t, b, tgt.SourceID)
 	if br, err := a.svc.TargetBrowse(ctx, tgt.ID, replica.KindShare, "media", "", snaps[0].Name, "/"); err != nil || len(br.Entries) != 2 {
 		t.Fatal(br, err)
 	}
@@ -578,5 +583,19 @@ func TestIdentitySealed(t *testing.T) {
 		if x.ID == tg.ID && x.Pin != "pin1" {
 			t.Fatal("pin lost")
 		}
+	}
+}
+
+// allowBrowse lets a source browse its replicas on b.
+func allowBrowse(t *testing.T, b *node, source string) {
+	t.Helper()
+	src, err := b.svc.Store().Source(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := src.SourceRules
+	r.AllowBrowse = true
+	if j := b.submit(t, JobSourceUpdate, SourceUpdateParams{Source: source, SourceRules: r}); j.State != jobs.Succeeded {
+		t.Fatal(j.Error)
 	}
 }

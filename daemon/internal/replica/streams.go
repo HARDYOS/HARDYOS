@@ -70,6 +70,7 @@ const keepFinished = 15 * time.Minute
 
 type stream struct {
 	id      string
+	kind    string
 	target  string // the dataset a receive writes (one receive per target)
 	started time.Time
 	bytes   atomic.Int64
@@ -122,6 +123,23 @@ type streams struct {
 // ErrBusy means a receive into the same dataset is already running.
 var ErrBusy = errors.New("a transfer into that replica is already running")
 
+// Limits on running transfers (a misbehaving caller can't start an
+// unbounded number of zfs processes).
+const (
+	MaxStreams        = 16
+	MaxStreamsPerKind = 8
+)
+
+// Kinds of transfers.
+const (
+	kindSend    = "send"
+	kindRecv    = "receive"
+	kindRestore = "restore"
+)
+
+// ErrTooMany means too many transfers are running.
+var ErrTooMany = errors.New("too many transfers are running; try again later")
+
 // ErrNoStream means the id isn't known (finished long ago, or never was).
 var ErrNoStream = errors.New("no such transfer")
 
@@ -131,13 +149,25 @@ func newStreamID() string {
 	return hex.EncodeToString(b)
 }
 
-func (r *streams) add(target string) (*stream, error) {
+func (r *streams) add(target, kind string) (*stream, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.byID == nil {
 		r.byID, r.targets = map[string]*stream{}, map[string]string{}
 	}
 	r.gc()
+	all, same := 0, 0
+	for _, s := range r.byID {
+		if !s.state().Done {
+			all++
+			if s.kind == kind {
+				same++
+			}
+		}
+	}
+	if all >= MaxStreams || same >= MaxStreamsPerKind {
+		return nil, ErrTooMany
+	}
 	if target != "" {
 		if id, ok := r.targets[target]; ok {
 			if s := r.byID[id]; s != nil && !s.state().Done {
@@ -145,7 +175,7 @@ func (r *streams) add(target string) (*stream, error) {
 			}
 		}
 	}
-	s := &stream{id: newStreamID(), target: target, started: time.Now()}
+	s := &stream{id: newStreamID(), kind: kind, target: target, started: time.Now()}
 	r.byID[s.id] = s
 	if target != "" {
 		r.targets[target] = s.id

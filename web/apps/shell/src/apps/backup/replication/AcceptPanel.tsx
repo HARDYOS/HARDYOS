@@ -112,12 +112,13 @@ export function AcceptPanel() {
                     <strong>{s.name}</strong>
                     <div className="small muted">
                       On {s.pool} · {bytes(s.usedBytes)}
-                      {s.quotaBytes > 0 ? ` of ${bytes(s.quotaBytes)}` : ", no limit"} · keeps at least {s.minKeep} snapshots of each · last seen{" "}
+                      {` of ${bytes(s.quotaBytes)}`} · keeps at least {s.minKeep} snapshots of each and all from the last {s.minAgeDays} days · browsing{" "}
+                      {s.allowBrowse ? "allowed" : "off"} · last seen{" "}
                       {s.lastSeenAt ? relativeTime(s.lastSeenAt) : "never"}
                     </div>
                   </div>
                   <div className="row">
-                    <Button size="sm" variant="ghost" aria-label={`Limits for ${s.name}`} onClick={() => setEditing(s)}>
+                    <Button size="sm" variant="ghost" aria-label={`Rules for ${s.name}`} onClick={() => setEditing(s)}>
                       <EditIcon size={14} />
                     </Button>
                     <Button size="sm" variant="ghost" aria-label={`Delete ${s.name}'s replicas`} onClick={() => setDeleting(s)}>
@@ -177,18 +178,19 @@ export function AcceptPanel() {
 function PairingDialog({ onClose, onMade }: { onClose: () => void; onMade: (c: ReplicationPairingCode) => void }) {
   const pools = usePoolNames();
   const [pool, setPool] = useState("");
-  const [quotaGB, setQuotaGB] = useState(0);
+  const [quotaGB, setQuotaGB] = useState(500);
   const [minKeep, setMinKeep] = useState(3);
+  const [minAgeDays, setMinAgeDays] = useState(7);
   const chosen = pool || pools.data?.[0] || "";
+  const quotaBytes = Math.round(quotaGB * GiB);
   const make = useMutation({
-    mutationFn: () =>
-      unwrap(api.POST("/replication/receive/pairing", { body: { pool: chosen, quotaBytes: Math.max(0, Math.round(quotaGB * GiB)), minKeep } })),
+    mutationFn: () => unwrap(api.POST("/replication/receive/pairing", { body: { pool: chosen, quotaBytes, minKeep, minAgeDays } })),
     onSuccess: onMade,
   });
   return (
     <Dialog
       title="Make a pairing code"
-      description="The code works once, for 30 minutes. The server that uses it may then send replicas here, into the pool you choose."
+      description="The code works once, for 30 minutes. The server that uses it may then send replicas here, into the pool you choose, up to the space limit."
       onClose={onClose}
       onSubmit={() => make.mutate()}
       footer={
@@ -196,7 +198,7 @@ function PairingDialog({ onClose, onMade }: { onClose: () => void; onMade: (c: R
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" type="submit" busy={make.isPending} disabled={!chosen || minKeep < 1}>
+          <Button variant="primary" type="submit" busy={make.isPending} disabled={!chosen || minKeep < 1 || quotaBytes < 1 || minAgeDays < 0}>
             Make code
           </Button>
         </>
@@ -216,11 +218,14 @@ function PairingDialog({ onClose, onMade }: { onClose: () => void; onMade: (c: R
           )}
         </Field>
         <div className="grid-2">
-          <Field label="Space limit (GiB)" hint="0 for no limit">
-            {(id) => <TextInput id={id} type="number" min={0} value={quotaGB} onChange={(e) => setQuotaGB(Number(e.target.value))} />}
+          <Field label="Space limit (GiB)" hint="Required: everything it sends must fit." error={quotaBytes < 1 ? "Set a space limit" : null}>
+            {(id) => <TextInput id={id} type="number" min={1} value={quotaGB} onChange={(e) => setQuotaGB(Number(e.target.value))} />}
           </Field>
           <Field label="Snapshots kept at least" hint="Per item, whatever the sending server asks.">
             {(id) => <TextInput id={id} type="number" min={1} max={1000} value={minKeep} onChange={(e) => setMinKeep(Number(e.target.value))} />}
+          </Field>
+          <Field label="Keep every snapshot for (days)" hint="Nothing younger is ever pruned, so a server that goes bad can't wipe its history here.">
+            {(id) => <TextInput id={id} type="number" min={0} max={3650} value={minAgeDays} onChange={(e) => setMinAgeDays(Number(e.target.value))} />}
           </Field>
         </div>
         {make.isError && <Alert tone="bad">{errorMessage(make.error)}</Alert>}
@@ -231,23 +236,28 @@ function PairingDialog({ onClose, onMade }: { onClose: () => void; onMade: (c: R
 
 function LimitsDialog({ source, onClose, onDone }: { source: ReplicationSource; onClose: () => void; onDone: () => void }) {
   const [quotaGB, setQuotaGB] = useState(Math.round((source.quotaBytes / GiB) * 10) / 10);
-  const [minKeep, setMinKeep] = useState(source.minKeep);
+  const [r, setR] = useState({
+    minKeep: source.minKeep,
+    minAgeDays: source.minAgeDays,
+    minIntervalMinutes: source.minIntervalMinutes,
+    maxDatasets: source.maxDatasets,
+    maxSnapshots: source.maxSnapshots,
+    allowBrowse: source.allowBrowse,
+  });
+  const set = (p: Partial<typeof r>) => setR((x) => ({ ...x, ...p }));
+  const quotaBytes = Math.round(quotaGB * GiB);
   const save = useMutation({
-    mutationFn: () =>
-      unwrap(
-        api.PATCH("/replication/receive/sources/{id}", {
-          params: { path: { id: source.id } },
-          body: { quotaBytes: Math.max(0, Math.round(quotaGB * GiB)), minKeep },
-        }),
-      ),
+    mutationFn: () => unwrap(api.PATCH("/replication/receive/sources/{id}", { params: { path: { id: source.id } }, body: { quotaBytes, ...r } })),
     onSuccess: () => {
       setTimeout(onDone, 500);
       onClose();
     },
   });
+  const num = (v: string) => Number(v);
   return (
     <Dialog
-      title={`Limits for ${source.name}`}
+      title={`Rules for ${source.name}`}
+      width={560}
       onClose={onClose}
       onSubmit={() => save.mutate()}
       footer={
@@ -255,21 +265,43 @@ function LimitsDialog({ source, onClose, onDone }: { source: ReplicationSource; 
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" type="submit" busy={save.isPending} disabled={minKeep < 1}>
+          <Button variant="primary" type="submit" busy={save.isPending} disabled={r.minKeep < 1 || quotaBytes < 1}>
             Save
           </Button>
         </>
       }
     >
-      <div className="grid-2">
-        <Field label="Space limit (GiB)" hint="0 for no limit; applies from the next transfer">
-          {(id) => <TextInput id={id} type="number" min={0} value={quotaGB} onChange={(e) => setQuotaGB(Number(e.target.value))} />}
-        </Field>
-        <Field label="Snapshots kept at least">
-          {(id) => <TextInput id={id} type="number" min={1} max={1000} value={minKeep} onChange={(e) => setMinKeep(Number(e.target.value))} />}
-        </Field>
+      <div className="stack">
+        <div className="grid-2">
+          <Field label="Space limit (GiB)" hint="Applies from the next transfer" error={quotaBytes < 1 ? "Set a space limit" : null}>
+            {(id) => <TextInput id={id} type="number" min={1} value={quotaGB} onChange={(e) => setQuotaGB(num(e.target.value))} />}
+          </Field>
+          <Field label="Snapshots kept at least">
+            {(id) => <TextInput id={id} type="number" min={1} max={1000} value={r.minKeep} onChange={(e) => set({ minKeep: num(e.target.value) })} />}
+          </Field>
+          <Field label="Keep every snapshot for (days)">
+            {(id) => <TextInput id={id} type="number" min={0} max={3650} value={r.minAgeDays} onChange={(e) => set({ minAgeDays: num(e.target.value) })} />}
+          </Field>
+          <Field label="At most one snapshot per item every (minutes)" hint="0 for no limit">
+            {(id) => (
+              <TextInput id={id} type="number" min={0} max={10080} value={r.minIntervalMinutes} onChange={(e) => set({ minIntervalMinutes: num(e.target.value) })} />
+            )}
+          </Field>
+          <Field label="Datasets at most">
+            {(id) => <TextInput id={id} type="number" min={1} value={r.maxDatasets} onChange={(e) => set({ maxDatasets: num(e.target.value) })} />}
+          </Field>
+          <Field label="Snapshots at most">
+            {(id) => <TextInput id={id} type="number" min={1} value={r.maxSnapshots} onChange={(e) => set({ maxSnapshots: num(e.target.value) })} />}
+          </Field>
+        </div>
+        <Toggle
+          label="Let it browse its replicas here"
+          description="Browsing mounts that server's data on this one for a moment, so this server's kernel reads file system structures the other server wrote. Leave off unless you trust it; it can always restore and look at the copy itself."
+          checked={r.allowBrowse}
+          onChange={(v) => set({ allowBrowse: v })}
+        />
+        {save.isError && <Alert tone="bad">{errorMessage(save.error)}</Alert>}
       </div>
-      {save.isError && <Alert tone="bad">{errorMessage(save.error)}</Alert>}
     </Dialog>
   );
 }

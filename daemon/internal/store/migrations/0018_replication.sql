@@ -51,8 +51,13 @@ CREATE TABLE repl_sources (
     name         TEXT NOT NULL,         -- the sending server's name
     pin_sealed   BLOB NOT NULL,
     pool         TEXT NOT NULL,
-    quota_bytes  INTEGER NOT NULL DEFAULT 0,
+    quota_bytes  INTEGER NOT NULL,          -- required: no unlimited sources
     min_keep     INTEGER NOT NULL DEFAULT 3,
+    min_age_days INTEGER NOT NULL DEFAULT 7, -- never prune snapshots received more recently
+    min_interval_minutes INTEGER NOT NULL DEFAULT 0,
+    max_datasets INTEGER NOT NULL DEFAULT 1000,
+    max_snapshots INTEGER NOT NULL DEFAULT 20000,
+    allow_browse INTEGER NOT NULL DEFAULT 0,  -- browsing mounts the source's data here: off unless allowed
     created_at   TEXT NOT NULL,
     last_seen_at TEXT
 );
@@ -72,8 +77,9 @@ CREATE TABLE repl_pairing (
     id           INTEGER PRIMARY KEY CHECK (id = 1),
     code_sealed  BLOB NOT NULL,
     pool         TEXT NOT NULL,
-    quota_bytes  INTEGER NOT NULL DEFAULT 0,
+    quota_bytes  INTEGER NOT NULL,
     min_keep     INTEGER NOT NULL DEFAULT 3,
+    min_age_days INTEGER NOT NULL DEFAULT 7,
     failures     INTEGER NOT NULL DEFAULT 0,
     expires_at   TEXT NOT NULL,
     created_at   TEXT NOT NULL

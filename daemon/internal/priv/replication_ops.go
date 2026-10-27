@@ -309,9 +309,9 @@ func (r *ReplicationItems) VMFree(ctx context.Context, id string) error {
 }
 
 // VMAdopt implements replica.Restorer.
-func (r *ReplicationItems) VMAdopt(ctx context.Context, id string) error {
-	_, err := r.VMs.Adopt(ctx, id)
-	return err
+func (r *ReplicationItems) VMAdopt(ctx context.Context, id string) ([]string, error) {
+	_, notes, err := r.VMs.Adopt(ctx, id)
+	return notes, err
 }
 
 // AppsPool implements replica.Restorer.

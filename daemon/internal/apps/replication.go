@@ -43,6 +43,24 @@ func (m *Manager) AdoptRestored(ctx context.Context, id string) error {
 	if ia.state.ID != id {
 		return fmt.Errorf("the restored app's state is for %q, not %s", ia.state.ID, id)
 	}
+	// Its user ID came with the data: keep it only when it's an app ID no
+	// other app here has, else the reinstall picks a free one.
+	if ia.state.UID != 0 {
+		others, err := m.installed(ctx, c)
+		if err != nil {
+			return err
+		}
+		clash := ia.state.UID < FirstAppUID || ia.state.UID > LastAppUID
+		for _, o := range others {
+			if o.state.ID != id && o.state.UID == ia.state.UID {
+				clash = true
+			}
+		}
+		if clash {
+			m.log().Warn("apps: the restored app's user ID is taken or invalid; a new one is chosen when it's reinstalled", "app", id, "uid", ia.state.UID)
+			ia.state.UID = 0
+		}
+	}
 	ia.state.Removed = true
 	ia.state.UpdatedAt = m.now()
 	m.log().Info("apps: restored from a replica as kept data", "app", id, "dataset", ia.dataset)

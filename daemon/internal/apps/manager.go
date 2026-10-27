@@ -681,7 +681,7 @@ func (m *Manager) load(ctx context.Context, c *EngineConfig, id string) (*instal
 		return nil, err
 	}
 	ia := &installedApp{dataset: ds, dir: dir}
-	sb, err := os.ReadFile(ia.meta(stateFile))
+	sb, err := readStateFile(ia.meta(stateFile))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, ErrNotInstalled
 	}
@@ -691,7 +691,7 @@ func (m *Manager) load(ctx context.Context, c *EngineConfig, id string) (*instal
 	if err := json.Unmarshal(sb, &ia.state); err != nil {
 		return nil, err
 	}
-	mb, err := os.ReadFile(ia.meta(ManifestFile))
+	mb, err := readStateFile(ia.meta(ManifestFile))
 	if err != nil {
 		return nil, err
 	}
@@ -699,7 +699,7 @@ func (m *Manager) load(ctx context.Context, c *EngineConfig, id string) (*instal
 		return nil, err
 	}
 	if ia.state.Icon != "" && filepath.Base(ia.state.Icon) == ia.state.Icon {
-		ia.icon, _ = os.ReadFile(ia.meta(ia.state.Icon))
+		ia.icon, _ = readStateFile(ia.meta(ia.state.Icon))
 	}
 	return ia, nil
 }
@@ -893,7 +893,7 @@ func (m *Manager) prepare(ctx context.Context, pkg *Package, a PrepareArgs, reco
 	// Settings: asked-for values, then earlier values, then defaults;
 	// generated secrets are kept across reinstalls.
 	oldEnv := map[string]string{}
-	if b, err := os.ReadFile(filepath.Join(meta, envFile)); err == nil {
+	if b, err := readStateFile(filepath.Join(meta, envFile)); err == nil {
 		oldEnv = parseEnv(b)
 	}
 	env := map[string]string{
@@ -1290,7 +1290,7 @@ func (m *Manager) composeArgs(ia *installedApp, args ...string) []string {
 // in its folders), and every shared folder still resolves to the place the
 // file mounts, read-only where the grant is read.
 func (m *Manager) resolved(ctx context.Context, ia *installedApp) (Resolved, error) {
-	b, err := os.ReadFile(ia.meta(resolvedFile))
+	b, err := readStateFile(ia.meta(resolvedFile))
 	if err != nil {
 		return nil, err
 	}

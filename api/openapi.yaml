@@ -4189,7 +4189,7 @@ paths:
       - { name: child, in: query, required: false, schema: { type: string } }
     get:
       operationId: browseReplicationReplica
-      summary: List a folder inside a replica's snapshot (mounted read-only on the receiving server for the moment it takes)
+      summary: List a folder inside a replica's snapshot (mounted read-only on the receiving server for the moment it takes; only when that server allows it for this one)
       tags: [replication]
       responses:
         "200":
@@ -4365,18 +4365,13 @@ paths:
       - { name: id, in: path, required: true, schema: { type: string } }
     patch:
       operationId: updateReplicationSource
-      summary: Change a sending server's quota and the snapshots kept of each item at least (a job)
+      summary: Change this server's rules for a sending server (a job)
       tags: [replication]
       requestBody:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              required: [quotaBytes, minKeep]
-              properties:
-                quotaBytes: { type: integer, format: int64, minimum: 0, description: 0 for no limit }
-                minKeep: { type: integer, minimum: 1 }
+            schema: { $ref: "#/components/schemas/ReplicationSourceRules" }
       responses:
         "202": { $ref: "#/components/responses/JobAccepted" }
         "400": { $ref: "#/components/responses/Invalid" }
@@ -7270,19 +7265,32 @@ components:
         message: { type: string }
     ReplicationPairing:
       type: object
-      required: [pool, quotaBytes, minKeep, expiresAt]
+      required: [pool, quotaBytes, minKeep, minAgeDays, expiresAt]
       properties:
         pool: { type: string }
         quotaBytes: { type: integer, format: int64 }
         minKeep: { type: integer }
+        minAgeDays: { type: integer }
         expiresAt: { type: string, format: date-time }
     ReplicationPairingRequest:
       type: object
-      required: [pool]
+      required: [pool, quotaBytes]
       properties:
         pool: { type: string, description: The pool that keeps the new source's replicas }
-        quotaBytes: { type: integer, format: int64, minimum: 0, description: 0 for no limit }
+        quotaBytes: { type: integer, format: int64, minimum: 1, description: The source's space limit (required) }
         minKeep: { type: integer, minimum: 1, description: "Snapshots kept of each item at least, whatever the source asks (default 3)" }
+        minAgeDays: { type: integer, minimum: 0, maximum: 3650, description: "Snapshots received more recently than this are never pruned (default 7)" }
+    ReplicationSourceRules:
+      type: object
+      required: [quotaBytes, minKeep, minAgeDays, minIntervalMinutes, maxDatasets, maxSnapshots, allowBrowse]
+      properties:
+        quotaBytes: { type: integer, format: int64, minimum: 1, description: Space limit (required) }
+        minKeep: { type: integer, minimum: 1, maximum: 1000 }
+        minAgeDays: { type: integer, minimum: 0, maximum: 3650, description: Snapshots received more recently are never pruned }
+        minIntervalMinutes: { type: integer, minimum: 0, maximum: 10080, description: "Least time between two snapshots of an item (0: any)" }
+        maxDatasets: { type: integer, minimum: 1 }
+        maxSnapshots: { type: integer, minimum: 1 }
+        allowBrowse: { type: boolean, description: "Let the source browse its replicas here (mounts its data on this server for a moment; off by default)" }
     ReplicationPairingCode:
       type: object
       required: [job, code, expiresAt, port, hostname]
@@ -7294,13 +7302,18 @@ components:
         hostname: { type: string }
     ReplicationSource:
       type: object
-      required: [id, name, pool, quotaBytes, minKeep, createdAt, lastSeenAt, items, usedBytes, replicas]
+      required: [id, name, pool, quotaBytes, minKeep, minAgeDays, minIntervalMinutes, maxDatasets, maxSnapshots, allowBrowse, createdAt, lastSeenAt, items, usedBytes, replicas]
       properties:
         id: { type: string }
         name: { type: string, description: The sending server's name }
         pool: { type: string }
         quotaBytes: { type: integer, format: int64 }
         minKeep: { type: integer }
+        minAgeDays: { type: integer }
+        minIntervalMinutes: { type: integer }
+        maxDatasets: { type: integer }
+        maxSnapshots: { type: integer }
+        allowBrowse: { type: boolean }
         createdAt: { type: string, format: date-time }
         lastSeenAt: { type: [string, "null"], format: date-time }
         items:

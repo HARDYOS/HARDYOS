@@ -129,6 +129,10 @@ func indexByte(b []byte, c byte) int {
 	return -1
 }
 
+// MaxBeginPayload bounds the payload after the first record (a resumed
+// stream's small nvlist; never a package's property list).
+const MaxBeginPayload = 1 << 20
+
 // Policy says which streams a receive accepts.
 type Policy struct {
 	// AllowRaw accepts raw (still encrypted, `zfs send -w`) streams. Off
@@ -148,6 +152,9 @@ type Policy struct {
 // holds, clones, raw streams unless allowed, unknown features, and
 // anything not for the snapshot asked for.
 func (p Policy) Check(b *Begin) error {
+	if b.Payload > MaxBeginPayload {
+		return invalid("the stream's first record carries %d bytes; at most %d are accepted", b.Payload, MaxBeginPayload)
+	}
 	if b.Header != hdrSubstream {
 		if b.Header == hdrCompound {
 			return invalid("the stream is a package of several datasets or carries properties (zfs send -R/-I/-p); only single-dataset streams are accepted")

@@ -250,6 +250,9 @@ func receiverFake() *sysexec.Fake {
 	f.On("zfs get -H -p -o value org.hardyos:replica tank/replicas/a1b2c3d4", "a1b2c3d4\n")
 	f.On("zfs get -H -p -o value quota tank/replicas/a1b2c3d4", "0\n")
 	f.On("zfs list -H -o type tank/replicas/a1b2c3d4/share", "filesystem\n")
+	f.OnPrefix("zfs set ", sysexec.Result{})
+	f.OnPrefix("zfs list -H -o name -r -t ", sysexec.Result{})
+	f.OnPrefix("zfs list -H -p -t snapshot -o name,guid,creation -d 1 ", sysexec.Result{})
 	return f
 }
 
@@ -258,7 +261,7 @@ func TestRecvConfinedWithOverrides(t *testing.T) {
 	st := &fakeStarter{}
 	m := &Manager{Runner: f, Starter: st}
 	tg := Target{Pool: "tank", Source: "a1b2c3d4", Kind: KindShare, Item: "media"}
-	rs, w, err := m.Recv(context.Background(), RecvArgs{Target: tg, Task: "abc123", Snapshot: label})
+	rs, w, err := m.Recv(context.Background(), RecvArgs{Target: tg, Limits: Limits{QuotaBytes: 1 << 30}, Task: "abc123", Snapshot: label})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +310,7 @@ func TestRecvRefusesBeforeZFS(t *testing.T) {
 		f := receiverFake()
 		st := &fakeStarter{}
 		m := &Manager{Runner: f, Starter: st}
-		rs, w, err := m.Recv(context.Background(), RecvArgs{Target: Target{Pool: "tank", Source: "a1b2c3d4", Kind: KindShare, Item: "media"}, Task: "abc123", Snapshot: label})
+		rs, w, err := m.Recv(context.Background(), RecvArgs{Target: Target{Pool: "tank", Source: "a1b2c3d4", Kind: KindShare, Item: "media"}, Limits: Limits{QuotaBytes: 1 << 30}, Task: "abc123", Snapshot: label})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -330,7 +333,7 @@ func TestRecvVolumeAndIncremental(t *testing.T) {
 	m := &Manager{Runner: f, Starter: st}
 	tg := Target{Pool: "tank", Source: "a1b2c3d4", Kind: KindVM, Item: "web", Child: "disk0"}
 	// A full stream over the existing replica is refused.
-	rs, w, err := m.Recv(context.Background(), RecvArgs{Target: tg, Task: "abc123", Snapshot: label})
+	rs, w, err := m.Recv(context.Background(), RecvArgs{Target: tg, Limits: Limits{QuotaBytes: 1 << 30}, Task: "abc123", Snapshot: label})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +342,7 @@ func TestRecvVolumeAndIncremental(t *testing.T) {
 	if res := waitDone(t, m, rs.Stream); res.OK || !strings.Contains(res.Error, "incremental") {
 		t.Fatalf("full stream over a replica: %+v", res)
 	}
-	rs, w, err = m.Recv(context.Background(), RecvArgs{Target: tg, Task: "abc123", Snapshot: label})
+	rs, w, err = m.Recv(context.Background(), RecvArgs{Target: tg, Limits: Limits{QuotaBytes: 1 << 30}, Task: "abc123", Snapshot: label})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,17 +365,17 @@ func TestRecvVolumeAndIncremental(t *testing.T) {
 func TestRecvChildNeedsParentAndOneAtATime(t *testing.T) {
 	f := receiverFake()
 	m := &Manager{Runner: f, Starter: &fakeStarter{block: make(chan struct{})}}
-	_, _, err := m.Recv(context.Background(), RecvArgs{Target: Target{Pool: "tank", Source: "a1b2c3d4", Kind: KindShare, Item: "media", Child: "sub"}, Task: "abc123", Snapshot: label})
+	_, _, err := m.Recv(context.Background(), RecvArgs{Target: Target{Pool: "tank", Source: "a1b2c3d4", Kind: KindShare, Item: "media", Child: "sub"}, Limits: Limits{QuotaBytes: 1 << 30}, Task: "abc123", Snapshot: label})
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("child before its parent: %v", err)
 	}
 	tg := Target{Pool: "tank", Source: "a1b2c3d4", Kind: KindShare, Item: "media"}
-	rs, w, err := m.Recv(context.Background(), RecvArgs{Target: tg, Task: "abc123", Snapshot: label})
+	rs, w, err := m.Recv(context.Background(), RecvArgs{Target: tg, Limits: Limits{QuotaBytes: 1 << 30}, Task: "abc123", Snapshot: label})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer w.Close()
-	if _, _, err := m.Recv(context.Background(), RecvArgs{Target: tg, Task: "abc123", Snapshot: label}); !errors.Is(err, ErrBusy) {
+	if _, _, err := m.Recv(context.Background(), RecvArgs{Target: tg, Limits: Limits{QuotaBytes: 1 << 30}, Task: "abc123", Snapshot: label}); !errors.Is(err, ErrBusy) {
 		t.Fatalf("second receive: %v", err)
 	}
 	// Cancel ends it (kills the process group, closes the pipe).
@@ -392,7 +395,7 @@ func TestEnsureLayoutRefusesForeignDatasets(t *testing.T) {
 	f.On("zfs list -H -o type tank/replicas", "filesystem\n")
 	f.On("zfs get -H -p -o value org.hardyos:role tank/replicas", "-\n")
 	m := &Manager{Runner: f, Starter: &fakeStarter{}}
-	_, _, err := m.Recv(context.Background(), RecvArgs{Target: Target{Pool: "tank", Source: "a1b2c3d4", Kind: KindShare, Item: "media"}, Task: "abc123", Snapshot: label})
+	_, _, err := m.Recv(context.Background(), RecvArgs{Target: Target{Pool: "tank", Source: "a1b2c3d4", Kind: KindShare, Item: "media"}, Limits: Limits{QuotaBytes: 1 << 30}, Task: "abc123", Snapshot: label})
 	if err == nil || !strings.Contains(err.Error(), "isn't HardyOS's replicas") {
 		t.Fatal(err)
 	}
@@ -436,8 +439,10 @@ func TestSendArgsAndTokens(t *testing.T) {
 	f.On("zfs list -H -o type "+ds+"@"+label, "snapshot\n")
 	f.On("zfs list -H -o type "+ds+"@"+from, "snapshot\n")
 	f.On("zfs send -n -P -L -e -c -i "+ds+"@"+from+" "+ds+"@"+label, "incremental\tx\ty\t1234\nsize\t1234\n")
-	f.On("zfs send -n -v -P -t 1-abc-10-789c", "resume token contents:\nnvlist version: 0\n\ttoname = "+ds+"@"+label+"\nsize\t99\n")
-	f.On("zfs send -n -v -P -t 1-abc-10-789d", "resume token contents:\n\ttoname = tank/shares/secret@"+label+"\n")
+	f.On("zfs list -H -p -t snapshot -o name,guid,creation -d 1 "+ds, ds+"@"+from+"\t111\t1\n"+ds+"@"+label+"\t222\t2\n")
+	f.OnPrefix("zfs send -n -P -t ", sysexec.Result{Stdout: []byte("size\t99\n")})
+	goodTok := makeToken(tokenPairs(ds+"@"+label, 222, 111))
+	otherTok := makeToken(tokenPairs("tank/shares/secret@"+label, 222, 111))
 	st := &fakeStarter{Output: []byte("stream")}
 	m := &Manager{Runner: f, Starter: st, Items: fakeItems{"share/media": ds}}
 	res, r, err := m.Send(context.Background(), SendArgs{Task: "abc123", Kind: KindShare, ID: "media", Snapshot: label, From: from})
@@ -456,18 +461,18 @@ func TestSendArgsAndTokens(t *testing.T) {
 		t.Fatal(s.Error)
 	}
 	// A token naming this snapshot resumes; one naming anything else doesn't.
-	res, r, err = m.Send(context.Background(), SendArgs{Task: "abc123", Kind: KindShare, ID: "media", Token: "1-abc-10-789c"})
+	res, r, err = m.Send(context.Background(), SendArgs{Task: "abc123", Kind: KindShare, ID: "media", Token: goodTok})
 	if err != nil {
 		t.Fatal(err)
 	}
 	r.Close()
-	if res.Snapshot != label || strings.Join(st.Calls()[1], " ") != "zfs send -t 1-abc-10-789c" {
+	if res.Snapshot != label || strings.Join(st.Calls()[1], " ") != "zfs send -t "+goodTok {
 		t.Fatalf("%+v %v", res, st.Calls()[1])
 	}
-	if _, _, err := m.Send(context.Background(), SendArgs{Task: "abc123", Kind: KindShare, ID: "media", Token: "1-abc-10-789d"}); err == nil {
+	if _, _, err := m.Send(context.Background(), SendArgs{Task: "abc123", Kind: KindShare, ID: "media", Token: otherTok}); err == nil {
 		t.Fatal("a token for another dataset was used")
 	}
-	if _, _, err := m.Send(context.Background(), SendArgs{Task: "abc123", Kind: KindShare, ID: "media", Token: "1-abc-10-789c; rm -rf /"}); err == nil {
+	if _, _, err := m.Send(context.Background(), SendArgs{Task: "abc123", Kind: KindShare, ID: "media", Token: goodTok + "; rm -rf /"}); err == nil {
 		t.Fatal("a malformed token was used")
 	}
 	// Snapshots must be this task's.

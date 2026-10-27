@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
@@ -69,7 +70,7 @@ const (
 	MaxKeep            = 1000
 	MaxItemsPerTask    = 100
 	PairingTTL         = 30 * time.Minute
-	MaxPairFailures    = 5
+	MaxPairFailures    = 10
 )
 
 // Service is replication in hardyd.
@@ -91,11 +92,13 @@ type Service struct {
 	// Poll is how often streams are checked on (default 250ms).
 	Poll time.Duration
 
-	initOnce sync.Once
-	st       *Store
-	idMu     sync.Mutex
-	id       *Identity
-	pairMu   sync.Mutex
+	initOnce  sync.Once
+	st        *Store
+	idMu      sync.Mutex
+	id        *Identity
+	pairMu    sync.Mutex
+	pairFails failCounter
+	browse    browseGate
 
 	runMu   sync.Mutex
 	running map[string]string // task id -> job id
@@ -244,8 +247,14 @@ func cleanLabel(s string, max int) string {
 	if !utf8.ValidString(s) {
 		s = strings.ToValidUTF8(s, "")
 	}
+	// No control, format (bidi overrides, zero-width), private-use,
+	// line or paragraph separator characters: a name can't hide or
+	// reorder what's shown next to it.
 	s = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
+		if unicode.IsSpace(r) {
+			return ' '
+		}
+		if unicode.In(r, unicode.Cc, unicode.Cf, unicode.Co, unicode.Cs) || r == 0xfeff {
 			return -1
 		}
 		return r
@@ -362,14 +371,14 @@ type PairingParams struct {
 	Pool       string `json:"pool"`
 	QuotaBytes uint64 `json:"quotaBytes"`
 	MinKeep    int    `json:"minKeep"`
+	MinAgeDays *int   `json:"minAgeDays,omitempty"`
 	SecretRef  string `json:"secretRef"`
 }
 
-// SourceUpdateParams changes a source's quota and kept snapshots.
+// SourceUpdateParams changes a source's rules.
 type SourceUpdateParams struct {
-	Source     string `json:"source"`
-	QuotaBytes uint64 `json:"quotaBytes"`
-	MinKeep    int    `json:"minKeep"`
+	Source string `json:"source"`
+	SourceRules
 }
 
 // SourceDeleteParams forgets a source; with DeleteReplicas its replicas
@@ -496,10 +505,10 @@ func (s *Service) RegisterJobs(m *jobs.Manager) {
 		if err := jc.Params(&p); err != nil {
 			return nil, err
 		}
-		if p.MinKeep < 1 || p.MinKeep > MaxKeep {
-			return nil, fmt.Errorf("keep between 1 and %d snapshots", MaxKeep)
+		if err := p.SourceRules.Check(); err != nil {
+			return nil, err
 		}
-		if err := s.st.UpdateSource(jc, p.Source, p.QuotaBytes, p.MinKeep); err != nil {
+		if err := s.st.UpdateSource(jc, p.Source, p.SourceRules); err != nil {
 			return nil, err
 		}
 		return s.st.Source(jc, p.Source)
@@ -718,4 +727,46 @@ func (s *Service) Tick(ctx context.Context) {
 			_ = s.st.setAlert(ctx, t.ID, "stale")
 		}
 	}
+}
+
+// Address is one of this server's addresses other servers can use.
+type Address struct {
+	Address   string `json:"address"`
+	Interface string `json:"interface"`
+	NetBird   bool   `json:"netbird"`
+}
+
+// skipInterfaces are never listened on: Docker, libvirt and VM taps, the
+// domain controller's shim, WireGuard tunnels other than NetBird's.
+var skipInterfaces = []string{"lo", "docker", "veth", "br-", "virbr", "vnet", "tap", "hdc", "macvtap"}
+
+// LocalAddresses lists this server's global unicast addresses on its LAN
+// ports, bridges for VMs (br0) and NetBird (wt0).
+func LocalAddresses() []Address {
+	out := []Address{}
+	ifs, err := net.Interfaces()
+	if err != nil {
+		return out
+	}
+	for _, ifc := range ifs {
+		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		skip := false
+		for _, p := range skipInterfaces {
+			skip = skip || strings.HasPrefix(ifc.Name, p)
+		}
+		if skip {
+			continue
+		}
+		addrs, _ := ifc.Addrs()
+		for _, a := range addrs {
+			ipn, ok := a.(*net.IPNet)
+			if !ok || !ipn.IP.IsGlobalUnicast() {
+				continue
+			}
+			out = append(out, Address{Address: ipn.IP.String(), Interface: ifc.Name, NetBird: ifc.Name == "wt0"})
+		}
+	}
+	return out
 }

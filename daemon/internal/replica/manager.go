@@ -363,22 +363,25 @@ func (m *Manager) Send(ctx context.Context, a SendArgs) (*SendStart, *os.File, e
 		if err := ValidToken(a.Token); err != nil {
 			return nil, nil, err
 		}
-		// The token comes from the receiver: it names what to send, so it
-		// must name this dataset and one of this task's snapshots.
-		// zfs prints the token's contents on stdout or stderr depending
-		// on the version: read both.
-		res, err := m.Runner.Run(ctx, nil, "zfs", "send", "-n", "-v", "-P", "-t", a.Token)
-		if err == nil && res.ExitCode != 0 {
-			err = fmt.Errorf("zfs send -t: %s", strings.TrimSpace(string(res.Stderr)))
-		}
+		// The token comes from the receiver and zfs send -t finds what to
+		// send by its GUIDs anywhere in the pool: decode it here and accept
+		// it only for this task's snapshots of exactly this dataset.
+		tok, err := DecodeToken(a.Token)
 		if err != nil {
-			return nil, nil, fmt.Errorf("the interrupted transfer can't be resumed: %w", err)
+			return nil, nil, err
 		}
-		out := append(append([]byte{}, res.Stdout...), append([]byte("\n"), res.Stderr...)...)
-		to := tokenToName(out)
-		name, label, _ := strings.Cut(to, "@")
-		if name != ds || ValidSnap(label, a.Task) != nil || (a.Snapshot != "" && label != a.Snapshot) {
-			return nil, nil, invalid("the resume token is for %q, not a snapshot of %s", to, ds)
+		snaps, err := m.listSnaps(ctx, ds, a.Task)
+		if err != nil {
+			return nil, nil, err
+		}
+		label, err := checkToken(tok, ds, a.Task, snaps, a.Snapshot)
+		if err != nil {
+			m.log().Warn("replication: refused a resume token", "dataset", ds, "token", tok.String(), "err", err)
+			return nil, nil, err
+		}
+		var out []byte
+		if res, err := m.Runner.Run(ctx, nil, "zfs", "send", "-n", "-P", "-t", a.Token); err == nil && res.ExitCode == 0 {
+			out = res.Stdout
 		}
 		st, f, err := m.startSend([]string{"send", "-t", a.Token}, sizeOf(out))
 		if st != nil {
@@ -417,7 +420,7 @@ func (m *Manager) Send(ctx context.Context, a SendArgs) (*SendStart, *os.File, e
 }
 
 func (m *Manager) startSend(args []string, est int64) (*SendStart, *os.File, error) {
-	s, err := m.streams.add("")
+	s, err := m.streams.add("", kindSend)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -466,17 +469,6 @@ func sizeOf(out []byte) int64 {
 		}
 	}
 	return 0
-}
-
-// tokenToName reads "toname = <name>" from zfs send -nv -t.
-func tokenToName(out []byte) string {
-	for _, l := range lines(out) {
-		k, v, ok := strings.Cut(strings.TrimSpace(l), "=")
-		if ok && strings.TrimSpace(k) == "toname" {
-			return strings.TrimSpace(v)
-		}
-	}
-	return ""
 }
 
 // StreamArgs names a running send or receive.
@@ -546,7 +538,7 @@ func (m *Manager) Prune(ctx context.Context, a PruneArgs) (*PruneResult, error) 
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.pruneTree(ctx, ds, a.Task, a.Keep, a.Protect)
+	return m.pruneTree(ctx, ds, a.Task, a.Keep, a.Protect, nil)
 }
 
 // pruneTree prunes a task's snapshots across an item's datasets. A label
@@ -554,7 +546,7 @@ func (m *Manager) Prune(ctx context.Context, a PruneArgs) (*PruneResult, error) 
 // dataset has (a dataset that missed the last run keeps what it shares
 // with the other side), and the newest Keep of those every dataset has
 // stay.
-func (m *Manager) pruneTree(ctx context.Context, top, task string, keep int, protect []string) (*PruneResult, error) {
+func (m *Manager) pruneTree(ctx context.Context, top, task string, keep int, protect []string, young map[string]bool) (*PruneResult, error) {
 	out, err := m.zfs(ctx, "list", "-H", "-o", "name", "-t", "snapshot", "-r", top)
 	if err != nil {
 		return nil, err
@@ -589,6 +581,9 @@ func (m *Manager) pruneTree(ctx context.Context, top, task string, keep int, pro
 	stay := map[string]bool{}
 	for _, p := range protect {
 		stay[p] = true
+	}
+	for l := range young {
+		stay[l] = true
 	}
 	if keep > 0 {
 		if len(common) == 0 {

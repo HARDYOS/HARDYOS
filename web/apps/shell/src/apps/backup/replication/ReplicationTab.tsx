@@ -603,6 +603,7 @@ function RestoreDialog({ target, item, onClose }: { target: ReplicationTarget; i
   const [name, setName] = useState(`${item.name} (restored)`);
   const [sure, setSure] = useState(false);
   const [job, setJob] = useState<string | null>(null);
+  const [notes, setNotes] = useState<string[]>([]);
   const list = snaps.data?.snapshots ?? [];
   const chosen = snapshot || list[list.length - 1]?.name || "";
   const takenIds = (shares.data?.shares ?? []).map((s) => s.id);
@@ -640,7 +641,7 @@ function RestoreDialog({ target, item, onClose }: { target: ReplicationTarget; i
     item.kind === "share"
       ? `a new shared folder "${name.trim()}" (only administrators can open it until you share it)`
       : item.kind === "vm"
-        ? `the VM ${item.id}, off, on ${pool || "its pool"} — only if no VM called ${item.id} exists here`
+        ? `the VM ${item.id}, off, on ${pool || "its pool"} — only if no VM called ${item.id} exists here; it won't start with the server, loses host devices, cloud-init and streaming, and gets new MAC addresses and a new UUID`
         : `${item.name}'s data, kept until you reinstall the app from the App Store — only if it isn't installed here`;
   return (
     <Dialog
@@ -666,13 +667,25 @@ function RestoreDialog({ target, item, onClose }: { target: ReplicationTarget; i
       }
     >
       {job ? (
-        <JobProgress
-          id={job}
-          onDone={() => {
-            void qc.invalidateQueries({ queryKey: ["shares"] });
-            void qc.invalidateQueries({ queryKey: ["vms"] });
-          }}
-        />
+        <div className="stack">
+          <JobProgress
+            id={job}
+            onDone={(j) => {
+              setNotes(((j.result ?? {}) as { notes?: string[] }).notes ?? []);
+              void qc.invalidateQueries({ queryKey: ["shares"] });
+              void qc.invalidateQueries({ queryKey: ["vms"] });
+            }}
+          />
+          {notes.length > 0 && (
+            <Alert tone="warn" title="Changed on the way back">
+              <ul style={{ margin: 0, paddingLeft: 18 }}>
+                {notes.map((n) => (
+                  <li key={n}>{n}</li>
+                ))}
+              </ul>
+            </Alert>
+          )}
+        </div>
       ) : (
         <div className="stack">
           {snaps.isPending && <Loading />}

@@ -3664,7 +3664,7 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** List a folder inside a replica's snapshot (mounted read-only on the receiving server for the moment it takes) */
+        /** List a folder inside a replica's snapshot (mounted read-only on the receiving server for the moment it takes; only when that server allows it for this one) */
         get: operations["browseReplicationReplica"];
         put?: never;
         post?: never;
@@ -3838,7 +3838,7 @@ export interface paths {
         delete: operations["deleteReplicationSource"];
         options?: never;
         head?: never;
-        /** Change a sending server's quota and the snapshots kept of each item at least (a job) */
+        /** Change this server's rules for a sending server (a job) */
         patch: operations["updateReplicationSource"];
         trace?: never;
     };
@@ -6602,6 +6602,7 @@ export interface components {
             /** Format: int64 */
             quotaBytes: number;
             minKeep: number;
+            minAgeDays: number;
             /** Format: date-time */
             expiresAt: string;
         };
@@ -6610,11 +6611,29 @@ export interface components {
             pool: string;
             /**
              * Format: int64
-             * @description 0 for no limit
+             * @description The source's space limit (required)
              */
-            quotaBytes?: number;
+            quotaBytes: number;
             /** @description Snapshots kept of each item at least, whatever the source asks (default 3) */
             minKeep?: number;
+            /** @description Snapshots received more recently than this are never pruned (default 7) */
+            minAgeDays?: number;
+        };
+        ReplicationSourceRules: {
+            /**
+             * Format: int64
+             * @description Space limit (required)
+             */
+            quotaBytes: number;
+            minKeep: number;
+            /** @description Snapshots received more recently are never pruned */
+            minAgeDays: number;
+            /** @description Least time between two snapshots of an item (0: any) */
+            minIntervalMinutes: number;
+            maxDatasets: number;
+            maxSnapshots: number;
+            /** @description Let the source browse its replicas here (mounts its data on this server for a moment; off by default) */
+            allowBrowse: boolean;
         };
         ReplicationPairingCode: {
             job: components["schemas"]["Job"];
@@ -6633,6 +6652,11 @@ export interface components {
             /** Format: int64 */
             quotaBytes: number;
             minKeep: number;
+            minAgeDays: number;
+            minIntervalMinutes: number;
+            maxDatasets: number;
+            maxSnapshots: number;
+            allowBrowse: boolean;
             /** Format: date-time */
             createdAt: string;
             /** Format: date-time */
@@ -12731,14 +12755,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": {
-                    /**
-                     * Format: int64
-                     * @description 0 for no limit
-                     */
-                    quotaBytes: number;
-                    minKeep: number;
-                };
+                "application/json": components["schemas"]["ReplicationSourceRules"];
             };
         };
         responses: {

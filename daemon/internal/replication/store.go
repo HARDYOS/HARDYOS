@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/replica"
@@ -57,14 +58,50 @@ type Run struct {
 	Message    string     `json:"message"`
 }
 
+// SourceRules are the receiving administrator's rules for a source.
+type SourceRules struct {
+	QuotaBytes         uint64 `json:"quotaBytes"`
+	MinKeep            int    `json:"minKeep"`
+	MinAgeDays         int    `json:"minAgeDays"`
+	MinIntervalMinutes int    `json:"minIntervalMinutes"`
+	MaxDatasets        int    `json:"maxDatasets"`
+	MaxSnapshots       int    `json:"maxSnapshots"`
+	AllowBrowse        bool   `json:"allowBrowse"`
+}
+
+// DefaultRules are a new source's rules besides its quota.
+var DefaultRules = SourceRules{MinKeep: 3, MinAgeDays: 7, MaxDatasets: replica.DefaultMaxDatasets, MaxSnapshots: replica.DefaultMaxSnapshots}
+
+// Check validates rules.
+func (r *SourceRules) Check() error {
+	switch {
+	case r.QuotaBytes == 0:
+		return errors.New("set a space limit for the server's replicas")
+	case r.MinKeep < 1 || r.MinKeep > MaxKeep:
+		return fmt.Errorf("keep between 1 and %d snapshots", MaxKeep)
+	case r.MinAgeDays < 0 || r.MinAgeDays > 3650:
+		return errors.New("keep snapshots between 0 and 3650 days")
+	case r.MinIntervalMinutes < 0 || r.MinIntervalMinutes > 7*24*60:
+		return errors.New("the minimum interval is at most 7 days")
+	case r.MaxDatasets < 1 || r.MaxDatasets > 100000 || r.MaxSnapshots < 1 || r.MaxSnapshots > 1000000:
+		return errors.New("the dataset and snapshot limits aren't valid")
+	}
+	return nil
+}
+
+// Limits are the rules as root applies them.
+func (r SourceRules) Limits() replica.Limits {
+	return replica.Limits{QuotaBytes: r.QuotaBytes, MinAgeDays: r.MinAgeDays, MinIntervalMinutes: r.MinIntervalMinutes,
+		MaxDatasets: r.MaxDatasets, MaxSnapshots: r.MaxSnapshots}
+}
+
 // Source is a server allowed to send replicas to this one.
 type Source struct {
-	ID         string       `json:"id"`
-	Name       string       `json:"name"`
-	Pin        string       `json:"-"`
-	Pool       string       `json:"pool"`
-	QuotaBytes uint64       `json:"quotaBytes"`
-	MinKeep    int          `json:"minKeep"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Pin  string `json:"-"`
+	Pool string `json:"pool"`
+	SourceRules
 	CreatedAt  time.Time    `json:"createdAt"`
 	LastSeenAt *time.Time   `json:"lastSeenAt"`
 	Items      []SourceItem `json:"items"`
@@ -85,6 +122,7 @@ type Pairing struct {
 	Pool       string    `json:"pool"`
 	QuotaBytes uint64    `json:"quotaBytes"`
 	MinKeep    int       `json:"minKeep"`
+	MinAgeDays int       `json:"minAgeDays"`
 	ExpiresAt  time.Time `json:"expiresAt"`
 	code       []byte
 	failures   int
@@ -94,6 +132,17 @@ type Pairing struct {
 type Store struct {
 	DB     *store.DB
 	Sealer *Sealer
+
+	// Unsealed sources, kept until a source changes (every request on
+	// the receiving port looks its caller up).
+	cacheMu sync.Mutex
+	cache   []Source
+}
+
+func (s *Store) invalidate() {
+	s.cacheMu.Lock()
+	s.cache = nil
+	s.cacheMu.Unlock()
 }
 
 func newID(n int) string {
@@ -376,14 +425,36 @@ func (s *Store) AddSource(ctx context.Context, src *Source) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.DB.ExecContext(ctx, `INSERT INTO repl_sources (id, name, pin_sealed, pool, quota_bytes, min_keep, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		src.ID, src.Name, sealed, src.Pool, int64(src.QuotaBytes), src.MinKeep, store.FormatTime(src.CreatedAt))
+	defer s.invalidate()
+	_, err = s.DB.ExecContext(ctx, `INSERT INTO repl_sources (id, name, pin_sealed, pool, quota_bytes, min_keep, min_age_days, min_interval_minutes,
+		max_datasets, max_snapshots, allow_browse, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		src.ID, src.Name, sealed, src.Pool, int64(src.QuotaBytes), src.MinKeep, src.MinAgeDays, src.MinIntervalMinutes,
+		src.MaxDatasets, src.MaxSnapshots, boolInt(src.AllowBrowse), store.FormatTime(src.CreatedAt))
 	return err
+}
+
+// pinned returns the sources with their pins (cached).
+func (s *Store) pinned(ctx context.Context) ([]Source, error) {
+	s.cacheMu.Lock()
+	c := s.cache
+	s.cacheMu.Unlock()
+	if c != nil {
+		return c, nil
+	}
+	l, err := s.Sources(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.cacheMu.Lock()
+	s.cache = l
+	s.cacheMu.Unlock()
+	return l, nil
 }
 
 // Sources lists the servers allowed to send here, with their items.
 func (s *Store) Sources(ctx context.Context) ([]Source, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT id, name, pin_sealed, pool, quota_bytes, min_keep, created_at, last_seen_at FROM repl_sources ORDER BY name, id`)
+	rows, err := s.DB.QueryContext(ctx, `SELECT id, name, pin_sealed, pool, quota_bytes, min_keep, min_age_days, min_interval_minutes,
+		max_datasets, max_snapshots, allow_browse, created_at, last_seen_at FROM repl_sources ORDER BY name, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -394,11 +465,14 @@ func (s *Store) Sources(ctx context.Context) ([]Source, error) {
 		var created string
 		var seen sql.NullString
 		var quota int64
-		if err := rows.Scan(&src.ID, &src.Name, &sealed, &src.Pool, &quota, &src.MinKeep, &created, &seen); err != nil {
+		var browse int
+		if err := rows.Scan(&src.ID, &src.Name, &sealed, &src.Pool, &quota, &src.MinKeep, &src.MinAgeDays, &src.MinIntervalMinutes,
+			&src.MaxDatasets, &src.MaxSnapshots, &browse, &created, &seen); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		src.QuotaBytes = uint64(max(quota, 0))
+		src.AllowBrowse = browse != 0
 		src.CreatedAt, src.LastSeenAt = store.ParseTime(created), parseNull(seen)
 		src.Pin, _ = s.openPin(ctx, sealed, "repl-source:"+src.ID)
 		src.Items = []SourceItem{}
@@ -445,14 +519,18 @@ func (s *Store) Source(ctx context.Context, id string) (*Source, error) {
 	return nil, store.ErrNotFound
 }
 
-// UpdateSource changes a source's quota and minimum kept snapshots.
-func (s *Store) UpdateSource(ctx context.Context, id string, quota uint64, minKeep int) error {
-	res, err := s.DB.ExecContext(ctx, `UPDATE repl_sources SET quota_bytes = ?, min_keep = ? WHERE id = ?`, int64(quota), minKeep, id)
+// UpdateSource changes a source's rules.
+func (s *Store) UpdateSource(ctx context.Context, id string, r SourceRules) error {
+	defer s.invalidate()
+	res, err := s.DB.ExecContext(ctx, `UPDATE repl_sources SET quota_bytes = ?, min_keep = ?, min_age_days = ?, min_interval_minutes = ?,
+		max_datasets = ?, max_snapshots = ?, allow_browse = ? WHERE id = ?`,
+		int64(r.QuotaBytes), r.MinKeep, r.MinAgeDays, r.MinIntervalMinutes, r.MaxDatasets, r.MaxSnapshots, boolInt(r.AllowBrowse), id)
 	return oneRow(res, err)
 }
 
 // DeleteSource forgets a source (and what it said about its items).
 func (s *Store) DeleteSource(ctx context.Context, id string) error {
+	defer s.invalidate()
 	if _, err := s.DB.ExecContext(ctx, `DELETE FROM repl_source_items WHERE source_id = ?`, id); err != nil {
 		return err
 	}
@@ -493,10 +571,10 @@ func (s *Store) SetPairing(ctx context.Context, code []byte, p Pairing) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.DB.ExecContext(ctx, `INSERT INTO repl_pairing (id, code_sealed, pool, quota_bytes, min_keep, failures, expires_at, created_at) VALUES (1, ?, ?, ?, ?, 0, ?, ?)
+	_, err = s.DB.ExecContext(ctx, `INSERT INTO repl_pairing (id, code_sealed, pool, quota_bytes, min_keep, min_age_days, failures, expires_at, created_at) VALUES (1, ?, ?, ?, ?, ?, 0, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET code_sealed = excluded.code_sealed, pool = excluded.pool, quota_bytes = excluded.quota_bytes,
-		min_keep = excluded.min_keep, failures = 0, expires_at = excluded.expires_at, created_at = excluded.created_at`,
-		sealed, p.Pool, int64(p.QuotaBytes), p.MinKeep, store.FormatTime(p.ExpiresAt), store.Now())
+		min_keep = excluded.min_keep, min_age_days = excluded.min_age_days, failures = 0, expires_at = excluded.expires_at, created_at = excluded.created_at`,
+		sealed, p.Pool, int64(p.QuotaBytes), p.MinKeep, p.MinAgeDays, store.FormatTime(p.ExpiresAt), store.Now())
 	return err
 }
 
@@ -507,8 +585,8 @@ func (s *Store) Pairing(ctx context.Context, now time.Time) (*Pairing, error) {
 	var sealed []byte
 	var exp string
 	var quota int64
-	err := s.DB.QueryRowContext(ctx, `SELECT code_sealed, pool, quota_bytes, min_keep, failures, expires_at FROM repl_pairing WHERE id = 1`).
-		Scan(&sealed, &p.Pool, &quota, &p.MinKeep, &p.failures, &exp)
+	err := s.DB.QueryRowContext(ctx, `SELECT code_sealed, pool, quota_bytes, min_keep, min_age_days, failures, expires_at FROM repl_pairing WHERE id = 1`).
+		Scan(&sealed, &p.Pool, &quota, &p.MinKeep, &p.MinAgeDays, &p.failures, &exp)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

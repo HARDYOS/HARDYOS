@@ -12,8 +12,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
@@ -29,25 +31,33 @@ import (
 // way to become one). Sources can add to their own replicas and read
 // them back; they can't delete them or reach anything else.
 
-// OpenPairing stores a pairing code for another server to use.
+// OpenPairing stores a pairing code for another server to use. The new
+// source's rules start as DefaultRules with p's pool, quota (required),
+// minimum kept snapshots and minimum age.
 func (s *Service) OpenPairing(ctx context.Context, code []byte, p PairingParams) (*Pairing, error) {
 	s.init()
 	if err := replica.ValidPool(p.Pool); err != nil {
 		return nil, errors.New("choose the pool that keeps the replicas")
 	}
-	if p.MinKeep == 0 {
-		p.MinKeep = 3
+	r := DefaultRules
+	r.QuotaBytes = p.QuotaBytes
+	if p.MinKeep != 0 {
+		r.MinKeep = p.MinKeep
 	}
-	if p.MinKeep < 1 || p.MinKeep > MaxKeep {
-		return nil, fmt.Errorf("keep between 1 and %d snapshots", MaxKeep)
+	if p.MinAgeDays != nil {
+		r.MinAgeDays = *p.MinAgeDays
 	}
-	pr := Pairing{Pool: p.Pool, QuotaBytes: p.QuotaBytes, MinKeep: p.MinKeep, ExpiresAt: s.now().Add(PairingTTL)}
+	if err := r.Check(); err != nil {
+		return nil, err
+	}
+	pr := Pairing{Pool: p.Pool, QuotaBytes: r.QuotaBytes, MinKeep: r.MinKeep, MinAgeDays: r.MinAgeDays, ExpiresAt: s.now().Add(PairingTTL)}
 	if _, err := s.Identity(ctx); err != nil {
 		return nil, err
 	}
 	if err := s.st.SetPairing(ctx, code, pr); err != nil {
 		return nil, err
 	}
+	s.pairFails.reset()
 	return &pr, nil
 }
 
@@ -58,26 +68,37 @@ func (s *Service) Receiving(ctx context.Context) bool {
 	if p, err := s.st.Pairing(ctx, s.now()); err == nil && p != nil {
 		return true
 	}
-	l, err := s.st.Sources(ctx)
+	l, err := s.st.pinned(ctx)
 	return err == nil && len(l) > 0
 }
 
-func (s *Service) listenAddr() string {
+// listenAddrs are where the receiving server listens: ListenAddr when
+// set, else the port on each of this server's own LAN and NetBird
+// addresses (never Docker's, libvirt's or the domain controller's
+// interfaces).
+func (s *Service) listenAddrs() []string {
 	if s.ListenAddr != "" {
-		return s.ListenAddr
+		return []string{s.ListenAddr}
 	}
-	return ":" + strconv.Itoa(DefaultPort)
+	var out []string
+	for _, a := range LocalAddresses() {
+		out = append(out, net.JoinHostPort(a.Address, strconv.Itoa(DefaultPort)))
+	}
+	sort.Strings(out)
+	return out
 }
 
-// serveWhileReceiving runs the receiving server while Receiving is true.
+// serveWhileReceiving runs the receiving server while Receiving is true,
+// on the current addresses (rechecked every 15 s).
 func (s *Service) serveWhileReceiving(ctx context.Context) {
 	var srv *http.Server
+	var on []string
 	stop := func() {
 		if srv != nil {
 			sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			_ = srv.Shutdown(sctx)
 			cancel()
-			srv = nil
+			srv, on = nil, nil
 		}
 	}
 	defer stop()
@@ -85,28 +106,34 @@ func (s *Service) serveWhileReceiving(ctx context.Context) {
 	defer t.Stop()
 	for {
 		want := s.Receiving(ctx)
-		switch {
-		case want && srv == nil:
+		addrs := s.listenAddrs()
+		if srv != nil && (!want || strings.Join(addrs, ",") != strings.Join(on, ",")) {
+			stop()
+			s.log().Info("replication: stopped receiving")
+		}
+		if want && srv == nil && len(addrs) > 0 {
 			id, err := s.Identity(ctx)
 			if err != nil {
 				s.log().Warn("replication: identity", "err", err)
-				break
-			}
-			ln, err := net.Listen("tcp", s.listenAddr())
-			if err != nil {
-				s.log().Warn("replication: listening for other servers", "addr", s.listenAddr(), "err", err)
-				break
-			}
-			srv = s.newServer(id)
-			go func(srv *http.Server) {
-				if err := srv.ServeTLS(ln, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
-					s.log().Warn("replication: server", "err", err)
+			} else {
+				srv = s.newServer(id)
+				caps := newConnCaps(MaxConns, MaxConnsPerIP)
+				for _, a := range addrs {
+					ln, err := net.Listen("tcp", a)
+					if err != nil {
+						s.log().Warn("replication: listening for other servers", "addr", a, "err", err)
+						continue
+					}
+					on = append(on, a)
+					go func(ln net.Listener) {
+						if err := srv.ServeTLS(caps.wrap(ln), "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+							s.log().Warn("replication: server", "err", err)
+						}
+					}(ln)
 				}
-			}(srv)
-			s.log().Info("replication: receiving from other servers", "addr", s.listenAddr())
-		case !want && srv != nil:
-			stop()
-			s.log().Info("replication: stopped receiving")
+				on = addrs // retried only when the addresses change
+				s.log().Info("replication: receiving from other servers", "addrs", strings.Join(addrs, " "))
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -114,6 +141,73 @@ func (s *Service) serveWhileReceiving(ctx context.Context) {
 		case <-t.C:
 		}
 	}
+}
+
+// Connection limits on the receiving port.
+const (
+	MaxConns      = 64
+	MaxConnsPerIP = 8
+)
+
+// connCaps bounds connections, in all and per client address.
+type connCaps struct {
+	mu    sync.Mutex
+	all   int
+	perIP map[string]int
+	max   int
+	maxIP int
+}
+
+func newConnCaps(max, maxIP int) *connCaps {
+	return &connCaps{perIP: map[string]int{}, max: max, maxIP: maxIP}
+}
+
+func (c *connCaps) wrap(ln net.Listener) net.Listener { return &capListener{Listener: ln, c: c} }
+
+type capListener struct {
+	net.Listener
+	c *connCaps
+}
+
+func (l *capListener) Accept() (net.Conn, error) {
+	for {
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		ip, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+		l.c.mu.Lock()
+		ok := l.c.all < l.c.max && l.c.perIP[ip] < l.c.maxIP
+		if ok {
+			l.c.all++
+			l.c.perIP[ip]++
+		}
+		l.c.mu.Unlock()
+		if !ok {
+			conn.Close()
+			continue
+		}
+		return &capConn{Conn: conn, c: l.c, ip: ip}, nil
+	}
+}
+
+type capConn struct {
+	net.Conn
+	c    *connCaps
+	ip   string
+	once sync.Once
+}
+
+func (c *capConn) Close() error {
+	c.once.Do(func() {
+		c.c.mu.Lock()
+		c.c.all--
+		if c.c.perIP[c.ip]--; c.c.perIP[c.ip] <= 0 {
+			delete(c.c.perIP, c.ip)
+		}
+		c.c.mu.Unlock()
+	})
+	return c.Conn.Close()
 }
 
 func (s *Service) newServer(id *Identity) *http.Server {
@@ -131,26 +225,70 @@ func (s *Service) newServer(id *Identity) *http.Server {
 	}
 }
 
+// Per-request time limits: the whole request for ordinary calls; for
+// streams, the time without progress.
+const (
+	RequestTimeout = time.Minute
+	StreamIdle     = 2 * time.Minute
+	BrowseTimeout  = 2 * time.Minute
+)
+
 // Handler serves the receiving side (exported for tests).
 func (s *Service) Handler() http.Handler {
 	s.init()
 	m := http.NewServeMux()
-	m.HandleFunc("POST /repl/v1/pair", s.handlePair)
-	m.Handle("GET /repl/v1/hello", s.source(s.handleHello))
-	m.Handle("PUT /repl/v1/items", s.source(s.handlePutItems))
-	m.Handle("GET /repl/v1/items", s.source(s.handleGetItems))
-	m.Handle("GET /repl/v1/state", s.source(s.handleState))
-	m.Handle("POST /repl/v1/abort", s.source(s.handleAbort))
+	m.Handle("POST /repl/v1/pair", withDeadline(RequestTimeout, http.HandlerFunc(s.handlePair)))
+	m.Handle("GET /repl/v1/hello", withDeadline(RequestTimeout, s.source(s.handleHello)))
+	m.Handle("PUT /repl/v1/items", withDeadline(RequestTimeout, s.source(s.handlePutItems)))
+	m.Handle("GET /repl/v1/items", withDeadline(RequestTimeout, s.source(s.handleGetItems)))
+	m.Handle("GET /repl/v1/state", withDeadline(RequestTimeout, s.source(s.handleState)))
+	m.Handle("POST /repl/v1/abort", withDeadline(RequestTimeout, s.source(s.handleAbort)))
 	m.Handle("PUT /repl/v1/stream", s.source(s.handleStream))
-	m.Handle("POST /repl/v1/prune", s.source(s.handlePrune))
-	m.Handle("GET /repl/v1/snapshots", s.source(s.handleSnapshots))
-	m.Handle("GET /repl/v1/children", s.source(s.handleChildren))
-	m.Handle("GET /repl/v1/browse", s.source(s.handleBrowse))
+	m.Handle("POST /repl/v1/prune", withDeadline(RequestTimeout, s.source(s.handlePrune)))
+	m.Handle("GET /repl/v1/snapshots", withDeadline(RequestTimeout, s.source(s.handleSnapshots)))
+	m.Handle("GET /repl/v1/children", withDeadline(RequestTimeout, s.source(s.handleChildren)))
+	m.Handle("GET /repl/v1/browse", withDeadline(BrowseTimeout, s.source(s.handleBrowse)))
 	m.Handle("GET /repl/v1/send", s.source(s.handleSend))
-	m.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	m.Handle("/", withDeadline(RequestTimeout, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		replyError(w, http.StatusNotFound, "not_found", "no such endpoint")
-	})
+	})))
 	return m
+}
+
+// withDeadline gives a request read and write deadlines and a context deadline.
+func withDeadline(d time.Duration, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rc := http.NewResponseController(w)
+		_ = rc.SetReadDeadline(time.Now().Add(d))
+		_ = rc.SetWriteDeadline(time.Now().Add(d))
+		ctx, cancel := context.WithTimeout(r.Context(), d)
+		defer cancel()
+		h.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// idleReader extends the connection's read deadline as data arrives.
+type idleReader struct {
+	r    io.Reader
+	rc   *http.ResponseController
+	idle time.Duration
+}
+
+func (i idleReader) Read(p []byte) (int, error) {
+	_ = i.rc.SetReadDeadline(time.Now().Add(i.idle))
+	return i.r.Read(p)
+}
+
+// idleWriter extends the connection's write deadline as data leaves.
+type idleWriter struct {
+	w    io.Writer
+	rc   *http.ResponseController
+	idle time.Duration
+}
+
+func (i idleWriter) Write(p []byte) (int, error) {
+	_ = i.rc.SetWriteDeadline(time.Now().Add(i.idle))
+	return i.w.Write(p)
 }
 
 // wireError is how one server tells another what went wrong.
@@ -177,7 +315,7 @@ func replyErr(w http.ResponseWriter, err error) {
 		replyError(w, http.StatusNotFound, "not_found", err.Error())
 	case errors.Is(err, replica.ErrInvalid):
 		replyError(w, http.StatusBadRequest, "invalid", err.Error())
-	case errors.Is(err, replica.ErrBusy):
+	case errors.Is(err, replica.ErrBusy), errors.Is(err, replica.ErrTooMany):
 		replyError(w, http.StatusConflict, "busy", err.Error())
 	case errors.As(err, &pe):
 		switch pe.Code {
@@ -218,20 +356,62 @@ func (s *Service) source(fn func(w http.ResponseWriter, r *http.Request, src *So
 			replyError(w, http.StatusUnauthorized, "unauthorized", "a client certificate is required")
 			return
 		}
-		l, err := s.st.Sources(r.Context())
+		l, err := s.st.pinned(r.Context())
 		if err != nil {
 			replyErr(w, err)
 			return
 		}
 		for i := range l {
 			if l[i].Pin != "" && subtle.ConstantTimeCompare([]byte(l[i].Pin), []byte(pin)) == 1 {
-				s.st.touchSource(r.Context(), l[i].ID)
-				fn(w, r, &l[i])
+				src := l[i]
+				s.st.touchSource(r.Context(), src.ID)
+				fn(w, r, &src)
 				return
 			}
 		}
 		replyError(w, http.StatusForbidden, "not_paired", "this server isn't paired with the receiving server")
 	})
+}
+
+// recordPeer audits what a source did here (actor: the source's name).
+func (s *Service) recordPeer(ctx context.Context, r *http.Request, src *Source, action, target, detail string, outcome audit.Outcome) {
+	if s.Audit == nil {
+		return
+	}
+	e := audit.Entry{Action: action, Target: target, Outcome: outcome, Detail: detail, IP: remoteIP(r), Actor: "server:" + src.Name}
+	if err := s.Audit.Record(context.WithoutCancel(ctx), e); err != nil {
+		s.log().Warn("replication: audit", "err", err)
+	}
+}
+
+// Pairing attempts: each address may fail MaxPairFailuresPerIP times per
+// code, and the code closes after MaxPairFailures failures in all.
+const MaxPairFailuresPerIP = 3
+
+type failCounter struct {
+	mu sync.Mutex
+	m  map[string]int
+}
+
+func (f *failCounter) reset() {
+	f.mu.Lock()
+	f.m = nil
+	f.mu.Unlock()
+}
+
+func (f *failCounter) blocked(ip string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.m[ip] >= MaxPairFailuresPerIP
+}
+
+func (f *failCounter) add(ip string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.m == nil {
+		f.m = map[string]int{}
+	}
+	f.m[ip]++
 }
 
 type pairRequest struct {
@@ -261,6 +441,7 @@ func (s *Service) handlePair(w http.ResponseWriter, r *http.Request) {
 		replyError(w, http.StatusBadRequest, "invalid", "invalid proof")
 		return
 	}
+	ip := remoteIP(r)
 	s.pairMu.Lock()
 	defer s.pairMu.Unlock()
 	ctx := r.Context()
@@ -273,20 +454,25 @@ func (s *Service) handlePair(w http.ResponseWriter, r *http.Request) {
 		replyError(w, http.StatusForbidden, "no_code", "no pairing code is open on the receiving server: make one in its Control Panel › Replication")
 		return
 	}
+	if s.pairFails.blocked(ip) {
+		replyError(w, http.StatusTooManyRequests, "too_many", "too many wrong pairing codes from this address")
+		return
+	}
 	id, err := s.Identity(ctx)
 	if err != nil {
 		replyErr(w, err)
 		return
 	}
 	if !hmac.Equal(proof, sourceProof(p.code, pin, id.Pin)) {
+		s.pairFails.add(ip)
 		s.st.pairingFailed(ctx)
-		s.record(ctx, "replication.pair", cleanLabel(req.Name, 60), "wrong pairing code", remoteIP(r), audit.Denied)
+		s.record(ctx, "replication.pair", cleanLabel(req.Name, 60), "wrong pairing code", ip, audit.Denied)
 		replyError(w, http.StatusForbidden, "wrong_code", "the pairing code doesn't match (or a connection in between changed it)")
 		return
 	}
 	name := cleanLabel(req.Name, 60)
 	if name == "" {
-		name = remoteIP(r)
+		name = ip
 	}
 	srcID := ""
 	l, err := s.st.Sources(ctx)
@@ -301,14 +487,16 @@ func (s *Service) handlePair(w http.ResponseWriter, r *http.Request) {
 	}
 	if srcID == "" {
 		srcID = newID(8)
-		if err := s.st.AddSource(ctx, &Source{ID: srcID, Name: name, Pin: pin, Pool: p.Pool, QuotaBytes: p.QuotaBytes, MinKeep: p.MinKeep}); err != nil {
+		rules := DefaultRules
+		rules.QuotaBytes, rules.MinKeep, rules.MinAgeDays = p.QuotaBytes, p.MinKeep, p.MinAgeDays
+		if err := s.st.AddSource(ctx, &Source{ID: srcID, Name: name, Pin: pin, Pool: p.Pool, SourceRules: rules}); err != nil {
 			replyErr(w, err)
 			return
 		}
 	}
 	_ = s.st.ClearPairing(ctx)
-	s.record(ctx, "replication.pair", name, "source "+srcID+" may send replicas to "+p.Pool, remoteIP(r), audit.Success)
-	s.log().Info("replication: paired with a source", "source", srcID, "name", name, "ip", remoteIP(r))
+	s.record(ctx, "replication.pair", name, "source "+srcID+" may send replicas to "+p.Pool, ip, audit.Success)
+	s.log().Info("replication: paired with a source", "source", srcID, "name", name, "ip", ip)
 	replyJSON(w, http.StatusOK, pairResponse{SourceID: srcID, Name: s.hostname(), Proof: hex.EncodeToString(receiverProof(p.code, pin, id.Pin, srcID))})
 }
 
@@ -393,7 +581,13 @@ func (s *Service) remoteItems(ctx context.Context, src *Source) ([]RemoteItem, e
 }
 
 func (s *Service) handleGetItems(w http.ResponseWriter, r *http.Request, src *Source) {
-	l, err := s.remoteItems(r.Context(), src)
+	// The cached record has no items; read them.
+	full, err := s.st.Source(r.Context(), src.ID)
+	if err != nil {
+		replyErr(w, err)
+		return
+	}
+	l, err := s.remoteItems(r.Context(), full)
 	if err != nil {
 		replyErr(w, err)
 		return
@@ -430,9 +624,11 @@ func (s *Service) handleAbort(w http.ResponseWriter, r *http.Request, src *Sourc
 		return
 	}
 	if err := s.Root.RecvAbort(r.Context(), t); err != nil {
+		s.recordPeer(r.Context(), r, src, "replication.receive.abort", t.Dataset(), err.Error(), audit.Failure)
 		replyErr(w, err)
 		return
 	}
+	s.recordPeer(r.Context(), r, src, "replication.receive.abort", t.Dataset(), "interrupted transfer discarded", audit.Success)
 	replyJSON(w, http.StatusOK, map[string]bool{"aborted": true})
 }
 
@@ -486,19 +682,23 @@ func (s *Service) handleStream(w http.ResponseWriter, r *http.Request, src *Sour
 		return
 	}
 	ctx := r.Context()
-	st, pw, err := s.Root.Recv(ctx, replica.RecvArgs{Target: t, Task: task, Snapshot: snap, QuotaBytes: src.QuotaBytes})
+	st, pw, err := s.Root.Recv(ctx, replica.RecvArgs{Target: t, Limits: src.Limits(), Task: task, Snapshot: snap})
 	if err != nil {
+		s.recordPeer(ctx, r, src, "replication.receive", t.Dataset()+"@"+snap, err.Error(), audit.Denied)
 		replyErr(w, err)
 		return
 	}
-	_, copyErr := io.Copy(pw, r.Body)
+	rc := http.NewResponseController(w)
+	_, copyErr := io.Copy(pw, idleReader{r: r.Body, rc: rc, idle: StreamIdle})
 	pw.Close() // end of stream: zfs receive finishes, or keeps what it got (-s)
 	// Root may still be writing; its outcome counts even if the sender left.
+	_ = rc.SetWriteDeadline(time.Now().Add(31 * time.Minute))
 	wctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 	res, err := s.waitStream(wctx, st.Stream, 30*time.Minute)
 	if err != nil {
 		_ = s.Root.Cancel(wctx, st.Stream)
+		s.recordPeer(ctx, r, src, "replication.receive", t.Dataset()+"@"+snap, err.Error(), audit.Failure)
 		replyErr(w, err)
 		return
 	}
@@ -508,6 +708,7 @@ func (s *Service) handleStream(w http.ResponseWriter, r *http.Request, src *Sour
 			msg = copyErr.Error()
 		}
 		s.log().Warn("replication: receive failed", "source", src.ID, "dataset", t.Dataset(), "err", msg)
+		s.recordPeer(ctx, r, src, "replication.receive", t.Dataset()+"@"+snap, msg, audit.Failure)
 		replyError(w, http.StatusUnprocessableEntity, "receive_failed", msg)
 		return
 	}
@@ -515,6 +716,7 @@ func (s *Service) handleStream(w http.ResponseWriter, r *http.Request, src *Sour
 		replyError(w, http.StatusBadRequest, "incomplete", copyErr.Error())
 		return
 	}
+	s.recordPeer(ctx, r, src, "replication.receive", t.Dataset()+"@"+snap, fmt.Sprintf("%d bytes", res.Bytes), audit.Success)
 	replyJSON(w, http.StatusOK, StreamResult{Bytes: res.Bytes})
 }
 
@@ -526,13 +728,17 @@ func (s *Service) handlePrune(w http.ResponseWriter, r *http.Request, src *Sourc
 	}
 	q := r.URL.Query()
 	keep, _ := strconv.Atoi(q.Get("keep"))
-	// The receiving server keeps at least its own minimum, whatever the
-	// source asks: a source can't use pruning to wipe its history here.
+	// The receiving server keeps at least its own minimum and everything
+	// younger than its minimum age, whatever the source asks: a source
+	// can't use pruning to wipe its history here.
 	keep = max(keep, src.MinKeep, 1)
-	res, err := s.Root.RecvPrune(r.Context(), replica.RecvPruneArgs{Target: t, Task: q.Get("task"), Keep: keep})
+	res, err := s.Root.RecvPrune(r.Context(), replica.RecvPruneArgs{Target: t, Task: q.Get("task"), Keep: keep, MinAgeDays: src.MinAgeDays})
 	if err != nil {
 		replyErr(w, err)
 		return
+	}
+	if len(res.Deleted) > 0 {
+		s.recordPeer(r.Context(), r, src, "replication.receive.prune", t.ItemDataset(), strings.Join(res.Deleted, " "), audit.Success)
 	}
 	replyJSON(w, http.StatusOK, res)
 }
@@ -565,14 +771,62 @@ func (s *Service) handleChildren(w http.ResponseWriter, r *http.Request, src *So
 	replyJSON(w, http.StatusOK, map[string]any{"children": l})
 }
 
+// BrowseSpacing is the least time between two browses from one source.
+const BrowseSpacing = 2 * time.Second
+
+// browseGate lets one browse per source run at a time, spaced out.
+type browseGate struct {
+	mu   sync.Mutex
+	busy map[string]bool
+	last map[string]time.Time
+}
+
+func (g *browseGate) enter(src string, now time.Time) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.busy == nil {
+		g.busy, g.last = map[string]bool{}, map[string]time.Time{}
+	}
+	if g.busy[src] || now.Sub(g.last[src]) < BrowseSpacing {
+		return false
+	}
+	g.busy[src] = true
+	return true
+}
+
+func (g *browseGate) leave(src string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.busy[src] = false
+	g.last[src] = time.Now()
+}
+
+// handleBrowse mounts one of the source's replica snapshots here for a
+// moment. That makes this server's kernel read file system structures
+// the source wrote, so it's off unless this server's administrator
+// allows it for that source, one at a time and spaced out.
 func (s *Service) handleBrowse(w http.ResponseWriter, r *http.Request, src *Source) {
 	t, err := target(r, src)
 	if err != nil {
 		replyErr(w, err)
 		return
 	}
+	if !src.AllowBrowse {
+		replyError(w, http.StatusForbidden, "browse_off", "browsing replicas is off for this server on the receiving server (its administrator can allow it); restore the item to look inside")
+		return
+	}
+	if !s.browse.enter(src.ID, time.Now()) {
+		replyError(w, http.StatusTooManyRequests, "busy", "one browse at a time; try again in a moment")
+		return
+	}
+	defer s.browse.leave(src.ID)
 	q := r.URL.Query()
 	res, err := s.Root.Browse(r.Context(), replica.BrowseArgs{Target: t, Snapshot: q.Get("snapshot"), Path: q.Get("path")})
+	outcome := audit.Success
+	if err != nil {
+		outcome = audit.Failure
+	}
+	s.recordPeer(r.Context(), r, src, "replication.receive.browse", t.Dataset()+"@"+q.Get("snapshot"), q.Get("path"), outcome)
 	if err != nil {
 		replyErr(w, err)
 		return
@@ -602,13 +856,14 @@ func (s *Service) handleSend(w http.ResponseWriter, r *http.Request, src *Source
 		return
 	}
 	defer rc.Close()
+	s.recordPeer(ctx, r, src, "replication.send", t.Dataset()+"@"+r.URL.Query().Get("snapshot"), "sent back for a restore", audit.Success)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Trailer", TrailerStatus)
 	if st.Estimate > 0 {
 		w.Header().Set("X-Hardyos-Estimate", strconv.FormatInt(st.Estimate, 10))
 	}
 	w.WriteHeader(http.StatusOK)
-	_, copyErr := io.Copy(w, rc)
+	_, copyErr := io.Copy(idleWriter{w: w, rc: http.NewResponseController(w), idle: StreamIdle}, rc)
 	if copyErr != nil {
 		_ = s.Root.Cancel(context.Background(), st.Stream)
 		return

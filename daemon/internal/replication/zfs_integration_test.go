@@ -43,11 +43,11 @@ type restorer struct{}
 func (restorer) ShareProps(_ context.Context, pool, id, name string) ([]string, error) {
 	return []string{"org.hardyos:share=1", "org.hardyos:name=" + name}, nil
 }
-func (restorer) ShareAdopt(context.Context, string, string) error { return nil }
-func (restorer) VMFree(context.Context, string) error             { return nil }
-func (restorer) VMAdopt(context.Context, string) error            { return nil }
-func (restorer) AppsPool(context.Context) (string, error)         { return "", replica.ErrNotFound }
-func (restorer) AppAdopt(context.Context, string) error           { return nil }
+func (restorer) ShareAdopt(context.Context, string, string) error  { return nil }
+func (restorer) VMFree(context.Context, string) error              { return nil }
+func (restorer) VMAdopt(context.Context, string) ([]string, error) { return nil, nil }
+func (restorer) AppsPool(context.Context) (string, error)          { return "", replica.ErrNotFound }
+func (restorer) AppAdopt(context.Context, string) error            { return nil }
 
 // TestZFSReplicationIntegration replicates between two file-backed pools on
 // one machine through two hardyd services talking mutual TLS over
@@ -186,9 +186,13 @@ func TestZFSReplicationIntegration(t *testing.T) {
 	}
 	last := strings.Fields(run("zfs", "list", "-H", "-o", "name", "-t", "snapshot", "-d", "1", "-s", "createtxg", rMedia))
 	lastLabel := last[len(last)-1][strings.Index(last[len(last)-1], "@")+1:]
-	// B keeps max(the task's 2, its own minimum 3); the rest are pruned.
-	if len(last) != 3 {
+	// B keeps max(the task's 2, its own minimum 3) and everything it
+	// received in the last 7 days (its minimum age): all 4 stay.
+	if len(last) != 4 {
 		t.Fatalf("replica snapshots after pruning: %v", last)
+	}
+	if v := get("org.hardyos:received", rMedia+"@"+lastLabel); v == "-" || v == "" {
+		t.Fatal("the received snapshot isn't marked with when it arrived")
 	}
 
 	// The receiver refuses streams with properties (-p), packages (-R), a
@@ -198,7 +202,7 @@ func TestZFSReplicationIntegration(t *testing.T) {
 		"props":   {"send", "-p", src + "/shares/media@" + lastLabel},
 		"package": {"send", "-R", src + "/shares/media@" + lastLabel},
 	} {
-		rs, w, err := m.Recv(ctx, replica.RecvArgs{Target: tg, Task: task.ID, Snapshot: lastLabel})
+		rs, w, err := m.Recv(ctx, replica.RecvArgs{Target: tg, Limits: replica.Limits{QuotaBytes: 1 << 30}, Task: task.ID, Snapshot: lastLabel})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -215,7 +219,7 @@ func TestZFSReplicationIntegration(t *testing.T) {
 		}
 	}
 	other := "hardyos-repl-" + task.ID + "-20200101T000000Z"
-	rs, w, err := m.Recv(ctx, replica.RecvArgs{Target: tg, Task: task.ID, Snapshot: other})
+	rs, w, err := m.Recv(ctx, replica.RecvArgs{Target: tg, Limits: replica.Limits{QuotaBytes: 1 << 30}, Task: task.ID, Snapshot: other})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,12 +235,12 @@ func TestZFSReplicationIntegration(t *testing.T) {
 		{Pool: dst, Source: "../" + srcID, Kind: replica.KindShare, Item: "media"},
 		{Pool: dst, Source: srcID, Kind: replica.KindShare, Item: "media", Child: "../../x"},
 	} {
-		if _, _, err := m.Recv(ctx, replica.RecvArgs{Target: bad, Task: task.ID, Snapshot: lastLabel}); err == nil {
+		if _, _, err := m.Recv(ctx, replica.RecvArgs{Target: bad, Limits: replica.Limits{QuotaBytes: 1 << 30}, Task: task.ID, Snapshot: lastLabel}); err == nil {
 			t.Errorf("%+v accepted", bad)
 		}
 	}
 	// A full stream over an existing replica is refused (no -F, nothing overwritten).
-	rs, w, err = m.Recv(ctx, replica.RecvArgs{Target: replica.Target{Pool: dst, Source: srcID, Kind: replica.KindShare, Item: "media"}, Task: task.ID, Snapshot: lastLabel})
+	rs, w, err = m.Recv(ctx, replica.RecvArgs{Target: replica.Target{Pool: dst, Source: srcID, Kind: replica.KindShare, Item: "media"}, Limits: replica.Limits{QuotaBytes: 1 << 30}, Task: task.ID, Snapshot: lastLabel})
 	if err == nil {
 		cmd := exec.CommandContext(ctx, "zfs", "send", src+"/shares/media@"+lastLabel)
 		cmd.Stdout = w
@@ -248,6 +252,7 @@ func TestZFSReplicationIntegration(t *testing.T) {
 	}
 
 	// Browse the replica's newest snapshot (mounted read-only for a moment).
+	allowBrowse(t, b, srcID)
 	br, err := a.svc.TargetBrowse(ctx, tgt.ID, replica.KindShare, "media", "", lastLabel, "/")
 	if err != nil {
 		t.Fatal(err)
