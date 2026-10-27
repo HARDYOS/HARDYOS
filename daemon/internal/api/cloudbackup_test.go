@@ -53,8 +53,12 @@ func (c *stubCloud) register(s *priv.Server) {
 	})
 	h(priv.OpCloudTargetRemove, func(json.RawMessage) (any, error) { return map[string]bool{"removed": true}, nil })
 	h(priv.OpCloudKit, func(raw json.RawMessage) (any, error) {
-		var a priv.CloudTargetRef
+		var a priv.CloudKitArgs
 		_ = json.Unmarshal(raw, &a)
+		// Root checks the password itself: hardyd must hand it on.
+		if a.Username == "" || a.Password != "supersecret1" {
+			return nil, priv.Errorf(priv.CodeBadArgs, "the password isn't right")
+		}
 		return cloudbackup.RecoveryKit{Target: cloudbackup.Target{ID: a.ID, Name: "Offsite", Kind: "s3", Endpoint: "https://s3.example.com", Bucket: "b"},
 			Repository: "s3:https://s3.example.com/b", Key: "REPO-KEY-0123456789abcdef"}, nil
 	})

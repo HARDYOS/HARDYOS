@@ -7,6 +7,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/hardyos/hardyos/daemon/internal/rootauth"
 	"github.com/hardyos/hardyos/daemon/internal/rootfile"
 	"log/slog"
 	"os"
@@ -216,7 +217,14 @@ func main() {
 			cb.Files = fw
 		}
 		cb.OnStart()
-		priv.RegisterCloudBackup(s, cb)
+		// Root checks an administrator's password itself for the recovery
+		// kit (decision 180); the installer's first administrator is taken
+		// at the first start, before hardyd has ever run.
+		ra := &rootauth.Checker{Domain: dc}
+		if err := ra.Seed(install.SeedFile); err != nil {
+			log.Warn("administrator verifiers", "err", err)
+		}
+		priv.RegisterCloudBackup(s, cb, ra)
 		go vmm.OnStart(ctx)
 		go vmm.Watch(ctx)
 		priv.RegisterBootRepair(s, priv.StorageEnv{Runner: sysexec.Exec{}, Root: os.DirFS("/")}, "/", boot.ConfigPath)

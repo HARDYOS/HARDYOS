@@ -309,7 +309,9 @@ func (s *Server) handleCloudKit(w http.ResponseWriter, r *http.Request, u *auth.
 	}
 	s.cfg.Limiter.Succeed(key)
 	var kit cloudbackup.RecoveryKit
-	if err := s.cfg.Priv.Call(r.Context(), priv.OpCloudKit, priv.CloudTargetRef{ID: id}, &kit); err != nil {
+	// hardyd-priv checks the password again itself (decision 180): the
+	// repository key never leaves root on hardyd's word alone.
+	if err := s.cfg.Priv.Call(r.Context(), priv.OpCloudKit, priv.CloudKitArgs{ID: id, Username: u.Username, Password: req.Password}, &kit); err != nil {
 		s.record(r, u, "backup.recovery_kit", id, audit.Failure, err.Error())
 		s.writePrivError(w, err)
 		return

@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 
 	"github.com/hardyos/hardyos/daemon/internal/cloudbackup"
+	"github.com/hardyos/hardyos/daemon/internal/rootauth"
 )
 
 // Cloud backup operation names (docs/backup.md). restic runs only through
@@ -31,14 +33,32 @@ const (
 	OpCloudOffer        = "cloudbackup.offer"
 	OpCloudOfferDismiss = "cloudbackup.offer.dismiss"
 	// Live installer only.
-	OpInstallCloudProbe = "install.cloud.probe"
-	OpInstallCloudStage = "install.cloud.stage"
+	// OpAdminPasswordChange tells root an administrator changed their own
+	// password (root checks the old one against its verifier first).
+	OpAdminPasswordChange = "rootauth.change"
+	OpInstallCloudProbe   = "install.cloud.probe"
+	OpInstallCloudStage   = "install.cloud.stage"
 )
 
 // CloudTargetRef names a destination.
 type CloudTargetRef struct {
 	ID      string `json:"id"`
 	Confirm string `json:"confirm,omitempty"`
+}
+
+// CloudKitArgs asks for a destination's recovery kit: root checks the
+// administrator's password itself (internal/rootauth, decision 180).
+type CloudKitArgs struct {
+	ID       string `json:"id"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// AdminPasswordChangeArgs: an administrator's own password change.
+type AdminPasswordChangeArgs struct {
+	Username string `json:"username"`
+	Old      string `json:"old"`
+	New      string `json:"new"`
 }
 
 // CloudCheckArgs checks a destination's repository.
@@ -88,25 +108,66 @@ func cloudErr(err error) error {
 	return Errorf(CodeFailed, "%v", err)
 }
 
-// RegisterCloudBackup adds the cloud backup operations.
-func RegisterCloudBackup(s *Server, r *cloudbackup.Root) {
+// RegisterCloudBackup adds the cloud backup operations. ra checks an
+// administrator's password as root for the recovery kit. Handing out a
+// kit, adding a destination and backing up the settings (keys included)
+// are written to hardyd-priv's own log (the journal), which hardyd can't
+// change.
+func RegisterCloudBackup(s *Server, r *cloudbackup.Root, ra *rootauth.Checker) {
+	journal := s.Logger
+	if journal == nil {
+		journal = slog.Default()
+	}
 	s.Handle(OpCloudTargets, func(ctx context.Context, _ json.RawMessage) (any, error) {
 		l, err := r.Targets()
 		return CloudTargetsResult{Targets: l}, cloudErr(err)
 	})
 	s.Handle(OpCloudTargetSave, typed(func(ctx context.Context, a cloudbackup.SaveArgs) (any, error) {
 		res, err := r.Save(ctx, a)
+		if err == nil && res != nil && (res.Created || !a.Update) {
+			journal.Warn("AUDIT cloud backup: destination added", "target", res.Target.ID, "kind", res.Target.Kind,
+				"endpoint", res.Target.Endpoint, "bucket", res.Target.Bucket, "prefix", res.Target.Prefix)
+		} else if err == nil && res != nil {
+			journal.Info("AUDIT cloud backup: destination changed", "target", res.Target.ID, "endpoint", res.Target.Endpoint, "bucket", res.Target.Bucket)
+		}
 		return res, cloudErr(err)
 	}))
 	s.Handle(OpCloudTargetRemove, typed(func(ctx context.Context, a CloudTargetRef) (any, error) {
 		return map[string]bool{"removed": true}, cloudErr(r.Remove(a.ID, a.Confirm))
 	}))
-	s.Handle(OpCloudKit, typed(func(ctx context.Context, a CloudTargetRef) (any, error) {
+	s.Handle(OpCloudKit, typed(func(ctx context.Context, a CloudKitArgs) (any, error) {
+		if ra == nil {
+			return nil, Errorf(CodeFailed, "the recovery kit isn't available here")
+		}
+		if err := ra.Check(ctx, a.Username, a.Password); err != nil {
+			journal.Warn("AUDIT cloud backup: recovery kit refused", "target", a.ID, "user", a.Username, "reason", err.Error())
+			return nil, Errorf(CodeBadArgs, "%v", err)
+		}
 		k, err := r.Kit(a.ID)
+		if err == nil {
+			journal.Warn("AUDIT cloud backup: recovery kit handed out", "target", a.ID, "user", a.Username)
+		}
 		return k, cloudErr(err)
+	}))
+	s.Handle(OpAdminPasswordChange, typed(func(ctx context.Context, a AdminPasswordChangeArgs) (any, error) {
+		if ra == nil {
+			return map[string]bool{"changed": false}, nil
+		}
+		if err := ra.Change(ctx, a.Username, a.Old, a.New); err != nil {
+			return nil, Errorf(CodeBadArgs, "%v", err)
+		}
+		journal.Info("AUDIT administrator verifier changed", "user", a.Username)
+		return map[string]bool{"changed": true}, nil
 	}))
 	s.Handle(OpCloudBackup, typed(func(ctx context.Context, a cloudbackup.BackupArgs) (any, error) {
 		t, err := r.StartBackup(a)
+		if err == nil {
+			for _, it := range a.Items {
+				if it.Kind == cloudbackup.ItemSystem {
+					journal.Warn("AUDIT cloud backup: settings and keys backed up", "target", a.Target, "task", a.Task, "run", a.Run)
+				}
+			}
+		}
 		return t, cloudErr(err)
 	}))
 	s.Handle(OpCloudRestore, typed(func(ctx context.Context, a cloudbackup.RestoreArgs) (any, error) {
