@@ -81,6 +81,9 @@ func (r *Root) StartRestore(ctx context.Context, a RestoreArgs) (*Task, error) {
 	if a.Who != nil && !r.ours(snap) {
 		return nil, problemf("that version was made by another server")
 	}
+	if a.Who != nil && len(a.Paths) == 0 {
+		return nil, problemf("choose the files and folders to restore")
+	}
 	if len(a.Paths) > 1000 {
 		return nil, problemf("choose at most 1000 files and folders")
 	}
@@ -122,13 +125,26 @@ func (r *Root) StartRestore(ctx context.Context, a RestoreArgs) (*Task, error) {
 	default:
 		return nil, problemf("choose how to restore")
 	}
-	return r.tasks.start(TaskRestore, a.Target, func(ctx context.Context, tc taskCtx) (any, error) {
+	var release func()
+	if a.Who != nil {
+		if release, err = r.startPersonRestore(a.Who); err != nil {
+			return nil, err
+		}
+	}
+	t, err := r.tasks.start(TaskRestore, a.Target, func(ctx context.Context, tc taskCtx) (any, error) {
+		if release != nil {
+			defer release()
+		}
 		res, err := r.restore(ctx, tc, repo, snap, it, rels, a)
 		if res != nil {
 			res.Snapshot, res.Item = snap.ID, it.Key()
 		}
 		return res, err
 	})
+	if err != nil && release != nil {
+		release()
+	}
+	return t, err
 }
 
 func (r *Root) restore(ctx context.Context, tc taskCtx, repo *Repo, snap *Snapshot, it Item, rels [][]string, a RestoreArgs) (*RestoreResult, error) {
@@ -171,10 +187,15 @@ type staged struct {
 }
 
 // stage restores snap (the given paths below its item folder, or all of
-// it) into a new staging dataset on pool.
-func (r *Root) stage(ctx context.Context, tc taskCtx, repo *Repo, snap *Snapshot, pool string, rels [][]string) (*staged, error) {
+// it) into a new staging dataset on pool, at most the version's size with
+// headroom, and at most limit bytes when limit > 0 (a person's restore).
+func (r *Root) stage(ctx context.Context, tc taskCtx, repo *Repo, snap *Snapshot, pool string, rels [][]string, limit int64) (*staged, error) {
 	name := "r-" + randomID(6)
-	dir, dev, err := r.Vol.CreateStaging(ctx, pool, name)
+	quota := stagingQuota(snap)
+	if limit > 0 && quota > limit {
+		quota = limit
+	}
+	dir, dev, err := r.Vol.CreateStaging(ctx, pool, name, quota)
 	if err != nil {
 		return nil, err
 	}
@@ -190,6 +211,12 @@ func (r *Root) stage(ctx context.Context, tc taskCtx, repo *Repo, snap *Snapshot
 	})
 	if err != nil {
 		r.unstage(st)
+		if limit > 0 && strings.Contains(err.Error(), "quota") {
+			return nil, problemf("that's more than %s; choose fewer files or ask an administrator", humanBytes(limit))
+		}
+		if strings.Contains(err.Error(), "quota") {
+			return nil, fmt.Errorf("the version unpacked to more than expected (%s): %w", humanBytes(quota), err)
+		}
 		return nil, err
 	}
 	st.root = filepath.Join(dir, filepath.FromSlash(strings.TrimPrefix(base, "/")))
@@ -231,7 +258,11 @@ func (r *Root) restoreShare(ctx context.Context, tc taskCtx, repo *Repo, snap *S
 			return nil, err
 		}
 	}
-	st, err := r.stage(ctx, tc, repo, snap, sh.Pool, rels)
+	var limit int64
+	if a.Who != nil {
+		limit = MaxUserBytes
+	}
+	st, err := r.stage(ctx, tc, repo, snap, sh.Pool, rels, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -526,7 +557,7 @@ func (r *Root) restoreApp(ctx context.Context, tc taskCtx, repo *Repo, snap *Sna
 	if err != nil {
 		return nil, err
 	}
-	st, err := r.stage(ctx, tc, repo, snap, src.Pool, nil)
+	st, err := r.stage(ctx, tc, repo, snap, src.Pool, nil, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -634,7 +665,7 @@ func (r *Root) restoreVM(ctx context.Context, tc taskCtx, repo *Repo, snap *Snap
 		}
 		pool = v.Spec.Pool
 	}
-	st, err := r.stage(ctx, tc, repo, snap, pool, nil)
+	st, err := r.stage(ctx, tc, repo, snap, pool, nil, 0)
 	if err != nil {
 		return nil, err
 	}

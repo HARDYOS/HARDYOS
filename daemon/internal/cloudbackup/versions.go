@@ -259,7 +259,19 @@ func (r *Root) Browse(ctx context.Context, a BrowseArgs) ([]Entry, error) {
 	}
 	base := snap.Paths[0]
 	dir := path.Join(append([]string{base}, parts...)...)
+	ck := a.Target + "\x00" + snap.ID + "\x00" + dir
+	if a.Who != nil {
+		ck += "\x00person"
+	}
+	if e, ok := r.cachedBrowse(ck); ok {
+		return e, nil
+	}
+	done, err := r.startBrowse(ctx, a.Who)
+	if err != nil {
+		return nil, err
+	}
 	nodes, err := r.Restic.Ls(ctx, repo, snap.ID, dir)
+	done()
 	if err != nil {
 		return nil, err
 	}
@@ -277,5 +289,6 @@ func (r *Root) Browse(ctx context.Context, a BrowseArgs) ([]Entry, error) {
 		}
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
+	r.cacheBrowse(ck, out)
 	return out, nil
 }

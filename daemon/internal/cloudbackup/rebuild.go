@@ -105,8 +105,16 @@ func (r *Root) dir() string {
 	return DefaultDir
 }
 
-// OnStart takes over what the installer left (ConnectFile).
+// OnStart removes restores' leftover work space (nothing runs yet) and
+// takes over what the installer left (ConnectFile).
 func (r *Root) OnStart() {
+	if r.Vol != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		if err := r.Vol.CleanStaging(ctx); err != nil {
+			r.log().Warn("cloud backup: removing leftover restore work space", "err", err)
+		}
+		cancel()
+	}
 	p := filepath.Join(r.dir(), ConnectFile)
 	b, err := rootfile.ReadFileInRootDir(p)
 	if rootfile.IsNotExist(err) {
@@ -324,7 +332,7 @@ func (r *Root) rebuildShare(ctx context.Context, tc taskCtx, repo *Repo, snap *S
 	if err != nil {
 		return err
 	}
-	st, err := r.stage(ctx, tc, repo, snap, pool, nil)
+	st, err := r.stage(ctx, tc, repo, snap, pool, nil, 0)
 	if err != nil {
 		return err
 	}
@@ -337,7 +345,7 @@ func (r *Root) rebuildApp(ctx context.Context, tc taskCtx, repo *Repo, snap *Sna
 	if r.Apps == nil {
 		return errors.New("apps aren't available on this server")
 	}
-	st, err := r.stage(ctx, tc, repo, snap, pool, nil)
+	st, err := r.stage(ctx, tc, repo, snap, pool, nil, 0)
 	if err != nil {
 		return err
 	}

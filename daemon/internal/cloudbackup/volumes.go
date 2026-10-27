@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,11 +34,15 @@ type Volumes interface {
 	// OpenZvolSnapshot opens a zvol snapshot's contents for reading; close
 	// the reader when done (it also removes the clone behind it).
 	OpenZvolSnapshot(ctx context.Context, dataset, name string) (io.ReadCloser, error)
-	// CreateStaging makes a private dataset on pool for a restore and
+	// CreateStaging makes a private dataset on pool for a restore, at most
+	// quota bytes (refused when the pool hasn't that much free), and
 	// returns its mounted folder and that mount's device.
-	CreateStaging(ctx context.Context, pool, name string) (dir string, dev uint64, err error)
+	CreateStaging(ctx context.Context, pool, name string, quota int64) (dir string, dev uint64, err error)
 	// DestroyStaging removes it.
 	DestroyStaging(ctx context.Context, pool, name string) error
+	// CleanStaging removes every pool's leftover staging datasets and
+	// clones (hardyd-priv's start: nothing can be using them then).
+	CleanStaging(ctx context.Context) error
 	// VerifyMount returns the device of dataset's own mount at dir
 	// (shares.MountVerifier).
 	VerifyMount(dir, dataset string) (uint64, error)
@@ -224,8 +229,8 @@ func (z *zvolReader) Close() error {
 }
 
 // CreateStaging implements Volumes.
-func (z *ZFS) CreateStaging(ctx context.Context, pool, name string) (string, uint64, error) {
-	if zfs.ValidPoolName(pool) != nil || !stageNameRE.MatchString(name) {
+func (z *ZFS) CreateStaging(ctx context.Context, pool, name string, quota int64) (string, uint64, error) {
+	if zfs.ValidPoolName(pool) != nil || !stageNameRE.MatchString(name) || quota <= 0 {
 		return "", 0, fmt.Errorf("bad staging %s/%s", pool, name)
 	}
 	parent := pool + "/" + StagingParent
@@ -233,6 +238,17 @@ func (z *ZFS) CreateStaging(ctx context.Context, pool, name string) (string, uin
 		if _, err := z.run(ctx, "zfs", "create", "-o", "canmount=off", "-o", "mountpoint=none", parent); err != nil {
 			return "", 0, fmt.Errorf("creating %s: %w", parent, err)
 		}
+	}
+	out, err := z.run(ctx, "zfs", "get", "-Hp", "-o", "value", "available", parent)
+	if err != nil {
+		return "", 0, err
+	}
+	avail, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil {
+		return "", 0, fmt.Errorf("reading %s's free space: %w", pool, err)
+	}
+	if quota > avail {
+		return "", 0, problemf("restoring this needs about %s free on %s, which has %s", humanBytes(quota), pool, humanBytes(avail))
 	}
 	base := filepath.Join(z.runDir(), "restore")
 	if err := ensureRunDir(z.runDir()); err != nil {
@@ -244,7 +260,7 @@ func (z *ZFS) CreateStaging(ctx context.Context, pool, name string) (string, uin
 	dir := filepath.Join(base, name)
 	ds := parent + "/" + name
 	if _, err := z.run(ctx, "zfs", "create", "-o", "mountpoint="+dir, "-o", "devices=off", "-o", "setuid=off", "-o", "exec=off",
-		"-o", "acltype=posixacl", "-o", "xattr=sa", ds); err != nil {
+		"-o", "acltype=posixacl", "-o", "xattr=sa", "-o", "quota="+strconv.FormatInt(quota, 10), ds); err != nil {
 		return "", 0, fmt.Errorf("creating the restore's work space: %w", err)
 	}
 	dev, err := z.VerifyMount(dir, ds)
@@ -265,6 +281,48 @@ func (z *ZFS) DestroyStaging(ctx context.Context, pool, name string) error {
 	}
 	_, err := z.run(ctx, "zfs", "destroy", "-r", pool+"/"+StagingParent+"/"+name)
 	return err
+}
+
+// CleanStaging implements Volumes.
+func (z *ZFS) CleanStaging(ctx context.Context) error {
+	out, err := z.run(ctx, "zpool", "list", "-H", "-o", "name")
+	if err != nil {
+		return err
+	}
+	var first error
+	for _, pool := range strings.Fields(string(out)) {
+		if zfs.ValidPoolName(pool) != nil {
+			continue
+		}
+		for _, parent := range []string{StagingParent, CloneParent} {
+			p := pool + "/" + parent
+			l, err := z.run(ctx, "zfs", "list", "-H", "-o", "name", "-d", "1", "-t", "filesystem,volume", p)
+			if err != nil {
+				continue // not there
+			}
+			for _, ds := range strings.Fields(string(l)) {
+				if ds == p || !strings.HasPrefix(ds, p+"/") {
+					continue
+				}
+				if _, err := z.run(ctx, "zfs", "destroy", "-r", ds); err != nil && first == nil {
+					first = err
+				}
+			}
+		}
+	}
+	return first
+}
+
+// humanBytes is a size in words (GB with one decimal).
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<40:
+		return fmt.Sprintf("%.1f TB", float64(n)/(1<<40))
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(n)/(1<<30))
+	default:
+		return fmt.Sprintf("%.0f MB", float64(n)/(1<<20)+0.5)
+	}
 }
 
 // VerifyMount implements Volumes.

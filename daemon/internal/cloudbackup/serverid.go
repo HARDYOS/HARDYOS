@@ -21,13 +21,6 @@ const ServerIDFile = "server-id"
 
 var serverIDRE = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
-func (r *Root) stateDir() string {
-	if r.Dir != "" {
-		return r.Dir
-	}
-	return DefaultDir
-}
-
 // ServerID is this server's install id (made on first use).
 func (r *Root) ServerID() string {
 	r.idMu.Lock()
@@ -35,7 +28,7 @@ func (r *Root) ServerID() string {
 	if r.serverID != "" {
 		return r.serverID
 	}
-	p := filepath.Join(r.stateDir(), ServerIDFile)
+	p := filepath.Join(r.dir(), ServerIDFile)
 	if b, err := rootfile.ReadFile(p); err == nil && serverIDRE.MatchString(strings.TrimSpace(string(b))) {
 		r.serverID = strings.TrimSpace(string(b))
 		return r.serverID
@@ -57,7 +50,7 @@ func (r *Root) adoptServerID(id string) error {
 	}
 	r.idMu.Lock()
 	defer r.idMu.Unlock()
-	if err := rootfile.WriteInRootDir(filepath.Join(r.stateDir(), ServerIDFile), []byte(id+"\n"), 0o600, 0o700); err != nil {
+	if err := rootfile.WriteInRootDir(filepath.Join(r.dir(), ServerIDFile), []byte(id+"\n"), 0o600, 0o700); err != nil {
 		return err
 	}
 	r.serverID = id

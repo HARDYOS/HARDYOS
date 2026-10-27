@@ -99,6 +99,7 @@ type Root struct {
 	items     map[string]*sync.Mutex
 	idMu      sync.Mutex
 	serverID  string
+	lim       limits
 }
 
 // DefaultDir is root's backup state directory.

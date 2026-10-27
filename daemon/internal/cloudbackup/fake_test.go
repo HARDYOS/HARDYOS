@@ -107,6 +107,10 @@ type fakeVol struct {
 	ds    map[string]string // dataset -> folder (or zvol file)
 	snaps map[string]string // ds@name -> copy
 	calls []string
+	// free is the pool's free space for staging (0: plenty); quotas the
+	// staging datasets' quotas.
+	free   int64
+	quotas []int64
 }
 
 func newFakeVol(t *testing.T, base string) *fakeVol {
@@ -180,7 +184,13 @@ func (f *fakeVol) OpenZvolSnapshot(_ context.Context, ds, name string) (io.ReadC
 	return os.Open(p)
 }
 
-func (f *fakeVol) CreateStaging(_ context.Context, pool, name string) (string, uint64, error) {
+func (f *fakeVol) CreateStaging(_ context.Context, pool, name string, quota int64) (string, uint64, error) {
+	if f.free > 0 && quota > f.free {
+		return "", 0, problemf("restoring this needs about %s free on %s, which has %s", humanBytes(quota), pool, humanBytes(f.free))
+	}
+	f.mu.Lock()
+	f.quotas = append(f.quotas, quota)
+	f.mu.Unlock()
 	dir := filepath.Join(f.base, "staging", pool, name)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", 0, err
@@ -202,6 +212,11 @@ func (f *fakeVol) DestroyStaging(_ context.Context, pool, name string) error {
 }
 
 func (f *fakeVol) VerifyMount(dir, _ string) (uint64, error) { return devOf(f.t, dir), nil }
+
+func (f *fakeVol) CleanStaging(context.Context) error {
+	f.log("clean staging")
+	return os.RemoveAll(filepath.Join(f.base, "staging"))
+}
 
 type fakeShares struct {
 	t    *testing.T

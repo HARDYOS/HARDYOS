@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -201,9 +202,13 @@ func TestPersonRestore(t *testing.T) {
 	}
 	// Read only: no restore.
 	e.files.level = "read"
-	x := e.wait(e.root.StartRestore(ctx, RestoreArgs{Target: tg.ID, Snapshot: snap, Mode: ModeCopy, Folder: "x", Who: who}))
+	x := e.wait(e.root.StartRestore(ctx, RestoreArgs{Target: tg.ID, Snapshot: snap, Mode: ModeCopy, Folder: "x", Paths: []string{"mine.txt"}, Who: who}))
 	if x.Error == "" {
 		t.Fatal("restored into a read-only folder")
+	}
+	// People choose what to restore (decision 181).
+	if _, err := e.root.StartRestore(ctx, RestoreArgs{Target: tg.ID, Snapshot: snap, Mode: ModeCopy, Folder: "x", Who: who}); err == nil {
+		t.Fatal("a person restored a whole folder")
 	}
 	// People can't roll back.
 	e.files.level = "write"
@@ -212,9 +217,14 @@ func TestPersonRestore(t *testing.T) {
 	}
 	// A copy goes through the person's file operations; the file they
 	// couldn't read in the backup is skipped.
-	x = e.wait(e.root.StartRestore(ctx, RestoreArgs{Target: tg.ID, Snapshot: snap, Mode: ModeCopy, Folder: "Back", Who: who}))
+	x = e.wait(e.root.StartRestore(ctx, RestoreArgs{Target: tg.ID, Snapshot: snap, Mode: ModeCopy, Folder: "Back", Paths: []string{"mine.txt", "private.txt"}, Who: who}))
 	if x.Error != "" {
 		t.Fatal(x.Error)
+	}
+	// Their staging was capped at MaxUserBytes; an administrator's at the
+	// version's size with headroom.
+	if q := e.vol.quotas[len(e.vol.quotas)-1]; q <= 0 || q > MaxUserBytes {
+		t.Fatalf("person's staging quota %d", q)
 	}
 	var rr RestoreResult
 	_ = json.Unmarshal(x.Result, &rr)
@@ -488,5 +498,73 @@ func TestTargetsAndKit(t *testing.T) {
 	}
 	if err := e.root.Remove("again", "Again"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestStagingLimits(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	tg := e.target("lim")
+	share := filepath.Join(e.base, "big")
+	write(t, filepath.Join(share, "f.bin"), strings.Repeat("x", 100000))
+	e.shares.add("big", "Big", share)
+	if x, _ := e.backup(tg.ID, "t", "l1", Item{Kind: ItemShare, ID: "big"}); x.Error != "" {
+		t.Fatal(x.Error)
+	}
+	versions, _ := e.root.Versions(ctx, tg.ID)
+	snap := versions[0].Items[0].Snapshot
+	// A pool without room for the version: refused before restic runs.
+	e.vol.free = 1 << 20
+	x := e.wait(e.root.StartRestore(ctx, RestoreArgs{Target: tg.ID, Snapshot: snap, Mode: ModeCopy, Folder: "R", Paths: []string{"f.bin"}}))
+	if !strings.Contains(x.Error, "needs about") {
+		t.Fatalf("restore on a full pool: %q", x.Error)
+	}
+	e.vol.free = 0
+	x = e.wait(e.root.StartRestore(ctx, RestoreArgs{Target: tg.ID, Snapshot: snap, Mode: ModeCopy, Folder: "R", Paths: []string{"f.bin"}}))
+	if x.Error != "" {
+		t.Fatal(x.Error)
+	}
+	if q := e.vol.quotas[len(e.vol.quotas)-1]; q < 100000 || q > 100000+(300<<20) {
+		t.Fatalf("staging quota %d", q)
+	}
+
+	// One restore per person at a time, a few for everyone.
+	who := &fileworker.Who{Principal: `HOME\alice`}
+	rel, err := e.root.startPersonRestore(who)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.root.StartRestore(ctx, RestoreArgs{Target: tg.ID, Snapshot: snap, Mode: ModeCopy, Folder: "y", Paths: []string{"f.bin"}, Who: who}); err == nil || !strings.Contains(err.Error(), "still running") {
+		t.Fatalf("second restore for one person: %v", err)
+	}
+	rel()
+	var rels []func()
+	for i := 0; i < maxPersonRestores; i++ {
+		r, err := e.root.startPersonRestore(&fileworker.Who{Principal: fmt.Sprintf(`HOME\p%d`, i)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rels = append(rels, r)
+	}
+	if _, err := e.root.startPersonRestore(who); err == nil {
+		t.Fatal("more people's restores than allowed")
+	}
+	for _, r := range rels {
+		r()
+	}
+
+	// Listing a version's folder is cached.
+	if _, err := e.root.Browse(ctx, BrowseArgs{Target: tg.ID, Snapshot: snap}); err != nil {
+		t.Fatal(err)
+	}
+	e.root.Restic.Binary = "/nonexistent/restic"
+	if _, err := e.root.Browse(ctx, BrowseArgs{Target: tg.ID, Snapshot: snap}); err != nil {
+		t.Fatalf("second listing ran restic again: %v", err)
+	}
+
+	// Leftover work space goes at start-up.
+	e.root.OnStart()
+	if !strings.Contains(strings.Join(e.vol.calls, "\n"), "clean staging") {
+		t.Fatal("leftover staging wasn't cleaned at start")
 	}
 }
