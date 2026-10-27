@@ -161,18 +161,22 @@ func (m *Manager) start(kind string, fn func(ctx context.Context, c *tc) (any, e
 			}()
 			return fn(ctx, c)
 		}()
-		release() // before the task shows as finished
-		tk.mu.Lock()
-		tk.t.Finished = time.Now().UTC()
+		// The outcome is written to disk before it shows in memory, so
+		// whoever sees the task finished also finds it saved.
+		snapshot := tk.snapshot()
+		snapshot.Finished = time.Now().UTC()
 		if err != nil {
-			tk.t.State, tk.t.Error = TaskFailed, err.Error()
+			snapshot.State, snapshot.Error = TaskFailed, err.Error()
 		} else {
-			tk.t.State, tk.t.Result, tk.t.Progress = TaskSucceeded, res, 100
+			snapshot.State, snapshot.Result, snapshot.Progress = TaskSucceeded, res, 100
 		}
-		snapshot := tk.t
-		tk.mu.Unlock()
 		c.saveLog(snapshot)
 		m.saveTask(snapshot)
+		release() // before the task shows as finished
+		tk.mu.Lock()
+		tk.t.Finished, tk.t.State, tk.t.Error = snapshot.Finished, snapshot.State, snapshot.Error
+		tk.t.Result, tk.t.Progress = snapshot.Result, snapshot.Progress
+		tk.mu.Unlock()
 		m.log().Info("gpu driver task finished", "kind", kind, "ok", err == nil, "err", err)
 	}()
 	snap := tk.snapshot()
@@ -222,7 +226,11 @@ func (m *Manager) saveTask(t Task) {
 	}
 	t.Log = ""
 	b, _ := json.Marshal(t)
-	_ = os.WriteFile(filepath.Join(d, "task.json"), b, 0o600)
+	// Replaced whole, never seen half written.
+	tmp := filepath.Join(d, "task.json.tmp")
+	if os.WriteFile(tmp, b, 0o600) == nil {
+		_ = os.Rename(tmp, filepath.Join(d, "task.json"))
+	}
 }
 
 // Wait blocks until the current task finishes (tests).
