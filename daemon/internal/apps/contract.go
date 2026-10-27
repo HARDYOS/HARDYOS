@@ -71,6 +71,7 @@ type Limits struct {
 const (
 	GrantHostNetwork = "hostNetwork"
 	GrantGPU         = "gpu"
+	GrantROCm        = "gpu.rocm"
 	GrantDevice      = "device:" // + path, e.g. device:/dev/dri
 	GrantCapability  = "cap:"    // + name, e.g. cap:NET_ADMIN
 )

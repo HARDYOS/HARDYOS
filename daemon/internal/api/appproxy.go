@@ -535,6 +535,9 @@ func (p *appProxy) handler(l *proxyListener) http.Handler {
 				"Your HardyOS sign-in ended or an administrator changed who may use it. Open it again from the desktop.")
 			return
 		}
+		if filterAppRequest(w, r, l.appID) {
+			return
+		}
 		rp.ServeHTTP(&trackingWriter{ResponseWriter: w, p: p, key: key, ss: ss}, r)
 	})
 }

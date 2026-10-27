@@ -155,7 +155,9 @@ func (c *opClient) IDTokenLifetime() time.Duration       { return idTokenTTL }
 func (c *opClient) DevMode() bool                        { return false }
 func (c *opClient) ClockSkew() time.Duration             { return 0 }
 func (c *opClient) IDTokenUserinfoClaimsAssertion() bool { return true }
-func (c *opClient) IsScopeAllowed(scope string) bool     { return scope == ScopeGroups }
+func (c *opClient) IsScopeAllowed(scope string) bool {
+	return scope == ScopeGroups || (scope == ScopePhotos && c.c.ManagedBy == PhotosClientKey)
+}
 func (c *opClient) RestrictAdditionalIdTokenScopes() func([]string) []string {
 	return func(s []string) []string { return s }
 }

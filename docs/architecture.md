@@ -1103,7 +1103,9 @@ them on (`settings.json`: `sftpEnabled`, `webdavEnabled`) and per folder
   `HOME\...`, local groups never contain a backslash) and by the name typed
   (`Match User *\*,*@*`), with unquoted patterns that every sshd parses
   the same; both blocks set `AllowGroups hardyos-sftp`,
-  `ChrootDirectory /srv/hardyos/sftp/%U`, `ForceCommand internal-sftp -d /`,
+  `ChrootDirectory /srv/hardyos/sftp/%U`, `ForceCommand internal-sftp -d / -P symlink,hardlink`
+  (no links can be made: Immich and other apps would follow them out of a
+  shared folder, decision 286),
   `DisableForwarding yes` (and each forwarding switch), `PermitTTY no`,
   `PermitUserRC no`, `PubkeyAuthentication no`, `AuthorizedKeysFile none`,
   `AuthenticationMethods password`; the file ends with `Match all`. With
@@ -1111,7 +1113,7 @@ them on (`settings.json`: `sftpEnabled`, `webdavEnabled`) and per folder
   for the same matches. Local accounts' SSH is untouched. Order on
   every apply (decision 109): views, group, drop-in (`sshd -t`, reload),
   then `sshd -T -C user=<first planned account's NSS name>,host=x,addr=127.0.0.1`
-  must show `forcecommand internal-sftp -d /`, `chrootdirectory <root>/%U`,
+  must show `forcecommand internal-sftp -d / -P symlink,hardlink`, `chrootdirectory <root>/%U`,
   `disableforwarding yes`, `allowgroups hardyos-sftp` (only),
   `authenticationmethods password`, `pubkeyauthentication no`,
   `permittty no` and the forwarding switches off (`sftp.CheckEffective`);
@@ -1744,6 +1746,132 @@ Details: [monitoring.md](monitoring.md).
 - **History** is a separate SQLite file of float32 chunks in four tiers
   (10 s/1 day, 1 min/7 days, 15 min/90 days, 1 h/2 years) fed by pluggable
   `monitor.Source`s.
+
+## Photos (Immich)
+
+Phase 7 part C (decisions 270-284, security review 285-296; user guide
+`docs/photos.md`). The desktop's Photos is the catalog's Immich app,
+configured by hardyd through Immich's own API. Root does two new named
+things: `shares.links` (list a share's links leading out of it) and an
+app's manifest-declared backup dump (`apps.Manager.PreBackup`, run by
+cloud backups).
+
+```
+ phone / browser ──https──► immich.<base> (NetBird proxy, public, nothing in front)
+        │                        └─► app gateway (HardyOS sign-in off) ─► 127.0.0.1:<web port> immich-server
+        │ OAuth (code + PKCE)                                                │  ▲
+        └────────► sso.<base> ── hardyd's OIDC provider ◄── discovery/token ─┘  │ API key (x-api-key)
+                                     │ client "photos-immich" (Clients.Ensure)    │
+ hardyd: photos.sync job ────────────┴─ Immich API on 127.0.0.1 ─────────────────┘
+        │ apps.status / apps.services / apps.pull / apps.reconfigure / apps.up, devices.inventory (hardyd-priv)
+```
+
+- **Package** (`apps/catalog/immich`, 3.3.5.1). Every image pinned by
+  digest; every service as the app's user; the web port published on
+  `127.0.0.1` only (the window proxy and the app gateway are the only ways
+  in, and both run `filterAppRequest`); `PHOTOS` (write, `/data`),
+  `EXISTING`, `EXISTING_2`, `EXISTING_3` (read, `/mnt/existing*`) and
+  `FAMILY` (read, `/mnt/family`). Machine learning: the CPU service always,
+  plus `-cuda`, `-openvino` and `-rocm` services with
+  `deploy.replicas: ${ML_*_REPLICAS}` (0 by default) and
+  `pull_policy: never`. Those are **managed settings**
+  (`Setting.Managed`): hidden from the install form and the settings
+  screen, checked like any other, kept across updates, and reset to their
+  default by an update whose options no longer include the old value.
+  `ServiceImage.Idle` marks services with 0 replicas: installs and updates
+  don't download them, and Compose doesn't either (`pull_policy`).
+  `/dev/kfd` (ROCm) needs its own `rocm` permission (grant `gpu.rocm`)
+  next to `gpu`, and is dropped like `/dev/dri` when the server has none.
+  `backup.dump` runs `pg_dump` into `db-dump/` before a cloud backup.
+- **`internal/photos`** (hardyd, unprivileged): `Settings` (Normalize),
+  `ChooseML` (GPUs from the devices inventory, `runtime.GOARCH`),
+  `RedirectURIs`, `Apply` (merges HardyOS's part of Immich's system config
+  into the current one: OAuth, password login, storage template, ML
+  URLs, library scan, DB dumps, external domain; everything else is left
+  as Immich's administrators set it; `user.deleteDelay` at least 30 days),
+  an `Immich` API client (bounded bodies, no redirects, 127.0.0.1 only),
+  `Reconciler.EnsureAdmin` (first, before anything slow; another
+  administrator on an Immich installed with new data,
+  `apps.new_data.immich`, is `ErrUnexpectedAdmin`: status incident,
+  critical alert `security.photos`), `Reconciler.Run` (family account by
+  recorded id and partner-only key, config, the account guard in
+  `accounts.go`, libraries keyed by the owner's subject with link
+  exclusions, partners) and `Store` (migration `0060_photos.sql`:
+  `photos_libraries` (with `subject`), `photos_accounts` (made/suspended
+  by subject), `photos_partners`; settings rows `photos.settings`,
+  `photos.status`, `photos.ml_applied`; `photos.immich` and
+  `photos.oidc_client` sealed with secretbox purpose `photos`, bound to
+  the row's name). `immichfake` is a test double of Immich's API.
+- **Jobs** (`api/handlers_photos.go`): `photos.sync`, `photos.settings`,
+  `photos.link`, locked `app:immich` with the app's own jobs. Changes are
+  audited as HardyOS's (`photos.sync`, `photos.account.*`,
+  `photos.family.*`, `photos.incident`, `oidc.client.*`). `RunPhotos`
+  starts a sync (a system job) after hardyd starts, after Immich's app
+  jobs, `remote.*`, `vms.*`, `domain.*` and OIDC settings jobs, right
+  after a user is changed or deleted or Immich's access list changes
+  (`photosNudge`), every 6 hours, and when its 5-minute check finds HardyOS
+  not yet Immich's administrator, a change in accounts/roles/groups/access
+  (`photosAccessPrint`), an accelerated ML service down while its GPU is
+  back with the server, or a new OAuth-linked Immich account.
+- **Accounts** (`photos/accounts.go`, decision 285): accounts are only
+  ever found by sign-in subject. Every person who may use Immich gets an
+  account made ahead (`photos_accounts.made`) holding their address;
+  other unlinked accounts holding a HardyOS address are renamed
+  `unlinked-<id>@hardyos.invalid`; linked accounts' addresses and
+  administrator flags are put back to HardyOS's and their passwords
+  rotated while Immich's passwords are off; accounts of people who may no
+  longer use Photos are suspended (address `suspended-<id>@…`, random
+  password, not admin, soft-deleted) and restored when they may again.
+  Service accounts use `@service.hardyos.invalid`, placeholders
+  `@local.hardyos.invalid` (HardyOS accounts only).
+- **Request filter** (`api/appfilter.go`): for `immich`, the window proxy
+  and the app gateway answer 403 to `PUT /api/users/me` setting `email` or
+  `password` (or a body they can't read), `POST /api/oauth/unlink` and
+  `POST /api/auth/admin-sign-up`, matching paths as Express would
+  (case, slashes, dot segments, percent-encoding, method overrides).
+- **Links** (decision 286): `shares.links` walks a share without
+  following links (5 million entries, 10 minutes) and lists links whose
+  target is absolute, missing or outside the share; libraries on it get
+  them as exclusion patterns, or aren't made (more than 200, truncated,
+  unchecked). SFTP refuses `symlink` and `hardlink` requests.
+- **Sign-in.** Only with the issuer `https://sso.<base>` (Immich's
+  server checks the provider's certificate). The managed client's
+  redirect URIs: `/auth/login` and `/user-settings` on the published
+  origin and the window proxy's origin, plus
+  `/api/oauth/mobile-redirect` on the published origin (Immich's mobile
+  override; the provider takes https only, exact matches). Scope
+  `hardyos_photos`, allowed only for the `photos-immich` client, adds
+  `hardyos_photos_role`, `hardyos_storage_label` (reserved names prefixed
+  `u-`) and, for HardyOS's own accounts only, a placeholder `email`
+  (`<label>@local.hardyos.invalid`) to the ID token and userinfo.
+  `oidc.Config.ManagedAccess` lets the client's owner refuse a person at
+  sign-in and refresh: Photos allows the app's access list.
+  `oidc.Config.ConfirmRedirect` makes sign-ins to Immich's mobile redirect
+  always show a confirmation page (never silent, not with prompt=none).
+  `Provider.ProfileFor` gives the same subject/email/label for accounts
+  made ahead of a first sign-in.
+- **Machine learning.** `apps.reconfigure` with the managed settings
+  (after `apps.pull` of the chosen service), then `apps.up`; Immich's ML
+  URLs list the accelerated service first and the CPU one as fallback.
+- **Publishing.** Phones need Immich published without a sign-in in front
+  (gateway HardyOS sign-in off; NetBird SSO off): the Control Panel button
+  uses the existing `PUT /apps/immich/publish` (public, auth none,
+  `confirmOpen`), audited as before.
+- **Web.** `apps/photos/PhotosApp` (the dock's Photos: `GET /photos`, then
+  `AppFrameView` for the app, with a "sign in in a tab" bar while SSO is on)
+  and Control Panel › Photos (`control-panel/Photos.tsx`).
+- **Tests.** `internal/photos` (settings, ML choice, redirect URIs, config
+  merge, sealing, reconciliation against `immichfake`: address takeover,
+  access following HardyOS, rehoming, link exclusions, family account by
+  id, incidents), `internal/apps` (`immich_test.go`: digests, idle
+  services, 127.0.0.1 port, read-only mounts, managed settings, rocm,
+  backup dump), `internal/shares` (link scan), `internal/oidc`
+  (`photos_test.go`: claims, scope only for Photos, ManagedAccess,
+  confirmation), `internal/api` (`photos_test.go`, `appfilter_test.go`),
+  `internal/cloudbackup` (the dump before the snapshot) and CI's
+  **Photos (Immich)** job: the real Immich 3.3.5 with HardyOS's provider
+  (`TestImmichIntegration`: links followed and excluded, suspension ends
+  sessions, restore, the package's `pg_dump`).
 
 ## Data and state
 

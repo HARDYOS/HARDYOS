@@ -696,6 +696,9 @@ func (rt *remoteRuntime) serveApp(w http.ResponseWriter, r *http.Request, route 
 			return
 		}
 	}
+	if filterAppRequest(w, r, route.appID) {
+		return
+	}
 	var rw http.ResponseWriter = w
 	if ss != nil {
 		rw = &trackingWriter{ResponseWriter: w, p: p, key: key, ss: ss}

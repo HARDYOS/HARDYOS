@@ -120,6 +120,16 @@ type Config struct {
 	// EndSessions ends a person's desktop and app window sessions (their
 	// account row now belongs to another directory object).
 	EndSessions func(ctx context.Context, userID int64)
+	// ManagedAccess, when set, is asked about every sign-in to a client
+	// another part of HardyOS keeps (Clients.Ensure, by its key): Photos
+	// lets only the people who may use the Immich app in. An error refuses
+	// the sign-in (and, at refresh, revokes the grant) with its message.
+	ManagedAccess func(ctx context.Context, managedBy string, u *auth.User) error
+	// ConfirmRedirect, when set, names redirect URIs of a managed client
+	// whose sign-ins the person always confirms on a page of HardyOS's
+	// (never finished silently on an existing session): Immich's mobile
+	// redirect, which hands the code to an app on another device.
+	ConfirmRedirect func(managedBy, redirectURI string) bool
 	// Insecure allows an http:// issuer (development without TLS).
 	Insecure bool
 	Log      *slog.Logger
@@ -197,9 +207,9 @@ func New(cfg Config) (*Provider, error) {
 		CodeMethodS256:        true,
 		AuthMethodPost:        true,
 		GrantTypeRefreshToken: true,
-		SupportedScopes:       []string{oidc.ScopeOpenID, oidc.ScopeProfile, oidc.ScopeEmail, ScopeGroups, oidc.ScopeOfflineAccess},
+		SupportedScopes:       []string{oidc.ScopeOpenID, oidc.ScopeProfile, oidc.ScopeEmail, ScopeGroups, ScopePhotos, oidc.ScopeOfflineAccess},
 		SupportedClaims: []string{"sub", "aud", "exp", "iat", "iss", "auth_time", "nonce", "amr", "azp", "at_hash", "c_hash",
-			"name", "preferred_username", "email", "email_verified", "groups", ClaimAdmin},
+			"name", "preferred_username", "email", "email_verified", "groups", ClaimAdmin, ClaimPhotosRole, ClaimStorageLabel},
 		DefaultLogoutRedirectURI: "logged-out", // made absolute in TerminateSessionFromRequest
 	}
 	opts := []op.Option{
@@ -228,6 +238,20 @@ func New(cfg Config) (*Provider, error) {
 const (
 	ScopeGroups = "groups"
 	ClaimAdmin  = "hardyos_admin"
+
+	// ScopePhotos asks for what Immich (the Photos app, docs/photos.md)
+	// maps from a sign-in: ClaimPhotosRole ("admin" for HardyOS
+	// administrators, else "user"; Immich's roleClaim), ClaimStorageLabel
+	// (the folder Immich files the person's photos in) and an email
+	// address for every account (Immich registers people by email): one
+	// that has none gets PlaceholderEmail, marked unverified.
+	// Only the Photos client (PhotosClientKey) may ask for it.
+	ScopePhotos       = "hardyos_photos"
+	ClaimPhotosRole   = "hardyos_photos_role"
+	ClaimStorageLabel = "hardyos_storage_label"
+
+	// PhotosClientKey is the managed client Photos keeps for Immich.
+	PhotosClientKey = "photos-immich"
 )
 
 func (p *Provider) now() time.Time {

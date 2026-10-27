@@ -89,6 +89,9 @@ func DescribePermissions(m Manifest) []string {
 	if m.Permissions.GPU {
 		out = append(out, "Uses the server's graphics card or chip, for hardware video transcoding (GPU)")
 	}
+	if m.Permissions.ROCm {
+		out = append(out, "Uses AMD's compute interface (/dev/kfd), for machine learning on an AMD graphics card (ROCm)")
+	}
 	for _, s := range m.Shares {
 		what := "Read files in"
 		if s.Access == AccessWrite {
@@ -111,8 +114,15 @@ var basicCapabilities = map[string]bool{
 	"KILL": true, "AUDIT_WRITE": true,
 }
 
-// driRE matches the graphics devices the gpu permission allows.
+// driRE matches the graphics devices the gpu permission allows (DRM).
 var driRE = regexp.MustCompile(`^/dev/dri(/(card|renderD)[0-9]{1,3})?$`)
+
+// kfdDevice is AMD's compute interface, allowed by the rocm permission.
+const kfdDevice = "/dev/kfd"
+
+// gpuDevice reports whether a device is one the GPU permissions handle
+// (and so is dropped, with a warning, on a server without it).
+func gpuDevice(src string) bool { return driRE.MatchString(src) || src == kfdDevice }
 
 // nvidiaCapabilities may be asked for in an NVIDIA device reservation.
 var nvidiaCapabilities = map[string]bool{"gpu": true, "compute": true, "utility": true, "video": true, "graphics": true, "display": true}
@@ -405,7 +415,7 @@ func checkService(p *Problems, name string, svc map[string]any, services map[str
 		case map[string]any:
 			src, _ = d["source"].(string)
 		}
-		if !devices[src] && !(perms.GPU && driRE.MatchString(src)) {
+		if !devices[src] && !(perms.GPU && driRE.MatchString(src)) && !(perms.GPU && perms.ROCm && src == kfdDevice) {
 			p.addf("service %s: device %s isn't declared in the manifest's permissions", name, src)
 		}
 	}
@@ -620,7 +630,13 @@ func (r Resolved) Services() []ServiceImage {
 	for name, raw := range services {
 		svc, _ := raw.(map[string]any)
 		img, _ := svc["image"].(string)
-		out = append(out, ServiceImage{Service: name, Image: img})
+		si := ServiceImage{Service: name, Image: img}
+		if dp, ok := svc["deploy"].(map[string]any); ok {
+			if n, ok := dp["replicas"].(float64); ok && n == 0 {
+				si.Idle = true
+			}
+		}
+		out = append(out, si)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Service < out[j].Service })
 	return out
@@ -630,6 +646,10 @@ func (r Resolved) Services() []ServiceImage {
 type ServiceImage struct {
 	Service string `json:"service"`
 	Image   string `json:"image"`
+	// Idle: the service runs no containers (deploy.replicas 0), so installs
+	// and updates don't download its image (pull_policy: never keeps
+	// Compose from doing it either). Turning it on downloads it first.
+	Idle bool `json:"idle,omitempty"`
 }
 
 // ParseResolved reads `docker compose config --format json` output.

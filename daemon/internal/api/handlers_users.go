@@ -96,6 +96,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request, me *au
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	defer s.photosNudge() // Immich follows the account's role and state
 	u, err := s.users.Update(r.Context(), id, auth.UserUpdate{
 		DisplayName: req.DisplayName, Email: req.Email, Role: req.Role, Disabled: req.Disabled,
 	})
@@ -123,6 +124,7 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request, me *au
 		writeUserError(s, w, err)
 		return
 	}
+	defer s.photosNudge()
 	if err := s.users.Delete(r.Context(), id); err != nil {
 		s.record(r, me, "user.delete", u.Username, audit.Failure, err.Error())
 		writeUserError(s, w, err)
