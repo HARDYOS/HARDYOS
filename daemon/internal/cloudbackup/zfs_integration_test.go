@@ -81,6 +81,8 @@ func TestZFSIntegrationCloudBackup(t *testing.T) {
 	if err := os.Symlink("/etc/shadow", filepath.Join(share, "evil")); err != nil {
 		t.Fatal(err)
 	}
+	// A person's ACL entry comes back; an app's (HardyOS's own) doesn't.
+	zfsRun(t, "setfacl", "-m", "u:4242:r,u:30005:rw", filepath.Join(share, "docs", "letter.txt"))
 	disk := make([]byte, 8<<20)
 	_, _ = rand.Read(disk[:1<<20])
 	zfsRun(t, "zfs", "create", "-p", "-V", "16M", pool+"/vms/web/disk0")
@@ -199,6 +201,9 @@ func TestZFSIntegrationCloudBackup(t *testing.T) {
 	}
 	if out := zfsRun(t, "stat", "-c", "%u", filepath.Join(share, "docs", "letter.txt")); strings.TrimSpace(out) != "3001" {
 		t.Fatalf("owner after restore: %s", out)
+	}
+	if acl := zfsRun(t, "getfacl", "-n", "-p", filepath.Join(share, "docs", "letter.txt")); !strings.Contains(acl, "user:4242:r") || strings.Contains(acl, "30005") {
+		t.Fatalf("ACL after restore:\n%s", acl)
 	}
 	if l, err := os.Readlink(filepath.Join(share, "evil")); err != nil || l != "/etc/shadow" {
 		t.Fatalf("link: %q %v", l, err)

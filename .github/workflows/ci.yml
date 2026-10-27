@@ -50,7 +50,7 @@ jobs:
       - name: install ZFS
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq zfsutils-linux gdisk dosfstools squashfs-tools grub-efi-amd64-bin grub-pc-bin grub2-common
+          sudo apt-get install -y -qq zfsutils-linux acl gdisk dosfstools squashfs-tools grub-efi-amd64-bin grub-pc-bin grub2-common
           sudo modprobe zfs
           zfs version
       - name: build test binaries
@@ -71,7 +71,7 @@ jobs:
       - name: restic for cloud backups
         run: sudo scripts/install-restic.sh /usr/local/bin/restic
       - name: cloud backups from snapshots, restores through a staging dataset
-        run: sudo HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/cloudbackup.test" -test.run TestZFSIntegrationCloudBackup -test.v -test.timeout 10m
+        run: sudo HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/cloudbackup.test" -test.run 'TestZFSIntegrationCloudBackup|TestSandbox' -test.v -test.timeout 10m
 
   nfs:
     name: NFS (loopback)

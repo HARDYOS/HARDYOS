@@ -12,6 +12,8 @@ import (
 	"strings"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/hardyos/hardyos/daemon/internal/shares"
 )
 
 // Restores never write through a path: everything goes through descriptors
@@ -111,19 +113,22 @@ func copyMeta(src, dst int, st *unix.Stat_t, isDir bool) error {
 	if err := unix.Fchmod(dst, mode); err != nil {
 		return err
 	}
-	buf := make([]byte, 64<<10)
+	// ACLs: people's entries as in the backup, HardyOS's own (apps, NFS,
+	// hardyos-files) as the destination has them now (decision 178).
 	for _, x := range aclXattrs {
-		if x == "system.posix_acl_default" && !isDir {
+		isDefault := x == "system.posix_acl_default"
+		if isDefault && !isDir {
 			continue
 		}
-		n, err := unix.Fgetxattr(src, x, buf)
+		merged, err := shares.MergeRestoredACL(getXattr(src, x), getXattr(dst, x), mode, isDefault)
 		if err != nil {
-			if isDir || x == "system.posix_acl_access" {
-				_ = unix.Fremovexattr(dst, x)
-			}
+			merged = nil // an ACL that can't be read doesn't come back
+		}
+		if merged == nil {
+			_ = unix.Fremovexattr(dst, x)
 			continue
 		}
-		_ = unix.Fsetxattr(dst, x, buf[:n], 0)
+		_ = unix.Fsetxattr(dst, x, merged, 0)
 	}
 	return unix.Futimes(dst, []unix.Timeval{unix.NsecToTimeval(st.Atim.Nano()), unix.NsecToTimeval(st.Mtim.Nano())})
 }
@@ -492,4 +497,14 @@ func joinPath(dir []string, name string) string {
 		return name
 	}
 	return strings.Join(dir, "/") + "/" + name
+}
+
+// getXattr reads one extended attribute (nil if it isn't there).
+func getXattr(fd int, name string) []byte {
+	buf := make([]byte, 64<<10)
+	n, err := unix.Fgetxattr(fd, name, buf)
+	if err != nil {
+		return nil
+	}
+	return buf[:n]
 }

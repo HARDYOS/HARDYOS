@@ -182,6 +182,7 @@ func TestPersonRestore(t *testing.T) {
 	if err := os.Chmod(filepath.Join(share, "private.txt"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	write(t, filepath.Join(share, "Photos", "a.jpg"), "photo")
 	e.shares.add("family", "Family", share)
 	if x, _ := e.backup(tg.ID, "daily", "p1", Item{Kind: ItemShare, ID: "family"}); x.Error != "" {
 		t.Fatal(x.Error)
@@ -226,6 +227,31 @@ func TestPersonRestore(t *testing.T) {
 	ops := strings.Join(e.files.ops, ",")
 	if !strings.Contains(ops, "in:open mine.txt") || !strings.Contains(ops, "create Back/mine.txt") {
 		t.Fatalf("not through the person's file operations: %s", ops)
+	}
+
+	// Their access today counts too (decision 177): nothing goes over a
+	// file they can't read now, or into a folder they can't open now.
+	write(t, filepath.Join(share, "mine.txt"), "mine now")
+	if err := os.Chmod(filepath.Join(share, "mine.txt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(share, "Photos", "a.jpg")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(share, "Photos"), 0o711); err != nil {
+		t.Fatal(err)
+	}
+	x = e.wait(e.root.StartRestore(ctx, RestoreArgs{Target: tg.ID, Snapshot: snap, Mode: ModeInPlace, Paths: []string{"mine.txt", "Photos/a.jpg"}, Who: who}))
+	if x.Error != "" {
+		t.Fatal(x.Error)
+	}
+	rr = RestoreResult{}
+	_ = json.Unmarshal(x.Result, &rr)
+	if got := read(t, filepath.Join(share, "mine.txt")); got != "mine now" || rr.Skipped != 2 {
+		t.Fatalf("restored over a file the person can't read now: %q (%+v)", got, rr)
+	}
+	if _, err := os.Stat(filepath.Join(share, "Photos", "a.jpg")); err == nil {
+		t.Fatal("restored into a folder the person can't open now")
 	}
 }
 

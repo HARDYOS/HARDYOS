@@ -397,6 +397,27 @@ func (f *fakeFiles) Do(_ context.Context, op string, a fileworker.Args) (json.Ra
 		return nil, fh, err
 	case fileworker.OpSetTime:
 		return nil, nil, os.Chtimes(p, a.Modified, a.Modified)
+	case fileworker.OpStat, fileworker.OpList, fileworker.OpOpen:
+		fi, err := os.Lstat(p)
+		if os.IsNotExist(err) {
+			return nil, nil, &fileworker.Error{Code: fileworker.CodeNotFound, Message: "not found"}
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		if op == fileworker.OpStat {
+			b, _ := json.Marshal(fileworker.Entry{Name: fi.Name(), Dir: fi.IsDir(), Size: fi.Size(), Modified: fi.ModTime()})
+			return b, nil, nil
+		}
+		// The fake's rule: others' read bit is the person's read access.
+		if fi.Mode()&0o004 == 0 {
+			return nil, nil, &fileworker.Error{Code: fileworker.CodeNoAccess, Message: "no access"}
+		}
+		if op == fileworker.OpOpen {
+			fh, err := os.Open(p)
+			return nil, fh, err
+		}
+		return []byte(`{"entries":[]}`), nil, nil
 	}
 	return nil, nil, fmt.Errorf("unexpected op %s", op)
 }

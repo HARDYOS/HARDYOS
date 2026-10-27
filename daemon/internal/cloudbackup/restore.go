@@ -339,6 +339,7 @@ func (r *Root) restoreAsPerson(ctx context.Context, tc taskCtx, who fileworker.W
 		res.Folder = a.Folder
 	}
 	count := 0
+	readable := map[string]bool{}
 	var walk func(rel string) error
 	walk = func(rel string) error {
 		if count++; count > MaxUserEntries {
@@ -358,6 +359,14 @@ func (r *Root) restoreAsPerson(ctx context.Context, tc taskCtx, who fileworker.W
 			return errors.New("file worker: bad answer")
 		}
 		dest := prefix + rel
+		// Their access today: they must be able to read what is there now
+		// (or the nearest folder that exists), so a restore never puts
+		// files where they couldn't look, or over what they can't read.
+		if err := r.personCanRead(ctx, who, sh.ID, dest, readable); err != nil {
+			res.Skipped++
+			addNote(res, "%s: %v", rel, err)
+			return nil
+		}
 		if e.Dir {
 			_, _, err := r.Files.Do(ctx, fileworker.OpMkdir, fileworker.Args{Who: who, Share: sh.ID, Path: dest})
 			var fe *fileworker.Error
@@ -418,6 +427,60 @@ func (r *Root) restoreAsPerson(ctx context.Context, tc taskCtx, who fileworker.W
 		}
 	}
 	return nil
+}
+
+// personCanRead checks that who can read dest in the live shared folder if
+// it exists (a folder listed, a file opened), or else the nearest folder
+// above it that exists. ok caches folders already checked.
+func (r *Root) personCanRead(ctx context.Context, who fileworker.Who, share, dest string, ok map[string]bool) error {
+	notFound := func(err error) bool {
+		var fe *fileworker.Error
+		return errors.As(err, &fe) && fe.Code == fileworker.CodeNotFound
+	}
+	raw, _, err := r.Files.Do(ctx, fileworker.OpStat, fileworker.Args{Who: who, Share: share, Path: dest})
+	if err == nil {
+		var e fileworker.Entry
+		if json.Unmarshal(raw, &e) != nil {
+			return errors.New("file worker: bad answer")
+		}
+		if e.Dir {
+			if ok[dest] {
+				return nil
+			}
+			if _, _, err := r.Files.Do(ctx, fileworker.OpList, fileworker.Args{Who: who, Share: share, Path: dest}); err != nil {
+				return fmt.Errorf("you can't open the folder that is there now: %w", err)
+			}
+			ok[dest] = true
+			return nil
+		}
+		_, f, err := r.Files.Do(ctx, fileworker.OpOpen, fileworker.Args{Who: who, Share: share, Path: dest})
+		if err != nil {
+			return fmt.Errorf("you can't read the file that is there now: %w", err)
+		}
+		if f != nil {
+			f.Close()
+		}
+		return nil
+	}
+	if !notFound(err) {
+		return err
+	}
+	for p := path.Dir(dest); ; p = path.Dir(p) {
+		if p == "." || p == "/" {
+			p = ""
+		}
+		if ok[p] {
+			return nil
+		}
+		_, _, err := r.Files.Do(ctx, fileworker.OpList, fileworker.Args{Who: who, Share: share, Path: p})
+		if err == nil {
+			ok[p] = true
+			return nil
+		}
+		if !notFound(err) || p == "" {
+			return fmt.Errorf("you can't open the folder it goes into: %w", err)
+		}
+	}
 }
 
 func addNote(res *RestoreResult, format string, a ...any) {
