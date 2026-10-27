@@ -8,6 +8,7 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/zitadel/oidc/v3/pkg/oidc"
 
@@ -46,12 +47,14 @@ func (p *Provider) allowed(ctx context.Context, c *Client, u *auth.User) error {
 // first time: a domain account's objectGUID (its SID with an older
 // directory helper), which survives renames; a random value for a local
 // account. If the directory says the account's GUID changed (the account
-// was deleted and another made with the same name), the old person's
-// grants and consents are dropped and the new one gets its own subject.
-func (p *Provider) subjectFor(ctx context.Context, u *auth.User) (string, error) {
+// was deleted and another made with the same name), everything of the old
+// person ends (CheckAnchor); interactive (the password was just typed) the
+// new one gets its own subject, otherwise (an older sign-in session in
+// this browser) auth.ErrAccountReplaced.
+func (p *Provider) subjectFor(ctx context.Context, u *auth.User, interactive bool) (string, error) {
 	db := p.cfg.DB
-	var cur, curGUID string
-	err := db.QueryRowContext(ctx, `SELECT sub, guid FROM oidc_subjects WHERE user_id = ?`, u.ID).Scan(&cur, &curGUID)
+	var cur string
+	err := db.QueryRowContext(ctx, `SELECT sub FROM oidc_subjects WHERE user_id = ?`, u.ID).Scan(&cur)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return "", err
 	}
@@ -74,28 +77,115 @@ func (p *Provider) subjectFor(ctx context.Context, u *auth.User) (string, error)
 		}
 		return "", ErrNoSubject
 	}
-	if cur == guid {
-		return cur, nil
+	if err := p.CheckAnchor(ctx, u, guid, interactive); err != nil {
+		return "", err
 	}
-	if cur != "" {
+	if err := db.QueryRowContext(ctx, `SELECT sub FROM oidc_subjects WHERE user_id = ?`, u.ID).Scan(&cur); err != nil {
+		return "", err
+	}
+	return cur, nil
+}
+
+// CheckAnchor implements auth.IdentityAnchor with oidc_subjects: the
+// directory object (GUID, else SID) each domain account row belongs to.
+// A row without one gets anchor. Another anchor means the name was given
+// to another person: their predecessor's desktop and app sessions, app
+// sign-ins (grants, tokens), provider sessions and consents all end; then,
+// interactive, the row is the new person's (new subject), otherwise
+// auth.ErrAccountReplaced.
+func (p *Provider) CheckAnchor(ctx context.Context, u *auth.User, anchor string, interactive bool) error {
+	if u == nil || anchor == "" || u.IdentitySource() != auth.SourceDomain {
+		return nil
+	}
+	db := p.cfg.DB
+	var cur, curGUID string
+	err := db.QueryRowContext(ctx, `SELECT sub, guid FROM oidc_subjects WHERE user_id = ?`, u.ID).Scan(&cur, &curGUID)
+	switch {
+	case err != nil && !errors.Is(err, sql.ErrNoRows):
+		return err
+	case err == nil && curGUID == anchor:
+		p.anchorConfirmed(u.ID)
+		return nil
+	case err == nil && curGUID == "" && !strings.HasPrefix(cur, "local-"):
+		// Recorded before anchors were kept: this is the one.
+		_, err := db.ExecContext(ctx, `UPDATE oidc_subjects SET guid = ? WHERE user_id = ?`, anchor, u.ID)
+		return err
+	case err == nil:
 		// Another person with the same name: nothing of the old one carries over.
-		_, _ = revokeWhere(ctx, db, p.now(), `user_id = ?`, u.ID)
-		_, _ = db.ExecContext(ctx, `DELETE FROM oidc_consents WHERE user_id = ?`, u.ID)
-		p.audit(ctx, "", u, "oidc.subject.change", u.Username, audit.Success, "the domain account was replaced by another with the same name; its app sign-ins were revoked")
+		p.endPredecessor(ctx, u)
+		if !interactive {
+			return auth.ErrAccountReplaced
+		}
 	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer tx.Rollback()
 	// A row of a forgotten-and-recreated users row with this GUID goes.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM oidc_subjects WHERE sub = ? OR user_id = ?`, guid, u.ID); err != nil {
-		return "", err
+	if _, err := tx.ExecContext(ctx, `DELETE FROM oidc_subjects WHERE sub = ? OR user_id = ?`, anchor, u.ID); err != nil {
+		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO oidc_subjects (user_id, sub, guid) VALUES (?, ?, ?)`, u.ID, guid, guid); err != nil {
-		return "", err
+	if _, err := tx.ExecContext(ctx, `INSERT INTO oidc_subjects (user_id, sub, guid) VALUES (?, ?, ?)`, u.ID, anchor, anchor); err != nil {
+		return err
 	}
-	return guid, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	p.anchorConfirmed(u.ID)
+	return nil
+}
+
+// endPredecessor ends everything a domain account row's previous owner
+// held.
+func (p *Provider) endPredecessor(ctx context.Context, u *auth.User) {
+	db := p.cfg.DB
+	_, _ = revokeWhere(ctx, db, p.now(), `user_id = ?`, u.ID)
+	_, _ = db.ExecContext(ctx, `DELETE FROM oidc_consents WHERE user_id = ?`, u.ID)
+	_, _ = db.ExecContext(ctx, `DELETE FROM oidc_browser_sessions WHERE user_id = ?`, u.ID)
+	if p.cfg.EndSessions != nil {
+		p.cfg.EndSessions(ctx, u.ID)
+	}
+	p.mu.Lock()
+	delete(p.anchorOK, u.ID)
+	p.mu.Unlock()
+	p.audit(ctx, "", u, "oidc.subject.change", u.Username, audit.Success,
+		"the domain account was replaced by another with the same name; the previous one's sessions and app sign-ins were ended")
+}
+
+// anchorFresh is how long a confirmed anchor isn't looked up again.
+const anchorFresh = 30 * time.Second
+
+func (p *Provider) anchorConfirmed(id int64) {
+	p.mu.Lock()
+	p.anchorOK[id] = p.now()
+	if len(p.anchorOK) > 10000 {
+		for k, t := range p.anchorOK {
+			if p.now().Sub(t) > anchorFresh {
+				delete(p.anchorOK, k)
+			}
+		}
+	}
+	p.mu.Unlock()
+}
+
+// checkAnchorNow asks the directory for u's anchor (at most every 30
+// seconds per person) and compares it with the recorded one.
+func (p *Provider) checkAnchorNow(ctx context.Context, u *auth.User) error {
+	if u.IdentitySource() != auth.SourceDomain {
+		return nil
+	}
+	p.mu.Lock()
+	t, ok := p.anchorOK[u.ID]
+	p.mu.Unlock()
+	if ok && p.now().Sub(t) < anchorFresh {
+		return nil
+	}
+	guid := p.domainGUID(ctx, u)
+	if guid == "" {
+		return nil // can't be asked: the groups refresh decides
+	}
+	return p.CheckAnchor(ctx, u, guid, false)
 }
 
 // domainGUID asks the directory for u's objectGUID (or SID); "" when it
@@ -113,10 +203,7 @@ func (p *Provider) domainGUID(ctx context.Context, u *auth.User) string {
 	if err != nil || a == nil || !a.Exists {
 		return ""
 	}
-	if a.ObjectGUID != "" {
-		return strings.ToLower(a.ObjectGUID)
-	}
-	return strings.ToUpper(a.SID)
+	return auth.AccountAnchor(a)
 }
 
 // userForSubject loads the account behind a subject, checking it may still
@@ -142,6 +229,11 @@ func (p *Provider) userForSubject(ctx context.Context, sub string) (*auth.User, 
 	}
 	if u.IdentitySource() != auth.SourceDomain && !p.loadSettings(ctx).localAccounts {
 		return nil, ErrLocalAccountsOff
+	}
+	// The subject was the directory object it was issued for; if the name
+	// now belongs to another one, the subject is no one's.
+	if err := p.checkAnchorNow(ctx, u); err != nil {
+		return nil, err
 	}
 	return u, nil
 }

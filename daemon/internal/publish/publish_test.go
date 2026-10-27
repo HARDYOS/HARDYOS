@@ -21,6 +21,8 @@ type env struct {
 	nb  *nbtest.Server
 	pub *Publisher
 	in  Inputs
+	// issuer is the sign-in provider's (pub.Issuer).
+	issuer string
 }
 
 func newEnv(t *testing.T) *env {
@@ -38,7 +40,7 @@ func newEnv(t *testing.T) *env {
 	}
 	st := &Store{DB: db, Sealer: &Sealer{KeyFile: filepath.Join(t.TempDir(), "secrets", "hardyd.key")}}
 	pub := &Publisher{Store: st}
-	e := &env{ctx: ctx, db: db, st: st, nb: nb, pub: pub,
+	e := &env{ctx: ctx, db: db, st: st, nb: nb, pub: pub, issuer: "https://sso.home.example.net",
 		in: Inputs{NetBirdIP: "100.83.40.2", ManagementURL: nb.URL, Known: true,
 			Apps: []App{{ID: "jellyfin", Name: "Jellyfin"}, {ID: "notes", Name: "Notes"}}}}
 	if err := st.SetToken(ctx, "nbp_token123"); err != nil {
@@ -47,6 +49,7 @@ func newEnv(t *testing.T) *env {
 	if _, err := st.Save(ctx, Settings{Enabled: true, BaseDomain: "home.example.net", DefaultMode: ModePublic}); err != nil {
 		t.Fatal(err)
 	}
+	pub.Issuer = func(context.Context) string { return e.issuer }
 	return e
 }
 
@@ -175,8 +178,21 @@ func TestSyncCreatesKeepsAndRepairs(t *testing.T) {
 	}
 	tg := jf.Targets[0]
 	if len(jf.Targets) != 1 || tg.TargetType != "peer" || tg.TargetID != "peer-nas" || tg.Protocol != "https" || tg.Port != DefaultGatewayPort ||
-		tg.Host != "100.83.40.2" || !tg.Options.SkipTLSVerify || tg.Options.CustomHeaders[GatewayHeader] != secret || len(secret) != 64 {
+		tg.Host != "100.83.40.2" || !tg.Options.SkipTLSVerify || tg.Options.CustomHeaders[GatewayHeader] != GatewayValue(secret, "jellyfin.home.example.net") || len(secret) != 64 {
 		t.Fatalf("target = %+v %+v", tg, tg.Options)
+	}
+	// Each service carries its own value: the shared secret itself is in
+	// no service, and one service's value is no other's.
+	for _, v := range e.nb.ServiceList() {
+		for _, x := range v.Targets {
+			if got := x.Options.CustomHeaders[GatewayHeader]; got == secret || got != GatewayValue(secret, v.Domain) {
+				t.Fatalf("%s carries %q", v.Domain, got)
+			}
+		}
+	}
+	if GatewayValue(secret, "jellyfin.home.example.net") == GatewayValue(secret, "notes.home.example.net") ||
+		GatewayValue(secret, "Jellyfin.Home.Example.net") != GatewayValue(secret, "jellyfin.home.example.net") {
+		t.Fatal("per-host values")
 	}
 	if !jf.PassHostHeader || jf.RewriteRedirect || jf.Private || jf.Auth.BearerAuth == nil || !jf.Auth.BearerAuth.Enabled {
 		t.Fatalf("jellyfin = %+v", jf)
@@ -530,5 +546,95 @@ func TestCheck(t *testing.T) {
 	c, _ = e.pub.Check(e.ctx, e.in, fakeDNS{}, nil)
 	if !strings.HasPrefix(stepState(c, "token"), "bad") || c.Ready {
 		t.Fatalf("no token = %+v", c.Steps)
+	}
+}
+
+// sso.<base> is published only while the sign-in provider's issuer is
+// exactly https://sso.<base>: with any other issuer the provider doesn't
+// answer there, and the host would be public with nothing behind it.
+func TestSSOPublishedOnlyForItsOwnIssuer(t *testing.T) {
+	for _, tc := range []struct {
+		issuer string
+		want   bool
+	}{
+		{"https://sso.home.example.net", true},
+		{"https://sso.home.example.net/oidc", false},
+		{"https://sso.home.example.net/", false},
+		{"https://sso.home.example.net:8443", false},
+		{"http://sso.home.example.net", false},
+		{"https://nas.home.example.net/oidc", false},
+		{"https://login.example.org", false},
+		{"https://sso.other.example.net", false},
+		{"", false},
+	} {
+		e := newEnv(t)
+		e.issuer = tc.issuer
+		res := e.sync(t)
+		it := item(res, SSOKey)
+		got := byDomain(e.nb, "sso.home.example.net") != nil
+		if got != tc.want || it.Published != tc.want || (!tc.want && (it.Config.Mode != ModeOff || !strings.Contains(it.Error, "issuer"))) {
+			t.Errorf("issuer %q: published %v (%+v)", tc.issuer, got, it)
+		}
+		// Nothing else depends on it.
+		if byDomain(e.nb, "jellyfin.home.example.net") == nil {
+			t.Errorf("issuer %q: apps not published", tc.issuer)
+		}
+	}
+	// No provider at all.
+	e := newEnv(t)
+	e.pub.Issuer = nil
+	if e.sync(t); byDomain(e.nb, "sso.home.example.net") != nil {
+		t.Fatal("sso published without a provider")
+	}
+	// The issuer moving away takes the published host down.
+	e = newEnv(t)
+	e.sync(t)
+	e.issuer = "https://sso.home.example.net/oidc"
+	if res := e.sync(t); res.Deleted != 1 || byDomain(e.nb, "sso.home.example.net") != nil {
+		t.Fatalf("issuer changed: %+v", res)
+	}
+	items, _ := e.pub.Items(e.ctx, e.in)
+	for _, it := range items {
+		if it.Key == SSOKey && it.Config.Mode != ModeOff {
+			t.Fatalf("Items shows sso as %+v", it)
+		}
+	}
+}
+
+func TestRotatingTheGatewaySecretUpdatesEveryService(t *testing.T) {
+	e := newEnv(t)
+	e.sync(t)
+	old, _ := e.st.GatewaySecret(e.ctx)
+	if err := e.st.RotateGatewaySecret(e.ctx); err != nil {
+		t.Fatal(err)
+	}
+	now, _ := e.st.GatewaySecret(e.ctx)
+	if now == old || len(now) != 64 {
+		t.Fatalf("secret %q -> %q", old, now)
+	}
+	if res := e.sync(t); res.Updated != 4 {
+		t.Fatalf("after rotation = %+v", res)
+	}
+	for _, v := range e.nb.ServiceList() {
+		if v.Targets[0].Options.CustomHeaders[GatewayHeader] != GatewayValue(now, v.Domain) {
+			t.Fatalf("%s still has the old value", v.Domain)
+		}
+	}
+}
+
+// The desktop's name is never an app's address, even while the desktop
+// isn't published.
+func TestDesktopNameIsAlwaysReserved(t *testing.T) {
+	e := newEnv(t)
+	if err := e.st.SetConfig(e.ctx, DesktopKey, ServiceConfig{Mode: ModeOff}, nil); err != nil {
+		t.Fatal(err)
+	}
+	e.in.Apps = append(e.in.Apps, App{ID: "nas", Name: "An app called nas"})
+	res := e.sync(t)
+	if it := item(res, AppKey("nas")); it.Published || !strings.Contains(it.Error, "desktop") {
+		t.Fatalf("app nas = %+v", it)
+	}
+	if byDomain(e.nb, "nas.home.example.net") != nil {
+		t.Fatal("an app took the desktop's address")
 	}
 }

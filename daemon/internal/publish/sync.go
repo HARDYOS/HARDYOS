@@ -92,6 +92,11 @@ type Publisher struct {
 	// OnNamesChanged runs after the settings are saved (the sign-in
 	// provider's NamesChanged: its issuer follows the base domain).
 	OnNamesChanged func()
+	// Issuer is HardyOS's sign-in provider's issuer (nil: no provider).
+	// sso.<base> is published only while it is exactly https://sso.<base>:
+	// any other issuer means the provider doesn't answer there, and the
+	// gateway would have nothing to serve on a public host.
+	Issuer func(ctx context.Context) string
 
 	mu sync.Mutex // one sync at a time
 }
@@ -166,15 +171,31 @@ func (p *Publisher) Items(ctx context.Context, in Inputs) ([]Item, error) {
 		return nil, err
 	}
 	var out []Item
-	for _, w := range p.plan(s, rows, in.Apps, in.ShareLinks) {
+	for _, w := range p.plan(s, rows, in.Apps, in.ShareLinks, p.ssoReady(ctx, s)) {
 		out = append(out, w.item)
 	}
 	return out, nil
 }
 
+// SSOIssuerFor is the only issuer sso.<base> is published for.
+func SSOIssuerFor(base string) string { return "https://" + SSOLabel + "." + base }
+
+// ssoReady reports whether the sign-in provider's issuer is exactly
+// https://sso.<base> (no path, no port), so that it answers every request
+// on that host.
+func (p *Publisher) ssoReady(ctx context.Context, s Settings) bool {
+	if p.Issuer == nil || s.BaseDomain == "" {
+		return false
+	}
+	return p.Issuer(ctx) == SSOIssuerFor(s.BaseDomain)
+}
+
+// ssoNotReady is why sso.<base> isn't published while its issuer is another.
+const ssoNotReady = "HardyOS sign-in's issuer isn't https://sso.<base domain> (Control Panel › Sign-in), so this address isn't published"
+
 // plan lists the desktop and every app with what the settings ask for
 // (without the NetBird-side parts of the requests).
-func (p *Publisher) plan(s Settings, rows map[string]*row, apps []App, shareLinks bool) []want {
+func (p *Publisher) plan(s Settings, rows map[string]*row, apps []App, shareLinks, ssoReady bool) []want {
 	mk := func(key, label, name string) want {
 		r := rows[key]
 		it := Item{Key: key, Label: label, Name: name, Config: resolve(key, r, s)}
@@ -192,7 +213,11 @@ func (p *Publisher) plan(s Settings, rows map[string]*row, apps []App, shareLink
 	if !s.PublicShareLinks && !shareLinks {
 		files.item.Config.Mode = ModeOff
 	}
-	out := []want{mk(DesktopKey, s.DesktopName, "Desktop"), mk(SSOKey, SSOLabel, "HardyOS sign-in"), files}
+	sso := mk(SSOKey, SSOLabel, "HardyOS sign-in")
+	if !ssoReady {
+		sso.item.Config.Mode = ModeOff
+	}
+	out := []want{mk(DesktopKey, s.DesktopName, "Desktop"), sso, files}
 	sorted := slices.Clone(apps)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
 	for _, a := range sorted {
@@ -216,7 +241,8 @@ func (p *Publisher) Sync(ctx context.Context, in Inputs) (*Result, error) {
 		return nil, err
 	}
 	res := &Result{}
-	plan := p.plan(s, rows, in.Apps, in.ShareLinks)
+	ssoReady := p.ssoReady(ctx, s)
+	plan := p.plan(s, rows, in.Apps, in.ShareLinks, ssoReady)
 	finish := func(problem string) (*Result, error) {
 		res.Problem = problem
 		for _, w := range plan {
@@ -301,11 +327,16 @@ func (p *Publisher) Sync(ctx context.Context, in Inputs) (*Result, error) {
 			return finish(problem)
 		}
 	}
-	// label -> key; HardyOS's own names are never an app's, even unpublished.
-	taken := map[string]string{SSOLabel: SSOKey, FilesLabel: FilesKey}
+	// label -> key; HardyOS's own names (the desktop's too) are never an
+	// app's, even while they aren't published: an app must not take the
+	// desktop's address while the desktop is off.
+	taken := map[string]string{SSOLabel: SSOKey, FilesLabel: FilesKey, s.DesktopName: DesktopKey}
 	for i := range plan {
 		w := &plan[i]
 		w.item.Error = ""
+		if w.item.Key == SSOKey && !ssoReady && s.Enabled {
+			w.item.Error = ssoNotReady
+		}
 		if !s.Enabled || w.item.Config.Mode == ModeOff {
 			continue
 		}
@@ -421,7 +452,8 @@ func (p *Publisher) request(s Settings, it Item, r *row, peer *netbird.Peer, ip 
 			// The gateway has the desktop's self-signed certificate; the
 			// hop runs inside WireGuard.
 			SkipTLSVerify: true,
-			CustomHeaders: map[string]string{GatewayHeader: secret},
+			// Per service: the gateway checks it against the request's Host.
+			CustomHeaders: map[string]string{GatewayHeader: GatewayValue(secret, it.Domain)},
 		},
 	}
 	req := &netbird.ServiceRequest{

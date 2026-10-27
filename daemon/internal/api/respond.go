@@ -53,6 +53,11 @@ func pathID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 // the address a trusted reverse proxy (Config.TrustedProxies) forwarded.
 // Everything that records or limits by address goes through it.
 func (s *Server) clientIP(r *http.Request) string {
+	if g := gatewayInfo(r); g != nil && g.client != "" {
+		// Through the app gateway: the address NetBird's proxy saw (believed
+		// only after the per-service secret checked out).
+		return g.client
+	}
 	return s.ips.IP(r)
 }
 

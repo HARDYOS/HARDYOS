@@ -199,6 +199,11 @@ function IssuerCard({ status, onChanged }: { status: OidcStatus; onChanged: () =
     onSuccess: onChanged,
     onError: (e) => toast("error", "Couldn't change the setting", errorMessage(e)),
   });
+  const admins = useMutation({
+    mutationFn: (on: boolean) => unwrap(api.PATCH("/oidc", { body: { publicAdmins: on } })),
+    onSuccess: onChanged,
+    onError: (e) => toast("error", "Couldn't change the setting", errorMessage(e)),
+  });
   return (
     <Card title="Issuer" actions={<Button onClick={() => setEditing(true)}>Change</Button>}>
       <div className="stack">
@@ -226,6 +231,13 @@ function IssuerCard({ status, onChanged }: { status: OidcStatus; onChanged: () =
           checked={status.localAccounts}
           disabled={local.isPending}
           onChange={(v) => local.mutate(v)}
+        />
+        <Toggle
+          label="Administrators can sign in through public SSO"
+          description="Off: from the internet (sso.<base domain> through NetBird's proxy) an administrator's sign-in is refused like a wrong password. Sign in at home or over NetBird instead."
+          checked={status.publicAdmins}
+          disabled={admins.isPending}
+          onChange={(v) => admins.mutate(v)}
         />
       </div>
       {editing && <IssuerDialog status={status} onClose={() => setEditing(false)} onChanged={onChanged} />}

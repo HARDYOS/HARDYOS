@@ -252,6 +252,31 @@ describe("PublishEditor", () => {
     expect(calls.find((c) => c.path === "/remote/desktop")?.body).toMatchObject({ mode: "public", confirmPublic: true });
   });
 
+  it("asks before an app goes on the internet with no sign-in at all", async () => {
+    const calls: Call[] = [];
+    serve(calls, joined);
+    renderIn(<PublishEditor item={jellyfin} />);
+    fireEvent.change(screen.getByLabelText("How Jellyfin is published"), { target: { value: "public" } });
+    fireEvent.change(screen.getByLabelText("Sign-in in front"), { target: { value: "none" } });
+    const save = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
+    // HardyOS sign-in still on: no warning.
+    expect(screen.queryByText("Jellyfin open to the internet")).toBeNull();
+    expect(save.disabled).toBe(false);
+    fireEvent.click(screen.getByRole("switch", { name: /Ask for a HardyOS sign-in too/ }));
+    expect(screen.getByText("Jellyfin open to the internet")).toBeTruthy();
+    expect(screen.getByText(/Disabled for Local Addresses/)).toBeTruthy();
+    expect(save.disabled).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: /own sign-in is enough/ }));
+    fireEvent.click(save);
+    await waitFor(() => expect(calls.some((c) => c.path === "/apps/jellyfin/publish")).toBe(true));
+    expect(calls.find((c) => c.path === "/apps/jellyfin/publish")?.body).toMatchObject({
+      mode: "public",
+      auth: "none",
+      hardyosSignIn: false,
+      confirmOpen: true,
+    });
+  });
+
   it("publishes the desktop through its own endpoint", async () => {
     const calls: Call[] = [];
     serve(calls, joined);

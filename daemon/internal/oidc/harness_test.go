@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -119,6 +120,10 @@ type env struct {
 	clock  *clock
 	audits []string
 	amu    sync.Mutex
+	// public makes every request count as from the internet.
+	public atomic.Bool
+	// ended are the users whose desktop sessions EndSessions ended.
+	ended []int64
 }
 
 func newEnv(t *testing.T) *env {
@@ -157,11 +162,18 @@ func newEnv(t *testing.T) *env {
 			}
 			return "", 0, false, false
 		},
+		PublicOrigin: func(*http.Request) bool { return e.public.Load() },
+		EndSessions: func(_ context.Context, id int64) {
+			e.amu.Lock()
+			e.ended = append(e.ended, id)
+			e.amu.Unlock()
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	e.p = p
+	signin.Anchor = p // as hardyd wires it
 	e.srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if p.Owns(r) {
 			p.ServeHTTP(w, r)

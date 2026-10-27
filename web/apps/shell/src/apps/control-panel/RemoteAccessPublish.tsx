@@ -40,13 +40,17 @@ export function PublishEditor({
   const [signin, setSignin] = useState(item.config.hardyosSignIn);
   const [chosen, setChosen] = useState<string[]>(item.config.groups);
   const [understood, setUnderstood] = useState(false);
+  const [openUnderstood, setOpenUnderstood] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const effective = mode === "" ? item.config.mode : mode;
   const desktopPublic = desktop && effective === "public";
+  // Public, nothing in front and no HardyOS sign-in: only the app's own sign-in is left.
+  const wideOpen = !desktop && effective === "public" && auth === "none" && !signin;
   const problem =
     (effective === "public" ? secretProblem(auth, secret, item.config.hasSecret && item.config.auth === auth) : "") ||
-    (desktopPublic && !understood ? "Confirm putting the desktop on the internet" : "");
+    (desktopPublic && !understood ? "Confirm putting the desktop on the internet" : "") ||
+    (wideOpen && !openUnderstood ? `Confirm putting ${item.name} on the internet without a sign-in in front` : "");
   const st = serviceStatus(item.status);
 
   async function save() {
@@ -55,6 +59,7 @@ export function PublishEditor({
     try {
       const body: PublishRequest = { mode, auth, groups: chosen, hardyosSignIn: signin };
       if (desktopPublic) body.confirmPublic = true;
+      if (wideOpen) body.confirmOpen = true;
       if ((auth === "password" || auth === "pin") && secret !== "") body.secret = secret;
       await savePublish(item.key, body);
       setSecret("");
@@ -155,6 +160,18 @@ export function PublishEditor({
           checked={signin}
           onChange={setSignin}
         />
+      )}
+      {wideOpen && (
+        <Alert tone="bad" title={`${item.name} open to the internet`}>
+          Anyone on the internet reaches {item.name} directly: no sign-in in front and no HardyOS sign-in, only the app&apos;s own. Apps that trust
+          local addresses let such visitors straight in, because every request reaches them from this server: for example Sonarr, Radarr and the
+          other *arr apps with Authentication set to &ldquo;Disabled for Local Addresses&rdquo;, or Home Assistant with trusted_networks. Make sure{" "}
+          {item.name} asks everyone for a password.
+          <label className="row small" style={{ gap: 6, marginTop: 8 }}>
+            <input type="checkbox" checked={openUnderstood} onChange={(e) => setOpenUnderstood(e.target.checked)} />
+            I understand: {item.name}&apos;s own sign-in is enough
+          </label>
+        </Alert>
       )}
       {error && <Alert tone="bad">{error}</Alert>}
       <div className="row">

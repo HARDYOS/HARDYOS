@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
+	"github.com/hardyos/hardyos/daemon/internal/oidc"
 )
 
 const (
@@ -33,6 +34,9 @@ const (
 	gatewayClientKey     = "remote-gateway"
 	settingGatewayClient = "remote.gateway_client" // sealed {"id","secret"}
 	gatewaySignInTTL     = 10 * time.Minute
+	// Sign-ins in progress at the gateway, per client address and in all.
+	maxGatewayPendingPerIP = 20
+	maxGatewayPending      = 5000
 )
 
 type gatewayClient struct {
@@ -41,10 +45,12 @@ type gatewayClient struct {
 }
 
 // ensureClient keeps the provider's client for the gateway with one
-// redirect URI per app host that asks for a HardyOS sign-in.
+// redirect URI per app host that asks for a HardyOS sign-in, and none when
+// no app does (stale addresses don't stay redirect URIs). Changes are
+// audited as HardyOS's own.
 func (rt *remoteRuntime) ensureClient(ctx context.Context, hosts []string) {
 	s := rt.s
-	if s.oidc == nil || len(hosts) == 0 {
+	if s.oidc == nil {
 		return
 	}
 	uris := make([]string, 0, len(hosts))
@@ -58,10 +64,32 @@ func (rt *remoteRuntime) ensureClient(ctx context.Context, hosts []string) {
 	if same {
 		return
 	}
+	before, err := s.oidc.Clients.Managed(ctx, gatewayClientKey)
+	if errors.Is(err, oidc.ErrNotFound) {
+		if len(uris) == 0 {
+			return // nothing to keep yet
+		}
+		before = nil
+	} else if err != nil {
+		s.log.Warn("app gateway sign-in client", "err", err)
+		return
+	}
 	id, secret, err := s.oidc.Clients.Ensure(ctx, gatewayClientKey, "HardyOS app gateway", uris, nil)
 	if err != nil {
 		s.log.Warn("app gateway sign-in client", "err", err)
 		return
+	}
+	switch {
+	case before == nil:
+		s.recordSystem(ctx, "oidc.client.create", "HardyOS app gateway ("+id+")", "kept by Remote Access; redirects "+strings.Join(uris, " "))
+	default:
+		old := slices.Clone(before.RedirectURIs)
+		slices.Sort(old)
+		if !slices.Equal(old, uris) {
+			added, removed := diffLists(old, uris)
+			s.recordSystem(ctx, "oidc.client.update", "HardyOS app gateway ("+id+")",
+				"kept by Remote Access; redirects added: "+strings.Join(added, " ")+"; removed: "+strings.Join(removed, " "))
+		}
 	}
 	store := s.cfg.Remote.Store
 	if secret == "" {
@@ -84,6 +112,21 @@ func (rt *remoteRuntime) ensureClient(ctx context.Context, hosts []string) {
 	rt.mu.Lock()
 	rt.client, rt.clientURIs = &gatewayClient{ID: id, Secret: secret}, uris
 	rt.mu.Unlock()
+}
+
+// diffLists says what b has that a hasn't (added) and the other way round.
+func diffLists(a, b []string) (added, removed []string) {
+	for _, x := range b {
+		if !slices.Contains(a, x) {
+			added = append(added, x)
+		}
+	}
+	for _, x := range a {
+		if !slices.Contains(b, x) {
+			removed = append(removed, x)
+		}
+	}
+	return added, removed
 }
 
 func (rt *remoteRuntime) gatewayClient() *gatewayClient {
@@ -112,14 +155,31 @@ func (rt *remoteRuntime) gatewayStart(w http.ResponseWriter, r *http.Request, ro
 	state, verifier, nonce := randomToken(), randomToken(), randomToken()
 	p := s.proxy
 	now := time.Now()
+	ip := s.clientIP(r)
 	p.mu.Lock()
+	pending, mine := 0, 0
 	for k, t := range p.tokens {
 		if now.After(t.expires) {
 			delete(p.tokens, k)
+			continue
+		}
+		if t.gateway {
+			pending++
+			if t.ip == ip {
+				mine++
+			}
 		}
 	}
+	if mine >= maxGatewayPendingPerIP || pending >= maxGatewayPending {
+		// Anyone on the internet can start sign-ins: each is memory for 10
+		// minutes, so there's a ceiling per address and in all.
+		p.mu.Unlock()
+		w.Header().Set("Retry-After", "60")
+		proxyPage(w, http.StatusTooManyRequests, "Too many sign-ins at once", "Wait a minute, then open the app again.")
+		return
+	}
 	p.tokens["st:"+state] = proxyToken{appID: route.appID, next: safeNext(r.URL.RequestURI()), expires: now.Add(gatewaySignInTTL),
-		gateway: true, verifier: verifier, nonce: nonce}
+		gateway: true, verifier: verifier, nonce: nonce, ip: ip}
 	p.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{Name: gatewayStateCookie, Value: state, Path: "/", MaxAge: int(gatewaySignInTTL.Seconds()),
 		HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
@@ -169,7 +229,7 @@ func (rt *remoteRuntime) gatewayCallback(w http.ResponseWriter, r *http.Request,
 		proxyPage(w, http.StatusServiceUnavailable, "HardyOS sign-in isn't ready", "Try again in a minute.")
 		return
 	}
-	sub, err := rt.exchange(r.Context(), cl, q.Get("code"), "https://"+route.host+gatewayCallbackPath, t.verifier, t.nonce)
+	sub, grant, err := rt.exchange(r.Context(), cl, q.Get("code"), "https://"+route.host+gatewayCallbackPath, t.verifier, t.nonce)
 	if err != nil {
 		s.log.Warn("app gateway sign-in", "app", route.appID, "err", err)
 		proxyPage(w, http.StatusForbidden, "Couldn't sign you in", "Open the app again.")
@@ -187,7 +247,7 @@ func (rt *remoteRuntime) gatewayCallback(w http.ResponseWriter, r *http.Request,
 	}
 	key := randomToken()
 	p.mu.Lock()
-	p.sessions[key] = &proxySession{appID: route.appID, userID: u.ID, gateway: true, sso: true,
+	p.sessions[key] = &proxySession{appID: route.appID, userID: u.ID, gateway: true, sso: true, grant: grant,
 		expires: now.Add(proxySessionTTL), checked: now}
 	p.mu.Unlock()
 	s.record(r, u, "apps.open", route.appID, audit.Success, "published address")
@@ -199,21 +259,34 @@ func (rt *remoteRuntime) gatewayCallback(w http.ResponseWriter, r *http.Request,
 
 // exchange swaps a code for tokens at the provider (in-process) and
 // returns the ID token's subject after checking issuer, audience, expiry
-// and nonce. The token comes straight from the provider's handler, not
-// over a network, so its signature needn't be checked here.
-func (rt *remoteRuntime) exchange(ctx context.Context, c *gatewayClient, code, redirect, verifier, nonce string) (string, error) {
+// and nonce, and the access token's id (its jti), which names the grant
+// the gateway session rechecks. The tokens come straight from the
+// provider's handler, not over a network, so signatures needn't be checked
+// here.
+func (rt *remoteRuntime) exchange(ctx context.Context, c *gatewayClient, code, redirect, verifier, nonce string) (string, string, error) {
+	sub, jti, err := rt.exchangeTokens(ctx, c, code, redirect, verifier, nonce)
+	if err != nil {
+		return "", "", err
+	}
+	if jti == "" {
+		return "", "", errors.New("no access token id")
+	}
+	return sub, jti, nil
+}
+
+func (rt *remoteRuntime) exchangeTokens(ctx context.Context, c *gatewayClient, code, redirect, verifier, nonce string) (string, string, error) {
 	if code == "" {
-		return "", errors.New("no code")
+		return "", "", errors.New("no code")
 	}
 	issuer := strings.TrimRight(rt.s.oidc.Issuer(ctx), "/")
 	iu, err := url.Parse(issuer)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {redirect}, "code_verifier": {verifier}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, issuer+"/oauth/token", strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	req.Host, req.RemoteAddr = iu.Host, "127.0.0.1:0"
 	if iu.Scheme == "https" {
@@ -224,19 +297,12 @@ func (rt *remoteRuntime) exchange(ctx context.Context, c *gatewayClient, code, r
 	rec := httptest.NewRecorder()
 	rt.s.oidc.ServeHTTP(rec, req)
 	var tok struct {
-		IDToken string `json:"id_token"`
-		Error   string `json:"error"`
+		IDToken     string `json:"id_token"`
+		AccessToken string `json:"access_token"`
+		Error       string `json:"error"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &tok); err != nil || rec.Code != http.StatusOK || tok.IDToken == "" {
-		return "", errors.New("token exchange failed: " + tok.Error)
-	}
-	parts := strings.Split(tok.IDToken, ".")
-	if len(parts) != 3 {
-		return "", errors.New("malformed ID token")
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "", err
+		return "", "", errors.New("token exchange failed: " + tok.Error)
 	}
 	var claims struct {
 		Iss   string          `json:"iss"`
@@ -245,8 +311,8 @@ func (rt *remoteRuntime) exchange(ctx context.Context, c *gatewayClient, code, r
 		Exp   int64           `json:"exp"`
 		Nonce string          `json:"nonce"`
 	}
-	if err := json.Unmarshal(raw, &claims); err != nil {
-		return "", err
+	if err := jwtPayload(tok.IDToken, &claims); err != nil {
+		return "", "", err
 	}
 	var auds []string
 	if json.Unmarshal(claims.Aud, &auds) != nil {
@@ -256,15 +322,35 @@ func (rt *remoteRuntime) exchange(ctx context.Context, c *gatewayClient, code, r
 	}
 	switch {
 	case strings.TrimRight(claims.Iss, "/") != issuer:
-		return "", errors.New("wrong issuer")
+		return "", "", errors.New("wrong issuer")
 	case !slices.Contains(auds, c.ID):
-		return "", errors.New("wrong audience")
+		return "", "", errors.New("wrong audience")
 	case time.Now().Unix() > claims.Exp:
-		return "", errors.New("expired ID token")
+		return "", "", errors.New("expired ID token")
 	case !sameSecret(claims.Nonce, nonce):
-		return "", errors.New("wrong nonce")
+		return "", "", errors.New("wrong nonce")
 	case claims.Sub == "":
-		return "", errors.New("no subject")
+		return "", "", errors.New("no subject")
 	}
-	return claims.Sub, nil
+	var at struct {
+		JTI string `json:"jti"`
+		Sub string `json:"sub"`
+	}
+	if err := jwtPayload(tok.AccessToken, &at); err != nil || at.Sub != claims.Sub {
+		return "", "", errors.New("malformed access token")
+	}
+	return claims.Sub, at.JTI, nil
+}
+
+// jwtPayload decodes a JWT's claims (no signature check: see exchange).
+func jwtPayload(token string, v any) error {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return errors.New("malformed token")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, v)
 }

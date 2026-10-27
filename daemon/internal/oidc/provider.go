@@ -59,6 +59,7 @@ type Names interface {
 const (
 	settingIssuer        = "oidc.issuer"
 	settingLocalAccounts = "oidc.local_accounts"
+	settingPublicAdmins  = "oidc.public_admins"
 	// Remote Access's names, read by SettingsNames when no Names is
 	// configured.
 	SettingRemoteBase    = "remote.base_domain"
@@ -108,6 +109,17 @@ type Config struct {
 	ClientIP   func(r *http.Request) string
 	Audit      AuditFunc
 	LoginError LoginErrorFunc
+	// PublicOrigin reports whether a request came from the internet (through
+	// the app gateway, for a public service). Such sign-ins count in their
+	// own buckets of PublicLimiter (slowed down, never locked out), so
+	// strangers can't lock anyone out of signing in at home or over
+	// NetBird; every failure looks the same; administrators are refused
+	// unless the "public admins" setting allows them. nil: never public.
+	PublicOrigin  func(r *http.Request) bool
+	PublicLimiter *auth.DelayLimiter
+	// EndSessions ends a person's desktop and app window sessions (their
+	// account row now belongs to another directory object).
+	EndSessions func(ctx context.Context, userID int64)
 	// Insecure allows an http:// issuer (development without TLS).
 	Insecure bool
 	Log      *slog.Logger
@@ -125,6 +137,11 @@ type Provider struct {
 
 	mu       sync.Mutex
 	settings settingsCache
+	// anchorOK: when a person's directory anchor was last confirmed (the
+	// token endpoints look the account up several times per request).
+	anchorOK map[int64]time.Time
+	// pending counts sign-in requests in progress per client address.
+	pending map[string][]time.Time
 }
 
 type settingsCache struct {
@@ -133,6 +150,7 @@ type settingsCache struct {
 	issuerSet     bool
 	derived       string
 	localAccounts bool
+	publicAdmins  bool
 }
 
 // New builds the provider. Run Start to keep the signing keys on schedule.
@@ -145,6 +163,12 @@ func New(cfg Config) (*Provider, error) {
 	}
 	if cfg.Limiter == nil {
 		cfg.Limiter = auth.NewLoginLimiter()
+	}
+	if cfg.PublicLimiter == nil {
+		cfg.PublicLimiter = auth.NewDelayLimiter()
+	}
+	if cfg.PublicOrigin == nil {
+		cfg.PublicOrigin = func(*http.Request) bool { return false }
 	}
 	if cfg.Secrets == nil {
 		cfg.Secrets = secretbox.NewStaticSource()
@@ -161,7 +185,7 @@ func New(cfg Config) (*Provider, error) {
 			return h
 		}
 	}
-	p := &Provider{cfg: cfg, csrfKey: make([]byte, 32)}
+	p := &Provider{cfg: cfg, csrfKey: make([]byte, 32), anchorOK: map[int64]time.Time{}, pending: map[string][]time.Time{}}
 	_, _ = rand.Read(p.csrfKey)
 	p.keys = &keyring{db: cfg.DB, secrets: cfg.Secrets, now: cfg.Now}
 	p.Clients = &Clients{DB: cfg.DB}
@@ -292,9 +316,18 @@ type ctxKey int
 const requestKey ctxKey = 1
 
 // withRequest keeps the request in the context, so storage calls can audit
-// with the client's address.
+// with the client's address and the code exchange can check the client and
+// PKCE before it uses the code up. Posted forms are parsed here (at most
+// 64 KiB), so the copy in the context has them.
 func (p *Provider) withRequest(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+			if err := r.ParseForm(); err != nil {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestKey, r)))
 	})
 }
@@ -318,6 +351,9 @@ func (p *Provider) loadSettings(ctx context.Context) settingsCache {
 	}
 	if v, err := p.cfg.DB.GetSetting(ctx, settingLocalAccounts); err == nil {
 		s.localAccounts = v == "true"
+	}
+	if v, err := p.cfg.DB.GetSetting(ctx, settingPublicAdmins); err == nil {
+		s.publicAdmins = v == "true"
 	}
 	// Every request to hardyd asks whether it's the provider's: the derived
 	// issuer is cached with the settings rather than read each time.
@@ -375,6 +411,10 @@ type Settings struct {
 	DerivedIssuer string `json:"derivedIssuer"`
 	Discovery     string `json:"discovery"`
 	LocalAccounts bool   `json:"localAccounts"`
+	// PublicAdmins: administrators may sign in through HardyOS sign-in
+	// from the internet (off by default: from a public address they get the
+	// same answer as a wrong password).
+	PublicAdmins bool `json:"publicAdmins"`
 }
 
 // GetSettings returns the settings.
@@ -382,8 +422,11 @@ func (p *Provider) GetSettings(ctx context.Context) Settings {
 	s := p.loadSettings(ctx)
 	iss := p.Issuer(ctx)
 	return Settings{Issuer: iss, IssuerChosen: s.issuerSet, DerivedIssuer: p.DerivedIssuer(ctx),
-		Discovery: iss + oidc.DiscoveryEndpoint, LocalAccounts: s.localAccounts}
+		Discovery: iss + oidc.DiscoveryEndpoint, LocalAccounts: s.localAccounts, PublicAdmins: s.publicAdmins}
 }
+
+// LocalAccounts reports whether HardyOS's own accounts may sign in to apps.
+func (p *Provider) LocalAccounts(ctx context.Context) bool { return p.loadSettings(ctx).localAccounts }
 
 // SetIssuer chooses the issuer ("" goes back to the derived one).
 func (p *Provider) SetIssuer(ctx context.Context, issuer string) error {
@@ -391,6 +434,14 @@ func (p *Provider) SetIssuer(ctx context.Context, issuer string) error {
 	if issuer != "" {
 		if err := checkIssuer(issuer, p.cfg.Insecure); err != nil {
 			return err
+		}
+		// sso.<base> is the provider's own host, published publicly with
+		// nothing in front: the provider must own all of it, so the issuer
+		// there has no path.
+		if base, _ := p.cfg.Names.PublicNames(ctx); base != "" {
+			if u, _ := url.Parse(issuer); u != nil && strings.EqualFold(u.Hostname(), "sso."+base) && u.Path != "" {
+				return &ValidationError{Problems: []string{"on sso." + base + " the issuer is https://sso." + base + " without a path"}}
+			}
 		}
 	}
 	defer p.dropSettings()
@@ -401,6 +452,19 @@ func (p *Provider) SetIssuer(ctx context.Context, issuer string) error {
 func (p *Provider) SetLocalAccounts(ctx context.Context, on bool) error {
 	defer p.dropSettings()
 	return p.cfg.DB.SetSetting(ctx, settingLocalAccounts, fmt.Sprint(on))
+}
+
+// SetPublicAdmins lets administrators sign in through HardyOS sign-in from
+// the internet.
+func (p *Provider) SetPublicAdmins(ctx context.Context, on bool) error {
+	defer p.dropSettings()
+	return p.cfg.DB.SetSetting(ctx, settingPublicAdmins, fmt.Sprint(on))
+}
+
+// adminRefused: an administrator signing in from the internet while that
+// isn't allowed.
+func (p *Provider) adminRefused(r *http.Request, u *auth.User) bool {
+	return u != nil && u.IsAdmin() && p.cfg.PublicOrigin(r) && !p.loadSettings(r.Context()).publicAdmins
 }
 
 func checkIssuer(s string, insecure bool) error {
@@ -509,5 +573,34 @@ func (p *Provider) RevokeClient(ctx context.Context, clientID string) (int64, er
 // hold for them (password changed or reset, account turned off).
 func (p *Provider) EndUser(ctx context.Context, userID int64) {
 	_, _ = p.cfg.DB.ExecContext(ctx, `DELETE FROM oidc_browser_sessions WHERE user_id = ?`, userID)
-	_, _ = p.cfg.DB.ExecContext(ctx, `UPDATE oidc_grants SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL`, store.FormatTime(p.now()), userID)
+	_, _ = revokeWhere(ctx, p.cfg.DB, p.now(), `user_id = ?`, userID)
+}
+
+// PasswordSet ends what a person signed in to with a password older than
+// at (the directory's pwdLastSet: a password changed on a computer in the
+// domain, which HardyOS doesn't otherwise hear of): the provider's sign-in
+// sessions and the grants (and tokens) made before it. It reports how many
+// sessions and grants ended.
+func (p *Provider) PasswordSet(ctx context.Context, userID int64, at time.Time) int64 {
+	ts := store.FormatTime(at)
+	var n int64
+	if res, err := p.cfg.DB.ExecContext(ctx, `DELETE FROM oidc_browser_sessions WHERE user_id = ? AND auth_time < ?`, userID, ts); err == nil {
+		n, _ = res.RowsAffected()
+	}
+	g, _ := revokeWhere(ctx, p.cfg.DB, p.now(), `user_id = ? AND created_at < ?`, userID, ts)
+	return n + g
+}
+
+// GrantActive reports whether the sign-in behind an access token this
+// provider issued (its jti) is still in force: not revoked (an
+// administrator, sign-out, a new password, the account replaced) and not
+// past the grant's end. The token's own 15 minutes don't matter here: the
+// app gateway checks its sessions against the grant every 30 seconds.
+func (p *Provider) GrantActive(ctx context.Context, accessTokenID string) bool {
+	var grantID string
+	if err := p.cfg.DB.QueryRowContext(ctx, `SELECT grant_id FROM oidc_access_tokens WHERE id = ?`, accessTokenID).Scan(&grantID); err != nil {
+		return false
+	}
+	g, err := p.storage().loadGrant(ctx, `id = ?`, grantID)
+	return err == nil && !g.Revoked && p.now().Before(g.ExpiresAt)
 }

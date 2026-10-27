@@ -74,11 +74,15 @@ func (d *privDirectory) Account(ctx context.Context, username string) (*auth.Dom
 		}
 		return nil, err
 	}
-	return &auth.DomainAccount{
+	a := &auth.DomainAccount{
 		Exists: g.Exists, Username: g.Username, DisplayName: g.DisplayName, Email: g.Email,
 		Enabled: g.Enabled, LockedOut: g.LockedOut, Expired: g.Expired, Groups: g.Groups,
 		DomainSID: g.DomainSID, GroupSIDs: g.GroupSIDs, SID: g.SID, ObjectGUID: g.ObjectGUID,
-	}, nil
+	}
+	if g.PwdLastSet > 0 {
+		a.PasswordSetAt = time.Unix(g.PwdLastSet, 0).UTC()
+	}
+	return a, nil
 }
 
 // domainSignInAvailable reports whether the sign-in page should mention

@@ -10,8 +10,49 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 )
 
-// SessionCookie is the name of the browser session cookie.
-const SessionCookie = "hardyos_session"
+// Desktop session cookies. Over HTTPS the cookie is __Host-hardyos_session:
+// a browser takes a __Host- cookie only Secure, Path=/ and without Domain
+// from the very host, so a page on a sibling subdomain (any published app
+// at <app>.<base>) can neither set nor overwrite it. Over plain HTTP
+// (development) browsers refuse __Host- cookies, so the old name is used.
+//
+// Migration: for one release a desktop reached over HTTPS still accepts a
+// session under the old name, except on published hosts (anything the app
+// gateway serves), where the old name is never read: a sibling app could
+// have planted it. A new sign-in sets the new name and expires the old one.
+// TODO(next release): stop reading LegacySessionCookie over HTTPS.
+const (
+	SessionCookie       = "__Host-hardyos_session"
+	LegacySessionCookie = "hardyos_session"
+)
+
+// sessionCookieName is the name the desktop's session cookie has on r.
+func (s *Server) sessionCookieName(r *http.Request) string {
+	if r.TLS != nil {
+		return SessionCookie
+	}
+	return LegacySessionCookie
+}
+
+// sessionToken is the desktop session token a request carries, if any.
+func (s *Server) sessionToken(r *http.Request) (string, bool) {
+	if r.TLS == nil {
+		if c, err := r.Cookie(LegacySessionCookie); err == nil {
+			return c.Value, true
+		}
+		return "", false
+	}
+	if c, err := r.Cookie(SessionCookie); err == nil {
+		return c.Value, true
+	}
+	if viaGateway(r) || s.remote.publishedHost(r.Host) {
+		return "", false
+	}
+	if c, err := r.Cookie(LegacySessionCookie); err == nil {
+		return c.Value, true
+	}
+	return "", false
+}
 
 type ctxKey int
 
@@ -49,12 +90,12 @@ func (s *Server) admin(h authedHandler) http.Handler {
 }
 
 func (s *Server) currentUser(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
-	c, err := r.Cookie(SessionCookie)
-	if err != nil {
+	token, ok := s.sessionToken(r)
+	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthenticated", "sign in required")
 		return nil, false
 	}
-	info, err := s.sessions.Validate(r.Context(), c.Value)
+	info, err := s.sessions.Validate(r.Context(), token)
 	if errors.Is(err, auth.ErrNoSession) {
 		s.clearCookie(w, r)
 		writeError(w, http.StatusUnauthorized, "unauthenticated", "session expired; sign in again")
@@ -64,7 +105,7 @@ func (s *Server) currentUser(w http.ResponseWriter, r *http.Request) (*auth.User
 		internalError(s, w, err)
 		return nil, false
 	}
-	u, err := s.sessionUser(r, c.Value, info.UserID)
+	u, err := s.sessionUser(r, token, info.UserID)
 	if err != nil {
 		s.clearCookie(w, r)
 		writeError(w, http.StatusUnauthorized, "unauthenticated", "account unavailable")
@@ -92,9 +133,12 @@ func (s *Server) sessionUser(r *http.Request, token string, userID int64) (*auth
 	if u.Source == auth.SourceDomain {
 		nu, err := s.signin.Refresh(ctx, u)
 		if errors.Is(err, auth.ErrAccountGone) {
-			_ = s.sessions.RevokeUser(ctx, u.ID)
-			s.endOIDCUser(ctx, u.ID)
-			s.record(r, u, "auth.session.end", u.Username, audit.Success, "the domain account was deleted, turned off or expired")
+			s.endUserEverywhere(ctx, u.ID)
+			why := "the domain account was deleted, turned off or expired"
+			if errors.Is(err, auth.ErrAccountReplaced) {
+				why = "the name now belongs to another domain account"
+			}
+			s.record(r, u, "auth.session.end", u.Username, audit.Success, why)
 			return nil, err
 		}
 		if err != nil {
@@ -108,7 +152,7 @@ func (s *Server) sessionUser(r *http.Request, token string, userID int64) (*auth
 
 func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string, expires time.Time) {
 	http.SetCookie(w, &http.Cookie{
-		Name:     SessionCookie,
+		Name:     s.sessionCookieName(r),
 		Value:    token,
 		Path:     "/",
 		Expires:  expires.Add(auth.MaxLifetime - auth.IdleTimeout), // server enforces the real expiry
@@ -116,17 +160,39 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token 
 		Secure:   r.TLS != nil || !s.cfg.Insecure,
 		SameSite: http.SameSiteStrictMode,
 	})
+	if r.TLS != nil {
+		// The old name goes (migration).
+		http.SetCookie(w, &http.Cookie{Name: LegacySessionCookie, Value: "", Path: "/", MaxAge: -1,
+			HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
+	}
 }
 
 func (s *Server) clearCookie(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
-		Name: SessionCookie, Value: "", Path: "/", MaxAge: -1,
-		HttpOnly: true, Secure: r.TLS != nil || !s.cfg.Insecure, SameSite: http.SameSiteStrictMode,
-	})
+	names := []string{LegacySessionCookie}
+	if r.TLS != nil {
+		names = append(names, SessionCookie)
+	}
+	for _, n := range names {
+		http.SetCookie(w, &http.Cookie{
+			Name: n, Value: "", Path: "/", MaxAge: -1,
+			HttpOnly: true, Secure: r.TLS != nil || !s.cfg.Insecure, SameSite: http.SameSiteStrictMode,
+		})
+	}
+}
+
+// endUserEverywhere ends every session a person has: desktop, app windows,
+// published apps, HardyOS sign-in and the tokens apps hold.
+func (s *Server) endUserEverywhere(ctx context.Context, id int64) {
+	if s.sessions != nil {
+		_ = s.sessions.RevokeUser(ctx, id)
+	}
+	s.proxy.endUser(id)
+	s.endOIDCUser(ctx, id)
 }
 
 // record writes an audit entry, logging (not failing) if the write fails.
 func (s *Server) record(r *http.Request, u *auth.User, action, target string, outcome audit.Outcome, detail string) {
+	// clientIP: through the app gateway, the address NetBird's proxy saw.
 	e := audit.Entry{Action: action, Target: target, Outcome: outcome, Detail: detail, IP: s.clientIP(r), Actor: "anonymous"}
 	if u != nil {
 		id := u.ID

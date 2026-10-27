@@ -141,11 +141,8 @@ func (a *API) do(ctx context.Context, method, path string, in, out any) error {
 			Message string `json:"message"`
 		}
 		_ = json.Unmarshal(raw, &e)
-		msg := e.Message
-		if len(msg) > 300 {
-			msg = msg[:300] + "…"
-		}
-		return &APIError{Status: res.StatusCode, Message: msg}
+		// NetBird's words reach Control Panel: keep them short and printable.
+		return &APIError{Status: res.StatusCode, Message: Clip(e.Message, 200)}
 	}
 	if out == nil || len(bytes.TrimSpace(raw)) == 0 {
 		return nil

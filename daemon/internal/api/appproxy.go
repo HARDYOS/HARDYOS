@@ -61,6 +61,7 @@ import (
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/apps"
+	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 )
@@ -128,6 +129,8 @@ type proxyToken struct {
 	gateway  bool
 	verifier string
 	nonce    string
+	// ip started the sign-in (gateway: bounded per address).
+	ip string
 }
 
 type proxySession struct {
@@ -140,6 +143,10 @@ type proxySession struct {
 	// through HardyOS's sign-in provider (sso: no desktop session behind it).
 	gateway bool
 	sso     bool
+	// grant is the provider's access token id (jti) the sign-in got: the
+	// session lasts while its grant does (revoked by an administrator,
+	// signing out of HardyOS sign-in, a new password, the account replaced).
+	grant string
 	// conns are the session's hijacked connections (WebSockets).
 	conns map[*trackedConn]struct{}
 }
@@ -573,12 +580,7 @@ func headerHasToken(h http.Header, key, token string) bool {
 
 // desktopCookie is the desktop session cookie the browser sent (it reaches
 // every port on the host).
-func desktopCookie(r *http.Request) string {
-	if c, err := r.Cookie(SessionCookie); err == nil {
-		return c.Value
-	}
-	return ""
-}
+func desktopCookie(r *http.Request) string { return anySessionCookie(r) }
 
 func sameSecret(a, b string) bool {
 	return a != "" && len(a) == len(b) && subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
@@ -680,6 +682,12 @@ func (p *appProxy) verify(r *http.Request, ss *proxySession) bool {
 		// desktop's domain refresh) and the app's access list.
 		u, err := s.sessionUser(r, "", ss.userID)
 		if err != nil {
+			return false
+		}
+		// The provider's rules still hold: local accounts only while they
+		// may use HardyOS sign-in, and the sign-in itself not revoked.
+		if s.oidc == nil || (u.IdentitySource() != auth.SourceDomain && !s.oidc.LocalAccounts(ctx)) ||
+			ss.grant == "" || !s.oidc.GrantActive(ctx, ss.grant) {
 			return false
 		}
 		if may, err := s.mayUse(ctx, "", u, ss.appID); err != nil || !may {

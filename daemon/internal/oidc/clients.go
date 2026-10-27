@@ -151,7 +151,7 @@ func (c *Clients) Create(ctx context.Context, spec ClientSpec) (*Client, string,
 }
 
 func (c *Clients) create(ctx context.Context, spec ClientSpec, managedBy string) (*Client, string, error) {
-	spec, err := normalize(spec)
+	spec, err := normalize(spec, managedBy != "")
 	if err != nil {
 		return nil, "", err
 	}
@@ -186,7 +186,7 @@ func (c *Clients) Update(ctx context.Context, id string, spec ClientSpec) (*Clie
 }
 
 func (c *Clients) update(ctx context.Context, cur *Client, spec ClientSpec) (*Client, string, error) {
-	spec, err := normalize(spec)
+	spec, err := normalize(spec, cur.ManagedBy != "")
 	if err != nil {
 		return nil, "", err
 	}
@@ -285,6 +285,12 @@ func (c *Clients) Ensure(ctx context.Context, key, name string, redirectURIs, gr
 	return cur.ID, "", nil
 }
 
+// Managed returns the client kept with Ensure under key (ErrNotFound when
+// there's none).
+func (c *Clients) Managed(ctx context.Context, key string) (*Client, error) {
+	return scanClient(c.DB.QueryRowContext(ctx, `SELECT `+clientCols+` FROM oidc_clients WHERE managed_by = ?`, key))
+}
+
 // EnsuredSecret gives a client kept with Ensure a new secret (for when the
 // caller lost the first one).
 func (c *Clients) EnsuredSecret(ctx context.Context, key string) (clientID, secret string, err error) {
@@ -356,8 +362,14 @@ func boolInt(b bool) int {
 
 var groupRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,14}\\[^\\/:*?"<>|\x00-\x1f]{1,64}$`)
 
-// normalize checks a spec and returns it cleaned up.
-func normalize(s ClientSpec) (ClientSpec, error) {
+// maxManagedURIs bounds a client HardyOS keeps itself (one redirect URI per
+// published app at the app gateway).
+const maxManagedURIs = 1000
+
+// normalize checks a spec and returns it cleaned up. A managed client (kept
+// with Ensure) may have more than 20 redirect URIs (one per published app)
+// and none at all (no app asks for HardyOS sign-in: it then signs nobody in).
+func normalize(s ClientSpec, managed bool) (ClientSpec, error) {
 	var problems []string
 	s.Name = strings.TrimSpace(s.Name)
 	if s.Name == "" || utf8.RuneCountInString(s.Name) > 64 {
@@ -369,11 +381,15 @@ func normalize(s ClientSpec) (ClientSpec, error) {
 	if s.Kind != KindConfidential && s.Kind != KindPublic {
 		problems = append(problems, "kind must be confidential or public")
 	}
-	s.RedirectURIs, problems = cleanURIs(s.RedirectURIs, "redirect URI", s.Kind, problems)
-	if len(s.RedirectURIs) == 0 {
+	limit := 20
+	if managed {
+		limit = maxManagedURIs
+	}
+	s.RedirectURIs, problems = cleanURIs(s.RedirectURIs, "redirect URI", s.Kind, limit, problems)
+	if len(s.RedirectURIs) == 0 && !managed {
 		problems = append(problems, "add at least one redirect URI")
 	}
-	s.PostLogoutRedirectURIs, problems = cleanURIs(s.PostLogoutRedirectURIs, "sign-out redirect URI", s.Kind, problems)
+	s.PostLogoutRedirectURIs, problems = cleanURIs(s.PostLogoutRedirectURIs, "sign-out redirect URI", s.Kind, 20, problems)
 	groups := []string{}
 	for _, g := range s.AllowedGroups {
 		g = strings.TrimSpace(g)
@@ -402,9 +418,10 @@ func normalize(s ClientSpec) (ClientSpec, error) {
 }
 
 // cleanURIs validates redirect URIs: absolute, no fragment, no user info,
-// HTTPS (plain HTTP only to this computer, for CLIs), at most 20, at most
-// 1000 characters. They're stored exactly as written and matched exactly.
-func cleanURIs(in []string, what, kind string, problems []string) ([]string, []string) {
+// HTTPS (plain HTTP only to this computer, for CLIs), at most limit, at
+// most 1000 characters. They're stored exactly as written and matched
+// exactly.
+func cleanURIs(in []string, what, kind string, limit int, problems []string) ([]string, []string) {
 	out := []string{}
 	for _, raw := range in {
 		raw = strings.TrimSpace(raw)
@@ -419,8 +436,8 @@ func cleanURIs(in []string, what, kind string, problems []string) ([]string, []s
 			out = append(out, raw)
 		}
 	}
-	if len(out) > 20 {
-		problems = append(problems, fmt.Sprintf("at most 20 of each kind of %s", what))
+	if len(out) > limit {
+		problems = append(problems, fmt.Sprintf("at most %d of each kind of %s", limit, what))
 	}
 	return out, problems
 }

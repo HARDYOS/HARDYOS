@@ -35,6 +35,7 @@ const (
 	JobKindRemoteService  = "remote.service"
 	JobKindRemoteSync     = "remote.sync"
 	JobKindRemoteDomain   = "remote.domain"
+	JobKindRemoteRotate   = "remote.gateway.rotate"
 )
 
 // remoteInputs asks the root helper for this server's NetBird state and
@@ -174,6 +175,11 @@ func RegisterRemoteJobs(m *jobs.Manager, pc *priv.Client, pub *publish.Publisher
 				s.Enabled = false
 				_, _ = pub.SaveSettings(jc, s)
 			}
+			// Whatever NetBird (or anyone who read its services) still holds
+			// stops opening the gateway.
+			if err := pub.Store.RotateGatewaySecret(jc); err != nil {
+				notes = append(notes, "couldn't replace the gateway secret: "+err.Error())
+			}
 		}
 		jc.Progress(60, "Leaving the NetBird network")
 		ctx, cancel := context.WithTimeout(jc, 2*time.Minute)
@@ -208,7 +214,26 @@ func RegisterRemoteJobs(m *jobs.Manager, pc *priv.Client, pub *publish.Publisher
 				return nil, err
 			}
 		}
+		before, _ := pub.Store.Load(jc)
 		if _, err := pub.SaveSettings(jc, p.Settings); err != nil {
+			return nil, err
+		}
+		res, err := sync(jc)
+		if err == nil && before.Enabled && !p.Settings.Enabled {
+			// Publishing turned off: the services are gone, and so is the
+			// secret they carried.
+			if rerr := pub.Store.RotateGatewaySecret(jc); rerr != nil {
+				return nil, rerr
+			}
+		}
+		return res, err
+	}})
+	m.Register(jobs.Kind{Name: JobKindRemoteRotate, AdminOnly: true, LockKey: lock, Run: func(jc *jobs.Context) (any, error) {
+		if pub == nil {
+			return nil, errors.New("publishing isn't available")
+		}
+		jc.Progress(20, "Making a new gateway secret")
+		if err := pub.Store.RotateGatewaySecret(jc); err != nil {
 			return nil, err
 		}
 		return sync(jc)
@@ -274,6 +299,7 @@ func (s *Server) remoteRoutes() {
 	m.Handle("GET /api/v1/remote/check", s.admin(s.handleRemoteCheck))
 	m.Handle("POST /api/v1/remote/domain", s.admin(s.handleRemoteDomain))
 	m.Handle("POST /api/v1/remote/sync", s.admin(s.handleRemoteSync))
+	m.Handle("POST /api/v1/remote/gateway/rotate", s.admin(s.handleRemoteRotate))
 	m.Handle("PUT /api/v1/remote/desktop", s.admin(s.handleRemoteService))
 	m.Handle("GET /api/v1/apps/{id}/publish", s.admin(s.handleAppPublish))
 	m.Handle("PUT /api/v1/apps/{id}/publish", s.admin(s.handleRemoteService))
@@ -468,8 +494,22 @@ func (s *Server) handleRemotePublishing(w http.ResponseWriter, r *http.Request, 
 	} else if set.Enabled && !pub.Store.HasToken(r.Context()) {
 		writeError(w, http.StatusBadRequest, "invalid", "paste a NetBird access token to publish apps")
 		return
+	} else if pub.Store.HasToken(r.Context()) && apiAddress(set.APIURL) != apiAddress(cur.APIURL) {
+		// The saved token must never be sent to an address it wasn't pasted
+		// for.
+		writeError(w, http.StatusBadRequest, "token_required", "paste the NetBird access token again when changing NetBird's API address")
+		return
 	}
 	s.submit(w, r, u, JobKindRemoteSettings, "Save the publishing settings", p, "remote.publishing", detail, nil)
+}
+
+// apiAddress is a NetBird API address as compared for "did it change"
+// ("" is the joined management server).
+func apiAddress(s string) string {
+	if n, err := netbird.NormalizeBaseURL(s); err == nil {
+		return strings.ToLower(n)
+	}
+	return strings.ToLower(strings.TrimSpace(s))
 }
 
 func boolWord(b bool) string {
@@ -529,6 +569,16 @@ func (s *Server) handleRemoteSync(w http.ResponseWriter, r *http.Request, u *aut
 	s.submit(w, r, u, JobKindRemoteSync, "Update NetBird's services", struct{}{}, "remote.sync", "", nil)
 }
 
+// handleRemoteRotate makes a new gateway secret and puts the new values in
+// every service (for when a NetBird administrator, or anyone who could read
+// the services, shouldn't hold the old ones).
+func (s *Server) handleRemoteRotate(w http.ResponseWriter, r *http.Request, u *auth.User) {
+	if _, ok := s.remoteAvailable(w); !ok {
+		return
+	}
+	s.submit(w, r, u, JobKindRemoteRotate, "Replace the gateway secret", struct{}{}, "remote.gateway.rotate", "every service's gateway value replaced", nil)
+}
+
 // PublishRequest is how the desktop or an app is published. Secret (a
 // password or PIN): absent keeps the saved one.
 type PublishRequest struct {
@@ -540,6 +590,10 @@ type PublishRequest struct {
 	// ConfirmPublic must be true to publish the desktop publicly: it has
 	// administration in it.
 	ConfirmPublic bool `json:"confirmPublic,omitempty"`
+	// ConfirmOpen must be true to publish an app publicly with nothing in
+	// front and HardyOS sign-in off: anyone on the internet reaches the
+	// app's own page.
+	ConfirmOpen bool `json:"confirmOpen,omitempty"`
 }
 
 func (s *Server) handleRemoteService(w http.ResponseWriter, r *http.Request, u *auth.User) {
@@ -574,6 +628,19 @@ func (s *Server) handleRemoteService(w http.ResponseWriter, r *http.Request, u *
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
+	if key != publish.DesktopKey && req.Auth == publish.AuthNone && !req.HardyOSSignIn && !req.ConfirmOpen {
+		mode := req.Mode
+		if mode == "" {
+			if set, err := s.cfg.Remote.Store.Load(r.Context()); err == nil {
+				mode = set.DefaultMode
+			}
+		}
+		if mode == publish.ModePublic {
+			writeError(w, http.StatusBadRequest, "confirm_required",
+				what+" would be on the internet with no sign-in in front and HardyOS sign-in off: confirm (confirmOpen) that its own sign-in is enough")
+			return
+		}
+	}
 	p := remoteServiceParams{Key: key, Mode: req.Mode, Auth: req.Auth, Groups: nonNilStrings(req.Groups), HardyOSSignIn: req.HardyOSSignIn}
 	if req.Secret != nil {
 		p.SecretChange = true
@@ -588,6 +655,9 @@ func (s *Server) handleRemoteService(w http.ResponseWriter, r *http.Request, u *
 	detail := key + " mode=" + mode + " auth=" + req.Auth
 	if key != publish.DesktopKey && !req.HardyOSSignIn {
 		detail += " hardyosSignIn=off"
+	}
+	if req.ConfirmOpen {
+		detail += " confirmedOpen"
 	}
 	s.submit(w, r, u, JobKindRemoteService, "Publish "+what, p, "remote.publish", detail, nil)
 }

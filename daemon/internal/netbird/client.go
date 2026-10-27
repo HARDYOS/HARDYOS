@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 )
@@ -246,12 +247,37 @@ func ParseStatus(raw []byte, st *ClientStatus) error {
 	return nil
 }
 
-func clip(s string) string {
-	s = strings.TrimSpace(s)
-	if len(s) > 300 {
-		return s[:300] + "…"
+func clip(s string) string { return Clip(s, 300) }
+
+// Clip makes text that came from NetBird (an error message, a status line)
+// safe to show: control characters become spaces, runs of spaces one, and
+// at most n bytes are kept (on a rune boundary), with … when cut.
+func Clip(s string, n int) string {
+	var b strings.Builder
+	space := false
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || r == ' ' || r == ' ' || r == utf8.RuneError {
+			r = ' '
+		}
+		if r == ' ' {
+			if space {
+				continue
+			}
+			space = true
+		} else {
+			space = false
+		}
+		b.WriteRune(r)
 	}
-	return s
+	out := strings.TrimSpace(b.String())
+	if len(out) <= n {
+		return out
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(out[cut]) {
+		cut--
+	}
+	return strings.TrimSpace(out[:cut]) + "…"
 }
 
 func (m *Manager) installed() bool {
@@ -423,8 +449,7 @@ func (m *Manager) Join(ctx context.Context, a JoinArgs) (*ClientStatus, error) {
 	}
 	upCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	res, err := sysexec.RunEnv(upCtx, m.Runner, []string{"NB_SETUP_KEY=" + a.SetupKey}, nil,
-		"netbird", "up", "--management-url", mgmt, "--hostname", host)
+	res, err := sysexec.RunEnv(upCtx, m.Runner, []string{"NB_SETUP_KEY=" + a.SetupKey}, nil, "netbird", UpArgs(mgmt, host)...)
 	if err == nil && res.ExitCode != 0 {
 		msg := clip(strings.ReplaceAll(string(res.Stderr)+" "+string(res.Stdout), a.SetupKey, "…"))
 		err = errors.New("NetBird refused to join: " + msg)
@@ -438,6 +463,27 @@ func (m *Manager) Join(ctx context.Context, a JoinArgs) (*ClientStatus, error) {
 		return nil, err
 	}
 	return m.Status(ctx)
+}
+
+// UpArgs is `netbird up`'s command line. Besides the management server and
+// the name, it refuses what NetBird's management server would push to this
+// peer and that would change the server's own networking (flag names as in
+// NetBird 0.81.5, client/cmd/system.go; the daemon keeps them in its
+// profile, so they survive restarts):
+//
+//   - --disable-client-routes: no routes from NetBird (a network route or
+//     exit node set in NetBird's dashboard could otherwise send this
+//     server's traffic, the LAN's included, through another peer);
+//   - --disable-server-routes: this server never routes for other peers
+//     (it isn't a gateway into the home network);
+//   - --disable-dns: NetBird doesn't take over the server's resolver (the
+//     domain controller and the setup check rely on it).
+//
+// Inbound connections stay allowed: NetBird's reverse proxy must reach
+// the app gateway on port 44200 (NetBird's policies decide which peers can).
+func UpArgs(managementURL, hostname string) []string {
+	return []string{"up", "--management-url", managementURL, "--hostname", hostname,
+		"--disable-client-routes", "--disable-server-routes", "--disable-dns"}
 }
 
 // Leave signs this server out of NetBird (deleting it as a peer when the

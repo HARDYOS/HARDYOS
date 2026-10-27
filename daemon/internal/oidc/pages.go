@@ -44,9 +44,28 @@ const pageCSP = "default-src 'none'; style-src 'self'; img-src 'self'; font-src 
 const (
 	cookieBrowser = "hardyos_oidc_b"
 	cookieSession = "hardyos_sso"
-	// desktopCookie is the desktop's session cookie (api.SessionCookie).
-	desktopCookie = "hardyos_session"
+	// desktopCookie is the desktop's session cookie over HTTPS
+	// (api.SessionCookie); desktopCookieLegacy its name over plain HTTP and
+	// before decision 142 (api.LegacySessionCookie).
+	desktopCookie       = "__Host-hardyos_session"
+	desktopCookieLegacy = "hardyos_session"
 )
+
+// hasDesktopCookie reports whether the request carries the desktop's
+// session cookie under either name.
+func hasDesktopCookie(r *http.Request) bool {
+	for _, n := range []string{desktopCookie, desktopCookieLegacy} {
+		if _, err := r.Cookie(n); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// uniformFailure is the one answer to every failed sign-in from the
+// internet: it doesn't say whether the name exists, is turned off, locked,
+// an administrator's or a local account.
+const uniformFailure = "Incorrect username or password."
 
 func (p *Provider) cookieName(base string) string {
 	if p.cfg.Insecure {
@@ -354,7 +373,7 @@ func (p *Provider) loginPage(w http.ResponseWriter, r *http.Request, base string
 	// the page once from here does, so someone signed in to the desktop
 	// isn't asked for their password again.
 	if base != "" && r.URL.Query().Get("b") == "" && r.Header.Get("Sec-Fetch-Site") == "cross-site" {
-		if _, err := r.Cookie(desktopCookie); err != nil {
+		if !hasDesktopCookie(r) {
 			again := base + "/login?" + url.Values{"id": {a.ID}, "b": {"1"}}.Encode()
 			p.render(w, http.StatusOK, &page{Kind: "bounce", Base: base, Title: "Signing in", Refresh: again, Link: again})
 			return
@@ -375,12 +394,12 @@ func loginHint(h string) string {
 // HardyOS sign-in, or to the desktop when the provider is on its host.
 func (p *Provider) existingSession(r *http.Request, base string) (*auth.User, time.Time, string, bool) {
 	local := p.loadSettings(r.Context()).localAccounts
-	if u, t, ok := p.sessionUser(r); ok && (u.IdentitySource() == auth.SourceDomain || local) {
+	if u, t, ok := p.sessionUser(r); ok && (u.IdentitySource() == auth.SourceDomain || local) && !p.adminRefused(r, u) {
 		return u, t, "existing HardyOS sign-in", true
 	}
 	if base != "" && p.cfg.DesktopUser != nil {
 		if u, t, ok := p.cfg.DesktopUser(r); ok {
-			if u.IdentitySource() == auth.SourceDomain || local {
+			if (u.IdentitySource() == auth.SourceDomain || local) && !p.adminRefused(r, u) {
 				return u, t, "desktop session", true
 			}
 		}
@@ -437,12 +456,24 @@ func (p *Provider) loginPost(w http.ResponseWriter, r *http.Request, base string
 	ip := p.cfg.ClientIP(r)
 	ctx := r.Context()
 	userKey := p.cfg.SignIn.LimitKey(ctx, name)
-	for _, key := range []string{"ip:" + ip, userKey} {
-		if ok, wait := p.cfg.Limiter.Allowed(key); !ok {
-			mins := int(math.Ceil(wait.Minutes()))
+	// From the internet: buckets of their own that only slow guessing down,
+	// so strangers can't lock anyone out of signing in at home or over
+	// NetBird, and one answer for every failure.
+	public := p.cfg.PublicOrigin(r)
+	var lim limiter = p.cfg.Limiter
+	prefix := ""
+	if public {
+		lim, prefix = p.cfg.PublicLimiter, "pub-"
+	}
+	for _, key := range []string{prefix + "ip:" + ip, prefix + userKey} {
+		if ok, wait := lim.Allowed(key); !ok {
 			w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(wait.Seconds()))))
-			p.audit(ctx, ip, nil, "oidc.signin", c.Name, audit.Denied, "rate limited ("+name+")")
-			p.loginForm(w, http.StatusTooManyRequests, base, a, c, b, name, fmt.Sprintf("Too many failed sign-ins. Try again in %d minutes.", mins))
+			p.audit(ctx, ip, nil, "oidc.signin", c.Name, audit.Denied, "rate limited ("+name+")"+publicNote(public))
+			msg := fmt.Sprintf("Too many failed sign-ins. Try again in %d minutes.", int(math.Ceil(wait.Minutes())))
+			if public {
+				msg = fmt.Sprintf("Too many failed sign-ins. Try again in %d seconds.", int(math.Ceil(wait.Seconds())))
+			}
+			p.loginForm(w, http.StatusTooManyRequests, base, a, c, b, name, msg)
 			return
 		}
 	}
@@ -453,9 +484,18 @@ func (p *Provider) loginPost(w http.ResponseWriter, r *http.Request, base string
 	} else {
 		u, err = p.cfg.SignIn.AuthenticateDomain(ctx, name, pw)
 	}
+	if err == nil && p.adminRefused(r, u) {
+		// The right password, but administrators don't sign in from the
+		// internet (Control Panel › Sign-in): answered like a wrong one.
+		p.audit(ctx, ip, u, "oidc.signin", c.Name, audit.Denied, "an administrator from a public address"+publicNote(public))
+		lim.Fail(prefix + "ip:" + ip)
+		lim.Fail(prefix + userKey)
+		p.loginForm(w, http.StatusUnauthorized, base, a, c, b, name, uniformFailure)
+		return
+	}
 	if err != nil {
 		code, status, counts, known := "bad_credentials", http.StatusUnauthorized, true, true
-		msg := "Incorrect username or password."
+		msg := uniformFailure
 		if errors.Is(err, auth.ErrLocalAccount) {
 			// Local accounts are off: answered like a wrong password, without
 			// looking at it, and counted against their own key.
@@ -470,19 +510,39 @@ func (p *Provider) loginPost(w http.ResponseWriter, r *http.Request, base string
 			p.cfg.Log.Error("oidc: sign-in", "err", err)
 			code, status, counts, msg = "error", http.StatusInternalServerError, false, "Something went wrong. Try again."
 		}
-		if counts {
-			p.cfg.Limiter.Fail("ip:" + ip)
-			p.cfg.Limiter.Fail(userKey)
+		if public && status < 500 {
+			// Turned off, locked, expired, not this server's: all the same
+			// from the internet.
+			status, msg = http.StatusUnauthorized, uniformFailure
 		}
-		p.audit(ctx, ip, nil, "oidc.signin", c.Name, audit.Failure, strings.ReplaceAll(code, "_", " ")+" ("+name+")")
+		if counts {
+			lim.Fail(prefix + "ip:" + ip)
+			lim.Fail(prefix + userKey)
+		}
+		p.audit(ctx, ip, nil, "oidc.signin", c.Name, audit.Failure, strings.ReplaceAll(code, "_", " ")+" ("+name+")"+publicNote(public))
 		p.loginForm(w, status, base, a, c, b, name, msg)
 		return
 	}
-	p.cfg.Limiter.Succeed("ip:" + ip)
-	p.cfg.Limiter.Succeed(userKey)
+	lim.Succeed(prefix + "ip:" + ip)
+	lim.Succeed(prefix + userKey)
 	now := p.now()
 	p.startSession(w, r, u, now)
 	p.proceed(w, r, base, a, c, u, now, "password", true)
+}
+
+// limiter is auth.LoginLimiter or, for sign-ins from the internet,
+// auth.DelayLimiter.
+type limiter interface {
+	Allowed(key string) (bool, time.Duration)
+	Fail(key string)
+	Succeed(key string)
+}
+
+func publicNote(public bool) string {
+	if public {
+		return "; from a public address"
+	}
+	return ""
 }
 
 func sentence(s string) string {
@@ -501,6 +561,13 @@ func sentence(s string) string {
 func (p *Provider) proceed(w http.ResponseWriter, r *http.Request, base string, a *authRequest, c *Client, u *auth.User, authTime time.Time, how string, posted bool) {
 	ctx := r.Context()
 	ip := p.cfg.ClientIP(r)
+	if p.adminRefused(r, u) {
+		// loginPost and existingSession already keep administrators out from
+		// the internet; this is the backstop.
+		p.audit(ctx, ip, u, "oidc.signin", c.Name, audit.Denied, "an administrator from a public address")
+		p.problem(w, base, http.StatusForbidden, "Sign in again", "Go back to the app and sign in again.")
+		return
+	}
 	if err := p.allowed(ctx, c, u); err != nil {
 		p.audit(ctx, ip, u, "oidc.signin", c.Name, audit.Denied, err.Error())
 		back := p.errorURL(ctx, a, oidc.ErrAccessDenied().WithDescription("not allowed for this account"))
@@ -508,7 +575,13 @@ func (p *Provider) proceed(w http.ResponseWriter, r *http.Request, base string, 
 			Heading: "You can't use " + c.Name, Lead: sentence(err.Error()), Link: back, LinkText: "Back to " + c.Name})
 		return
 	}
-	sub, err := p.subjectFor(ctx, u)
+	sub, err := p.subjectFor(ctx, u, how == "password")
+	if errors.Is(err, auth.ErrAccountReplaced) {
+		// This browser's sign-in was the previous owner of the name's.
+		p.endSession(w, r)
+		p.problem(w, base, http.StatusForbidden, "Sign in again", "Your sign-in here has ended. Go back to the app and sign in again.")
+		return
+	}
 	if err != nil {
 		p.cfg.Log.Warn("oidc: subject", "user", u.Username, "err", err)
 		p.problem(w, base, http.StatusServiceUnavailable, "Can't sign you in right now", sentence(ErrNoSubject.Error()))
@@ -688,6 +761,7 @@ func (p *Provider) logout(w http.ResponseWriter, r *http.Request, base string) {
 		}
 		if sub != "" && p.subjectOf(ctx, u.ID) == sub {
 			p.endSession(w, r)
+			p.endManagedGrants(ctx, u.ID)
 			p.audit(ctx, p.cfg.ClientIP(r), u, "oidc.signout", u.Username, audit.Success, "signed out by an app")
 			http.Redirect(w, r, next, http.StatusFound)
 			return
@@ -705,12 +779,25 @@ func (p *Provider) logout(w http.ResponseWriter, r *http.Request, base string) {
 		}
 		p.endSession(w, r)
 		if signedIn {
+			p.endManagedGrants(ctx, u.ID)
 			p.audit(ctx, p.cfg.ClientIP(r), u, "oidc.signout", u.Username, audit.Success, "")
 		}
 		p.render(w, http.StatusOK, &page{Kind: "continue", Base: base, Title: "Signed out", Heading: "You're signed out",
 			Lead: "Taking you back…", Refresh: next, Link: next, LinkText: "Continue"})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// endManagedGrants revokes a person's sign-ins at the clients HardyOS keeps
+// itself (Remote Access's app gateway): signing out of HardyOS sign-in
+// signs them out of every published app within the gateway's 30-second
+// recheck. Apps an administrator registered keep their own sessions (they
+// learn of it through RP-initiated logout, or at their next refresh).
+func (p *Provider) endManagedGrants(ctx context.Context, userID int64) {
+	n, _ := revokeWhere(ctx, p.cfg.DB, p.now(), `user_id = ? AND client_id IN (SELECT id FROM oidc_clients WHERE managed_by != '')`, userID)
+	if n > 0 {
+		p.audit(ctx, "", nil, "oidc.token.revoke", "published apps", audit.Success, fmt.Sprintf("signed out of HardyOS sign-in: %d app sign-in(s) ended", n))
 	}
 }
 

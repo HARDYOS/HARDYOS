@@ -312,7 +312,21 @@ func TestPublishedAppsOpenAtTheirAddress(t *testing.T) {
 	if !pv.Enabled || pv.URL != "https://board.home.example.net" || !pv.Config.HardyOSSignIn || !pv.Published {
 		t.Fatalf("publish view = %+v", pv)
 	}
-	if j, _ := e.submit(t, "PUT", "/api/v1/apps/board/publish", PublishRequest{Mode: publish.ModePublic, Auth: publish.AuthNone, HardyOSSignIn: false}); j["state"] != "succeeded" {
+	// Public with nothing in front and HardyOS sign-in off needs a
+	// confirmation (the app's own sign-in is all that's left).
+	var er ErrorResponse
+	if code := e.admin.do("PUT", "/api/v1/apps/board/publish", PublishRequest{Mode: publish.ModePublic, Auth: publish.AuthNone}, &er); code != 400 || er.Code != "confirm_required" {
+		t.Fatalf("open without confirmation = %d %+v", code, er)
+	}
+	// Following a public default needs it too; NetBird-only or with a
+	// sign-in in front doesn't.
+	if code := e.admin.do("PUT", "/api/v1/apps/board/publish", PublishRequest{Auth: publish.AuthNone}, &er); code != 400 {
+		t.Fatalf("open by default without confirmation = %d", code)
+	}
+	if j, _ := e.submit(t, "PUT", "/api/v1/apps/notes/publish", PublishRequest{Mode: publish.ModeNetBird, Auth: publish.AuthNone}); j["state"] != "succeeded" {
+		t.Fatalf("notes NetBird-only without HardyOS sign-in = %v", j)
+	}
+	if j, _ := e.submit(t, "PUT", "/api/v1/apps/board/publish", PublishRequest{Mode: publish.ModePublic, Auth: publish.AuthNone, HardyOSSignIn: false, ConfirmOpen: true}); j["state"] != "succeeded" {
 		t.Fatalf("publish board = %v", j)
 	}
 	anon := e.browser(t, secret)

@@ -299,14 +299,29 @@ type proxyHop struct {
 	next   http.RoundTripper
 	secret string
 	ip     string
+	// hostFor: send this host's value instead of the request's (tests).
+	hostFor string
+	// xff replaces the X-Forwarded-For the proxy sends (tests).
+	xff []string
 }
 
 func (p *proxyHop) RoundTrip(r *http.Request) (*http.Response, error) {
 	r = r.Clone(r.Context())
 	if p.secret != "" {
-		r.Header.Set(publish.GatewayHeader, p.secret)
+		// Each NetBird service carries its own host's value.
+		host := r.URL.Hostname()
+		if p.hostFor != "" {
+			host = p.hostFor
+		}
+		r.Header.Set(publish.GatewayHeader, publish.GatewayValue(p.secret, host))
 	}
 	r.Header.Set("X-Forwarded-For", "198.51.100.1, "+p.ip) // the client's own entry first, then the proxy's
+	if p.xff != nil {
+		r.Header.Del("X-Forwarded-For")
+		for _, v := range p.xff {
+			r.Header.Add("X-Forwarded-For", v)
+		}
+	}
 	return p.next.RoundTrip(r)
 }
 
@@ -433,6 +448,11 @@ func (e *remoteEnv) setUp(t *testing.T) (secret string) {
 	if err := e.server.OIDC().SetLocalAccounts(e.ctx, true); err != nil {
 		t.Fatal(err)
 	}
+	// cade is the administrator; most tests sign him in from "the
+	// internet" (TestPublicSSORefusesAdministrators turns this off again).
+	if err := e.server.OIDC().SetPublicAdmins(e.ctx, true); err != nil {
+		t.Fatal(err)
+	}
 	// The fake NetBird knows this server by the stub's address.
 	tok := testToken
 	j, _ := e.submit(t, "PUT", "/api/v1/remote/publishing", RemotePublishingRequest{Enabled: true, BaseDomain: "home.example.net",
@@ -487,12 +507,25 @@ func TestGatewayOnlyTakesNetBirdsProxy(t *testing.T) {
 	rt := e.server.remote
 	req := httptest.NewRequest("GET", "https://board.home.example.net/", nil)
 	req.RemoteAddr = "192.168.1.50:5000"
-	req.Header.Set(publish.GatewayHeader, secret)
+	req.Header.Set(publish.GatewayHeader, publish.GatewayValue(secret, "board.home.example.net"))
 	if rt.fromProxy(req, mustPrefix("100.64.0.0/10"), secret) {
 		t.Fatal("accepted a LAN address")
 	}
 	req.RemoteAddr = "100.83.12.7:5000"
 	if !rt.fromProxy(req, mustPrefix("100.64.0.0/10"), secret) {
 		t.Fatal("refused NetBird's proxy")
+	}
+	// The shared secret itself, or another service's value, opens nothing.
+	for _, v := range []string{secret, publish.GatewayValue(secret, "notes.home.example.net"), publish.GatewayValue("other", "board.home.example.net")} {
+		req.Header.Set(publish.GatewayHeader, v)
+		if rt.fromProxy(req, mustPrefix("100.64.0.0/10"), secret) {
+			t.Fatalf("accepted %q for board", v)
+		}
+	}
+	// Through the gateway: notes' value with board's Host is refused.
+	b2 := e.browser(t, secret)
+	b2.client.Transport.(*proxyHop).hostFor = "notes.home.example.net"
+	if code, _, _ := b2.nav(t, "GET", "https://board.home.example.net/", nil); code != 403 {
+		t.Fatalf("another service's value = %d", code)
 	}
 }

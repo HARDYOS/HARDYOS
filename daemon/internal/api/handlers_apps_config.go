@@ -60,10 +60,18 @@ func (s *Server) appWho(ctx context.Context, token string, u *auth.User) appstor
 	return who
 }
 
-// sessionToken is the desktop session's token from the request's cookie.
-func sessionToken(r *http.Request) string {
-	if c, err := r.Cookie(SessionCookie); err == nil {
-		return c.Value
+// sessionToken is the desktop session's token from the request's cookie
+// (only for requests the desktop's session check already let through).
+func sessionToken(r *http.Request) string { return anySessionCookie(r) }
+
+// anySessionCookie is the desktop session cookie under either name (the
+// app gateway removes the old name from what it hands hardyd, and the app
+// window proxy ports are only on the desktop's own address).
+func anySessionCookie(r *http.Request) string {
+	for _, n := range []string{SessionCookie, LegacySessionCookie} {
+		if c, err := r.Cookie(n); err == nil {
+			return c.Value
+		}
 	}
 	return ""
 }

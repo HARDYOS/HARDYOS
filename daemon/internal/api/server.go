@@ -118,6 +118,12 @@ type Server struct {
 	log      *slog.Logger
 	ips      *clientip.Resolver
 	oidc     *oidc.Provider
+	// pubLimiter slows down failed sign-ins from the internet (through the
+	// app gateway) in buckets of their own: decision 143.
+	pubLimiter *auth.DelayLimiter
+	// waits hands a job's in-memory outcome (a new client secret) back to
+	// the request that started it.
+	waits jobWaits
 }
 
 // New builds the API server and registers its routes.
@@ -135,7 +141,7 @@ func New(cfg Config) *Server {
 		cfg.Root = os.DirFS("/")
 	}
 	s := &Server{cfg: cfg, mux: http.NewServeMux(), started: time.Now(), log: cfg.Logger,
-		ips: &clientip.Resolver{Trusted: cfg.TrustedProxies}}
+		ips: &clientip.Resolver{Trusted: cfg.TrustedProxies}, pubLimiter: auth.NewDelayLimiter()}
 	s.proxy = &appProxy{s: s}
 	s.remote = &remoteRuntime{s: s}
 	if cfg.DB != nil {
@@ -151,6 +157,16 @@ func New(cfg Config) *Server {
 				s.cfg.PublicHost = func() string { h, _ := os.Hostname(); return strings.ToLower(h) }
 			}
 			s.oidc = s.newOIDC()
+			if s.oidc != nil {
+				// A domain account row stays one directory object's (decision
+				// 144), and a password set in the domain ends what was signed
+				// in with the old one.
+				s.signin.Anchor = s.oidc
+				s.signin.PasswordSet = s.passwordSet
+				if cfg.Jobs != nil {
+					s.registerOIDCJobs(cfg.Jobs)
+				}
+			}
 		}
 	}
 	// Remote access and the sign-in provider see each other: the provider's
@@ -158,6 +174,7 @@ func New(cfg Config) *Server {
 	// setup check looks for that issuer among NetBird's identity providers.
 	if s.cfg.Remote != nil && s.oidc != nil {
 		s.cfg.Remote.OnNamesChanged = s.oidc.NamesChanged
+		s.cfg.Remote.Issuer = s.oidc.Issuer
 		if s.cfg.SSOIssuer == nil {
 			s.cfg.SSOIssuer = s.oidc.Issuer
 		}
@@ -239,12 +256,7 @@ func (s *Server) routes() {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	if s.oidc != nil && s.oidc.Owns(r) {
-		// The sign-in provider: its own host (sso.<base>) or /oidc on the
-		// desktop's, with its own headers and no desktop routes.
-		rw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
-		s.oidc.ServeHTTP(rw, r)
-		s.log.Debug("http request", "method", r.Method, "path", r.URL.Path, "status", rw.status,
-			"duration", time.Since(start).String())
+		s.serveProvider(w, r, start)
 		return
 	}
 	h := w.Header()
@@ -261,6 +273,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Debug("http request",
 		"method", r.Method, "path", logPath(r.URL.Path), "status", rw.status,
+		"duration", time.Since(start).String())
+}
+
+// serveProvider hands a request to the sign-in provider: its own host
+// (sso.<base>) or /oidc on the desktop's, with its own headers and no
+// desktop routes.
+func (s *Server) serveProvider(w http.ResponseWriter, r *http.Request, start time.Time) {
+	rw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+	s.oidc.ServeHTTP(rw, r)
+	s.log.Debug("http request", "method", r.Method, "path", r.URL.Path, "status", rw.status,
 		"duration", time.Since(start).String())
 }
 

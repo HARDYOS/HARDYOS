@@ -23,7 +23,17 @@ package api
 //     Sign-in goes through HardyOS's own sign-in provider at sso.<base>
 //     (appgateway_signin.go), then the app host's own session cookie
 //     (__Host-, HttpOnly, Secure, Lax) is set;
-//   - files.<base> serves share link pages (/s/...) and nothing else.
+//   - files.<base> serves share link pages (/s/...) and nothing else;
+//   - sso.<base> serves the sign-in provider and nothing else: a request
+//     the provider doesn't own there is a 404, never the desktop.
+//
+// The secret NetBird sends is per service (publish.GatewayValue: an HMAC
+// of the service's host under the gateway secret), checked against the
+// request's Host, so a value read from one service opens no other.
+// X-Forwarded-For is believed only after that check, and only its
+// right-most entry: NetBird's proxy (proxy/internal/proxy/reverseproxy.go)
+// appends the address of the connection it accepted to whatever the client
+// sent, so everything to its left is the client's own writing.
 
 import (
 	"context"
@@ -81,7 +91,42 @@ type gwRoute struct {
 	host   string
 	target *url.URL
 	signin bool
+	// public: published for the internet (not NetBird-only).
+	public bool
 	rp     *httputil.ReverseProxy
+}
+
+// gwInfo is what the gateway learnt about a request it let through.
+type gwInfo struct {
+	// client is the address NetBird's proxy saw.
+	client string
+	// public: the service is public, so the request may come from anyone
+	// on the internet.
+	public bool
+}
+
+type gwKey struct{}
+
+func gatewayInfo(r *http.Request) *gwInfo {
+	g, _ := r.Context().Value(gwKey{}).(*gwInfo)
+	return g
+}
+
+// viaGateway reports whether a request came in through the app gateway.
+func viaGateway(r *http.Request) bool { return gatewayInfo(r) != nil }
+
+// publicOrigin reports whether a request came through the gateway for a
+// public service (sso.<base> is always one).
+func publicOrigin(r *http.Request) bool {
+	g := gatewayInfo(r)
+	return g != nil && g.public
+}
+
+// publishedHost reports whether host is one the gateway serves.
+func (rt *remoteRuntime) publishedHost(host string) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.routes[strings.ToLower(hostOnly(host))] != nil
 }
 
 // remoteRuntime runs the publishing loop and the gateway.
@@ -301,10 +346,11 @@ func (rt *remoteRuntime) apply(ctx context.Context, in publish.Inputs, st *netbi
 				continue
 			}
 			host := strings.ToLower(it.Domain)
+			public := it.Config.Mode == publish.ModePublic
 			if it.Key == publish.DesktopKey || it.Key == publish.SSOKey || it.Key == publish.FilesKey {
 				// hardyd's own handler (the sign-in provider takes its host;
 				// files.<base> serves share link pages only).
-				routes[host] = &gwRoute{key: it.Key, host: host}
+				routes[host] = &gwRoute{key: it.Key, host: host, public: public}
 				if it.Key == publish.DesktopKey {
 					desktopHost = host
 				}
@@ -314,23 +360,27 @@ func (rt *remoteRuntime) apply(ctx context.Context, in publish.Inputs, st *netbi
 			if !ok || a.Web == nil {
 				continue
 			}
-			r := &gwRoute{key: it.Key, appID: a.ID, host: host, target: appTarget(a), signin: it.Config.HardyOSSignIn}
+			r := &gwRoute{key: it.Key, appID: a.ID, host: host, target: appTarget(a), signin: it.Config.HardyOSSignIn, public: public}
 			routes[host], byApp[a.ID] = r, r
 		}
 	}
-	var signinHosts []string
+	signinHosts := []string{}
 	for _, r := range byApp {
 		if r.signin {
 			signinHosts = append(signinHosts, r.host)
 		}
 	}
-	rt.ensureClient(ctx, signinHosts)
+	if in.Known {
+		// Only with the full app list: a root helper that didn't answer
+		// mustn't strip every app's redirect URI.
+		rt.ensureClient(ctx, signinHosts)
+	}
 	rt.mu.Lock()
 	opts := rt.opts
 	// Keep proxies whose route didn't change (open connections).
 	for host, r := range routes {
-		if old := rt.routes[host]; old != nil && rt.desktopHost == desktopHost && old.appID == r.appID && old.signin == r.signin && old.target != nil && r.target != nil &&
-			old.target.String() == r.target.String() {
+		if old := rt.routes[host]; old != nil && rt.desktopHost == desktopHost && old.appID == r.appID && old.signin == r.signin && old.public == r.public &&
+			old.target != nil && r.target != nil && old.target.String() == r.target.String() {
 			routes[host] = old
 			if r.appID != "" {
 				byApp[r.appID] = old
@@ -393,18 +443,22 @@ func (rt *remoteRuntime) listen(addr string) {
 }
 
 // fromProxy reports whether a request came from NetBird's proxy for one of
-// HardyOS's services.
+// HardyOS's services: from the NetBird network (NetBird's API doesn't say
+// which peers are its proxies: 0.81.5 leaves embedded proxy peers out of
+// /api/peers, so no narrower list can be built), carrying the value of the
+// service for the request's own Host.
 func (rt *remoteRuntime) fromProxy(r *http.Request, network netip.Prefix, secret string) bool {
 	a, err := netip.ParseAddr(clientip.Peer(r))
-	if err != nil || !network.IsValid() || !network.Contains(a.Unmap()) {
+	if err != nil || !network.IsValid() || !network.Contains(a.Unmap()) || secret == "" {
 		return false
 	}
-	return sameSecret(r.Header.Get(publish.GatewayHeader), secret)
+	host := strings.ToLower(strings.TrimSuffix(hostOnly(r.Host), "."))
+	return host != "" && sameSecret(r.Header.Get(publish.GatewayHeader), publish.GatewayValue(secret, host))
 }
 
 // forwardedClient is the client's address as NetBird's proxy saw it: the
-// right-most X-Forwarded-For entry (the one the proxy added), else the
-// connection's peer.
+// right-most X-Forwarded-For entry (the one the proxy appended), else the
+// connection's peer. Only for requests fromProxy accepted.
 func forwardedClient(r *http.Request) string {
 	vals := r.Header.Values("X-Forwarded-For")
 	if len(vals) > 0 {
@@ -431,6 +485,8 @@ func (rt *remoteRuntime) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.Del(publish.GatewayHeader)
 	h.Del("X-Netbird-User")
 	h.Del("X-Netbird-Groups")
+	h.Del("X-Real-Ip")
+	h.Del("Forwarded")
 	h.Set("X-Forwarded-For", client)
 	if route == nil {
 		proxyPage(w, http.StatusNotFound, "Nothing is published here", "No HardyOS app or desktop has this address.")
@@ -440,16 +496,53 @@ func (rt *remoteRuntime) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		proxyPage(w, http.StatusNotFound, "Nothing here", "This address only opens share links.")
 		return
 	}
+	r = r.WithContext(context.WithValue(r.Context(), gwKey{}, &gwInfo{client: client, public: route.public}))
 	if route.appID == "" {
 		// The desktop, the sign-in provider and share links: hardyd's own
 		// handler, seeing the real client.
 		r2 := r.Clone(r.Context())
 		r2.RemoteAddr = net.JoinHostPort(client, "0")
 		r2.Header.Del("X-Forwarded-For")
+		// The desktop's session cookie under its old name could have been
+		// planted by a sibling app: never read on a published host.
+		dropCookie(r2.Header, LegacySessionCookie)
+		if route.key == publish.SSOKey {
+			// A public host with nothing in front: the sign-in provider or
+			// nothing. Never the desktop's routes, whatever the issuer is.
+			if rt.s.oidc == nil || !rt.s.oidc.Owns(r2) {
+				proxyPage(w, http.StatusNotFound, "Nothing here", "This address is HardyOS's sign-in, which isn't set up here.")
+				return
+			}
+			rt.s.serveProvider(w, r2, time.Now())
+			return
+		}
 		rt.s.ServeHTTP(w, r2)
 		return
 	}
 	rt.serveApp(w, r, rt.proxyFor(route, desktopHost))
+}
+
+// dropCookie removes the cookies called name from a request's headers.
+func dropCookie(h http.Header, name string) {
+	lines := h.Values("Cookie")
+	if len(lines) == 0 {
+		return
+	}
+	var keep []string
+	for _, line := range lines {
+		for _, part := range strings.Split(line, ";") {
+			part = strings.TrimSpace(part)
+			n, _, _ := strings.Cut(part, "=")
+			if part == "" || strings.TrimSpace(n) == name {
+				continue
+			}
+			keep = append(keep, part)
+		}
+	}
+	h.Del("Cookie")
+	if len(keep) > 0 {
+		h.Set("Cookie", strings.Join(keep, "; "))
+	}
 }
 
 // proxyFor makes (once) the reverse proxy for an app route.
@@ -469,6 +562,7 @@ func (rt *remoteRuntime) proxyFor(route *gwRoute, desktopHost string) *gwRoute {
 			pr.SetURL(target)
 			pr.Out.Host = pr.In.Host
 			pr.Out.Header.Set("X-Forwarded-For", pr.In.Header.Get("X-Forwarded-For"))
+			pr.Out.Header.Set("X-Real-Ip", pr.In.Header.Get("X-Forwarded-For"))
 			pr.Out.Header.Set("X-Forwarded-Proto", "https")
 			pr.Out.Header.Set("X-Forwarded-Host", pr.In.Host)
 			gatewayRequestCookies(pr.Out.Header)

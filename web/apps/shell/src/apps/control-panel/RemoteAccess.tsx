@@ -378,14 +378,26 @@ function PublishedCard({ st }: { st: RemoteStatus }) {
       void qc.invalidateQueries({ queryKey: ["remote"] });
     },
   });
+  const rotate = useMutation({
+    mutationFn: () => jobDone(unwrap(api.POST("/remote/gateway/rotate"))),
+    onSuccess: () => {
+      toast("success", "New gateway secret", "Every NetBird service has its new value.");
+      void qc.invalidateQueries({ queryKey: ["remote"] });
+    },
+  });
   const last = st.lastSync;
   return (
     <Card
       title="Published"
       actions={
-        <Button size="sm" variant="ghost" busy={sync.isPending} onClick={() => sync.mutate()}>
-          Update NetBird now
-        </Button>
+        <>
+          <Button size="sm" variant="ghost" busy={rotate.isPending} onClick={() => rotate.mutate()}>
+            New gateway secret
+          </Button>
+          <Button size="sm" variant="ghost" busy={sync.isPending} onClick={() => sync.mutate()}>
+            Update NetBird now
+          </Button>
+        </>
       }
     >
       <div className="stack">
@@ -396,6 +408,7 @@ function PublishedCard({ st }: { st: RemoteStatus }) {
         {last?.problem && <Alert tone="warn">{last.problem}</Alert>}
         {st.gateway.problem && <Alert tone="bad">{st.gateway.problem}</Alert>}
         {sync.isError && <Alert tone="bad">{errorMessage(sync.error)}</Alert>}
+        {rotate.isError && <Alert tone="bad">{errorMessage(rotate.error)}</Alert>}
         <ul className="stack" style={{ listStyle: "none", padding: 0, margin: 0 }} aria-label="Published">
           {st.items.map((it) => {
             const s = serviceStatus(it.status);

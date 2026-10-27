@@ -270,12 +270,42 @@ func root(t *testing.T, installed bool) string {
 	return dir
 }
 
+// upLine is how HardyOS runs `netbird up`: routes and DNS that NetBird's
+// management server would push are refused (flag names of NetBird 0.81.5).
+const upLine = "netbird up --management-url https://vpn.hardynetworks.net --hostname nas --disable-client-routes --disable-server-routes --disable-dns"
+
+func TestUpRefusesPushedRoutesAndDNS(t *testing.T) {
+	args := strings.Join(UpArgs("https://vpn.hardynetworks.net", "nas"), " ")
+	for _, flag := range []string{"--disable-client-routes", "--disable-server-routes", "--disable-dns"} {
+		if !strings.Contains(args, flag) {
+			t.Errorf("netbird up without %s: %s", flag, args)
+		}
+	}
+	// The proxy must still reach the gateway.
+	if strings.Contains(args, "--block-inbound") {
+		t.Errorf("netbird up blocks inbound connections: %s", args)
+	}
+}
+
+func TestClipKeepsNetBirdsWordsPrintable(t *testing.T) {
+	for in, want := range map[string]string{
+		"  plain  ":                     "plain",
+		"line\nbreak\r\tand\x1b[31mred": "line break and [31mred",
+		"a b\u0085c":                    "a b c",
+		strings.Repeat("é", 200):        strings.Repeat("é", 50) + "…",
+	} {
+		if got := Clip(in, 100); got != want {
+			t.Errorf("Clip(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestJoinStatusLeave(t *testing.T) {
 	dir := root(t, true)
 	f := &sysexec.Fake{}
 	f.On("systemctl enable --now netbird.service", "")
 	f.OnResult("netbird status --json", sysexec.Result{Stdout: fixture(t, "status-idle.json")})
-	f.On("netbird up --management-url https://vpn.hardynetworks.net --hostname nas", "Connected")
+	f.On(upLine, "Connected")
 	m := &Manager{Runner: f, Root: dir, Sleep: 1}
 	ctx := context.Background()
 	key := "A1B2C3D4-0000-1111-2222-333344445555"
@@ -340,8 +370,7 @@ func TestJoinFailureHidesTheKeyAndTurnsOff(t *testing.T) {
 	f := &sysexec.Fake{}
 	f.On("systemctl enable --now netbird.service", "")
 	f.OnResult("netbird status --json", sysexec.Result{Stdout: fixture(t, "status-idle.json")})
-	f.OnResult("netbird up --management-url https://vpn.hardynetworks.net --hostname nas",
-		sysexec.Result{ExitCode: 1, Stderr: []byte("login failed: invalid setup key " + key)})
+	f.OnResult(upLine, sysexec.Result{ExitCode: 1, Stderr: []byte("login failed: invalid setup key " + key)})
 	f.On("netbird down", "")
 	f.On("systemctl disable --now netbird.service", "")
 	m := &Manager{Runner: f, Root: dir, Sleep: 1}

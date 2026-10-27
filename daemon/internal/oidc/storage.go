@@ -224,6 +224,9 @@ func (s *storage) CreateAuthRequest(ctx context.Context, req *oidc.AuthRequest, 
 	if len(a.State) > 2048 || len(a.Nonce) > 512 || len(a.LoginHint) > 256 || len(a.Scopes) > 20 {
 		return nil, oidc.ErrInvalidRequest().WithDescription("request too large")
 	}
+	if !s.p.admitAuthRequest(ctx) {
+		return nil, oidc.ErrServerError().WithDescription("too many sign-ins in progress; try again in a few minutes")
+	}
 	b, _ := json.Marshal(a)
 	_, err = s.p.cfg.DB.ExecContext(ctx, `INSERT INTO oidc_auth_requests (id, client_id, request, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`,
 		a.ID, a.ClientID, string(b), store.FormatTime(now), store.FormatTime(now.Add(authRequestTTL)))
@@ -304,13 +307,24 @@ func (s *storage) AuthRequestByCode(ctx context.Context, code string) (op.AuthRe
 	h := hashHex(code)
 	db := s.p.cfg.DB
 	now := s.p.now()
-	var id, codeAt string
+	var id, codeAt, raw string
 	var consumed sql.NullString
-	err := db.QueryRowContext(ctx, `SELECT id, code_at, consumed_at FROM oidc_auth_requests WHERE code_hash = ?`, h).Scan(&id, &codeAt, &consumed)
+	err := db.QueryRowContext(ctx, `SELECT id, code_at, consumed_at, request FROM oidc_auth_requests WHERE code_hash = ?`, h).Scan(&id, &codeAt, &consumed, &raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("unknown code")
 	}
 	if err != nil {
+		return nil, err
+	}
+	// Before the code is used up: only its own client, with its secret and
+	// the PKCE verifier, may spend it. Someone else presenting a stolen (or
+	// guessed) code mustn't burn it, which would revoke the real client's
+	// sign-in as a replay.
+	var pre authRequest
+	if err := json.Unmarshal([]byte(raw), &pre); err != nil {
+		return nil, err
+	}
+	if err := s.p.exchangeAllowed(ctx, &pre); err != nil {
 		return nil, err
 	}
 	res, err := db.ExecContext(ctx, `UPDATE oidc_auth_requests SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL`, store.FormatTime(now), id)
@@ -325,10 +339,6 @@ func (s *storage) AuthRequestByCode(ctx context.Context, code string) (op.AuthRe
 	}
 	if now.Sub(store.ParseTime(codeAt)) > codeTTL {
 		return nil, errors.New("code expired")
-	}
-	var raw string
-	if err := db.QueryRowContext(ctx, `SELECT request FROM oidc_auth_requests WHERE id = ?`, id).Scan(&raw); err != nil {
-		return nil, err
 	}
 	var a authRequest
 	if err := json.Unmarshal([]byte(raw), &a); err != nil {

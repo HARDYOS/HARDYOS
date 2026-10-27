@@ -174,7 +174,7 @@ func TestAppProxyCookieIsolation(t *testing.T) {
 	b := browserOf(e.admin)
 	var desktopBefore string
 	for _, c := range e.admin.http.Jar.Cookies(mustURL(notes)) {
-		if c.Name == SessionCookie {
+		if c.Name == LegacySessionCookie { // plain HTTP test server
 			desktopBefore = c.Value
 		}
 	}
@@ -193,7 +193,7 @@ func TestAppProxyCookieIsolation(t *testing.T) {
 	if names["a_notes_sid"] != nport || names["a_notes_dom"] != "1" || names["sid"] != "" || names["a_notes_hardyos_session"] != "" {
 		t.Fatalf("cookies after notes set them: %v", names)
 	}
-	if names[SessionCookie] != desktopBefore || names["hardyos_app_board"] == "evil" {
+	if names[LegacySessionCookie] != desktopBefore || names["hardyos_app_board"] == "evil" {
 		t.Fatalf("an app overwrote a HardyOS cookie: %v", names)
 	}
 

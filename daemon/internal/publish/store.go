@@ -13,7 +13,9 @@ package publish
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -67,9 +69,19 @@ const (
 	settingSecret  = "remote.secret" // sealed: the gateway header's value
 )
 
-// GatewayHeader carries the shared secret from NetBird's proxy to the
-// gateway (a target's custom header).
+// GatewayHeader carries the per-service secret from NetBird's proxy to the
+// gateway (a target's custom header): GatewayValue(gateway secret, the
+// service's host), so a value read from one service in NetBird (its
+// dashboard shows custom headers) opens no other address.
 const GatewayHeader = "X-Hardyos-Gateway"
+
+// GatewayValue is the header value for the service at host: an HMAC of the
+// host (lower case, no port) under the gateway secret.
+func GatewayValue(secret, host string) string {
+	m := hmac.New(sha256.New, []byte(secret))
+	m.Write([]byte("hardyos-gateway\x00" + strings.ToLower(host)))
+	return hex.EncodeToString(m.Sum(nil))
+}
 
 // DefaultGatewayPort is the gateway's port on the NetBird address.
 const DefaultGatewayPort = 44200
@@ -301,6 +313,14 @@ func (st *Store) GatewaySecret(ctx context.Context) (string, error) {
 	}
 	v = randomHex(32)
 	return v, st.setSealed(ctx, settingSecret, v)
+}
+
+// RotateGatewaySecret replaces the gateway secret (on leaving NetBird,
+// turning publishing off, or an administrator's "new gateway secret"):
+// every value NetBird holds stops working at once, and the next sync sends
+// the new ones.
+func (st *Store) RotateGatewaySecret(ctx context.Context) error {
+	return st.setSealed(ctx, settingSecret, randomHex(32))
 }
 
 type row struct {

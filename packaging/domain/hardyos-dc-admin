@@ -231,6 +231,9 @@ class Directory:
             # as the stable subject; the SID is the fallback.
             "sid": sid_of(m),
             "objectGuid": guid_of(m),
+            # When the password was last set (Unix seconds, 0 = must change
+            # at next sign-in): HardyOS ends what was signed in before it.
+            "pwdLastSet": ad_time(first(m, "pwdLastSet", "0")),
         }
 
     @staticmethod

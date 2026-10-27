@@ -7,8 +7,10 @@ info:
     This file is the source of truth: regenerate the TypeScript client with
     `make gen` after changing it.
 
-    Authentication: a session cookie (`hardyos_session`) set by `POST /auth/login`
-    or `POST /setup/admin`. State-changing requests (POST, PATCH, PUT, DELETE)
+    Authentication: a session cookie set by `POST /auth/login` or
+    `POST /setup/admin`: `__Host-hardyos_session` over HTTPS, `hardyos_session`
+    over plain HTTP (development). For one release the old name is still read
+    over HTTPS on the desktop's own address, never on a published one. State-changing requests (POST, PATCH, PUT, DELETE)
     must send the header `X-HardyOS-Request: 1`; requests without it are
     rejected with 403 `csrf`.
 servers:
@@ -3101,6 +3103,16 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "503": { $ref: "#/components/responses/Unavailable" }
+  /remote/gateway/rotate:
+    post:
+      operationId: rotateRemoteGatewaySecret
+      summary: Replace the gateway secret and put the new per-service values in NetBird (job remote.gateway.rotate)
+      tags: [remote]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
   /remote/desktop:
     put:
       operationId: publishDesktop
@@ -3277,7 +3289,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
     patch:
       operationId: updateOidc
-      summary: Choose the issuer or let HardyOS accounts sign in to apps (admin)
+      summary: Choose the issuer or who may sign in to apps (admin; job oidc.settings, answered when it finishes)
       tags: [oidc]
       requestBody:
         required: true
@@ -3286,8 +3298,9 @@ paths:
             schema:
               type: object
               properties:
-                issuer: { type: string, description: "The issuer URL; empty goes back to the one HardyOS works out" }
+                issuer: { type: string, description: "The issuer URL; empty goes back to the one HardyOS works out. On sso.<base> it has no path" }
                 localAccounts: { type: boolean, description: "HardyOS (non-domain) accounts may sign in to apps (off by default)" }
+                publicAdmins: { type: boolean, description: "Administrators may sign in through HardyOS sign-in from the internet (off by default)" }
       responses:
         "200":
           description: Status
@@ -3459,7 +3472,8 @@ components:
     session:
       type: apiKey
       in: cookie
-      name: hardyos_session
+      name: __Host-hardyos_session
+      description: "hardyos_session over plain HTTP (development)"
     installer:
       type: apiKey
       in: cookie
@@ -5349,6 +5363,7 @@ components:
         hardyosSignIn: { type: boolean }
         secret: { type: string, writeOnly: true, description: "Password (8+ characters) or PIN (4-12 digits). Absent keeps the saved one" }
         confirmPublic: { type: boolean, description: "Desktop only: must be true to publish it publicly (it includes administration)" }
+        confirmOpen: { type: boolean, description: "Apps only: must be true to publish an app publicly with no sign-in in front (auth none) and HardyOS sign-in off; else 400 confirm_required" }
     AppPublish:
       allOf:
         - $ref: "#/components/schemas/PublishItem"
@@ -5453,13 +5468,14 @@ components:
     # ---- sign-in provider (OIDC) schemas ----
     OidcStatus:
       type: object
-      required: [issuer, issuerChosen, derivedIssuer, discovery, localAccounts, keys]
+      required: [issuer, issuerChosen, derivedIssuer, discovery, localAccounts, publicAdmins, keys]
       properties:
         issuer: { type: string, description: "The issuer apps are configured with" }
         issuerChosen: { type: boolean, description: An administrator chose it (else it follows Remote Access) }
         derivedIssuer: { type: string, description: "https://sso.<base>, or https://<desktop>/oidc without a base domain" }
         discovery: { type: string }
         localAccounts: { type: boolean }
+        publicAdmins: { type: boolean, description: "Administrators may sign in through HardyOS sign-in from the internet (off by default)" }
         keys: { type: array, items: { $ref: "#/components/schemas/OidcKey" } }
     OidcKey:
       type: object

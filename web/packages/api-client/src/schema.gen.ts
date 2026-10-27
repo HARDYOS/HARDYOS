@@ -2635,6 +2635,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/remote/gateway/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Replace the gateway secret and put the new per-service values in NetBird (job remote.gateway.rotate) */
+        post: operations["rotateRemoteGatewaySecret"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/remote/desktop": {
         parameters: {
             query?: never;
@@ -2793,7 +2810,7 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        /** Choose the issuer or let HardyOS accounts sign in to apps (admin) */
+        /** Choose the issuer or who may sign in to apps (admin; job oidc.settings, answered when it finishes) */
         patch: operations["updateOidc"];
         trace?: never;
     };
@@ -4718,6 +4735,8 @@ export interface components {
             secret?: string;
             /** @description Desktop only: must be true to publish it publicly (it includes administration) */
             confirmPublic?: boolean;
+            /** @description Apps only: must be true to publish an app publicly with no sign-in in front (auth none) and HardyOS sign-in off; else 400 confirm_required */
+            confirmOpen?: boolean;
         };
         AppPublish: components["schemas"]["PublishItem"] & {
             /** @description Publishing is set up */
@@ -4818,6 +4837,8 @@ export interface components {
             derivedIssuer: string;
             discovery: string;
             localAccounts: boolean;
+            /** @description Administrators may sign in through HardyOS sign-in from the internet (off by default) */
+            publicAdmins: boolean;
             keys: components["schemas"]["OidcKey"][];
         };
         OidcKey: {
@@ -9160,6 +9181,21 @@ export interface operations {
             503: components["responses"]["Unavailable"];
         };
     };
+    rotateRemoteGatewaySecret: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
     publishDesktop: {
         parameters: {
             query?: never;
@@ -9415,10 +9451,12 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": {
-                    /** @description The issuer URL; empty goes back to the one HardyOS works out */
+                    /** @description The issuer URL; empty goes back to the one HardyOS works out. On sso.<base> it has no path */
                     issuer?: string;
                     /** @description HardyOS (non-domain) accounts may sign in to apps (off by default) */
                     localAccounts?: boolean;
+                    /** @description Administrators may sign in through HardyOS sign-in from the internet (off by default) */
+                    publicAdmins?: boolean;
                 };
             };
         };

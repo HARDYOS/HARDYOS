@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"regexp"
 	"strconv"
@@ -53,6 +54,36 @@ type DomainAccount struct {
 	// directory didn't say). The sign-in provider's subject is the GUID.
 	SID        string
 	ObjectGUID string
+	// PasswordSetAt is when the password was last set (pwdLastSet; zero
+	// when unknown or when it must be changed at next sign-in).
+	PasswordSetAt time.Time
+}
+
+// AccountAnchor is what ties a HardyOS account row to one directory
+// object: its objectGUID (lower case), else its SID; "" when the directory
+// said neither. A name can be given to another person (delete alice, make
+// a new alice); the anchor can't.
+func AccountAnchor(a *DomainAccount) string {
+	if a == nil {
+		return ""
+	}
+	if a.ObjectGUID != "" {
+		return strings.ToLower(a.ObjectGUID)
+	}
+	return strings.ToUpper(a.SID)
+}
+
+// IdentityAnchor remembers which directory object each domain account row
+// belongs to (the sign-in provider keeps it with the account's subject).
+type IdentityAnchor interface {
+	// CheckAnchor compares anchor (AccountAnchor of what the directory says
+	// now) with the one recorded for u, recording it when there's none. On
+	// a mismatch everything the previous person held (desktop and app
+	// sessions, app sign-ins and tokens) is ended. interactive: the person
+	// just proved the password, so they are the new owner of the name and
+	// the new anchor is recorded (nil is returned); otherwise
+	// ErrAccountReplaced.
+	CheckAnchor(ctx context.Context, u *User, anchor string, interactive bool) error
 }
 
 // DomainDirectory answers questions about the domain. hardyd implements it
@@ -90,6 +121,10 @@ var (
 	// ErrAccountGone ends the sessions of a domain account that was
 	// deleted, turned off or expired since it signed in.
 	ErrAccountGone = errors.New("the domain account is no longer allowed to sign in")
+	// ErrAccountReplaced: the name now belongs to another directory object
+	// (the account was deleted and another made with the same name). It is
+	// an ErrAccountGone for whoever holds a session of the previous one.
+	ErrAccountReplaced = fmt.Errorf("%w: the name now belongs to another domain account", ErrAccountGone)
 )
 
 // RIDDomainAdmins is the relative ID of the domain's Domain Admins group
@@ -126,8 +161,32 @@ type SignIn struct {
 	Domain   DomainDirectory // nil: local accounts only
 	Kerberos PasswordChecker // nil: KerberosChecker{}
 	Log      *slog.Logger
+	// Anchor checks that a domain account row still belongs to the same
+	// directory object, at every sign-in and every groups refresh (nil:
+	// not checked).
+	Anchor IdentityAnchor
+	// PasswordSet is told when the directory says a domain account's
+	// password was set (at sign-in and at every groups refresh), so what was
+	// signed in with an older password can end (nil: nothing is done).
+	PasswordSet func(ctx context.Context, u *User, at time.Time)
 
 	refreshing sync.Map // user ID -> *refreshState
+}
+
+// checkDirectory runs the anchor and password-change hooks for what the
+// directory said about u.
+func (s *SignIn) checkDirectory(ctx context.Context, u *User, a *DomainAccount, interactive bool) error {
+	if s.Anchor != nil {
+		if anchor := AccountAnchor(a); anchor != "" {
+			if err := s.Anchor.CheckAnchor(ctx, u, anchor, interactive); err != nil {
+				return err
+			}
+		}
+	}
+	if s.PasswordSet != nil && !a.PasswordSetAt.IsZero() {
+		s.PasswordSet(ctx, u, a.PasswordSetAt)
+	}
+	return nil
 }
 
 type refreshState struct {
@@ -302,6 +361,13 @@ func (s *SignIn) domainSignIn(ctx context.Context, info *DomainInfo, name, pw st
 	if u.Disabled {
 		return nil, ErrDisabledHere
 	}
+	// The password was just proved: whoever had this name before (another
+	// directory object) loses everything, and so does anything signed in
+	// with an older password.
+	if err := s.checkDirectory(ctx, u, a, true); err != nil {
+		s.log().Warn("domain sign-in: recording the account's identity", "user", name, "err", err)
+		return nil, ErrDomainUnavailable
+	}
 	s.Users.touchLogin(ctx, u.ID)
 	return u, nil
 }
@@ -435,6 +501,13 @@ func (s *SignIn) refresh(ctx context.Context, u *User) (nu *User, asked bool, er
 	}
 	if accountUsable(a) != nil {
 		return nil, true, ErrAccountGone
+	}
+	// Another directory object behind the name: this session was the
+	// previous person's.
+	if err := s.checkDirectory(ctx, u, a, false); errors.Is(err, ErrAccountGone) {
+		return nil, true, err
+	} else if err != nil {
+		s.log().Warn("domain groups refresh: checking the account's identity", "user", u.Username, "err", err)
 	}
 	nu, err = s.Users.UpsertDomain(ctx, domainUpdate(info, a))
 	if err != nil {
