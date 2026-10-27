@@ -1,0 +1,87 @@
+/* Devices view and device pickers (VMs part D). */
+.devcard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: var(--hos-radius);
+  background: var(--hos-surface);
+  border: 1px solid var(--hos-surface-border);
+}
+.devcard--on {
+  border-color: var(--hos-accent);
+  box-shadow: 0 0 0 1px var(--hos-accent-soft);
+}
+.devcard--blocked {
+  opacity: 0.75;
+}
+.devcard__choices {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+.devcard__choices label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.devcard__hints {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--hos-text-muted);
+}
+.devcard__vgpu {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hos-surface-border);
+}
+.devcard__type {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.devlist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.devlist li.is-blocked {
+  opacity: 0.7;
+}
+.devpick__more summary,
+.devlog summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--hos-text-muted);
+}
+.devpick__more[open] summary {
+  margin-bottom: 8px;
+}
+.devpick__problems {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+.devlicence,
+.devlog pre {
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border-radius: var(--hos-radius-sm);
+  background: var(--hos-bg);
+  border: 1px solid var(--hos-surface-border);
+  font-family: var(--hos-font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.devlog pre {
+  max-height: 220px;
+}

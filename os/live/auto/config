@@ -2,11 +2,15 @@
 # live-build configuration for the HardyOS live/installer ISO.
 set -e
 
+# Archive areas: non-free is in the image's apt sources so HardyOS can
+# install Debian's NVIDIA driver on request (after the admin agrees to
+# NVIDIA's licence); nothing from it is installed in the image itself.
+
 lb config noauto \
   --mode debian \
   --distribution trixie \
   --architectures amd64 \
-  --archive-areas "main contrib non-free-firmware" \
+  --archive-areas "main contrib non-free non-free-firmware" \
   --binary-images iso-hybrid \
   --bootloaders "grub-efi,syslinux" \
   --debian-installer none \

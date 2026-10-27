@@ -25,6 +25,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
+	"github.com/hardyos/hardyos/daemon/internal/syslock"
 	"github.com/hardyos/hardyos/daemon/internal/version"
 )
 
@@ -269,6 +270,13 @@ func bootSync(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+	// Never alongside hardyd-priv's own boot menu changes or an update.
+	syslock.Init()
+	release, err := syslock.Acquire(ctx, "hardyctl boot-sync")
+	if err != nil {
+		return err
+	}
+	defer release()
 	entries, err := boot.Sync(ctx, boot.Env{Runner: sysexec.Exec{}, Root: "/"}, cfg, opts)
 	for i, e := range entries {
 		def := ""

@@ -61,6 +61,8 @@ jobs:
         run: sudo HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/priv.test" -test.run TestZFSIntegration -test.v
       - name: installer on loop devices
         run: sudo HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/install.test" -test.run TestInstallIntegration -test.v
+      - name: chroot mounts in a private mount namespace (host /dev kept, busy teardown, pool export)
+        run: sudo HARDYOS_MOUNTNS_TEST=1 HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/install.test" -test.run 'SystemDirs' -test.v
       - name: settings backups on a pool
         run: sudo HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/backup.test" -test.run TestZFSBackupIntegration -test.v
 
@@ -164,6 +166,39 @@ jobs:
         run: |
           sudo docker ps -a --filter label=org.hardyos.app
           for c in $(sudo docker ps -aq --filter label=org.hardyos.app); do sudo docker logs --tail 80 "$c" 2>&1; done
+
+  vms:
+    name: Virtual machines (KVM)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache: false
+      - name: ZFS, libvirt and QEMU
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zfsutils-linux libvirt-daemon-system libvirt-clients qemu-system-x86 qemu-utils ovmf swtpm swtpm-tools xorriso dnsmasq-base
+          sudo modprobe zfs
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+          sudo systemctl start libvirtd
+          sudo virsh -c qemu:///system net-start default || true
+          sudo virsh -c qemu:///system version --daemon
+      - name: build test binary
+        working-directory: daemon
+        run: go test -c -o "$RUNNER_TEMP/vms.test" ./internal/vms
+      - name: download, import, boot, console, snapshot, roll back and delete a VM
+        run: sudo HARDYOS_VM_INTEGRATION=1 "$RUNNER_TEMP/vms.test" -test.run TestLibvirtIntegration -test.v -test.timeout 20m
+      - name: libvirt logs
+        if: failure()
+        run: |
+          sudo tail -80 /var/log/libvirt/qemu/cirros.log || true
+          sudo journalctl -u libvirtd --no-pager -n 80 || true
+          sudo dmesg | grep -iE "apparmor|kvm" | tail -30 || true
 
   web:
     name: Web (desktop)

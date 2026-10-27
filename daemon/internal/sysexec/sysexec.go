@@ -35,12 +35,13 @@ type Exec struct{}
 func (Exec) Run(ctx context.Context, stdin []byte, name string, args ...string) (Result, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C"}
+	own(cmd)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
-	err := cmd.Run()
+	err := ignoreWaitDelay(cmd.Run())
 	res := Result{Stdout: out.Bytes(), Stderr: errb.Bytes()}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
@@ -51,6 +52,16 @@ func (Exec) Run(ctx context.Context, stdin []byte, name string, args ...string) 
 		return res, nil
 	}
 	return res, err
+}
+
+// ignoreWaitDelay drops exec.ErrWaitDelay: the command itself finished
+// successfully (Wait reports that error only then), but a process it left
+// running (a daemon a package started) still held its output open.
+func ignoreWaitDelay(err error) error {
+	if errors.Is(err, exec.ErrWaitDelay) {
+		return nil
+	}
+	return err
 }
 
 // Output runs a command and returns stdout, turning a non-zero exit into an

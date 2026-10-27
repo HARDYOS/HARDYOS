@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/hardyos/hardyos/daemon/internal/rootfile"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -409,18 +410,21 @@ func (st *storageOps) createPool(ctx context.Context, a PoolCreateArgs) (any, er
 	return st.status(ctx, a.Spec.Name)
 }
 
+// writeKey creates a new pool key. The key directory sits in hardyd's
+// directory, so it must be root's own (rootfile.CreateExclusive moves a
+// planted one aside) and the key file is created new, never through a link.
 func writeKey(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("%s already exists", path)
-	}
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
 		return err
 	}
-	return os.WriteFile(path, key, 0o400)
+	if err := rootfile.CreateExclusive(path, key, 0o400, 0o700); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("%s already exists", path)
+		}
+		return err
+	}
+	return nil
 }
 
 func (st *storageOps) addVdevs(ctx context.Context, a PoolAddArgs) (any, error) {

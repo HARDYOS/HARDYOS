@@ -75,6 +75,10 @@ type Config struct {
 	// believed for the client's address (sign-in limits, audit, share link
 	// limits). Empty (the default): the header is never read.
 	TrustedProxies []netip.Prefix
+
+	// GPUUploadDir is where uploaded vGPU driver files are saved for
+	// hardyd-priv (default gpu.UploadDir; tests use a temp dir).
+	GPUUploadDir string
 }
 
 // Server is hardyd's HTTP handler.
@@ -173,6 +177,8 @@ func (s *Server) routes() {
 			s.shareRoutes()
 			s.fileServiceRoutes()
 			s.snapshotRoutes()
+			s.vmRoutes()
+			s.deviceRoutes()
 		}
 		if s.cfg.Backups != nil {
 			s.backupRoutes()

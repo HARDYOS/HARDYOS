@@ -1184,6 +1184,145 @@ them on (`settings.json`: `sftpEnabled`, `webdavEnabled`) and per folder
   lockout after ten wrong passwords, and an overriding drop-in caught by
   the effective-config check (PAM off, problem shown) and recovered.
 
+## Virtual machines
+
+Phase 5 part C (decisions 120-125; user guide `docs/vms.md`; plan
+`docs/plans/vms.md`). QEMU/KVM through libvirt, driven only by hardyd-priv.
+
+```
+ browser ──► hardyd  /api/v1/vms*  (admin, jobs + audit)   ──► hardyd-priv  vms.* ops ──► virsh / libvirt ──► QEMU
+                     /vms/{id}/console/ws  ◄── VNC socket fd (SCM_RIGHTS) ◄──┘     │
+                                                                                  ├─► zfs: <pool>/vms/<id>, zvol disks, snapshots
+                                                                                  ├─► ISOs shared folder (verified fds only)
+                                                                                  ├─► network.Manager.EnsureBridge (br0, rollback)
+                                                                                  └─► devices.Host (part D): Check / Prepare / Release
+```
+
+- **Code**: `internal/vms` (spec and validation, templates, domain XML,
+  manager, storage and snapshots, ISO library and downloads, imports,
+  cloud-init, console tokens), `priv/vms_ops.go`, `api/handlers_vms*.go`
+  and `api/vmconsole.go`, the bridge in `internal/network/bridge.go`, web
+  in `apps/vms/`.
+- **Spec, not XML**: hardyd sends a `vms.Spec`; hardyd-priv normalizes and
+  validates it against the host (CPUs, memory, pools, Secure Boot firmware
+  from QEMU's firmware descriptors, swtpm) and renders the domain XML with
+  `encoding/xml`. Architecture differences (machine type, SATA, TPM model,
+  Hyper-V enlightenments, SMM) are a table keyed by `GOARCH`; UEFI uses
+  libvirt's firmware auto-selection, so no firmware path is in the code.
+  Device fragments from part D must parse as 1-8 `<hostdev>` elements
+  without namespaces; the whole document is checked again before
+  `virsh define --validate`.
+- **Where a VM lives**: `<pool>/vms/<id>` (`org.hardyos:vm=<id>`, mounted,
+  `exec,setuid,devices` off, mode 0711) holds `vm.json` (0600), `nvram.fd`,
+  `tpm/` and `cloud-init.iso`; disks are sparse zvols
+  `<pool>/vms/<id>/diskN`. hardyd-priv finds VMs by listing datasets with
+  the property and reads `vm.json` only when root wrote it. At start it
+  waits for libvirt, defines every VM afresh, releases devices of VMs that
+  are off, and starts VMs set to start with the server in order.
+- **Lifecycle**: start = check media, give QEMU read access to the discs
+  (ACL on the descriptor), restore TPM state, `devices.Check` +
+  `Prepare`, define with the fragments, `virsh start`, put VLAN NICs on
+  their VLAN, then redefine without devices (the stored definition never
+  holds them). A watcher reads `virsh domstats` every 3 s: CPU use, memory
+  (balloon stats), and VMs that stopped by themselves get `afterStop`
+  (devices released, TPM state saved to the pool). Graceful stops ask the
+  agent, then ACPI; the stop job waits up to 3 minutes.
+- **Network**: `network.Config.Bridges` (`br0` over a port or bond, the
+  port's MAC kept, VLAN filtering on, VIDs 2-4094 on the uplink).
+  `EnsureBridge` builds it from the default route's interface, applies it
+  like any change (saved first), checks the bridge got the old address and
+  the router answers, and confirms or undoes it. The domain controller's
+  `HoldNetwork`/`ReleaseNetwork` run around any change that adds or removes
+  a bridge.
+- **ISO library**: the `isos` shared folder. Listing, downloads (https
+  only, internet addresses only, optional SHA-256, background task with
+  progress followed by the hardyd job) and deletes go through the folder's
+  verified mount and `openat2(RESOLVE_BENEATH|NO_SYMLINKS)`.
+- **Console**: `vms.console` issues a 60-second one-time token for one VM;
+  `vms.console.open` redeems it, finds the VNC socket in the live domain
+  (only libvirt's own folders accepted), connects and hands the
+  connection over. hardyd relays it over a WebSocket to noVNC.
+- **Tests**: golden XML files per template (`internal/vms/testdata`), a
+  ZFS/libvirt simulator for the manager, priv ops over a real socket, the
+  API with a stub root helper (including the console relay), the bridge
+  with rollback and the DC's move onto it, web component tests, and
+  `TestLibvirtIntegration` (real ZFS, libvirt and KVM; CI job "Virtual
+  machines (KVM)").
+
+## Devices and GPUs
+
+Phase 5 part D (decisions 126-130; user guide `docs/gpus.md`). Two packages
+run inside hardyd-priv: `internal/devices` (inventory, IOMMU, passthrough,
+GPU ownership, vGPU slices; `devices.Host` implements the `devices.Manager`
+contract in `contract.go` that the VM engine calls) and `internal/gpu`
+(NVIDIA driver and vGPU host driver installs, the update hook). Named ops in
+`priv/devices_ops.go`; API in `api/handlers_devices*.go`; web in
+`apps/vms/devices/` (the Control Panel's Devices & GPUs view and the device
+pickers the VM wizard imports).
+
+- **Inventory** reads sysfs and procfs only (any architecture): PCI functions
+  with vendor/device names from `pci.ids`, plain-words class, driver, IOMMU
+  group, `reset_method`; IOMMU groups with an explanation of what lending one
+  member means; USB devices (not root hubs or interfaces); GPUs grouped by
+  slot with their functions (HDMI audio, USB-C), VRAM (amdgpu sysfs,
+  `nvidia-smi`), owner, processes using them, vGPU slices and hints (AMD
+  reset bug list, no reset method, console card). Host-critical devices are
+  found from the boot configuration, `zpool list -v -H -P`, mounted block
+  filesystems (`/proc/self/mountinfo` device numbers) and swap, following
+  `slaves/` (dm, md, LUKS, multipath) and NVMe multipath heads
+  (`multipath/`, the subsystem's controllers) down to controllers, and the
+  default routes (walking `lower_*` and `brif` links down to physical ports).
+- **Root's state on the shared dataset**: `rootfile.RootStateDir`
+  (`/var/lib/hardyos/root`, root 0755, checked on every access) holds
+  `kernel-args.json` and the ROM library; every root write into hardyd's
+  directory goes through `rootfile.WriteAtomic` (no symlinks followed, random
+  `O_EXCL` temp file, `renameat`), reads through `rootfile.ReadFile`
+  (decision 131).
+- **System lock**: `syslock` serialises boot menu writers, update ops and GPU
+  tasks (in-process, plus an flock on `/run/hardyos/system.lock` shared with
+  `hardyctl boot-sync`; decision 133).
+- **Kernel arguments**: `boot.KernelArgsPath` on the shared dataset, rendered
+  by `boot.Sync` into every entry (`RenderGrubWithArgs`). "Turn on IOMMU"
+  (`devices.iommu.enable`, a job) adds the CPU vendor's flags.
+- **Lending** (`Prepare`, called by the VM engine before `virsh start`):
+  check everything first (`Check` returns every problem as `devices.Problems`),
+  record the plan in `/run/hardyos/devices/state.json`, then bind each
+  function and group companion to `vfio-pci`, create vGPU instances, and
+  return libvirt `<hostdev>` fragments (`managed='no'` for PCI; mdev by
+  UUID; USB by vendor:product with `startupPolicy='optional'`, or by the
+  bus/device a port has at start). A failure undoes everything.
+  `Release` (after the VM stops) removes slices and rebinds each device to
+  the driver recorded for it; a device that won't rebind is listed as
+  stuck. `Reconcile` (at start, and from the Devices view) releases devices
+  of VMs libvirt doesn't list as active (`virsh list --name`, any active
+  state); when the list can't be read nothing is released. Sysfs writes have
+  a 30 s deadline; a hanging one leaves the device stuck, not the lock held.
+- **GPU drivers**: tasks in hardyd-priv (`gpu.nvidia.prepare`, `.install`,
+  `.remove`, `gpu.vgpu.install`, `.remove`), one at a time, each with a
+  64 KiB log; `gpu.task` reports progress and hardyd's jobs follow it every
+  2 s, so no privileged call is long. apt sources: Debian `non-free` (in the
+  image; added for older systems) and NVIDIA's container toolkit repository
+  with the pinned key embedded in hardyd-priv. Root's state, the licence
+  agreement and the admin's vGPU driver file are in `/var/lib/hardyos-gpu`
+  (root, 0700), never in hardyd's `/var/lib/hardyos`.
+- **Updates**: `update.Updater.Hooks` run after `install.FinishRoot` and
+  before `boot.Sync`. `gpu.Manager.PrepareNewRoot` copies root's GPU
+  directory into the new system, reinstalls the packages (or reruns NVIDIA's
+  vGPU installer per kernel) in a chroot, checks the DKMS module exists for
+  every kernel and rebuilds the initramfs; an error removes the new boot
+  environment and the current version stays. The driver goes in only at the
+  version the licence was agreed to (else `gpu.ConsentError`), unless the
+  admin chose `gpu.nvidia.skip-next-update`, which leaves the drivers out
+  once and marks the new system's record `reinstallNeeded`.
+
+What only real hardware can verify (no GPUs in CI): rebinding NVIDIA cards
+with `nvidia_drm` loaded, AMD reset behaviour and vendor-reset, GPU ROM
+needs, `boot_vga` consoles going blank, NVIDIA's vGPU driver on Debian's
+kernel (mdev and per-VF type files, `sriov-manage`, the installer's
+`--kernel-name`/`--skip-module-load` in a chroot), Intel SR-IOV with
+i915/xe, the exact Debian package set and the licence file location in it,
+and IOMMU flags on real firmware.
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly

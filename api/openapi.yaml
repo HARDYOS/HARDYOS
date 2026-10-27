@@ -34,6 +34,7 @@ tags:
   - name: apps
   - name: sharelinks
   - name: files
+  - name: vms
 paths:
   /health:
     get:
@@ -3096,6 +3097,566 @@ paths:
       responses:
         "202": { description: Restarting }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  # ---- devices API (part D: PCI/USB passthrough, GPUs, NVIDIA driver, vGPU) ----
+  /devices:
+    get:
+      operationId: getDevices
+      summary: IOMMU state and groups, PCI and USB devices, GPUs with their owner and vGPU slices
+      tags: [devices]
+      responses:
+        "200":
+          description: Device inventory
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceInventory" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /devices/check:
+    post:
+      operationId: checkDevices
+      summary: Check devices for a VM without changing anything (every problem in plain words)
+      tags: [devices]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DevicesCheckRequest" }
+      responses:
+        "200":
+          description: Whether the devices can go to the VM
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DevicesCheckResult" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/iommu/enable:
+    post:
+      operationId: enableIOMMU
+      summary: Add the IOMMU kernel flags for this CPU to every boot disk (takes effect after a restart)
+      tags: [devices]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/reconcile:
+    post:
+      operationId: reconcileDevices
+      summary: Give back devices held for VMs that aren't running
+      tags: [devices]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/gpus/{address}/sriov:
+    post:
+      operationId: setGPUVirtualFunctions
+      summary: Turn a GPU's SR-IOV virtual functions (vGPU slices) on or off
+      tags: [devices]
+      parameters:
+        - { name: address, in: path, required: true, schema: { type: string }, description: "PCI address, 0000:01:00.0" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [vfs]
+              properties:
+                vfs: { type: integer, minimum: 0, maximum: 64, description: "0 turns them off" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/slices/{id}/remove:
+    post:
+      operationId: removeVGPUSlice
+      summary: Remove a leftover vGPU slice no running VM uses
+      tags: [devices]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string }, description: mdev UUID or virtual function address }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/nvidia:
+    get:
+      operationId: getNvidiaStatus
+      summary: The NVIDIA driver, container toolkit and vGPU host driver on this server
+      tags: [devices]
+      responses:
+        "200":
+          description: NVIDIA status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NvidiaStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/nvidia/licence:
+    get:
+      operationId: getNvidiaLicence
+      summary: NVIDIA's licence text, read from the downloaded driver packages
+      tags: [devices]
+      responses:
+        "200":
+          description: Licence
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NvidiaLicenceText" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/nvidia/prepare:
+    post:
+      operationId: prepareNvidiaDriver
+      summary: Download the NVIDIA driver packages and read their licence (nothing is installed)
+      tags: [devices]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/nvidia/install:
+    post:
+      operationId: installNvidiaDriver
+      summary: Agree to NVIDIA's licence and install the driver and container toolkit
+      tags: [devices]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NvidiaInstallRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/nvidia/remove:
+    post:
+      operationId: removeNvidiaDriver
+      summary: Remove the NVIDIA driver and container toolkit
+      tags: [devices]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeviceConfirmRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/nvidia/skip-next-update:
+    post:
+      operationId: skipNvidiaForNextUpdate
+      summary: Install the next update without the NVIDIA drivers (or withdraw that choice)
+      description: >-
+        For when a driver can't be built for a new version: the update then goes ahead, and the new
+        version shows that its NVIDIA drivers need installing again. Used up by the next update.
+        Skipping needs confirm; the choice is audited.
+      tags: [devices]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NvidiaSkipRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/gpu-task:
+    get:
+      operationId: getGPUTask
+      summary: The running or last GPU driver task, with its log
+      tags: [devices]
+      responses:
+        "200":
+          description: Task
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GPUTaskResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/vgpu-driver/upload:
+    post:
+      operationId: uploadVGPUDriver
+      summary: Upload NVIDIA's vGPU host driver (.run) you got from NVIDIA; returns its SHA-256
+      description: >-
+        The request body is the raw file; its name (NVIDIA-Linux-x86_64-<version>-vgpu-kvm.run) goes in
+        X-HardyOS-Filename. The server computes the SHA-256 while receiving it and keeps it with the
+        upload ID; installing names only that ID. Nothing is installed yet. `known` says whether the
+        checksum is in HardyOS's list of checked NVIDIA installers (empty by default); `warning`
+        explains when it isn't.
+      tags: [devices]
+      parameters:
+        - { name: X-HardyOS-Filename, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: Saved
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VGPUUpload" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413":
+          description: The file is too large
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /devices/vgpu-driver/install:
+    post:
+      operationId: installVGPUDriver
+      summary: Install an uploaded vGPU host driver (checksum checked again, DKMS build)
+      description: >-
+        The file's name and checksum come from the server's record of the upload, never from the
+        request. The admin types the driver's version (confirmVersion) to confirm.
+      tags: [devices]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VGPUInstallRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/vgpu-driver/remove:
+    post:
+      operationId: removeVGPUDriver
+      summary: Uninstall NVIDIA's vGPU host driver
+      tags: [devices]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeviceConfirmRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  # ---- end of devices API paths (part D) ----
+  # ---- virtual machines API (phase 5 part C, docs/vms.md) ----
+  /vms:
+    get:
+      operationId: listVMs
+      summary: Every virtual machine with its state, CPU and memory use, and disks kept from deleted VMs
+      tags: [vms]
+      responses:
+        "200":
+          description: The VMs
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VMOverview" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    post:
+      operationId: createVM
+      summary: Create a VM (a job - downloads, the network bridge, the VirtIO drivers disc, disks, import, start)
+      description: |
+        Administrators only. The spec is checked here and again by the root
+        helper, which builds the libvirt definition itself. The first VM on
+        the home network (bridge or VLAN network card) puts the server's
+        network on a bridge, keeping its address; if the server can't be
+        reached that way the change is undone and the job fails.
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMCreateRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /vms/templates:
+    get:
+      operationId: listVMTemplates
+      summary: The New VM wizard's templates, with presets and suggested downloads
+      tags: [vms]
+      responses:
+        "200":
+          description: Templates, in order
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/VMTemplate" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /vms/capabilities:
+    get:
+      operationId: getVMCapabilities
+      summary: What the server can do for VMs (KVM, firmware, TPM, pools, bridge, ISO library)
+      tags: [vms]
+      responses:
+        "200":
+          description: Capabilities
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VMCapabilities" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /vms/bridge:
+    post:
+      operationId: createVMBridge
+      summary: Put the server's network on a bridge for VMs now (a job; same address, undone if the server becomes unreachable)
+      tags: [vms]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /vms/kept/delete:
+    post:
+      operationId: deleteVMKeptDisks
+      summary: Delete disks kept from a deleted VM (a job)
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMKeptDeleteRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /vms/isos:
+    get:
+      operationId: listVMLibrary
+      summary: The ISO library (the ISOs shared folder) and downloads in progress
+      tags: [vms]
+      responses:
+        "200":
+          description: The library
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VMLibrary" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /vms/isos/download:
+    post:
+      operationId: downloadVMImage
+      summary: Download an installer (.iso) or disk image into the ISO library by link (a job; https only, optional SHA-256)
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMDownload" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /vms/isos/{name}:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+    delete:
+      operationId: deleteVMImage
+      summary: Delete a file from the ISO library that no VM has in a drive (a job)
+      tags: [vms]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /vms/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getVM
+      summary: One VM, with its addresses and disk use
+      tags: [vms]
+      responses:
+        "200":
+          description: The VM
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VM" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      operationId: updateVM
+      summary: Change a VM's hardware and settings (a job; most changes apply at its next start)
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMUpdateRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: deleteVM
+      summary: Delete a VM that's off (a job); its disks are deleted or kept
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMDeleteRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /vms/{id}/{action}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - name: action
+        in: path
+        required: true
+        schema: { type: string, enum: [start, stop, force-stop, restart, reset] }
+        description: stop asks the guest to shut down; force-stop pulls the plug; reset is a hard restart
+    post:
+      operationId: vmAction
+      summary: Start, shut down, turn off, restart or reset a VM (a job)
+      tags: [vms]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /vms/{id}/logs:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: lines, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 5000 } }
+    get:
+      operationId: getVMLogs
+      summary: The end of the VM's QEMU log
+      tags: [vms]
+      responses:
+        "200":
+          description: The log
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VMLogs" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /vms/{id}/snapshots:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: listVMSnapshots
+      summary: The VM's snapshots, newest first
+      tags: [vms]
+      responses:
+        "200":
+          description: Snapshots
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/VMSnapshot" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      operationId: snapshotVM
+      summary: Snapshot the whole VM (disks, settings, firmware); file systems are frozen first with the guest agent (a job)
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMSnapshotRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /vms/{id}/snapshots/{name}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: name, in: path, required: true, schema: { type: string } }
+    delete:
+      operationId: deleteVMSnapshot
+      summary: Delete one snapshot (a job; the VM's name typed to confirm)
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMSnapshotDeleteRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /vms/{id}/rollback:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: rollbackVM
+      summary: Put a VM that's off back to a snapshot (a job; later snapshots and changes are lost)
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMRollbackRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /vms/{id}/console:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: openVMConsole
+      summary: A one-time pass to a running VM's screen, valid for a minute
+      description: |
+        Open the returned path as a WebSocket (subprotocol "binary"): it
+        carries the VM's VNC (RFB) stream for noVNC. The pass works once,
+        for this VM only. Opening and closing are audited.
+      tags: [vms]
+      responses:
+        "200":
+          description: The pass
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VMConsoleSession" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /vms/{id}/console/ws:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: token, in: query, required: true, schema: { type: string } }
+    get:
+      operationId: vmConsoleSocket
+      summary: The VM's screen as a WebSocket (RFB in binary frames), for a pass from /vms/{id}/console
+      tags: [vms]
+      responses:
+        "101": { description: Switching to the WebSocket }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  # ---- end of virtual machines API ----
 components:
   securitySchemes:
     session:
@@ -3751,8 +4312,8 @@ components:
       properties:
         mode:
           type: string
-          enum: [dhcp, static, "off", member]
-          description: member is set by the server for bond members
+          enum: [dhcp, static, "off", member, bridged]
+          description: member is set by the server for bond members, bridged for the port or bond under a bridge
         address: { type: string, description: "Static only: CIDR, like 192.168.1.20/24" }
         gateway: { type: string, description: Static only, optional }
         mtu: { type: integer, description: 0 or absent for the default 1500 }
@@ -3790,12 +4351,25 @@ components:
         interfaces: { type: array, items: { $ref: "#/components/schemas/NetworkInterface" } }
         bonds: { type: array, items: { $ref: "#/components/schemas/NetworkBond" } }
         vlans: { type: array, items: { $ref: "#/components/schemas/NetworkVLAN" } }
+        bridges:
+          type: array
+          items: { $ref: "#/components/schemas/NetworkBridge" }
+          description: Bridges for virtual machines; leaving it out keeps the current ones
+    NetworkBridge:
+      allOf:
+        - $ref: "#/components/schemas/NetworkAddressing"
+        - type: object
+          required: [name, port]
+          properties:
+            name: { type: string, description: br0 to br9 }
+            port: { type: string, description: The port or bond it runs over (it takes that one's address) }
+            mac: { type: string, description: "The port's MAC address, kept so DHCP gives the same address" }
     LiveInterface:
       type: object
       required: [name, kind, mac, up, carrier, speedMbps, addresses]
       properties:
         name: { type: string }
-        kind: { type: string, enum: [port, bond, vlan, other] }
+        kind: { type: string, enum: [port, bond, vlan, bridge, other] }
         mac: { type: string }
         up: { type: boolean }
         carrier: { type: boolean, description: A cable is connected and the link is up }
@@ -4881,3 +5455,633 @@ components:
         overwrite: { type: boolean, description: Replace a file that's already there (never a folder) }
         modified: { type: integer, format: int64, description: The file's modification time in ms since 1970 (File.lastModified) }
     # ---- end of files API schemas (part C) ----
+    # ---- devices API schemas (part D) ----
+    VMDevice:
+      type: object
+      description: One device in a VM's spec (devices.Device)
+      required: [kind, id]
+      properties:
+        kind: { type: string, enum: [pci, usb, gpu, vgpu] }
+        id: { type: string, description: "PCI address (0000:01:00.0; the parent card for vgpu), USB vendor:product (046d:c52b) or port (1-4.2)" }
+        vgpuType: { type: string, description: The slice type for vgpu (a VGPUType id) }
+        romFile: { type: string, description: A GPU ROM file from the ROM library }
+        primary: { type: boolean, description: The GPU is the VM's main display }
+    DevicesCheckRequest:
+      type: object
+      required: [vm, devices]
+      properties:
+        vm: { type: string }
+        devices: { type: array, items: { $ref: "#/components/schemas/VMDevice" }, maxItems: 64 }
+    DeviceProblem:
+      type: object
+      required: [device, message]
+      properties:
+        device: { type: string, description: The device id it's about (empty for the VM as a whole) }
+        message: { type: string }
+    DevicesCheckResult:
+      type: object
+      required: [ok, problems]
+      properties:
+        ok: { type: boolean }
+        problems: { type: array, items: { $ref: "#/components/schemas/DeviceProblem" } }
+    DeviceInventory:
+      type: object
+      required: [iommu, groups, pci, usb, gpus, stuck]
+      properties:
+        iommu: { $ref: "#/components/schemas/IOMMUState" }
+        groups: { type: array, items: { $ref: "#/components/schemas/IOMMUGroup" } }
+        pci: { type: array, items: { $ref: "#/components/schemas/PCIDeviceInfo" } }
+        usb: { type: array, items: { $ref: "#/components/schemas/USBDeviceInfo" } }
+        gpus: { type: array, items: { $ref: "#/components/schemas/GPUInfo" } }
+        stuck: { type: array, items: { $ref: "#/components/schemas/StuckDevice" } }
+    IOMMUState:
+      type: object
+      required: [enabled, groups, cpuVendor, firmwareTable, flags, configured, active, restartNeeded, canTurnOn, kernelArgs, message]
+      properties:
+        enabled: { type: boolean }
+        groups: { type: integer }
+        cpuVendor: { type: string, description: "intel, amd or other" }
+        firmwareTable: { type: boolean, description: The firmware describes an IOMMU (it's on in the BIOS) }
+        flags: { type: array, items: { type: string }, description: The kernel flags this CPU needs }
+        configured: { type: boolean }
+        active: { type: boolean }
+        restartNeeded: { type: boolean }
+        canTurnOn: { type: boolean }
+        kernelArgs: { type: array, items: { type: string }, description: All extra kernel arguments configured }
+        message: { type: string }
+    IOMMUGroup:
+      type: object
+      required: [id, devices, explanation]
+      properties:
+        id: { type: integer }
+        devices: { type: array, items: { type: string } }
+        explanation: { type: string }
+    PCIDeviceInfo:
+      type: object
+      required: [address, vendorId, deviceId, vendor, name, class, kind, driver, iommuGroup, resetMethods, resettable, bridge, bootVga, critical, owner, assigned]
+      properties:
+        address: { type: string }
+        vendorId: { type: string }
+        deviceId: { type: string }
+        vendor: { type: string }
+        name: { type: string }
+        class: { type: string }
+        kind: { type: string, description: "Plain words: Graphics card, SATA controller..." }
+        driver: { type: string }
+        iommuGroup: { type: integer, nullable: true }
+        resetMethods: { type: array, items: { type: string } }
+        resettable: { type: boolean }
+        bridge: { type: boolean }
+        bootVga: { type: boolean }
+        physFn: { type: string }
+        critical: { type: string, description: Why the server needs it (empty if it can go to a VM) }
+        owner: { type: string, description: The VM using it now (empty for the server) }
+        assigned: { type: array, items: { type: string } }
+    USBDeviceInfo:
+      type: object
+      required: [port, bus, dev, vendorId, productId, manufacturer, product, speed, hub, critical, owner, assigned]
+      properties:
+        port: { type: string }
+        bus: { type: integer }
+        dev: { type: integer }
+        vendorId: { type: string }
+        productId: { type: string }
+        manufacturer: { type: string }
+        product: { type: string }
+        speed: { type: string }
+        hub: { type: boolean }
+        critical: { type: string }
+        owner: { type: string }
+        assigned: { type: array, items: { type: string } }
+    GPUInfo:
+      type: object
+      required: [address, vendor, vendorName, model, vramBytes, sharedMemory, functions, driver, bootVga, iommuGroup, owner, users, assigned, problem, hints, vgpu]
+      properties:
+        address: { type: string }
+        vendor: { type: string, enum: [nvidia, amd, intel, other] }
+        vendorName: { type: string }
+        model: { type: string }
+        vramBytes: { type: integer, format: int64, description: 0 when unknown }
+        sharedMemory: { type: boolean }
+        functions:
+          type: array
+          items:
+            type: object
+            required: [address, kind, driver]
+            properties:
+              address: { type: string }
+              kind: { type: string }
+              driver: { type: string }
+        driver: { type: string }
+        bootVga: { type: boolean }
+        iommuGroup: { type: integer, nullable: true }
+        owner: { $ref: "#/components/schemas/GPUOwner" }
+        users: { type: array, items: { $ref: "#/components/schemas/DeviceUser" } }
+        assigned: { type: array, items: { type: string } }
+        problem: { type: string, description: Why it can't go to a VM (empty if it can) }
+        hints: { type: array, items: { type: string } }
+        vgpu:
+          allOf: [{ $ref: "#/components/schemas/VGPUInfo" }]
+          nullable: true
+    GPUOwner:
+      type: object
+      required: [kind, label]
+      properties:
+        kind: { type: string, enum: [apps, vm, vgpu, none, stuck] }
+        vm: { type: string }
+        label: { type: string }
+    DeviceUser:
+      type: object
+      required: [pid, process, container]
+      properties:
+        pid: { type: integer }
+        process: { type: string }
+        app: { type: string }
+        container: { type: boolean }
+    StuckDevice:
+      type: object
+      required: [address, vm, driver, message]
+      properties:
+        address: { type: string }
+        vm: { type: string }
+        driver: { type: string }
+        message: { type: string }
+    VGPUInfo:
+      type: object
+      required: [mode, hostDriver, types, instances, vfs, maxVfs]
+      properties:
+        mode: { type: string, enum: [mdev, nvidia-vf, sriov-vf] }
+        hostDriver: { type: boolean }
+        types: { type: array, items: { $ref: "#/components/schemas/VGPUType" } }
+        instances: { type: array, items: { $ref: "#/components/schemas/VGPUInstance" } }
+        vfs: { type: integer }
+        maxVfs: { type: integer }
+        note: { type: string }
+    VGPUType:
+      type: object
+      required: [id, name, description, available, framebufferMb, maxInstances]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        available: { type: integer }
+        framebufferMb: { type: integer }
+        maxInstances: { type: integer }
+    VGPUInstance:
+      type: object
+      required: [id, type, parent, vm]
+      properties:
+        id: { type: string }
+        type: { type: string }
+        parent: { type: string }
+        vm: { type: string }
+    DeviceConfirmRequest:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: boolean }
+    NvidiaInstallRequest:
+      type: object
+      required: [licenceSha256, accept]
+      properties:
+        licenceSha256: { type: string, description: SHA-256 of the licence text shown }
+        accept: { type: boolean, description: Must be true }
+    NvidiaConsent:
+      type: object
+      required: [by, at, licenceSha256, version, packages, installed]
+      properties:
+        by: { type: string }
+        at: { type: string, format: date-time }
+        licenceSha256: { type: string }
+        version: { type: string, description: The driver version the agreement covers }
+        packages: { type: array, items: { type: string } }
+        versions: { type: object, additionalProperties: { type: string }, description: Exact package versions installed }
+        installed: { type: boolean }
+    NvidiaLicence:
+      type: object
+      required: [sha256, version, packages, prepared, source]
+      properties:
+        sha256: { type: string }
+        version: { type: string }
+        packages: { type: array, items: { type: string } }
+        versions: { type: object, additionalProperties: { type: string }, description: Exact versions downloaded (the ones installed) }
+        prepared: { type: string, format: date-time }
+        source: { type: string }
+    NvidiaLicenceText:
+      type: object
+      required: [text, licence]
+      properties:
+        text: { type: string }
+        licence: { $ref: "#/components/schemas/NvidiaLicence" }
+    VGPUDriverRecord:
+      type: object
+      required: [file, sha256, version, by, at, installed]
+      properties:
+        file: { type: string }
+        sha256: { type: string }
+        version: { type: string }
+        by: { type: string }
+        at: { type: string, format: date-time }
+        installed: { type: boolean }
+    GPUTask:
+      type: object
+      required: [id, kind, state, step, progress, log, started]
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [nvidia.prepare, nvidia.install, nvidia.remove, vgpu.install, vgpu.remove] }
+        state: { type: string, enum: [running, succeeded, failed] }
+        step: { type: string }
+        progress: { type: integer }
+        log: { type: string }
+        error: { type: string }
+        result: { type: object, additionalProperties: true }
+        started: { type: string, format: date-time }
+        finished: { type: string, format: date-time }
+    GPUTaskResult:
+      type: object
+      required: [task]
+      properties:
+        task:
+          allOf: [{ $ref: "#/components/schemas/GPUTask" }]
+          nullable: true
+    NvidiaStatus:
+      type: object
+      required: [nvidiaGpus, installed, loaded, version, toolkit, nouveau, restartNeeded, packages, consent, licence, vgpu, vgpuHostDriver, task, skipNextUpdate, reinstallNeeded]
+      properties:
+        nvidiaGpus: { type: integer }
+        installed: { type: boolean }
+        loaded: { type: boolean }
+        version: { type: string }
+        toolkit: { type: boolean }
+        nouveau: { type: boolean }
+        restartNeeded: { type: boolean }
+        packages: { type: array, items: { type: string } }
+        consent:
+          allOf: [{ $ref: "#/components/schemas/NvidiaConsent" }]
+          nullable: true
+        licence:
+          allOf: [{ $ref: "#/components/schemas/NvidiaLicence" }]
+          nullable: true
+        vgpu:
+          allOf: [{ $ref: "#/components/schemas/VGPUDriverRecord" }]
+          nullable: true
+        vgpuHostDriver: { type: boolean }
+        task:
+          allOf: [{ $ref: "#/components/schemas/GPUTask" }]
+          nullable: true
+        skipNextUpdate:
+          allOf: [{ $ref: "#/components/schemas/NvidiaSkip" }]
+          nullable: true
+        reinstallNeeded:
+          allOf: [{ $ref: "#/components/schemas/NvidiaReinstall" }]
+          nullable: true
+    VGPUUpload:
+      type: object
+      required: [upload, sha256, size, fileName, version, known, by]
+      properties:
+        upload: { type: string }
+        sha256: { type: string, description: Computed by the server while receiving the file }
+        size: { type: integer, format: int64 }
+        fileName: { type: string }
+        version: { type: string }
+        known: { type: boolean, description: "The checksum is in HardyOS's list of checked NVIDIA vGPU installers" }
+        warning: { type: string, description: Shown when the checksum isn't in that list }
+        by: { type: string }
+    NvidiaSkipRequest:
+      type: object
+      required: [skip]
+      properties:
+        skip: { type: boolean, description: "true: the next update leaves the NVIDIA drivers out; false: withdraw" }
+        confirm: { type: boolean, description: Must be true to skip }
+    NvidiaSkip:
+      type: object
+      required: [by, at]
+      properties:
+        by: { type: string }
+        at: { type: string, format: date-time }
+    NvidiaReinstall:
+      type: object
+      required: [driver, vgpu, by, at, reason]
+      properties:
+        driver: { type: boolean, description: "Debian's NVIDIA driver for Docker apps needs installing again" }
+        vgpu: { type: boolean, description: "NVIDIA's vGPU host driver needs installing again" }
+        by: { type: string }
+        at: { type: string, format: date-time }
+        reason: { type: string }
+    VGPUInstallRequest:
+      type: object
+      required: [upload, confirmVersion, accept]
+      additionalProperties: false
+      properties:
+        upload: { type: string, description: The upload ID the upload returned }
+        confirmVersion: { type: string, description: "The driver's version, typed by the admin to confirm" }
+        accept: { type: boolean, description: "You have NVIDIA's vGPU licence and agree to the licence in NVIDIA's installer" }
+        replaceDriver: { type: boolean, description: Remove Debian's NVIDIA driver first }
+    # ---- end of devices API schemas (part D) ----
+    # ---- virtual machines API schemas (phase 5 part C) ----
+    VMCPU:
+      type: object
+      required: [cores, threads]
+      properties:
+        cores: { type: integer, minimum: 1, maximum: 256 }
+        threads: { type: integer, enum: [1, 2], description: Threads per core }
+    VMMemory:
+      type: object
+      required: [mb, balloon]
+      properties:
+        mb: { type: integer, minimum: 128 }
+        balloon: { type: boolean, description: The guest can give unused memory back and report its use }
+    VMFirmware:
+      type: object
+      required: [type, secureBoot, tpm]
+      properties:
+        type: { type: string, enum: [uefi, bios] }
+        secureBoot: { type: boolean }
+        tpm: { type: boolean, description: A TPM 2.0 (swtpm), as Windows 11 needs }
+    VMDisk:
+      type: object
+      required: [name, sizeGB, bus]
+      properties:
+        name: { type: string, description: disk0 to disk9 }
+        sizeGB: { type: integer, minimum: 1 }
+        bus: { type: string, enum: [virtio-scsi, virtio-blk, sata] }
+        import:
+          type: object
+          required: [file]
+          properties:
+            file: { type: string, description: A disk image in the ISO library, copied into the disk when the VM is created }
+    VMMedia:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string, enum: [iso, virtio, cloudinit, empty], description: "iso: a file from the ISO library; virtio: the VirtIO drivers disc; cloudinit: the generated cloud-init disc" }
+        iso: { type: string }
+    VMNIC:
+      type: object
+      required: [mode, model]
+      properties:
+        mode: { type: string, enum: [bridge, nat, vlan], description: "bridge: on the home network (its own address from the router); nat: behind the server; vlan: a VLAN of the home network" }
+        vlan: { type: integer, minimum: 1, maximum: 4094 }
+        model: { type: string, enum: [virtio, e1000e] }
+        mac: { type: string, description: Empty for a new card (one is made up) }
+        allowSpoofing: { type: boolean, description: "On the home network or a VLAN: let the card use MAC and IP addresses other than its own (needed by routers such as OPNsense). Off by default: the card is filtered (libvirt clean-traffic)" }
+    VMCloudInit:
+      type: object
+      required: [user, sshKeys, installAgent]
+      properties:
+        user: { type: string }
+        sshKeys: { type: array, items: { type: string } }
+        hostname: { type: string }
+        passwordHash: { type: string, description: Never sent by the server; set a password with the request's password }
+        installAgent: { type: boolean }
+    VMAutostart:
+      type: object
+      required: [enabled, order, delaySec]
+      properties:
+        enabled: { type: boolean }
+        order: { type: integer, minimum: 0, maximum: 999, description: Lower starts first }
+        delaySec: { type: integer, minimum: 0, maximum: 600, description: Wait after starting this VM before the next }
+    VMSpec:
+      type: object
+      required: [id, name, template, os, pool, cpu, memory, firmware, disks, media, nics, video, guestAgent, boot, autostart, devices]
+      properties:
+        id: { type: string, description: "Short name: 2-32 lowercase letters, digits and dashes" }
+        name: { type: string }
+        description: { type: string }
+        template: { type: string }
+        os: { type: string, enum: [windows, linux, other] }
+        pool: { type: string }
+        uuid: { type: string }
+        cpu: { $ref: "#/components/schemas/VMCPU" }
+        memory: { $ref: "#/components/schemas/VMMemory" }
+        firmware: { $ref: "#/components/schemas/VMFirmware" }
+        disks: { type: array, items: { $ref: "#/components/schemas/VMDisk" } }
+        media: { type: array, items: { $ref: "#/components/schemas/VMMedia" } }
+        nics: { type: array, items: { $ref: "#/components/schemas/VMNIC" } }
+        video: { type: string, enum: [virtio, vga, bochs, none] }
+        guestAgent: { type: boolean }
+        cloudInit: { $ref: "#/components/schemas/VMCloudInit" }
+        boot: { type: array, items: { type: string, enum: [disk, cdrom, network] } }
+        autostart: { $ref: "#/components/schemas/VMAutostart" }
+        devices: { type: array, items: { $ref: "#/components/schemas/VMDevice" } }
+        streaming:
+          type: object
+          required: [remote]
+          properties:
+            remote: { type: boolean, description: Publish Sunshine through the VPN for play away from home }
+        labels: { type: object, additionalProperties: { type: string } }
+    VM:
+      allOf:
+        - $ref: "#/components/schemas/VMSpec"
+        - type: object
+          required: [dataset, state, cpuPercent, memoryUsedMB, addresses, passwordSet, restartNeeded, diskUsage]
+          properties:
+            dataset: { type: string }
+            state: { type: string, enum: [running, stopped, paused, shutting-down, crashed, suspended, unknown] }
+            cpuPercent: { type: number }
+            memoryUsedMB: { type: integer }
+            addresses: { type: array, items: { type: string } }
+            passwordSet: { type: boolean }
+            restartNeeded: { type: boolean, description: Hardware changed while it ran }
+            diskUsage: { type: object, additionalProperties: { type: integer, format: int64 }, description: Bytes each disk uses on the pool }
+    VMKeptDisk:
+      type: object
+      required: [dataset, vm, pool, bytes]
+      properties:
+        dataset: { type: string }
+        vm: { type: string }
+        pool: { type: string }
+        bytes: { type: integer, format: int64 }
+    VMOverview:
+      type: object
+      required: [vms, kept]
+      properties:
+        vms: { type: array, items: { $ref: "#/components/schemas/VM" } }
+        kept: { type: array, items: { $ref: "#/components/schemas/VMKeptDisk" } }
+    VMPreset:
+      type: object
+      required: [id, name, summary, cores, threads, memoryMB, diskGB]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        summary: { type: string }
+        cores: { type: integer }
+        threads: { type: integer }
+        memoryMB: { type: integer }
+        diskGB: { type: integer }
+    VMImage:
+      type: object
+      required: [name, kind, urls]
+      properties:
+        name: { type: string }
+        kind: { type: string, enum: [iso, disk] }
+        urls: { type: [object, "null"], additionalProperties: { type: string }, description: Download links by architecture (x86_64, aarch64) }
+        page: { type: string }
+    VMTemplate:
+      type: object
+      required: [id, name, summary, group, os, install, firmware, diskBus, nicModel, nics, allowSpoofing, video, virtio, cloudInit, balloon, gpu, presets, defaultPreset, minMemoryMB, minDiskGB, images, notes]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        summary: { type: string }
+        group: { type: string, enum: [windows, linux, gaming, appliance, other] }
+        os: { type: string, enum: [windows, linux, other] }
+        install: { type: string, enum: [iso, image, cloud] }
+        firmware: { $ref: "#/components/schemas/VMFirmware" }
+        diskBus: { type: string }
+        nicModel: { type: string }
+        nics: { type: integer }
+        allowSpoofing: { type: boolean, description: "The template's cards may use other addresses (routers); others are kept to their own" }
+        video: { type: string }
+        virtio: { type: boolean }
+        cloudInit: { type: boolean }
+        balloon: { type: boolean }
+        gpu: { type: boolean }
+        presets: { type: array, items: { $ref: "#/components/schemas/VMPreset" } }
+        defaultPreset: { type: string }
+        minMemoryMB: { type: integer }
+        minDiskGB: { type: integer }
+        images: { type: [array, "null"], items: { $ref: "#/components/schemas/VMImage" } }
+        notes: { type: [array, "null"], items: { type: string } }
+    VMArch:
+      type: object
+      required: [arch, machine]
+      properties:
+        arch: { type: string }
+        machine: { type: string }
+        sata: { type: boolean }
+        cdBus: { type: string }
+        tpmModel: { type: string }
+        hyperV: { type: boolean }
+        smm: { type: boolean }
+        vmport: { type: boolean }
+        legacyBios: { type: boolean }
+        pit: { type: boolean }
+    VMCapabilities:
+      type: object
+      required: [supported, problem, kvm, arch, cpus, memoryMB, pools, uefi, secureBoot, tpm, libvirt, bridge, library, virtio, devices, committedMB, security, spoofingFilter]
+      properties:
+        supported: { type: boolean }
+        problem: { type: string, description: Why VMs can't run, in plain words }
+        kvm: { type: boolean }
+        arch: { $ref: "#/components/schemas/VMArch" }
+        cpus: { type: integer }
+        memoryMB: { type: integer }
+        pools: { type: array, items: { type: string } }
+        uefi: { type: boolean }
+        secureBoot: { type: boolean }
+        tpm: { type: boolean }
+        libvirt: { type: string }
+        bridge: { type: string, description: The home network's bridge, empty until the first bridged VM }
+        library: { type: string, description: The ISOs shared folder's pool, empty when there's none }
+        virtio: { type: boolean, description: The VirtIO drivers disc is downloaded }
+        devices: { description: The devices code's overview (IOMMU, GPUs) when it's there }
+        committedMB: { type: integer, description: Memory of the running VMs }
+        security: { type: string, description: "How libvirt confines QEMU: apparmor, or empty when it doesn't (then VMs are unsupported)" }
+        spoofingFilter: { type: boolean, description: "libvirt's clean-traffic filter is installed (cards on the home network need it unless they allow spoofing)" }
+    VMTask:
+      type: object
+      required: [id, kind, vm, file, progress, message, done, error, started, finished]
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [download, import] }
+        vm: { type: string }
+        file: { type: string }
+        progress: { type: number }
+        message: { type: string }
+        done: { type: boolean }
+        error: { type: string }
+        started: { type: string, format: date-time }
+        finished: { type: string, format: date-time }
+    VMLibraryFile:
+      type: object
+      required: [name, kind, size, modified, usedBy]
+      properties:
+        name: { type: string }
+        kind: { type: string, enum: [iso, disk] }
+        size: { type: integer, format: int64 }
+        modified: { type: string, format: date-time }
+        usedBy: { type: array, items: { type: string }, description: VMs that have it in a drive }
+    VMLibrary:
+      type: object
+      required: [pool, path, files, tasks]
+      properties:
+        pool: { type: string, description: Empty until the ISOs shared folder exists }
+        path: { type: string }
+        files: { type: array, items: { $ref: "#/components/schemas/VMLibraryFile" } }
+        tasks: { type: array, items: { $ref: "#/components/schemas/VMTask" } }
+    VMDownload:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string, description: An https:// link }
+        name: { type: string, description: Save as (default from the link; .gz and .bz2 are unpacked) }
+        sha256: { type: string }
+        pool: { type: string, description: Where to make the ISOs shared folder if there's none }
+    VMCreateRequest:
+      type: object
+      required: [spec]
+      properties:
+        spec: { $ref: "#/components/schemas/VMSpec" }
+        password: { type: string, description: The cloud-init user's password (never stored as typed) }
+        start: { type: boolean }
+        downloads: { type: array, items: { $ref: "#/components/schemas/VMDownload" }, maxItems: 4, description: Files to download into the ISO library first }
+        allowOvercommit: { type: boolean, description: "Create the VM even when its (thin) disks are bigger than the pool's free space" }
+    VMUpdateRequest:
+      type: object
+      required: [spec]
+      properties:
+        spec: { $ref: "#/components/schemas/VMSpec" }
+        password: { type: string }
+        removeDisks: { type: array, items: { type: string }, description: Disks left out of the spec that may be deleted (the VM must be off; confirm required) }
+        confirm: { type: string, description: "The VM's name or display name, required when removeDisks is set" }
+        allowOvercommit: { type: boolean, description: "Add or grow disks even past the pool's free space" }
+    VMDeleteRequest:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: string, description: The VM's name or display name }
+        keepDisks: { type: boolean }
+    VMKeptDeleteRequest:
+      type: object
+      required: [dataset, confirm]
+      properties:
+        dataset: { type: string }
+        confirm: { type: string, description: The deleted VM's name }
+    VMSnapshot:
+      type: object
+      required: [name, label, created, bytes, consistent]
+      properties:
+        name: { type: string }
+        label: { type: string }
+        created: { type: string, format: date-time }
+        bytes: { type: integer, format: int64 }
+        consistent: { type: boolean, description: The guest's file systems were frozen first (or it was off) }
+    VMSnapshotDeleteRequest:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: string, description: "The VM's name or display name" }
+    VMSnapshotRequest:
+      type: object
+      properties:
+        label: { type: string, maxLength: 80 }
+    VMRollbackRequest:
+      type: object
+      required: [snapshot, confirm]
+      properties:
+        snapshot: { type: string }
+        confirm: { type: string }
+    VMConsoleSession:
+      type: object
+      required: [token, expires, path]
+      properties:
+        token: { type: string }
+        expires: { type: string, format: date-time }
+        path: { type: string, description: The WebSocket to open }
+    VMLogs:
+      type: object
+      required: [logs]
+      properties:
+        logs: { type: string }
+    # ---- end of virtual machines API schemas ----

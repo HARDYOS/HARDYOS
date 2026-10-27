@@ -19,6 +19,16 @@ if ! getent passwd hardyos-files >/dev/null; then
     --shell /usr/sbin/nologin --gecos "HardyOS File Manager" hardyos-files
 fi
 
+# VM disk image imports run qemu-img and xz as this user, in a sandbox,
+# never as root (decision 134).
+if ! getent group hardyos-import >/dev/null; then
+  addgroup --system hardyos-import
+fi
+if ! getent passwd hardyos-import >/dev/null; then
+  adduser --system --ingroup hardyos-import --home /nonexistent --no-create-home \
+    --shell /usr/sbin/nologin --gecos "HardyOS VM image imports" hardyos-import
+fi
+
 if [ -d /run/systemd/system ]; then
   systemctl daemon-reload
   systemctl enable hardyos-issue.service hardyd-priv.service hardyd.service >/dev/null

@@ -23,6 +23,9 @@ type Server struct {
 	Logger      *slog.Logger
 	// OpTimeout bounds each operation. Zero means 10 minutes.
 	OpTimeout time.Duration
+	// OpTimeouts overrides OpTimeout for single operations (installing an
+	// update that rebuilds the NVIDIA driver takes longer).
+	OpTimeouts map[string]time.Duration
 	// OnListen runs once the socket is ready (systemd readiness notification).
 	OnListen func()
 
@@ -141,6 +144,9 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 	timeout := s.OpTimeout
 	if timeout == 0 {
 		timeout = 10 * time.Minute
+	}
+	if t, ok := s.OpTimeouts[req.Op]; ok && t > 0 {
+		timeout = t
 	}
 	opCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

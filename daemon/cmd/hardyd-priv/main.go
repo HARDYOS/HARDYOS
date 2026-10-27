@@ -19,8 +19,10 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/apps"
 	"github.com/hardyos/hardyos/daemon/internal/backup"
 	"github.com/hardyos/hardyos/daemon/internal/boot"
+	"github.com/hardyos/hardyos/daemon/internal/devices"
 	"github.com/hardyos/hardyos/daemon/internal/domain"
 	"github.com/hardyos/hardyos/daemon/internal/fileworker"
+	"github.com/hardyos/hardyos/daemon/internal/gpu"
 	"github.com/hardyos/hardyos/daemon/internal/hw"
 	"github.com/hardyos/hardyos/daemon/internal/install"
 	"github.com/hardyos/hardyos/daemon/internal/network"
@@ -31,8 +33,10 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/smb"
 	"github.com/hardyos/hardyos/daemon/internal/snapshots"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
+	"github.com/hardyos/hardyos/daemon/internal/syslock"
 	"github.com/hardyos/hardyos/daemon/internal/update"
 	"github.com/hardyos/hardyos/daemon/internal/version"
+	"github.com/hardyos/hardyos/daemon/internal/vms"
 )
 
 func main() {
@@ -90,9 +94,33 @@ func main() {
 	if live {
 		priv.RegisterSystem(s, sysexec.Exec{}, nil)
 	} else {
+		// Boot menu changes, updates and GPU driver tasks take turns, with
+		// hardyctl boot-sync too (a lock file in root's runtime directory).
+		syslock.Init()
+		// Root's own state directory on the shared dataset; files early
+		// builds put in hardyd's directory move there.
+		if err := boot.MigrateRootState(boot.Env{Runner: sysexec.Exec{}, Root: "/"}); err != nil {
+			log.Warn("root's state directory", "dir", rootfile.RootStateDir, "err", err)
+		}
+		if err := devices.MigrateRoms("/"); err != nil {
+			log.Warn("GPU ROM library", "err", err)
+		}
 		// Before hardyd touches the state dataset: finish a settings restore,
 		// undo a failed update, or start the new version's confirm watchdog.
-		updater.OnBoot(ctx)
+		if release, err := syslock.Acquire(ctx, "Checking the last update"); err == nil {
+			updater.OnBoot(ctx)
+			release()
+		} else {
+			log.Warn("system lock", "err", err)
+			updater.OnBoot(ctx)
+		}
+		// GPUs and devices for VMs. The NVIDIA driver HardyOS installed is
+		// rebuilt inside every new version before it's offered for boot.
+		gpus := &gpu.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log}
+		updater.Hooks = append(updater.Hooks, update.Hook{Name: "Installing the NVIDIA driver into the new version", Run: gpus.PrepareNewRoot})
+		s.OpTimeouts = map[string]time.Duration{priv.OpUpdateStage: 45 * time.Minute}
+		devs := &devices.Host{Runner: sysexec.Exec{}, Root: "/", Log: log}
+		priv.RegisterDevices(s, devs, gpus)
 		priv.RegisterSystem(s, sysexec.Exec{}, updater.BeforeReboot)
 		priv.RegisterUpdates(s, updater)
 		// The domain controller, if one was set up. The NAS's resolver puts the
@@ -129,7 +157,8 @@ func main() {
 			Addresses: func(ctx context.Context) []string { return smb.LANAddresses(ctx, sysexec.Exec{}) }}
 		// SFTP for domain accounts: sshd's settings and each person's view of the folders.
 		fsm.SFTP = &sftp.Manager{Runner: sysexec.Exec{}, Log: log}
-		priv.RegisterShares(s, shm, priv.RegisterNFS(s, nfsm), priv.RegisterFiles(s, fsm))
+		shareHooks := []priv.ShareHook{priv.RegisterNFS(s, nfsm), priv.RegisterFiles(s, fsm)}
+		priv.RegisterShares(s, shm, shareHooks...)
 		go nfsm.Watch(ctx)
 		go fsm.Watch(ctx)
 		snaps := &snapshots.Manager{Runner: sysexec.Exec{}, Shares: shm, Log: log}
@@ -142,6 +171,19 @@ func main() {
 			log.Error("file access isn't available", "err", err)
 		}
 		go am.OnStart(ctx)
+		// Virtual machines: libvirt is driven from here only. Adding or
+		// removing the VM bridge takes the domain controller off the port
+		// first and puts it on the new parent after.
+		netm.BeforeBridges = dc.HoldNetwork
+		netm.AfterBridges = dc.ReleaseNetwork
+		// Devices go to VMs through part D's Host, the same one its ops use;
+		// the Devices view shows which VM each device is assigned to.
+		vmm := &vms.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log, Network: netm, Library: priv.VMLibrary(shm, shareHooks...), Devices: devs}
+		devs.Assignments = vmm.Assignments
+		go reconcileDevices(ctx, devs, log)
+		priv.RegisterVMs(s, vmm)
+		go vmm.OnStart(ctx)
+		go vmm.Watch(ctx)
 		priv.RegisterBootRepair(s, priv.StorageEnv{Runner: sysexec.Exec{}, Root: os.DirFS("/")}, "/", boot.ConfigPath)
 		if len(updater.Keys()) == 0 {
 			log.Warn("no trusted release key: updates can't be installed until one is added")
@@ -178,6 +220,25 @@ func main() {
 	if err := s.ListenAndServe(ctx, *socket, 0o660, gid); err != nil {
 		log.Error("serve failed", "err", err)
 		os.Exit(1)
+	}
+}
+
+// reconcileDevices gives back devices held for VMs that stopped while
+// hardyd-priv wasn't running. libvirt may come up after hardyd-priv, so
+// it tries for a while; nothing is released while the running VMs can't
+// be listed.
+func reconcileDevices(ctx context.Context, h *devices.Host, log *slog.Logger) {
+	for i := 0; i < 20; i++ {
+		err := h.Reconcile(ctx)
+		if err == nil {
+			return
+		}
+		log.Warn("devices: reconcile", "err", err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(30 * time.Second):
+		}
 	}
 }
 
