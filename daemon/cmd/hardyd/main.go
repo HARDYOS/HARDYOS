@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"syscall"
@@ -31,6 +32,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/installer"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/metrics"
+	"github.com/hardyos/hardyos/daemon/internal/monitor"
 	"github.com/hardyos/hardyos/daemon/internal/notify"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/publish"
@@ -140,18 +142,61 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		remote = &publish.Publisher{Store: &publish.Store{DB: db, Sealer: &publish.Sealer{Source: secrets}}}
 	}
 	api.RegisterRemoteJobs(manager, pc, remote)
+	// Alerts and monitoring (docs/monitoring.md): every event goes through
+	// the dispatcher (desktop, Discord/Slack/Teams, email), including the
+	// notifications packages send through the center; the monitor checks
+	// disks, pools, the UPS, apps, VMs and services and keeps resource
+	// history in metrics.db next to the database.
+	var alerts *notify.Dispatcher
+	var mon *monitor.Service
+	if !live {
+		alerts = &notify.Dispatcher{DB: db, Center: notifications, Channels: &notify.Channels{DB: db, Keys: secrets}, Log: log}
+		notifications.Forward = alerts.Forward
+		history, err := monitor.OpenHistory(ctx, filepath.Join(filepath.Dir(dbPath), "metrics.db"))
+		if err != nil {
+			log.Error("resource history unavailable", "err", err)
+			history = nil
+		} else {
+			defer history.Close()
+		}
+		mon = &monitor.Service{DB: db, Priv: pc, Notify: alerts, History: history, Log: log, Root: os.DirFS("/"),
+			UPS: &monitor.UPSService{DB: db, Keys: secrets, Log: log}}
+		if remote != nil {
+			mon.PublishErrors = func(ctx context.Context) (map[string]string, error) {
+				recs, err := remote.Store.Records(ctx)
+				if err != nil {
+					return nil, err
+				}
+				out := map[string]string{}
+				for k, r := range recs {
+					if r.Error != "" {
+						out[k] = r.Error
+					}
+				}
+				return out, nil
+			}
+		}
+		mon.AddSource(monitor.SystemSource{Collector: collector})
+		mon.AddSource(&monitor.DiskIOSource{Root: os.DirFS("/")})
+		mon.AddSource(monitor.HwmonSource{Root: os.DirFS("/")})
+		mon.AddSource(&monitor.AppsSource{Root: os.DirFS("/"), CPUs: func() int { return collector.Snapshot().CPUs }, Names: mon.AppNames})
+		mon.AddSource(monitor.UPSSource(mon.UPS))
+		stor.HealthElsewhere = true
+		stor.ScrubAllowed = mon.ScrubAllowed
+		api.RegisterMonitorJobs(manager, mon, pc)
+	}
 	// File Manager and share links: files read and written as the person.
 	var fileAccess files.Service
 	if !live {
 		fileAccess = &files.Client{Priv: pc, Lookup: files.UserLookup(&auth.Users{DB: db})}
 		api.RegisterFileJobs(manager, fileAccess)
 	}
-	// Replication to and from other HardyOS servers. Notifications go
-	// through replication.Notifier (a no-op until internal/notify's
-	// interface lands).
+	// Replication to and from other HardyOS servers. Its events (kinds
+	// "replication.*", so they route as the replication category) go to
+	// the alert dispatcher.
 	var repl *replication.Service
 	if !live {
-		repl = &replication.Service{DB: db, Root: &replication.PrivRoot{Priv: pc}, Jobs: manager, Notifier: replication.NopNotifier{},
+		repl = &replication.Service{DB: db, Root: &replication.PrivRoot{Priv: pc}, Jobs: manager, Notifier: replNotifier{alerts},
 			Audit: &audit.Log{DB: db, Events: broker}, Sealer: &replication.Sealer{Source: secrets}, Log: log}
 		repl.RegisterJobs(manager)
 	}
@@ -173,6 +218,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		WebRoot: webRoot, Insecure: httpsAddr == "", Installer: inst, Updates: upd, Backups: bk,
 		Apps: appStore, Files: fileAccess, TrustedProxies: trustedProxies, Secrets: secrets, Remote: remote,
 		Replication: repl,
+		Alerts:      alerts, Monitor: mon,
 	})
 
 	go housekeeping(ctx, log, &auth.Sessions{DB: db})
@@ -185,6 +231,8 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		go upd.RunChecks(ctx) // look for new versions on GitHub daily
 		go bk.Run(ctx)        // nightly settings backup
 		go repl.Run(ctx)      // replication schedule, stale alerts, receiving from other servers
+		go alerts.Run(ctx)    // alert delivery and quiet-hours summaries
+		go mon.Run(ctx)       // checks, self-test schedule, UPS, resource history
 		if p := handler.OIDC(); p != nil {
 			go p.Start(ctx) // sign-in provider: signing keys on schedule, expired sign-ins removed
 		}
@@ -319,4 +367,11 @@ func newLogger(level string) *slog.Logger {
 		l = slog.LevelInfo
 	}
 	return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: l}))
+}
+
+// replNotifier hands replication's events to the alert dispatcher.
+type replNotifier struct{ to notify.Notifier }
+
+func (n replNotifier) Notify(ctx context.Context, e replication.Event) {
+	n.to.Notify(ctx, notify.Event{Kind: e.Kind, Severity: e.Severity, Title: e.Title, Body: e.Body, Link: e.Link, Time: e.Time})
 }

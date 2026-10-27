@@ -244,8 +244,9 @@ token, which A's root decodes and checks before zfs uses it.
   (receiving side) and `ReplicationPage` (Control Panel › Replication).
 - Notifications: `replication.Notifier` with
   `Event{Kind, Severity, Title, Body, Link string; Time time.Time}`
-  (severities info, warning, critical); main wires `NopNotifier` until
-  `internal/notify` provides the interface.
+  (severities info, warning, critical); hardyd hands them to the alert
+  dispatcher (`notify.Dispatcher`), where kinds `replication.*` route as
+  the Replication category and link to Control Panel › Replication.
 - Tests: `internal/replica` (stream policy, confinement, argument
   building, pruning, tokens) with fakes; `internal/replication` with a
   simulated root and two services over real mutual TLS (pairing, full,

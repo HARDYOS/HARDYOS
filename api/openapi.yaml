@@ -40,6 +40,9 @@ tags:
   - name: oidc
   - name: vms
   - name: replication
+  - name: alerts
+  - name: monitor
+  - name: ups
 paths:
   /health:
     get:
@@ -911,6 +914,336 @@ paths:
       tags: [notifications]
       responses:
         "204": { description: Marked read }
+  /notifications/unread:
+    get:
+      operationId: countUnreadNotifications
+      summary: How many of your notifications you haven't read
+      tags: [notifications]
+      responses:
+        "200":
+          description: Unread count
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UnreadCount" }
+  /alerts/channels:
+    get:
+      operationId: listAlertChannels
+      summary: Where alerts go, the desktop first (admin). Secrets are never returned.
+      tags: [alerts]
+      responses:
+        "200":
+          description: Channels
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AlertChannel" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: createAlertChannel
+      summary: Add a channel (admin). New channels get warning and critical alerts of every category.
+      description: |
+        Webhooks must be https. Discord, Slack and Teams channels accept only their
+        services' hosts; a generic webhook needs `config.allowAnyHost`. Hosts on this
+        server or a private network are refused, here and again at every connection.
+      tags: [alerts]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AlertChannelInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AlertChannel" }
+        "400": { $ref: "#/components/responses/Invalid" }
+  /alerts/channels/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+    patch:
+      operationId: updateAlertChannel
+      summary: Change a channel (admin). Omitted secrets are kept; an empty string clears one.
+      tags: [alerts]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AlertChannelInput" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AlertChannel" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: deleteAlertChannel
+      summary: Remove a channel (admin; not the desktop)
+      tags: [alerts]
+      responses:
+        "204": { description: Removed }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /alerts/channels/{id}/test:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+    post:
+      operationId: testAlertChannel
+      summary: Send a test alert to one channel now (admin)
+      tags: [alerts]
+      responses:
+        "200":
+          description: How it went
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChannelTestResult" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /alerts/routes:
+    get:
+      operationId: listAlertRoutes
+      summary: Routing rules (admin)
+      tags: [alerts]
+      responses:
+        "200":
+          description: Rules
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AlertRoute" }
+    put:
+      operationId: setAlertRoutes
+      summary: Replace every routing rule (admin)
+      description: A channel gets an alert when the rule for the alert's category (or "*") has a minimum severity at or below the alert's.
+      tags: [alerts]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [routes]
+              properties:
+                routes: { type: array, items: { $ref: "#/components/schemas/AlertRoute" } }
+      responses:
+        "200":
+          description: Rules
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AlertRoute" }
+        "400": { $ref: "#/components/responses/Invalid" }
+  /alerts/settings:
+    get:
+      operationId: getAlertSettings
+      summary: Quiet hours, duplicate and rate limits (admin)
+      tags: [alerts]
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AlertSettings" }
+    put:
+      operationId: saveAlertSettings
+      summary: Change quiet hours, duplicate and rate limits (admin)
+      tags: [alerts]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AlertSettings" }
+      responses:
+        "200":
+          description: Saved
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AlertSettings" }
+        "400": { $ref: "#/components/responses/Invalid" }
+  /alerts/deliveries:
+    get:
+      operationId: listAlertDeliveries
+      summary: Recent deliveries to channels, newest first (admin)
+      tags: [alerts]
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500 } }
+      responses:
+        "200":
+          description: Deliveries
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AlertDelivery" }
+  /alerts/categories:
+    get:
+      operationId: listAlertCategories
+      summary: The routing categories (admin)
+      tags: [alerts]
+      responses:
+        "200":
+          description: Categories
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AlertCategory" }
+  /monitor/series:
+    get:
+      operationId: listMetricSeries
+      summary: Every resource history series (admin)
+      tags: [monitor]
+      responses:
+        "200":
+          description: Series
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SeriesInfo" }
+  /monitor/history:
+    get:
+      operationId: getMetricHistory
+      summary: Resource history for some series over a range (admin)
+      description: |
+        `from` is clamped to two years ago and `to` to now; a range needing more
+        than 48 stored values per returned point is refused (400).
+        Values come from the finest tier that still covers the range (10 s for a
+        day, 1 min for 7 days, 15 min for 90 days, 1 h for 2 years), averaged down
+        to at most `points` values.
+      tags: [monitor]
+      parameters:
+        - { name: series, in: query, required: true, description: "Comma-separated names; a trailing * matches a prefix (app.cpu:*)", schema: { type: string } }
+        - { name: range, in: query, schema: { type: string, enum: [1h, 6h, 24h, 7d, 30d, 90d, 1y, 2y] } }
+        - { name: from, in: query, description: RFC 3339; overrides range, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+        - { name: points, in: query, schema: { type: integer, minimum: 1, maximum: 2000 } }
+      responses:
+        "200":
+          description: History
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HistoryResult" }
+        "400": { $ref: "#/components/responses/Invalid" }
+  /monitor/conditions:
+    get:
+      operationId: listConditions
+      summary: What the monitor sees wrong right now, most severe first (admin)
+      tags: [monitor]
+      responses:
+        "200":
+          description: Conditions
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Condition" }
+  /monitor/settings:
+    get:
+      operationId: getMonitorSettings
+      summary: Thresholds and the self-test and scrub schedule (admin)
+      tags: [monitor]
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MonitorSettings" }
+    put:
+      operationId: saveMonitorSettings
+      summary: Change thresholds and schedules (admin)
+      tags: [monitor]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MonitorSettings" }
+      responses:
+        "200":
+          description: Saved
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MonitorSettings" }
+        "400": { $ref: "#/components/responses/Invalid" }
+  /monitor/disks:
+    get:
+      operationId: listDiskInfo
+      summary: Every disk with its last SMART reading and self-test schedule (admin)
+      tags: [monitor]
+      responses:
+        "200":
+          description: Disks
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/DiskInfo" }
+  /monitor/disks/{name}/test:
+    parameters:
+      - { name: name, in: path, required: true, description: Kernel disk name, e.g. sda, schema: { type: string } }
+    post:
+      operationId: startDiskSelfTest
+      summary: Start a SMART self-test now (admin, job)
+      tags: [monitor]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [test]
+              properties:
+                test: { type: string, enum: [short, long] }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /ups:
+    get:
+      operationId: getUPS
+      summary: The UPS setup (passwords never returned) and its last reading (admin)
+      tags: [ups]
+      responses:
+        "200":
+          description: UPS
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UPSView" }
+    put:
+      operationId: saveUPS
+      summary: Set up the UPS and apply it (admin, job)
+      tags: [ups]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [config]
+              properties:
+                config: { $ref: "#/components/schemas/UPSConfig" }
+                secrets: { $ref: "#/components/schemas/UPSSecretsInput" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+  /ups/detect:
+    get:
+      operationId: detectUPS
+      summary: Look for UPSes on USB (admin)
+      tags: [ups]
+      responses:
+        "200":
+          description: Found
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/UPSDevice" }
   /system/updates:
     get:
       operationId: getUpdateStatus
@@ -4698,9 +5031,22 @@ components:
             advisories: { type: array, items: { type: string } }
     SMART:
       type: object
-      required: [device, model, serial, capacityBytes, rotationRpm, health, reasons]
+      required: [device, protocol, model, serial, firmware, capacityBytes, rotationRpm, standby, health, reasons, attributes, selfTest, selfTests]
       properties:
         device: { type: string }
+        protocol: { type: string, description: "ATA, SCSI or NVMe" }
+        firmware: { type: string }
+        standby: { type: boolean, description: Asleep and not woken to read it }
+        powerCycles: { type: [integer, "null"] }
+        reportedUncorrect: { type: [integer, "null"] }
+        grownDefects: { type: [integer, "null"] }
+        uncorrectedErrors: { type: [integer, "null"] }
+        availableSpare: { type: [integer, "null"] }
+        spareThreshold: { type: [integer, "null"] }
+        unsafeShutdowns: { type: [integer, "null"] }
+        attributes: { type: array, items: { $ref: "#/components/schemas/SMARTAttribute" } }
+        selfTest: { $ref: "#/components/schemas/SelfTestState" }
+        selfTests: { type: array, items: { $ref: "#/components/schemas/SelfTest" } }
         model: { type: string }
         serial: { type: string }
         capacityBytes: { type: integer }
@@ -4877,8 +5223,10 @@ components:
         lastError: { type: string, readOnly: true }
     Notification:
       type: object
-      required: [id, at, level, title, body, source, adminOnly, readAt]
+      required: [id, at, level, title, body, source, adminOnly, readAt, kind, link]
       properties:
+        kind: { type: string, description: 'Event kind, e.g. "disk.smart" (empty for older entries)' }
+        link: { type: string, description: 'Where it points in the desktop, e.g. "storage/disks/sda"' }
         id: { type: integer, format: int64 }
         at: { type: string, format: date-time }
         level: { type: string, enum: [info, success, warning, error] }
@@ -4916,6 +5264,298 @@ components:
         current: { $ref: "#/components/schemas/MetricSample" }
         history: { type: array, items: { $ref: "#/components/schemas/MetricSample" } }
         cpus: { type: integer }
+    UnreadCount:
+      type: object
+      required: [count]
+      properties:
+        count: { type: integer }
+    AlertChannelConfig:
+      type: object
+      description: A channel's settings without secrets; each type uses its own fields.
+      properties:
+        urlHost: { type: string, readOnly: true, description: Where a webhook points (its URL is a secret) }
+        allowAnyHost: { type: boolean, description: "Generic webhooks only: post to any public https host" }
+        from: { type: string, description: Email sender }
+        to: { type: array, items: { type: string } }
+        host: { type: string, description: SMTP server }
+        port: { type: integer }
+        security: { type: string, enum: [starttls, tls, none] }
+        username: { type: string }
+        allowAnyPort: { type: boolean, description: "SMTP: allow a port other than 25, 465, 587 and 2525" }
+        region: { type: string, description: "SES region, e.g. us-east-1" }
+        accessKeyId: { type: string }
+        configurationSet: { type: string }
+    AlertSecretsInput:
+      type: object
+      description: Secrets to set; an omitted field keeps the stored value, an empty string clears it.
+      properties:
+        url: { type: string, writeOnly: true }
+        password: { type: string, writeOnly: true }
+        secretAccessKey: { type: string, writeOnly: true }
+    AlertChannel:
+      type: object
+      required: [id, type, name, enabled, config, secretsSet, lastAt, lastOk, lastError]
+      properties:
+        id: { type: integer, format: int64 }
+        type: { type: string, enum: [desktop, discord, slack, teams, webhook, smtp, ses] }
+        name: { type: string }
+        enabled: { type: boolean }
+        config: { $ref: "#/components/schemas/AlertChannelConfig" }
+        secretsSet: { type: object, additionalProperties: { type: boolean } }
+        lastAt: { type: [string, "null"], format: date-time }
+        lastOk: { type: [boolean, "null"] }
+        lastError: { type: string }
+    AlertChannelInput:
+      type: object
+      required: [type, name, config]
+      properties:
+        type: { type: string, enum: [desktop, discord, slack, teams, webhook, smtp, ses] }
+        name: { type: string, maxLength: 64 }
+        enabled: { type: boolean }
+        config: { $ref: "#/components/schemas/AlertChannelConfig" }
+        secrets: { $ref: "#/components/schemas/AlertSecretsInput" }
+    ChannelTestResult:
+      type: object
+      required: [ok, error]
+      properties:
+        ok: { type: boolean }
+        error: { type: string }
+    AlertRoute:
+      type: object
+      required: [category, channelId, minSeverity]
+      properties:
+        category: { type: string, description: 'Alert category (disk, pool, ups, backup, ...) or "*"' }
+        channelId: { type: integer, format: int64 }
+        minSeverity: { type: string, enum: [info, warning, critical, "off"], description: '"off": none of this category (overrides "*")' }
+    QuietHours:
+      type: object
+      required: [enabled, start, end, allow]
+      properties:
+        enabled: { type: boolean }
+        start: { type: string, examples: ["22:00"] }
+        end: { type: string, examples: ["07:00"] }
+        allow: { type: string, enum: [warning, critical], description: Alerts at this severity or above still go out }
+    AlertSettings:
+      type: object
+      required: [quietHours, dedupMinutes, maxPerHour, serverUrl]
+      properties:
+        quietHours: { $ref: "#/components/schemas/QuietHours" }
+        dedupMinutes: { type: integer, minimum: 0, maximum: 1440 }
+        maxPerHour: { type: integer, minimum: 1, maximum: 120 }
+        serverUrl: { type: string, description: The desktop's address for links in messages }
+    AlertDelivery:
+      type: object
+      required: [id, at, channelId, kind, severity, title, status, detail]
+      properties:
+        id: { type: integer, format: int64 }
+        at: { type: string, format: date-time }
+        channelId: { type: integer, format: int64 }
+        kind: { type: string }
+        severity: { type: string, enum: [info, warning, critical] }
+        title: { type: string }
+        status: { type: string, enum: [sent, failed, held, suppressed] }
+        detail: { type: string }
+    AlertCategory:
+      type: object
+      required: [id, label, description]
+      properties:
+        id: { type: string }
+        label: { type: string }
+        description: { type: string }
+    SeriesInfo:
+      type: object
+      required: [name, label, unit, lastSeen]
+      properties:
+        name: { type: string, examples: ["cpu.percent", "disk.read:sda", "app.cpu:immich"] }
+        label: { type: string }
+        unit: { type: string, examples: [percent, bytes, bytes/s, celsius, seconds, watts, volts, count] }
+        lastSeen: { type: string, format: date-time }
+    SeriesData:
+      type: object
+      required: [name, label, unit, values]
+      properties:
+        name: { type: string }
+        label: { type: string }
+        unit: { type: string }
+        values: { type: array, items: { type: [number, "null"] } }
+    HistoryResult:
+      type: object
+      required: [from, to, step, tier, series]
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        step: { type: integer, description: Seconds between values }
+        tier: { type: integer }
+        series: { type: array, items: { $ref: "#/components/schemas/SeriesData" } }
+    Condition:
+      type: object
+      required: [key, kind, severity, title, body, link, since]
+      properties:
+        key: { type: string }
+        kind: { type: string }
+        severity: { type: string, enum: [info, warning, critical] }
+        title: { type: string }
+        body: { type: string }
+        link: { type: string }
+        since: { type: string, format: date-time }
+    SmartSchedule:
+      type: object
+      required: [enabled, shortDays, longDays, windowStart, windowEnd, scrubInWindow, excluded]
+      properties:
+        enabled: { type: boolean }
+        shortDays: { type: integer, minimum: 1, maximum: 90 }
+        longDays: { type: integer, minimum: 7, maximum: 365 }
+        windowStart: { type: integer, minimum: 0, maximum: 23 }
+        windowEnd: { type: integer, minimum: 0, maximum: 23 }
+        scrubInWindow: { type: boolean }
+        excluded: { type: array, items: { type: string } }
+    MonitorSettings:
+      type: object
+      required: [poolWarnPct, poolCritPct, hddWarnC, hddCritC, ssdWarnC, ssdCritC, sensorWarnC, sensorCritC, smart]
+      properties:
+        poolWarnPct: { type: integer }
+        poolCritPct: { type: integer }
+        hddWarnC: { type: integer }
+        hddCritC: { type: integer }
+        ssdWarnC: { type: integer }
+        ssdCritC: { type: integer }
+        sensorWarnC: { type: integer }
+        sensorCritC: { type: integer }
+        smart: { $ref: "#/components/schemas/SmartSchedule" }
+    TestState:
+      type: object
+      required: [byId, nextShortAt, nextLongAt, lastShortAt, lastLongAt, running, runningSince, lastType, lastResult, lastPassed, lastDoneAt, excluded]
+      properties:
+        byId: { type: string }
+        nextShortAt: { type: string, format: date-time }
+        nextLongAt: { type: string, format: date-time }
+        lastShortAt: { type: [string, "null"], format: date-time }
+        lastLongAt: { type: [string, "null"], format: date-time }
+        running: { type: string, enum: ["", short, long] }
+        runningSince: { type: [string, "null"], format: date-time }
+        lastType: { type: string }
+        lastResult: { type: string }
+        lastPassed: { type: [boolean, "null"] }
+        lastDoneAt: { type: [string, "null"], format: date-time }
+        excluded: { type: boolean }
+    DiskInfo:
+      type: object
+      required: [disk, smart, readAt, tests, asleep, supported]
+      properties:
+        disk: { $ref: "#/components/schemas/Disk" }
+        smart: { oneOf: [{ $ref: "#/components/schemas/SMART" }, { type: "null" }] }
+        readAt: { type: [string, "null"], format: date-time }
+        tests: { oneOf: [{ $ref: "#/components/schemas/TestState" }, { type: "null" }] }
+        asleep: { type: boolean }
+        supported: { type: boolean }
+    SMARTAttribute:
+      type: object
+      required: [id, name, value, worst, thresh, raw, rawString, whenFailed]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        value: { type: integer }
+        worst: { type: integer }
+        thresh: { type: integer }
+        raw: { type: integer }
+        rawString: { type: string }
+        whenFailed: { type: string }
+    SelfTest:
+      type: object
+      required: [type, status, passed, hours]
+      properties:
+        type: { type: string }
+        status: { type: string }
+        passed: { type: [boolean, "null"] }
+        hours: { type: [integer, "null"] }
+    SelfTestState:
+      type: object
+      required: [running, remainingPct, status, shortMinutes, longMinutes]
+      properties:
+        running: { type: boolean }
+        remainingPct: { type: [integer, "null"] }
+        status: { type: string }
+        shortMinutes: { type: integer }
+        longMinutes: { type: integer }
+    UPSConfig:
+      type: object
+      required: [mode]
+      properties:
+        mode: { type: string, enum: [off, local, netclient] }
+        name: { type: string }
+        driver: { type: string, enum: [usbhid-ups, nutdrv_qx, blazer_usb, blazer_ser, apcsmart, bcmxcp_usb, tripplite_usb, riello_usb, dummy-ups] }
+        port: { type: string }
+        vendorId: { type: string }
+        productId: { type: string }
+        serial: { type: string }
+        description: { type: string }
+        shutdownCharge: { type: integer, minimum: 0, maximum: 90 }
+        shutdownRuntime: { type: integer, minimum: 0, maximum: 3600 }
+        serveNetwork: { type: boolean }
+        clientUser: { type: string }
+        listenAddress: { type: string, description: "With serveNetwork: the one address of this server upsd listens on" }
+        remoteHost: { type: string }
+        remotePort: { type: integer }
+        remoteUps: { type: string }
+        remoteUser: { type: string }
+        remoteTls: { type: boolean, description: "Netclient: use TLS (the NUT server must offer it)" }
+        remoteVerify: { type: boolean, description: "Netclient with TLS: verify the server's certificate against the system's CAs" }
+    UPSSecretsInput:
+      type: object
+      properties:
+        clientPassword: { type: string, writeOnly: true }
+        remotePassword: { type: string, writeOnly: true }
+    UPSStatus:
+      type: object
+      required: [ups, manufacturer, model, serial, driver, raw, flags, onLine, onBattery, lowBattery, replaceBattery, charging, overload, forcedShutdown,
+        chargePct, runtimeSecs, loadPct, inputVolts, outputVolts, batteryVolts, nominalWatts, lowChargePct, lowRuntimeSec, vars]
+      properties:
+        ups: { type: string }
+        manufacturer: { type: string }
+        model: { type: string }
+        serial: { type: string }
+        driver: { type: string }
+        raw: { type: string }
+        flags: { type: array, items: { type: string } }
+        onLine: { type: boolean }
+        onBattery: { type: boolean }
+        lowBattery: { type: boolean }
+        replaceBattery: { type: boolean }
+        charging: { type: boolean }
+        overload: { type: boolean }
+        forcedShutdown: { type: boolean }
+        chargePct: { type: [number, "null"] }
+        runtimeSecs: { type: [number, "null"] }
+        loadPct: { type: [number, "null"] }
+        inputVolts: { type: [number, "null"] }
+        outputVolts: { type: [number, "null"] }
+        batteryVolts: { type: [number, "null"] }
+        nominalWatts: { type: [number, "null"] }
+        lowChargePct: { type: [number, "null"] }
+        lowRuntimeSec: { type: [number, "null"] }
+        vars: { type: object, additionalProperties: { type: string } }
+    UPSView:
+      type: object
+      required: [config, secretsSet, status, error, checkedAt, addresses]
+      properties:
+        addresses: { type: array, items: { type: string }, description: "This server's addresses, for listenAddress" }
+        config: { $ref: "#/components/schemas/UPSConfig" }
+        secretsSet: { type: object, additionalProperties: { type: boolean } }
+        status: { oneOf: [{ $ref: "#/components/schemas/UPSStatus" }, { type: "null" }] }
+        error: { type: string }
+        checkedAt: { type: [string, "null"], format: date-time }
+    UPSDevice:
+      type: object
+      required: [driver, port, vendorId, productId, vendor, product, serial, bus]
+      properties:
+        driver: { type: string }
+        port: { type: string }
+        vendorId: { type: string }
+        productId: { type: string }
+        vendor: { type: string }
+        product: { type: string }
+        serial: { type: string }
+        bus: { type: string }
     InstalledVersion:
       type: object
       required: [dataset, name, version, created, default, running, trying]

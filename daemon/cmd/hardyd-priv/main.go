@@ -37,6 +37,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 	"github.com/hardyos/hardyos/daemon/internal/syslock"
 	"github.com/hardyos/hardyos/daemon/internal/update"
+	"github.com/hardyos/hardyos/daemon/internal/ups"
 	"github.com/hardyos/hardyos/daemon/internal/version"
 	"github.com/hardyos/hardyos/daemon/internal/vms"
 	"github.com/hardyos/hardyos/daemon/internal/zfs"
@@ -204,6 +205,13 @@ func main() {
 		replItems := &priv.ReplicationItems{Shares: shm, Apps: am, VMs: vmm}
 		priv.RegisterReplication(s, &replica.Manager{Runner: sysexec.Exec{}, Items: replItems, Restore: replItems, Freeze: vmm.Frozen, Log: log})
 		priv.RegisterBootRepair(s, priv.StorageEnv{Runner: sysexec.Exec{}, Root: os.DirFS("/")}, "/", boot.ConfigPath)
+		// Monitoring: SMART self-tests and the UPS (NUT's configuration in
+		// /etc/nut and its services). The monitor's polling is logged quietly.
+		priv.RegisterMonitor(s, priv.MonitorEnv{
+			Storage: priv.StorageEnv{Runner: sysexec.Exec{}, Root: os.DirFS("/")},
+			UPS:     &ups.Root{Runner: sysexec.Exec{}, Root: os.DirFS("/")},
+		})
+		priv.QuietMonitoringOps(s)
 		if len(updater.Keys()) == 0 {
 			log.Warn("no trusted release key: updates can't be installed until one is added")
 		}

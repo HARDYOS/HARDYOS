@@ -78,9 +78,10 @@ operation per pool at a time). Progress streams to the browser over the
 - New pools get standard datasets (`system`, `apps`, `users`, `shares`, `vms`),
   a monthly scrub, and daily (keep 14) + weekly (keep 8) snapshots of `users`
   and `shares`. The ARC limit is set once from the hardware profile.
-- hardyd checks every minute: due snapshots (with retention), due scrubs,
-  pool health changes, and every 6 hours each disk's SMART health.
-  Changes raise notifications.
+- hardyd checks every minute: due snapshots (with retention) and due
+  scrubs (inside the maintenance window, one pool at a time). Pool health,
+  device errors, capacity and SMART are the monitor's (see Monitoring and
+  alerts).
 - Layout recommendations follow the plan: 1 disk stripe, 2-3 mirror, 4-5
   RAIDZ1, 6-11 RAIDZ2, 12+ several RAIDZ2 vdevs (leftovers become spares);
   spare SSDs become a special mirror, then an SLOG (only with power-loss
@@ -1572,8 +1573,8 @@ another HardyOS server, over the LAN or NetBird. One way, no promotion yet
 - **Notifications** go through `replication.Notifier`
   (`Event{Kind, Severity, Title, Body, Link, Time}`): failure (warning,
   once), stale (critical, once; three intervals, at least an interval and
-  an hour), recovered and restored (info). hardyd wires a no-op until
-  `internal/notify` offers the interface.
+  an hour), recovered and restored (info). hardyd passes them to the
+  alert dispatcher (category `replication`, link `control/replication`).
 - **Restore** pulls a replica's snapshot back (`repl.replica.send` on B,
   `repl.restore.recv` on A, the same stream check): a shared folder as a
   new one (`shares.Manager.RestoreProps`: administrators only, SMB off), a
@@ -1588,10 +1589,52 @@ another HardyOS server, over the LAN or NetBird. One way, no promotion yet
   when a replica is promoted (phase 8). Raw sends need only the policy
   switch (`Policy.AllowRaw`) and a send flag.
 
+## Monitoring and alerts
+
+Details: [monitoring.md](monitoring.md).
+
+```
+ checks (internal/monitor) ─┐                       ┌─► desktop (notifications, per-person read state)
+ UPS watcher (NUT protocol) ├─► notify.Event ─► Dispatcher ─┼─► Discord / Slack / Teams / https webhook
+ backups, replication ──────┤   Notify(ctx, e)   routing,   ├─► SMTP (Gmail, SES SMTP, any server)
+ storage, updates (Center)──┘                    dedup,     └─► Amazon SES API v2 (SigV4)
+                                                 rate limit, quiet hours
+```
+
+- **Events.** `notify.Event{Kind, Severity, Title, Body, Link, Time}` with
+  `Notify(ctx, Event)` is the one way in. Older callers of
+  `notify.Center.Send` are forwarded through the dispatcher, so their
+  notices are routed too. Routing is per category (the kind before the
+  dot) and channel, with a minimum severity or off.
+- **Checks** run in hardyd and read through hardyd-priv's read-only ops
+  (`zfs.pools`, `zfs.pool.status`, `hw.smart` with `noWake`, `apps.status`,
+  `vms.list`, `netbird.status`, `domain.replication`, `system.ping`) or
+  world-readable files (/proc, hwmon, cgroups). What they find is kept as
+  conditions (`monitor_conditions`): raised once, cleared once, kept
+  across restarts.
+- **Self-tests and scrubs** run in a maintenance window, staggered: first
+  due dates spread over the interval, one long test at a time, none on a
+  scrubbing pool, scrubs one pool at a time.
+- **UPS.** NUT does the shutting down (`upsmon`, from the driver's low
+  battery at HardyOS's thresholds), so a clean shutdown doesn't depend on
+  hardyd. hardyd-priv writes /etc/nut and starts the units (`ups.apply`);
+  hardyd reads upsd over TCP.
+- **Secrets** of channels and the UPS are sealed with secretbox (purposes
+  `notify` and `ups`) and never returned.
+- **Outbound safety.** Webhooks and SES go through a client that refuses
+  local and private addresses at dial time and never follows redirects;
+  SMTP may reach the LAN (a family mail server) but never downgrades
+  STARTTLS.
+- **History** is a separate SQLite file of float32 chunks in four tiers
+  (10 s/1 day, 1 min/7 days, 15 min/90 days, 1 h/2 years) fed by pluggable
+  `monitor.Source`s.
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly
   config export to the boot drive so a fresh install can restore settings.
+- Resource history: `metrics.db` next to the database (not in settings
+  backups).
 - Web desktop assets: `/usr/share/hardyos/web`.
 - OS: ZFS root with boot environments; each update installs into a new boot
   environment and falls back automatically if the health check fails.

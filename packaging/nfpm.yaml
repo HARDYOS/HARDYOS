@@ -17,6 +17,8 @@ depends:
 recommends:
   - zfsutils-linux
   - smartmontools
+  - nut-server
+  - nut-client
   - samba-ad-dc
   - iputils-arping
   - docker.io

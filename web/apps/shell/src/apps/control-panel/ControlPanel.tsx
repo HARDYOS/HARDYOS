@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { initials } from "../../format";
-import { CalendarIcon, CpuIcon, DomainIcon, FolderIcon, GlobeIcon, GpuIcon, GridIcon, KeyIcon, LayersIcon, NetworkIcon, RefreshIcon, ShareIcon, ShieldIcon, UsersIcon } from "../../icons";
+import { BellIcon, CalendarIcon, PowerIcon, CpuIcon, DomainIcon, FolderIcon, GlobeIcon, GpuIcon, GridIcon, KeyIcon, LayersIcon, NetworkIcon, RefreshIcon, ShareIcon, ShieldIcon, UsersIcon } from "../../icons";
 import { type AppProps, useShell } from "../../shell";
 import { AppLayout, PageHeader, SideNav } from "../../ui";
 import { AuditLog } from "../shared";
@@ -12,6 +12,8 @@ import { DevicesView } from "../vms/devices";
 import { ReplicationPage } from "../backup/replication";
 import { Hardware } from "./Hardware";
 import { Network } from "./Network";
+import { Notifications } from "./Notifications";
+import { UPS } from "./UPS";
 import { SharedFolders } from "./SharedFolders";
 import { SignIn } from "./SignIn";
 import { TerminalSwitch } from "./TerminalSwitch";
@@ -32,6 +34,8 @@ const SECTIONS = [
   { id: "time", label: "Date & Time", icon: <CalendarIcon size={16} /> },
   { id: "hardware", label: "Hardware", icon: <CpuIcon size={16} /> },
   { id: "devices", label: "Devices & GPUs", icon: <GpuIcon size={16} /> },
+  { id: "ups", label: "UPS", icon: <PowerIcon size={16} /> },
+  { id: "notifications", label: "Notifications", icon: <BellIcon size={16} /> },
   { id: "updates", label: "Updates", icon: <RefreshIcon size={16} /> },
   { id: "backup", label: "Backup & Restore", icon: <LayersIcon size={16} /> },
   { id: "replication", label: "Replication", icon: <ShareIcon size={16} /> },
@@ -74,6 +78,8 @@ export default function ControlPanel({ args }: AppProps) {
       {section === "time" && <DateTime />}
       {section === "hardware" && <Hardware />}
       {section === "devices" && <DevicesView />}
+      {section === "ups" && <UPS />}
+      {section === "notifications" && <Notifications />}
       {section === "updates" && <Updates />}
       {section === "backup" && <Backup />}
       {section === "replication" && <ReplicationPage initialTab={args?.tab === "accept" ? "accept" : "send"} />}

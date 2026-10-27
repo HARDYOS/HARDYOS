@@ -65,6 +65,8 @@ type StorageEnv struct {
 // DeviceArgs names one disk device.
 type DeviceArgs struct {
 	Device string `json:"device"`
+	// NoWake leaves a disk in standby asleep (periodic checks set it).
+	NoWake bool `json:"noWake,omitempty"`
 }
 
 // PoolArgs names a pool.
@@ -197,7 +199,11 @@ func RegisterStorage(s *Server, env StorageEnv) {
 		return hw.ReadSystem(env.Root), nil
 	})
 	s.Handle(OpHWSmart, typed(func(ctx context.Context, a DeviceArgs) (any, error) {
-		return hw.ReadSMART(ctx, env.Runner, a.Device)
+		d, err := knownDisk(ctx, env, a.Device)
+		if err != nil {
+			return nil, err
+		}
+		return hw.ReadSMARTOpts(ctx, env.Runner, d.ByID, a.NoWake)
 	}))
 	s.Handle(OpPools, func(ctx context.Context, _ json.RawMessage) (any, error) {
 		out, err := st.zpool(ctx, zfs.PoolListArgs...)

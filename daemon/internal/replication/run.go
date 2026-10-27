@@ -158,13 +158,13 @@ func (s *Service) alert(ctx context.Context, t *Task, state, msg string) {
 	case "succeeded":
 		if t.Alert != "" {
 			s.notifier().Notify(ctx, Event{Kind: EventRecovered, Severity: SeverityInfo, Title: "Replication " + t.Name + " is working again",
-				Body: "The last run succeeded.", Link: "replication:" + t.ID, Time: now})
+				Body: "The last run succeeded.", Link: "control/replication", Time: now})
 			_ = s.st.setAlert(ctx, t.ID, "")
 		}
 	case "failed":
 		if t.Alert == "" {
 			s.notifier().Notify(ctx, Event{Kind: EventFailed, Severity: SeverityWarning, Title: "Replication " + t.Name + " failed",
-				Body: msg, Link: "replication:" + t.ID, Time: now})
+				Body: msg, Link: "control/replication", Time: now})
 			_ = s.st.setAlert(ctx, t.ID, "failed")
 		}
 	}
@@ -399,7 +399,7 @@ func (s *Service) restore(jc *jobs.Context, a RestoreParams) (any, error) {
 			jc.Progress(100, "Restored. Changed: "+strings.Join(res.Notes, "; "))
 		}
 		s.notifier().Notify(context.Background(), Event{Kind: EventRestored, Severity: SeverityInfo, Title: "Restored " + a.ID + " from " + tgt.Name,
-			Body: msg, Link: "replication:restore", Time: s.now()})
+			Body: msg, Link: "control/replication", Time: s.now()})
 	}
 	if runID != 0 {
 		var n int64

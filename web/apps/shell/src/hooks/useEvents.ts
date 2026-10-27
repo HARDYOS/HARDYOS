@@ -44,12 +44,16 @@ export function useEvents(enabled: boolean): Connection {
                 void qc.invalidateQueries({ queryKey: [key] });
               }
             }
+            if (job.kind.startsWith("monitor.") || job.kind === "ups.apply") {
+              for (const key of ["disk-info", "ups"]) void qc.invalidateQueries({ queryKey: [key] });
+            }
             if (job.state === "failed") toast("error", `${job.title} failed`, job.error);
           }
         } else if (e.type === "notification") {
           const n = e.data as Notification;
           toast(n.level, n.title, n.body || undefined);
           void qc.invalidateQueries({ queryKey: ["notifications"] });
+          void qc.invalidateQueries({ queryKey: ["conditions"] });
         } else if (e.type === "audit.created") {
           void qc.invalidateQueries({ queryKey: ["audit"] });
         }

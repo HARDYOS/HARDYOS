@@ -4,6 +4,9 @@ import { useEffect, useRef, useState } from "react";
 import { api, errorMessage, unwrap } from "../api";
 import { dateTime, initials, relativeTime } from "../format";
 import { useNotifications } from "../hooks/queries";
+import { useUnread } from "../hooks/monitoring";
+import { openLink } from "../links";
+import { openApp } from "../wm/open";
 import { useLogout } from "../hooks/session";
 import { BrandMark } from "../brand";
 import { BellIcon, KeyIcon, LogoutIcon } from "../icons";
@@ -46,15 +49,19 @@ function usePopover() {
   return { open, setOpen, ref };
 }
 
-function NotificationCenter() {
+function NotificationCenter({ user }: { user: User }) {
   const { open, setOpen, ref } = usePopover();
   const { data = [] } = useNotifications();
+  const unreadQ = useUnread();
   const qc = useQueryClient();
-  const unread = data.filter((n) => !n.readAt).length;
-  const readAll = useMutation({
-    mutationFn: () => unwrap(api.POST("/notifications/read-all")),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["notifications"] }),
+  const unread = unreadQ.data?.count ?? data.filter((n) => !n.readAt).length;
+  const refresh = () => qc.invalidateQueries({ queryKey: ["notifications"] });
+  const readAll = useMutation({ mutationFn: () => unwrap(api.POST("/notifications/read-all")), onSuccess: refresh });
+  const readOne = useMutation({
+    mutationFn: (id: number) => unwrap(api.POST("/notifications/{id}/read", { params: { path: { id } } })),
+    onSuccess: refresh,
   });
+  const label = unread > 99 ? "99+" : String(unread);
 
   return (
     <div className="popover-anchor" ref={ref}>
@@ -63,34 +70,67 @@ function NotificationCenter() {
         className="menubar__icon"
         aria-label={unread ? `Notifications, ${unread} unread` : "Notifications"}
         aria-expanded={open}
-        onClick={() => {
-          setOpen(!open);
-          if (!open && unread) readAll.mutate();
-        }}
+        onClick={() => setOpen(!open)}
       >
         <BellIcon size={16} />
-        {unread > 0 && <span className="menubar__dot" aria-hidden="true" />}
+        {unread > 0 && (
+          <span className="menubar__count" aria-hidden="true">
+            {label}
+          </span>
+        )}
       </button>
       {open && (
         <div className="popover popover--notifications glass" role="dialog" aria-label="Notifications">
-          <div className="popover__head">Notifications</div>
+          <div className="popover__head popover__head--row">
+            <span>Notifications</span>
+            {unread > 0 && (
+              <button type="button" onClick={() => readAll.mutate()} disabled={readAll.isPending}>
+                Mark all read
+              </button>
+            )}
+          </div>
           {data.length === 0 ? (
             <p className="popover__empty">You're all caught up.</p>
           ) : (
             <ul className="notif-list">
               {data.map((n) => (
-                <li key={n.id} className={`notif notif--${n.level}`}>
-                  <span className={`notif__bar notif__bar--${n.level}`} aria-hidden="true" />
-                  <div className="notif__text">
-                    <strong>{n.title}</strong>
-                    {n.body && <span>{n.body}</span>}
-                    <time dateTime={n.at} title={dateTime(n.at)}>
-                      {relativeTime(n.at)}
-                    </time>
-                  </div>
+                <li key={n.id}>
+                  <button
+                    type="button"
+                    className={`notif notif--button${n.readAt ? " notif--read" : ""}`}
+                    onClick={() => {
+                      if (!n.readAt) readOne.mutate(n.id);
+                      if (openLink(n.link, user)) setOpen(false);
+                    }}
+                  >
+                    <span className={`notif__bar notif__bar--${n.level}`} aria-hidden="true" />
+                    <span className="notif__text">
+                      <strong>
+                        {n.title}
+                        {!n.readAt && <span className="notif__unread" aria-label="unread" />}
+                      </strong>
+                      {n.body && <span>{n.body}</span>}
+                      <time dateTime={n.at} title={dateTime(n.at)}>
+                        {relativeTime(n.at)}
+                      </time>
+                    </span>
+                  </button>
                 </li>
               ))}
             </ul>
+          )}
+          {user.role === "admin" && (
+            <div className="popover__foot">
+              <button
+                type="button"
+                onClick={() => {
+                  setOpen(false);
+                  openApp("os.hardy.control", user, { section: "notifications" });
+                }}
+              >
+                Notification settings
+              </button>
+            </div>
           )}
         </div>
       )}
@@ -198,7 +238,7 @@ export function MenuBar({ user, connection }: { user: User; connection: string }
           Reconnecting…
         </span>
       )}
-      <NotificationCenter />
+      <NotificationCenter user={user} />
       <UserMenu user={user} />
       <Clock />
     </header>

@@ -29,8 +29,8 @@ const (
 	SeverityCritical = "critical"
 )
 
-// Event is a notification replication raises (the shape internal/notify's
-// Event has; until that lands, main wires a no-op).
+// Event is a notification replication raises (the shape of notify.Event;
+// hardyd adapts it for the alert dispatcher).
 type Event struct {
 	Kind     string
 	Severity string
@@ -723,7 +723,7 @@ func (s *Service) Tick(ctx context.Context) {
 				last = t.LastSuccessAt.Format("2006-01-02 15:04 UTC")
 			}
 			s.notifier().Notify(ctx, Event{Kind: EventStale, Severity: SeverityCritical, Title: "Replication " + t.Name + " is behind",
-				Body: "Its last successful run was " + last + ". " + t.LastError, Link: "replication:" + t.ID, Time: now})
+				Body: "Its last successful run was " + last + ". " + t.LastError, Link: "control/replication", Time: now})
 			_ = s.st.setAlert(ctx, t.ID, "stale")
 		}
 	}
