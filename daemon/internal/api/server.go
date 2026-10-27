@@ -27,6 +27,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/oidc"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/publish"
+	"github.com/hardyos/hardyos/daemon/internal/replication"
 	"github.com/hardyos/hardyos/daemon/internal/secretbox"
 	"github.com/hardyos/hardyos/daemon/internal/sharelinks"
 	"github.com/hardyos/hardyos/daemon/internal/storage"
@@ -104,6 +105,9 @@ type Config struct {
 	// PublicHost is the desktop's own HTTPS name (the issuer without a base
 	// domain); nil uses the hostname.
 	PublicHost func() string
+	// Replication sends replicas to and receives them from other HardyOS
+	// servers (nil leaves it out).
+	Replication *replication.Service
 	// GPUUploadDir is where uploaded vGPU driver files are saved for
 	// hardyd-priv (default gpu.UploadDir; tests use a temp dir).
 	GPUUploadDir string
@@ -244,6 +248,7 @@ func (s *Server) routes() {
 			s.snapshotRoutes()
 			s.vmRoutes()
 			s.deviceRoutes()
+			s.replicationRoutes()
 		}
 		if s.cfg.Backups != nil {
 			s.backupRoutes()

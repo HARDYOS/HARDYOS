@@ -233,3 +233,21 @@ export type VMSnapshot = S["VMSnapshot"];
 export type VMCreateRequest = S["VMCreateRequest"];
 export type VMUpdateRequest = S["VMUpdateRequest"];
 export type VMConsoleSession = S["VMConsoleSession"];
+
+// Replication between HardyOS servers (phase 6 part B).
+export type ReplicationKind = S["ReplicationKind"];
+export type ReplicationItem = S["ReplicationItem"];
+export type ReplicationLocalItem = S["ReplicationLocalItem"];
+export type ReplicationTarget = S["ReplicationTarget"];
+export type ReplicationTask = S["ReplicationTask"];
+export type ReplicationTaskRequest = S["ReplicationTaskRequest"];
+export type ReplicationOverview = S["ReplicationOverview"];
+export type ReplicationSnapshot = S["ReplicationSnapshot"];
+export type ReplicationRemoteItem = S["ReplicationRemoteItem"];
+export type ReplicationBrowse = S["ReplicationBrowse"];
+export type ReplicationRestoreRequest = S["ReplicationRestoreRequest"];
+export type ReplicationRun = S["ReplicationRun"];
+export type ReplicationPairing = S["ReplicationPairing"];
+export type ReplicationPairingCode = S["ReplicationPairingCode"];
+export type ReplicationSource = S["ReplicationSource"];
+export type ReplicationReceive = S["ReplicationReceive"];

@@ -120,5 +120,10 @@ const (
 
 // reservedLabel reports whether a label is kept for the scheduler.
 func reservedLabel(label string) bool {
-	return strings.HasPrefix(strings.ToLower(label), AutoPrefix)
+	l := strings.ToLower(label)
+	return strings.HasPrefix(l, AutoPrefix) || strings.HasPrefix(l, ReplicationPrefix)
 }
+
+// ReplicationPrefix starts replication snapshots (internal/replica), which
+// replication prunes itself; a manual snapshot can't take such a name.
+const ReplicationPrefix = "hardyos-repl-"

@@ -54,6 +54,16 @@ func (Exec) Run(ctx context.Context, stdin []byte, name string, args ...string) 
 	return res, err
 }
 
+// OwnGroup is for commands started elsewhere without a context (long-running
+// zfs send and receive): their own process group and a bounded wait for
+// their pipes, like Exec's. There is no cmd.Cancel (exec refuses one on a
+// command not made with CommandContext); the caller kills the group itself
+// (KillGroup).
+func OwnGroup(cmd *exec.Cmd) {
+	ownGroup(cmd)
+	cmd.WaitDelay = WaitDelay
+}
+
 // ignoreWaitDelay drops exec.ErrWaitDelay: the command itself finished
 // successfully (Wait reports that error only then), but a process it left
 // running (a daemon a package started) still held its output open.
