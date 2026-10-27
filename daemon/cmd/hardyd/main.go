@@ -273,6 +273,12 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 				DesktopPort: port,
 				ListenHost:  host,
 			})
+			// The office suite: the editor's own origin (44250) and the
+			// listener the Document Server container calls back on.
+			go handler.RunOffice(ctx, api.OfficeOptions{
+				TLS:        &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+				ListenHost: host,
+			})
 			// The app gateway on the NetBird address, for NetBird's reverse
 			// proxy, and the publishing sync.
 			go handler.RunRemote(ctx, api.RemoteOptions{
@@ -296,6 +302,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 			port, _ := strconv.Atoi(p)
 			host, _, _ := net.SplitHostPort(httpAddr)
 			go handler.RunAppProxy(ctx, api.AppProxyOptions{DesktopPort: port, ListenHost: host})
+			go handler.RunOffice(ctx, api.OfficeOptions{ListenHost: host})
 		}
 		serve(&http.Server{Addr: httpAddr, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}, false)
 	} else {

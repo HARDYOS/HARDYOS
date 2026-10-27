@@ -1,0 +1,39 @@
+{
+  "format": 1,
+  "id": "onlyoffice",
+  "name": "Office (OnlyOffice Document Server)",
+  "version": "9.4.0.1",
+  "summary": "Edit documents, spreadsheets and presentations together, right in the File Manager.",
+  "description": "The engine behind HardyOS's office suite: OnlyOffice Document Server Community Edition. Turn it on from Control Panel > Office; then double-click a .docx, .xlsx or .pptx (or .odt, .ods, .odp, .csv, .txt) in the File Manager to open it in an editor window. Several people can edit the same file at once, with comments and tracked changes, and every save is written back as the person who made it.\n\nThe free Community Edition allows 20 people editing at the same time. It only listens on this server; browsers reach it through HardyOS.",
+  "publisher": "Ascensio System SIA (packaged by HardyOS)",
+  "website": "https://www.onlyoffice.com/docs-community",
+  "icon": "icon.svg",
+  "arch": ["amd64", "arm64"],
+  "minMemoryMB": 4096,
+  "ports": [
+    { "name": "WEB", "label": "Document Server (this server only)", "default": 8418 }
+  ],
+  "settings": [
+    {
+      "env": "JWT_SECRET",
+      "label": "Integration secret",
+      "help": "Set by HardyOS when the office suite is turned on in Control Panel > Office.",
+      "type": "password",
+      "required": true
+    }
+  ],
+  "folders": [
+    { "path": "data", "mode": "0750" },
+    { "path": "lib", "mode": "0750" },
+    { "path": "logs", "mode": "0750" }
+  ],
+  "shares": [
+    {
+      "name": "FONTS",
+      "label": "Extra fonts",
+      "help": "A shared folder with .ttf, .otf or .ttc fonts to add to the editors (read only). Optional.",
+      "access": "read",
+      "required": false
+    }
+  ]
+}

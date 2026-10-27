@@ -1,0 +1,34 @@
+{{define "editor"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{{.Title}} · HardyOS</title>
+<link rel="stylesheet" href="/s/-/office/static/editor.css">
+</head>
+<body>
+{{if .Notice}}<div class="notice" role="status">{{.Notice}}</div>{{end}}
+<div id="hardyos-editor" class="editor" data-config="{{.Config}}"><div id="hardyos-placeholder"></div>
+<p class="loading">Opening {{.Title}}…</p></div>
+<script src="/s/-/ds/web-apps/apps/api/documents/api.js"></script>
+<script src="/s/-/office/static/editor.js"></script>
+</body>
+</html>{{end}}
+
+{{define "message"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{{.Title}} · HardyOS</title>
+<link rel="stylesheet" href="/s/-/office/static/editor.css">
+</head>
+<body class="center">
+<main class="card">
+<h1>{{.Title}}</h1>
+<p class="muted">{{.Message}}</p>
+</main>
+</body>
+</html>{{end}}

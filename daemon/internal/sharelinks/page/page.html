@@ -18,6 +18,7 @@
 {{if eq .Kind "password"}}{{template "password" .}}{{end}}
 {{if eq .Kind "file"}}{{template "file" .}}{{end}}
 {{if eq .Kind "folder"}}{{template "folder" .}}{{end}}
+{{if eq .Kind "office-name"}}{{template "office-name" .}}{{end}}
 <footer class="foot">Shared by {{.SharedBy}}{{if .Expires}} · works until {{.Expires}}{{end}}</footer>
 </main>
 </body>
@@ -42,7 +43,19 @@
 {{define "file"}}
 <h1 class="name">{{.Title}}</h1>
 <p class="muted"><span class="num">{{.Size}}</span> · changed {{.Modified}}</p>
-<a class="btn" href="{{.DownloadURL}}" download>Download</a>
+<div class="row-actions">{{if .OfficeURL}}<a class="btn" href="{{.OfficeURL}}">{{if .OfficeEdit}}Edit in the browser{{else}}Open in the browser{{end}}</a>
+<a class="btn btn--ghost" href="{{.DownloadURL}}" download>Download</a>{{else}}<a class="btn" href="{{.DownloadURL}}" download>Download</a>{{end}}</div>
+{{end}}
+
+{{define "office-name"}}
+<h1 class="name">{{.Title}}</h1>
+<p class="muted">{{if .OfficeEdit}}You can edit this document together with others. Changes are saved to the shared copy.{{else}}You can read this document in the browser.{{end}}</p>
+<form method="get" action="{{.OfficeURL}}" class="stack">
+{{if .OfficePath}}<input type="hidden" name="path" value="{{.OfficePath}}">{{end}}
+<label for="name">Your name (others in the document see it)</label>
+<input id="name" name="name" type="text" maxlength="64" autocomplete="name" autofocus>
+<button class="btn" type="submit">{{if .OfficeEdit}}Open the editor{{else}}Open{{end}}</button>
+</form>
 {{end}}
 
 {{define "folder"}}
@@ -54,7 +67,7 @@
 <thead><tr><th>Name</th><th class="num">Size</th><th class="hide-sm">Changed</th></tr></thead>
 <tbody>
 {{range .Entries}}<tr>
-<td>{{if .Dir}}<a class="dir" href="{{.URL}}">{{.Name}}/</a>{{else}}<a href="{{.URL}}" download>{{.Name}}</a>{{end}}</td>
+<td>{{if .Dir}}<a class="dir" href="{{.URL}}">{{.Name}}/</a>{{else}}<a href="{{.URL}}" download>{{.Name}}</a>{{if .OfficeURL}} <a class="open" href="{{.OfficeURL}}">{{if $.OfficeEdit}}Edit{{else}}Open{{end}}</a>{{end}}{{end}}</td>
 <td class="num">{{if not .Dir}}{{.Size}}{{end}}</td>
 <td class="hide-sm muted">{{.Modified}}</td>
 </tr>{{end}}

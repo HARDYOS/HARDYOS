@@ -18,6 +18,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/office"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/zfs"
 )
@@ -894,6 +895,11 @@ func (s *Server) handleAppInstall(w http.ResponseWriter, r *http.Request, u *aut
 		return
 	}
 	mf := pkg.Manifest
+	if mf.ID == office.AppID {
+		// Its secret is HardyOS's to set (decision 250).
+		writeError(w, http.StatusConflict, "managed_app", "the Document Server is installed by turning the office suite on in Control Panel › Office")
+		return
+	}
 	source := apps.Source(req.Source)
 	sourceName := st.SourceNameOf(r.Context(), req.Source, req.Ref, req.CatalogID)
 	o, err := s.appsStatus(r.Context())

@@ -9,6 +9,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/files"
+	"github.com/hardyos/hardyos/daemon/internal/office"
 	"github.com/hardyos/hardyos/daemon/internal/sharelinks"
 )
 
@@ -45,6 +46,12 @@ func (s *Server) shareLinkRoutes() {
 	}
 	if s.cfg.Files == nil {
 		pub.Files = unavailableFiles{}
+	}
+	if s.office != nil {
+		if _, ok := s.cfg.Files.(files.Service); ok {
+			pub.Office = officeLinks{rt: s.office}
+			s.office.links = pub
+		}
 	}
 	pub.Register(m)
 }
@@ -132,6 +139,13 @@ func (s *Server) handleShareLinkCreate(w http.ResponseWriter, r *http.Request, u
 		writeError(w, http.StatusForbidden, "forbidden", "you can share only files and folders you can change")
 		return
 	}
+	if q.Access == sharelinks.AccessEdit && !e.Dir {
+		if f, ok := office.FormatOf(e.Name); !ok || !f.Editable {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Code: "invalid", Message: "Only documents the editor can save can be shared for editing.",
+				Details: []string{"Only documents the editor can save can be shared for editing."}})
+			return
+		}
+	}
 	if q.AllowUpload && !e.Dir {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Code: "invalid", Message: "Only links to folders can take uploads.",
 			Details: []string{"Only links to folders can take uploads."}})
@@ -157,6 +171,9 @@ func (s *Server) handleShareLinkCreate(w http.ResponseWriter, r *http.Request, u
 	}
 	if l.Dir {
 		detail += ", zips up to " + strconv.FormatInt(l.MaxZipBytes, 10) + " bytes"
+	}
+	if l.Access == sharelinks.AccessEdit {
+		detail += ", editing in the browser"
 	}
 	s.record(r, u, "sharelink.create", target, audit.Success, "link #"+strconv.FormatInt(l.ID, 10)+": "+detail)
 	out := ShareLinkCreated{Link: l, URL: "/s/" + token, Token: token}
