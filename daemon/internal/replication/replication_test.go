@@ -101,7 +101,7 @@ func (n *node) serve(t *testing.T) {
 
 func (n *node) wait(t *testing.T, j *jobs.Job) *jobs.Job {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(3 * time.Minute)
 	for time.Now().Before(deadline) {
 		got, err := n.jobs.Get(context.Background(), j.ID)
 		if err != nil {
@@ -134,11 +134,14 @@ func (n *node) run(t *testing.T, task string) *jobs.Job {
 	return n.wait(t, j)
 }
 
-func pair(t *testing.T, a, b *node) *Target {
+func pair(t *testing.T, a, b *node) *Target { t.Helper(); return pairOn(t, a, b, "tank") }
+
+// pairOn pairs a with b, b keeping a's replicas on pool.
+func pairOn(t *testing.T, a, b *node, pool string) *Target {
 	t.Helper()
 	ctx := context.Background()
 	raw, code := NewCode()
-	if _, err := b.svc.OpenPairing(ctx, raw, PairingParams{Pool: "tank", MinKeep: 3}); err != nil {
+	if _, err := b.svc.OpenPairing(ctx, raw, PairingParams{Pool: pool, MinKeep: 3}); err != nil {
 		t.Fatal(err)
 	}
 	a.mu.Lock()

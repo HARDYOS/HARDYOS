@@ -352,10 +352,16 @@ func (m *Manager) Send(ctx context.Context, a SendArgs) (*SendStart, *os.File, e
 		}
 		// The token comes from the receiver: it names what to send, so it
 		// must name this dataset and one of this task's snapshots.
-		out, err := m.zfs(ctx, "send", "-n", "-v", "-P", "-t", a.Token)
+		// zfs prints the token's contents on stdout or stderr depending
+		// on the version: read both.
+		res, err := m.Runner.Run(ctx, nil, "zfs", "send", "-n", "-v", "-P", "-t", a.Token)
+		if err == nil && res.ExitCode != 0 {
+			err = fmt.Errorf("zfs send -t: %s", strings.TrimSpace(string(res.Stderr)))
+		}
 		if err != nil {
 			return nil, nil, fmt.Errorf("the interrupted transfer can't be resumed: %w", err)
 		}
+		out := append(append([]byte{}, res.Stdout...), append([]byte("\n"), res.Stderr...)...)
 		to := tokenToName(out)
 		name, label, _ := strings.Cut(to, "@")
 		if name != ds || ValidSnap(label, a.Task) != nil || (a.Snapshot != "" && label != a.Snapshot) {

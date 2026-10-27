@@ -1495,6 +1495,92 @@ kernel (mdev and per-VF type files, `sriov-manage`, the installer's
 i915/xe, the exact Debian package set and the licence file location in it,
 and IOMMU flags on real firmware.
 
+## Replication between servers
+
+Phase 6 part B (decisions 180-192; guide `docs/replication.md`). Scheduled
+incremental ZFS replication of chosen shared folders, apps and VMs to
+another HardyOS server, over the LAN or NetBird. One way, no promotion yet
+(phase 8).
+
+```
+ server A (source)                                          server B (receiver)
+ hardyd  replication.Service ── HTTPS :44400, TLS 1.3 ───►  hardyd  replication.Service (listens while receiving)
+   │  jobs replication.run/restore   mutual TLS, pinned keys     │  per-request pin → paired source
+   │  PrivRoot                                                    │  PrivRoot
+   ▼  repl.snapshot / repl.send (fd) / repl.prune                 ▼  repl.recv (fd) / repl.recv.state / .prune / .abort
+ hardyd-priv  replica.Manager: zfs snapshot -r, zfs send    hardyd-priv  replica.Manager: DRR_BEGIN check,
+                                                                      zfs receive -u -s into <pool>/replicas/<src>/<kind>/<id>
+```
+
+- **Code**: root side `internal/replica` and `priv/replication_ops.go`
+  (`repl.*` ops); hardyd side `internal/replication` (identity, pairing,
+  store, receiving server, client, runs, schedule) and
+  `api/handlers_replication.go`; web
+  `apps/shell/src/apps/backup/replication/`; migration
+  `0018_replication.sql`.
+- **Streams as file descriptors.** `repl.send` starts `zfs send` (its own
+  process group) and hands hardyd the read end of its stdout over the priv
+  socket (SCM_RIGHTS); `repl.recv` hands hardyd the write end of a pipe
+  whose first 312 bytes root checks before starting `zfs receive` with
+  them and the rest. Root keeps a registry of streams (`repl.stream` for
+  the outcome and bytes, `repl.cancel` kills the group; 72 h at most, one
+  receive per target). hardyd never runs zfs, only moves bytes: on A with
+  the task's bandwidth limit and a byte count for the job's progress, on B
+  from the request body into the pipe.
+- **Identity and pairing.** One ECDSA P-256 key per server, sealed in the
+  settings table (`replication.identity`, secretbox purpose
+  `replication`). B opens a one-time 128-bit code (sealed in
+  `repl_pairing`, 30 minutes, 5 failures) for a pool, quota and minimum
+  kept snapshots; A proves the code over both keys' SHA-256 pins on the
+  TLS connection, B answers with its own proof and a source id. Pins are
+  sealed per row (`repl_targets`, `repl_sources`, AAD = table and id).
+- **Wire API on B** (`/repl/v1/`): `pair` (any client certificate, right
+  code), and for paired sources `hello`, `items` (PUT names/pools, GET
+  replicas with sizes), `state`, `abort`, `stream` (PUT the zfs stream;
+  answered after `zfs receive` exits), `prune` (keep = max(task's keep,
+  source's minimum)), `snapshots`, `children`, `browse`, `send` (GET a
+  replica's snapshot back, outcome in a trailer). The pool and source id
+  always come from B's record of the caller.
+- **Confinement on B.** `<pool>/replicas` (role `replicas`, never mounted,
+  read only), `<pool>/replicas/<source>` (quota), `/<kind>/<item>[/<child>]`;
+  every component validated (`replica.Target`), existing datasets checked
+  for HardyOS's role/replica properties before use. Receive options:
+  `-u -s`, file systems `canmount=off`, a mountpoint under
+  `/mnt/<pool>/replicas`, `readonly=on`, `exec/setuid/devices=off`,
+  `-x sharenfs/sharesmb` and every HardyOS service property; volumes
+  `readonly=on`, `volmode=none`, `refreservation=none`; all
+  `org.hardyos:replica=<source>`. Stream policy: single-dataset
+  substreams only, known features, no dedup/redacted/holds/clone/raw, the
+  asked-for snapshot, incremental over an existing replica, never `-F`.
+- **Runs.** Per item: `zfs snapshot -r` (`hardyos-repl-<task>-<UTC>`; VMs
+  through `vms.Manager.Frozen`, the guest agent's freeze), then per
+  dataset, parent first: resume a token (validated on A against the
+  dataset and the task's snapshots) or send `-i` from the newest snapshot
+  whose GUID B has, or the whole snapshot for a new replica. Pruning (both
+  sides) only touches the task's labels and only below the newest label
+  every dataset of the item has. Runs are jobs (`replication.run`, one per
+  task at a time) recorded in `repl_runs`; `Service.Run` ticks every minute
+  for due tasks and stale ones, and keeps the listener up while a code is
+  open or a source is paired.
+- **Notifications** go through `replication.Notifier`
+  (`Event{Kind, Severity, Title, Body, Link, Time}`): failure (warning,
+  once), stale (critical, once; three intervals, at least an interval and
+  an hour), recovered and restored (info). hardyd wires a no-op until
+  `internal/notify` offers the interface.
+- **Restore** pulls a replica's snapshot back (`repl.replica.send` on B,
+  `repl.restore.recv` on A, the same stream check): a shared folder as a
+  new one (`shares.Manager.RestoreProps`: administrators only, SMB off), a
+  VM under its own id when free (`vms.Manager.Adopt`: read and checked
+  like any VM on a pool, defined off), an app's data when not installed
+  (`apps.Manager.AdoptRestored`: kept data, reinstall to run). Copies carry
+  `org.hardyos:restoring=1` until finished; an unfinished one is
+  destroyed.
+- **Later promotion.** Replicas keep their kind and id in the path and
+  B keeps each item's name, pool and task (`repl_source_items`); the
+  service properties stripped on receive come back from those records
+  when a replica is promoted (phase 8). Raw sends need only the policy
+  switch (`Policy.AllowRaw`) and a send flag.
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly

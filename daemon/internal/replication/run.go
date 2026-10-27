@@ -102,8 +102,8 @@ func (l *limited) Read(b []byte) (int, error) {
 		l.start = time.Now()
 	}
 	// Small reads keep the pace even.
-	if max := int(max(l.rate/10, 4096)); len(b) > max {
-		b = b[:max]
+	if chunk := int(max(l.rate/10, 4096)); len(b) > chunk {
+		b = b[:chunk]
 	}
 	n, err := l.r.Read(b)
 	l.n += int64(n)
@@ -420,7 +420,7 @@ func (s *Service) restoreItem(jc *jobs.Context, p *peer, tgt *Target, a RestoreP
 	if err != nil {
 		return nil, err
 	}
-	finish := replica.RestoreFinishArgs{Kind: a.Kind, ID: a.ID, Pool: a.Pool, NewID: a.NewID}
+	finish := replica.RestoreFinishArgs{Kind: a.Kind, ID: a.ID, Pool: a.Pool, NewID: a.NewID, Snapshot: a.Snapshot}
 	pr := &progress{jc: jc, items: len(kids), started: time.Now()}
 	cleanup := func() {
 		if err := s.Root.RestoreAbort(context.Background(), finish); err != nil {

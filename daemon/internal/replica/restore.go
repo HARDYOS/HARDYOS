@@ -208,11 +208,14 @@ func (m *Manager) receiveRestore(r *os.File, s *stream, ds string, a RestoreArgs
 }
 
 // RestoreFinishArgs completes a restore once every dataset is back.
+// Snapshot is the replication snapshot that came along, removed from the
+// copy (no task would ever prune it there).
 type RestoreFinishArgs struct {
-	Kind  string `json:"kind"`
-	ID    string `json:"id"`
-	Pool  string `json:"pool"`
-	NewID string `json:"newId,omitempty"`
+	Kind     string `json:"kind"`
+	ID       string `json:"id"`
+	Pool     string `json:"pool"`
+	NewID    string `json:"newId,omitempty"`
+	Snapshot string `json:"snapshot,omitempty"`
 }
 
 // RestoreFinishResult says where the copy is.
@@ -239,6 +242,16 @@ func (m *Manager) RestoreFinish(ctx context.Context, a RestoreFinishArgs) (*Rest
 	kids, err := m.children(ctx, top)
 	if err != nil {
 		return nil, err
+	}
+	if a.Snapshot != "" {
+		if err := ValidSnap(a.Snapshot, ""); err != nil {
+			return nil, err
+		}
+		if _, ok := m.exists(ctx, top+"@"+a.Snapshot); ok {
+			if _, err := m.zfs(ctx, "destroy", "-r", top+"@"+a.Snapshot); err != nil {
+				m.log().Warn("replication: removing the replication snapshot from a restored copy", "dataset", top, "err", err)
+			}
+		}
 	}
 	for _, k := range kids {
 		ds := top + childSuffix(k.Child)

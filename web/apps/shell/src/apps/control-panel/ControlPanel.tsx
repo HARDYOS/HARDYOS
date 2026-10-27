@@ -9,6 +9,7 @@ import { DateTime } from "./DateTime";
 import { Domain } from "./Domain";
 import { FileServices } from "./FileServices";
 import { DevicesView } from "../vms/devices";
+import { ReplicationPage } from "../backup/replication";
 import { Hardware } from "./Hardware";
 import { Network } from "./Network";
 import { SharedFolders } from "./SharedFolders";
@@ -33,6 +34,7 @@ const SECTIONS = [
   { id: "devices", label: "Devices & GPUs", icon: <GpuIcon size={16} /> },
   { id: "updates", label: "Updates", icon: <RefreshIcon size={16} /> },
   { id: "backup", label: "Backup & Restore", icon: <LayersIcon size={16} /> },
+  { id: "replication", label: "Replication", icon: <ShareIcon size={16} /> },
   { id: "security", label: "Security", icon: <ShieldIcon size={16} /> },
 ];
 
@@ -74,6 +76,7 @@ export default function ControlPanel({ args }: AppProps) {
       {section === "devices" && <DevicesView />}
       {section === "updates" && <Updates />}
       {section === "backup" && <Backup />}
+      {section === "replication" && <ReplicationPage initialTab={args?.tab === "accept" ? "accept" : "send"} />}
       {section === "security" && (
         <>
           <PageHeader title="Security" subtitle="Who can do what, and every sign-in and change to the system, newest first." />

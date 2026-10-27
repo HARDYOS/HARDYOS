@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -451,7 +452,41 @@ type ReplicationReceive struct {
 	Pin       string                  `json:"pin"`
 	Pairing   *replication.Pairing    `json:"pairing"`
 	Sources   []ReplicationSourceView `json:"sources"`
-	Problem   string                  `json:"problem,omitempty"`
+	// Addresses are where other servers can reach this one.
+	Addresses []ReplicationAddress `json:"addresses"`
+	Problem   string               `json:"problem,omitempty"`
+}
+
+// ReplicationAddress is one of this server's addresses.
+type ReplicationAddress struct {
+	Address   string `json:"address"`
+	Interface string `json:"interface"`
+	NetBird   bool   `json:"netbird"`
+}
+
+// localAddresses lists this server's global unicast addresses (the
+// NetBird interface is wt0).
+func localAddresses() []ReplicationAddress {
+	out := []ReplicationAddress{}
+	ifs, err := net.Interfaces()
+	if err != nil {
+		return out
+	}
+	for _, ifc := range ifs {
+		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 || strings.HasPrefix(ifc.Name, "docker") || strings.HasPrefix(ifc.Name, "veth") ||
+			strings.HasPrefix(ifc.Name, "br-") || strings.HasPrefix(ifc.Name, "virbr") || strings.HasPrefix(ifc.Name, "hdc") {
+			continue
+		}
+		addrs, _ := ifc.Addrs()
+		for _, a := range addrs {
+			ipn, ok := a.(*net.IPNet)
+			if !ok || !ipn.IP.IsGlobalUnicast() {
+				continue
+			}
+			out = append(out, ReplicationAddress{Address: ipn.IP.String(), Interface: ifc.Name, NetBird: ifc.Name == "wt0"})
+		}
+	}
+	return out
 }
 
 func (s *Server) handleReplicationReceive(w http.ResponseWriter, r *http.Request, _ *auth.User) {
@@ -474,7 +509,7 @@ func (s *Server) handleReplicationReceive(w http.ResponseWriter, r *http.Request
 		return
 	}
 	out := ReplicationReceive{Receiving: pairing != nil || len(sources) > 0, Hostname: hostnameOf(), Port: replication.DefaultPort,
-		Pin: id.Pin, Pairing: pairing, Sources: []ReplicationSourceView{}}
+		Pin: id.Pin, Pairing: pairing, Sources: []ReplicationSourceView{}, Addresses: localAddresses()}
 	reps, err := svc.Root.Replicas(ctx)
 	if err != nil {
 		out.Problem = "the replicas' sizes can't be read: " + err.Error()

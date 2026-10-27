@@ -57,6 +57,7 @@ jobs:
           go test -c -o "$RUNNER_TEMP/priv.test" ./internal/priv
           go test -c -o "$RUNNER_TEMP/install.test" ./internal/install
           go test -c -o "$RUNNER_TEMP/backup.test" ./internal/backup
+          go test -c -o "$RUNNER_TEMP/replication.test" ./internal/replication
       - name: storage operations against real ZFS
         run: sudo HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/priv.test" -test.run TestZFSIntegration -test.v
       - name: installer on loop devices
@@ -65,6 +66,8 @@ jobs:
         run: sudo HARDYOS_MOUNTNS_TEST=1 HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/install.test" -test.run 'SystemDirs' -test.v
       - name: settings backups on a pool
         run: sudo HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/backup.test" -test.run TestZFSBackupIntegration -test.v
+      - name: replication between two pools over mutual TLS (full, incremental, resume, refusals, restore)
+        run: sudo HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/replication.test" -test.run TestZFSReplicationIntegration -test.v -test.timeout 15m
 
   nfs:
     name: NFS (loopback)
