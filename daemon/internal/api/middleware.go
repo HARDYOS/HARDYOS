@@ -93,6 +93,7 @@ func (s *Server) sessionUser(r *http.Request, token string, userID int64) (*auth
 		nu, err := s.signin.Refresh(ctx, u)
 		if errors.Is(err, auth.ErrAccountGone) {
 			_ = s.sessions.RevokeUser(ctx, u.ID)
+			s.endOIDCUser(ctx, u.ID)
 			s.record(r, u, "auth.session.end", u.Username, audit.Success, "the domain account was deleted, turned off or expired")
 			return nil, err
 		}

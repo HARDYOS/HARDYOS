@@ -23,7 +23,9 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/metrics"
 	"github.com/hardyos/hardyos/daemon/internal/notify"
+	"github.com/hardyos/hardyos/daemon/internal/oidc"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
+	"github.com/hardyos/hardyos/daemon/internal/secretbox"
 	"github.com/hardyos/hardyos/daemon/internal/sharelinks"
 	"github.com/hardyos/hardyos/daemon/internal/storage"
 	"github.com/hardyos/hardyos/daemon/internal/store"
@@ -75,6 +77,17 @@ type Config struct {
 	// believed for the client's address (sign-in limits, audit, share link
 	// limits). Empty (the default): the header is never read.
 	TrustedProxies []netip.Prefix
+
+	// Secrets seals what hardyd keeps encrypted at rest (the sign-in
+	// provider's signing keys); nil: a key that lasts as long as the
+	// process (tests, development).
+	Secrets secretbox.Source
+	// OIDCNames are Remote Access's base domain and desktop name, for the
+	// sign-in provider's issuer; nil reads them from the settings table.
+	OIDCNames oidc.Names
+	// PublicHost is the desktop's own HTTPS name (the issuer without a base
+	// domain); nil uses the hostname.
+	PublicHost func() string
 }
 
 // Server is hardyd's HTTP handler.
@@ -93,6 +106,7 @@ type Server struct {
 	started  time.Time
 	log      *slog.Logger
 	ips      *clientip.Resolver
+	oidc     *oidc.Provider
 }
 
 // New builds the API server and registers its routes.
@@ -119,6 +133,12 @@ func New(cfg Config) *Server {
 		s.signin = &auth.SignIn{Users: s.users, Kerberos: cfg.Kerberos, Log: cfg.Logger}
 		if cfg.Priv != nil && cfg.Installer == nil {
 			s.signin.Domain = &privDirectory{pc: cfg.Priv, ttl: cfg.DomainInfoTTL}
+		}
+		if cfg.Installer == nil {
+			if s.cfg.PublicHost == nil {
+				s.cfg.PublicHost = func() string { h, _ := os.Hostname(); return strings.ToLower(h) }
+			}
+			s.oidc = s.newOIDC()
 		}
 	}
 	s.routes()
@@ -177,6 +197,7 @@ func (s *Server) routes() {
 		if s.cfg.Backups != nil {
 			s.backupRoutes()
 		}
+		s.oidcRoutes() // Control Panel > Sign-in (OIDC); the provider itself is routed in ServeHTTP
 		if _, ok := s.cfg.Files.(files.Service); ok {
 			s.fileRoutes()
 			s.davRoutes() // WebDAV at /dav/, outside /api and the desktop session
@@ -195,6 +216,15 @@ func (s *Server) routes() {
 // headers and CSRF protection for state-changing API calls.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	if s.oidc != nil && s.oidc.Owns(r) {
+		// The sign-in provider: its own host (sso.<base>) or /oidc on the
+		// desktop's, with its own headers and no desktop routes.
+		rw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		s.oidc.ServeHTTP(rw, r)
+		s.log.Debug("http request", "method", r.Method, "path", r.URL.Path, "status", rw.status,
+			"duration", time.Since(start).String())
+		return
+	}
 	h := w.Header()
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Frame-Options", "SAMEORIGIN")

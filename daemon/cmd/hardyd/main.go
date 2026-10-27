@@ -32,6 +32,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/metrics"
 	"github.com/hardyos/hardyos/daemon/internal/notify"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
+	"github.com/hardyos/hardyos/daemon/internal/secretbox"
 	"github.com/hardyos/hardyos/daemon/internal/storage"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 	"github.com/hardyos/hardyos/daemon/internal/tlscert"
@@ -139,11 +140,17 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 	}
 	defer func() { cancelJobs(); manager.Wait() }()
 
+	// Secrets hardyd keeps encrypted at rest are sealed with keys from
+	// hardyd-priv (the master key is root's).
+	var secrets secretbox.Source
+	if !live {
+		secrets = &secretbox.PrivSource{Priv: pc}
+	}
 	handler := api.New(api.Config{
 		DB: db, Jobs: manager, Events: broker, Priv: pc, Logger: log,
 		Storage: stor, Notify: notifications, Metrics: collector,
 		WebRoot: webRoot, Insecure: httpsAddr == "", Installer: inst, Updates: upd, Backups: bk,
-		Apps: appStore, Files: fileAccess, TrustedProxies: trustedProxies,
+		Apps: appStore, Files: fileAccess, TrustedProxies: trustedProxies, Secrets: secrets,
 	})
 
 	go housekeeping(ctx, log, &auth.Sessions{DB: db})
@@ -155,6 +162,9 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		go upd.ConfirmWhenHealthy(ctx, time.Minute)
 		go upd.RunChecks(ctx) // look for new versions on GitHub daily
 		go bk.Run(ctx)        // nightly settings backup
+		if p := handler.OIDC(); p != nil {
+			go p.Start(ctx) // sign-in provider: signing keys on schedule, expired sign-ins removed
+		}
 	}
 
 	var servers []*http.Server
