@@ -55,7 +55,7 @@ func (r *devRunner) RunEnv(ctx context.Context, env []string, stdin []byte, name
 
 func jsonUnmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }
 
-const testLicence ="NVIDIA Software License\nThis license is a legal agreement...\n"
+const testLicence = "NVIDIA Software License\nThis license is a legal agreement...\n"
 
 func newDevicesEnv(t *testing.T) (*testEnv, string) {
 	t.Helper()

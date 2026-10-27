@@ -278,11 +278,11 @@ func TestVGPUFileNames(t *testing.T) {
 		}
 	}
 	for name, msg := range map[string]string{
-		"NVIDIA-Linux-x86_64-550.90.07-grid.run":       "guest (GRID) driver",
-		"NVIDIA-Linux-x86_64-470.82-vgpu-kvm.run":      "too old",
-		"NVIDIA-Linux-aarch64-550.90.05-vgpu-kvm.run":  "this server is amd64",
+		"NVIDIA-Linux-x86_64-550.90.07-grid.run":        "guest (GRID) driver",
+		"NVIDIA-Linux-x86_64-470.82-vgpu-kvm.run":       "too old",
+		"NVIDIA-Linux-aarch64-550.90.05-vgpu-kvm.run":   "this server is amd64",
 		"../NVIDIA-Linux-x86_64-550.90.05-vgpu-kvm.run": "choose NVIDIA's vGPU host driver",
-		"NVIDIA-Linux-x86_64-550.90.05.run":            "choose NVIDIA's vGPU host driver",
+		"NVIDIA-Linux-x86_64-550.90.05.run":             "choose NVIDIA's vGPU host driver",
 	} {
 		if _, err := CheckVGPUFileName(name, "amd64"); err == nil || !strings.Contains(err.Error(), msg) {
 			t.Errorf("%s: %v", name, err)
