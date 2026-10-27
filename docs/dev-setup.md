@@ -11,7 +11,9 @@ This is how to build HardyOS and test it in a VM on the laptop.
 3. Inside Ubuntu, install the build tools:
 
    ```sh
-   sudo apt update && sudo apt install -y make git curl
+   sudo apt update && sudo apt install -y make git curl gcc libc6-dev
+   # gcc builds hardyos-nss, the small helper that looks up domain accounts
+   # through the system's NSS (winbind); everything else is pure Go.
    # Go 1.26+
    curl -fsSL https://go.dev/dl/go1.26.0.linux-amd64.tar.gz | sudo tar -C /usr/local -xz
    echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> ~/.bashrc
