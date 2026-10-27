@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -458,5 +459,86 @@ func TestVMConsoleRelay(t *testing.T) {
 	}
 	if actions["vms.console.open/success"] != 1 || actions["vms.console.open/denied"] != 2 || actions["vms.console.close/success"] != 1 {
 		t.Fatalf("audit = %v", actions)
+	}
+}
+
+// An open console closes when its session signs out (or stops being an
+// administrator's).
+func TestVMConsoleClosesOnSignOut(t *testing.T) {
+	old := vmConsoleRecheck
+	vmConsoleRecheck = 50 * time.Millisecond
+	defer func() { vmConsoleRecheck = old }()
+	env, stub := newVMEnv(t)
+	sock := filepath.Join(t.TempDir(), "vnc.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	stub.vnc = sock
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				_, _ = c.Write([]byte("RFB 003.008\n"))
+				_, _ = io.Copy(io.Discard, c)
+			}()
+		}
+	}()
+	stub.vms["web"] = &vms.VM{Spec: vms.Spec{ID: "web", Name: "Web"}, State: "running"}
+	admin := env.client(t)
+	admin.do("POST", "/api/v1/setup/admin", map[string]string{"username": "cade", "password": "supersecret1"}, nil)
+	var sess VMConsoleSession
+	if code := admin.do("POST", "/api/v1/vms/web/console", nil, &sess); code != 200 {
+		t.Fatal(code)
+	}
+	ctx := context.Background()
+	u := "ws" + strings.TrimPrefix(env.srv.URL, "http") + sess.Path
+	conn, _, err := websocket.Dial(ctx, u, &websocket.DialOptions{HTTPClient: admin.http, HTTPHeader: http.Header{"Origin": {env.srv.URL}}, Subprotocols: []string{"binary"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if _, _, err := conn.Read(rctx); err != nil {
+		t.Fatal(err)
+	}
+	admin.do("POST", "/api/v1/auth/logout", nil, nil)
+	for {
+		if _, _, err := conn.Read(rctx); err != nil {
+			if rctx.Err() != nil {
+				t.Fatal("the console stayed open after signing out")
+			}
+			break
+		}
+	}
+}
+
+// Deleting a snapshot or a disk needs the VM's name typed.
+func TestVMDeletesNeedConfirmation(t *testing.T) {
+	env, stub := newVMEnv(t)
+	admin := env.client(t)
+	admin.do("POST", "/api/v1/setup/admin", map[string]string{"username": "cade", "password": "supersecret1"}, nil)
+	spec := linuxRequest().Spec
+	stub.vms["web"] = &vms.VM{Spec: spec, State: "stopped"}
+	var e ErrorResponse
+	if code := admin.do("DELETE", "/api/v1/vms/web/snapshots/vm-20261026-120000", VMSnapshotDeleteRequest{Confirm: "nope"}, &e); code != 400 || e.Code != "confirm_required" {
+		t.Fatalf("snapshot delete without the name = %d %+v", code, e)
+	}
+	if code := admin.do("DELETE", "/api/v1/vms/web/snapshots/vm-20261026-120000", VMSnapshotDeleteRequest{Confirm: "Web server"}, nil); code != 202 {
+		t.Fatalf("snapshot delete = %d", code)
+	}
+	upd := VMUpdateRequest{Spec: spec, RemoveDisks: []string{"disk1"}}
+	if code := admin.do("PUT", "/api/v1/vms/web", upd, &e); code != 400 || e.Code != "confirm_required" {
+		t.Fatalf("disk removal without the name = %d %+v", code, e)
+	}
+	upd.Confirm = "web"
+	if code := admin.do("PUT", "/api/v1/vms/web", upd, nil); code != 202 {
+		t.Fatalf("disk removal = %d", code)
 	}
 }

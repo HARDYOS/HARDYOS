@@ -65,6 +65,20 @@ SHUTDOWN_TIMEOUT=180
 GUESTS
 systemctl enable libvirtd.service libvirt-guests.service >/dev/null 2>&1 || true
 
+# QEMU is always confined by AppArmor (decision 138): libvirt refuses to
+# start a VM it can't confine, and HardyOS reports VMs as unsupported when
+# libvirt's security driver isn't AppArmor.
+mkdir -p /etc/libvirt
+if [ -f /etc/libvirt/qemu.conf ]; then
+  sed -i -E '/^[[:space:]]*#?[[:space:]]*(security_driver|security_require_confined)[[:space:]]*=/d' /etc/libvirt/qemu.conf
+fi
+cat >> /etc/libvirt/qemu.conf <<'QEMU'
+
+# Written by HardyOS: every VM runs confined by AppArmor.
+security_driver = "apparmor"
+security_require_confined = 1
+QEMU
+
 # Load the zfs module at boot so pools can be imported right away.
 echo zfs > /etc/modules-load.d/zfs.conf
 

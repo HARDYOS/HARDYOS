@@ -33,10 +33,11 @@ const (
 // vmCreateParams are a create job's parameters; the password waits in
 // jobSecrets (job parameters are kept in the job history).
 type vmCreateParams struct {
-	Spec        vms.Spec           `json:"spec"`
-	Start       bool               `json:"start"`
-	Downloads   []vms.DownloadArgs `json:"downloads,omitempty"`
-	PasswordRef string             `json:"passwordRef,omitempty"`
+	Spec            vms.Spec           `json:"spec"`
+	Start           bool               `json:"start"`
+	Downloads       []vms.DownloadArgs `json:"downloads,omitempty"`
+	PasswordRef     string             `json:"passwordRef,omitempty"`
+	AllowOvercommit bool               `json:"allowOvercommit,omitempty"`
 }
 
 type vmUpdateParams struct {
@@ -122,6 +123,23 @@ func waitStopped(jc *jobs.Context, pc *priv.Client, id string, limit time.Durati
 	}
 }
 
+// ensureVMBridge makes the home network's bridge if there's none yet,
+// holding the network job lock so it never overlaps a network change from
+// Control Panel (or another VM job making the bridge).
+func ensureVMBridge(jc *jobs.Context, pc *priv.Client, pct float64) error {
+	unlock := jc.Lock("network")
+	defer unlock()
+	var caps vms.Capabilities
+	if err := call(jc, pc, time.Minute, priv.OpVMsCapabilities, nil, &caps); err != nil {
+		return err
+	}
+	if caps.Bridge != "" {
+		return nil
+	}
+	jc.Progress(pct, "Putting the server's network on a bridge for VMs (the network restarts for a moment)")
+	return call(jc, pc, 5*time.Minute, priv.OpVMsBridge, nil, nil)
+}
+
 func registerVMJobs(m *jobs.Manager, pc *priv.Client) {
 	reg := func(name string, lock bool, run jobs.RunFunc) {
 		k := jobs.Kind{Name: name, AdminOnly: true, Run: run}
@@ -161,15 +179,8 @@ func registerVMJobs(m *jobs.Manager, pc *priv.Client) {
 		}
 		// 2. The home network's bridge, the first time a VM needs it.
 		if s.NeedsBridge() {
-			var caps vms.Capabilities
-			if err := call(jc, pc, time.Minute, priv.OpVMsCapabilities, nil, &caps); err != nil {
+			if err := ensureVMBridge(jc, pc, 52); err != nil {
 				return nil, err
-			}
-			if caps.Bridge == "" {
-				jc.Progress(52, "Putting the server's network on a bridge for VMs (the network restarts for a moment)")
-				if err := call(jc, pc, 5*time.Minute, priv.OpVMsBridge, nil, nil); err != nil {
-					return nil, err
-				}
 			}
 		}
 		// 3. The VirtIO drivers disc for Windows.
@@ -186,7 +197,7 @@ func registerVMJobs(m *jobs.Manager, pc *priv.Client) {
 		// 4. The VM itself.
 		jc.Progress(76, "Creating "+s.Name)
 		var created vms.Result
-		if err := call(jc, pc, 5*time.Minute, priv.OpVMsCreate, vms.CreateArgs{Spec: s, Password: password}, &created); err != nil {
+		if err := call(jc, pc, 5*time.Minute, priv.OpVMsCreate, vms.CreateArgs{Spec: s, Password: password, AllowOvercommit: p.AllowOvercommit}, &created); err != nil {
 			return nil, err
 		}
 		// 5. Disk images.
@@ -230,15 +241,8 @@ func registerVMJobs(m *jobs.Manager, pc *priv.Client) {
 			args.Password = pw
 		}
 		if args.Spec.NeedsBridge() {
-			var caps vms.Capabilities
-			if err := call(jc, pc, time.Minute, priv.OpVMsCapabilities, nil, &caps); err != nil {
+			if err := ensureVMBridge(jc, pc, 20); err != nil {
 				return nil, err
-			}
-			if caps.Bridge == "" {
-				jc.Progress(20, "Putting the server's network on a bridge for VMs (the network restarts for a moment)")
-				if err := call(jc, pc, 5*time.Minute, priv.OpVMsBridge, nil, nil); err != nil {
-					return nil, err
-				}
 			}
 		}
 		if args.Spec.NeedsVirtio() {

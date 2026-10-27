@@ -117,7 +117,8 @@ type Manager struct {
 	running  map[string]bool // last seen state, for stop detection
 	restart  map[string]bool // hardware changed while running
 	addrs    map[string][]string
-	prepared map[string]bool // devices prepared and not yet released
+	prepared map[string]bool            // devices prepared and not yet released
+	releases map[string]*pendingRelease // stopped VMs whose devices still go back
 }
 
 func (m *Manager) log() *slog.Logger {
@@ -370,25 +371,10 @@ func (m *Manager) saveSpec(st *stored) error {
 	return writeAtomic(filepath.Join(m.sys(st.dir), specFile), append(b, '\n'), 0o600)
 }
 
+// writeAtomic replaces a root file without following links (a fresh
+// O_EXCL|O_NOFOLLOW name in the opened parent, synced, renamed over).
 func writeAtomic(path string, b []byte, mode os.FileMode) error {
-	tmp := path + ".tmp"
-	_ = os.Remove(tmp)
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(b); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return rootfile.WriteAtomic(path, b, mode)
 }
 
 // ---- host -----------------------------------------------------------------
@@ -1228,6 +1214,7 @@ func (m *Manager) forget(id string) {
 	delete(m.restart, id)
 	delete(m.addrs, id)
 	delete(m.prepared, id)
+	delete(m.releases, id)
 }
 
 func notDefined(err error) bool {

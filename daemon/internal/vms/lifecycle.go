@@ -518,13 +518,95 @@ func (m *Manager) afterStop(ctx context.Context, st *stored) {
 	m.statsMu.Unlock()
 	if m.Devices != nil && (was || len(st.spec.Devices) > 0) {
 		if err := m.Devices.Release(ctx, id); err != nil {
-			m.log().Warn("vms: giving a stopped VM's devices back", "id", id, "err", err)
+			m.log().Warn("vms: giving a stopped VM's devices back; trying again later", "id", id, "err", err)
+			m.retryRelease(id, err)
+		} else {
+			m.releaseDone(id)
 		}
 	}
 	if st.spec.Firmware.TPM {
 		if err := m.saveTPM(st); err != nil {
 			m.log().Warn("vms: saving the TPM state", "id", id, "err", err)
 		}
+	}
+}
+
+// Releasing devices can fail for a while (libvirt busy, a GPU still
+// resetting); a stopped VM's devices are then given back on later watcher
+// ticks, with backoff, in the background, until it works or the VM runs
+// again.
+var (
+	releaseFirstRetry = 5 * time.Second
+	releaseMaxRetry   = 5 * time.Minute
+)
+
+type pendingRelease struct {
+	next     time.Time
+	delay    time.Duration
+	inFlight bool
+}
+
+func (m *Manager) retryRelease(id string, _ error) {
+	m.statsMu.Lock()
+	defer m.statsMu.Unlock()
+	if m.releases == nil {
+		m.releases = map[string]*pendingRelease{}
+	}
+	p := m.releases[id]
+	if p == nil {
+		p = &pendingRelease{delay: releaseFirstRetry}
+		m.releases[id] = p
+	} else {
+		p.delay = min(p.delay*2, releaseMaxRetry)
+	}
+	p.inFlight = false
+	p.next = time.Now().Add(p.delay)
+}
+
+func (m *Manager) releaseDone(id string) {
+	m.statsMu.Lock()
+	delete(m.releases, id)
+	m.statsMu.Unlock()
+}
+
+// retryReleases starts the background release of VMs whose turn has come.
+func (m *Manager) retryReleases(ctx context.Context, stats map[string]domStats) {
+	if m.Devices == nil {
+		return
+	}
+	now := time.Now()
+	m.statsMu.Lock()
+	var due []string
+	for id, p := range m.releases {
+		if s, ok := stats[id]; ok && (s.State == "running" || s.State == "paused") {
+			delete(m.releases, id) // it runs again: its devices are its own
+			continue
+		}
+		if !p.inFlight && !now.Before(p.next) {
+			p.inFlight = true
+			due = append(due, id)
+		}
+	}
+	m.statsMu.Unlock()
+	for _, id := range due {
+		go func(id string) {
+			unlock := m.lock(id)
+			defer unlock()
+			if m.state(ctx, id) == "running" {
+				m.releaseDone(id)
+				return
+			}
+			rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			err := m.Devices.Release(rctx, id)
+			cancel()
+			if err != nil {
+				m.log().Warn("vms: giving a stopped VM's devices back, again", "id", id, "err", err)
+				m.retryRelease(id, err)
+				return
+			}
+			m.log().Info("vms: gave a stopped VM's devices back", "id", id)
+			m.releaseDone(id)
+		}(id)
 	}
 }
 
@@ -648,6 +730,7 @@ func (m *Manager) Watch(ctx context.Context) {
 
 func (m *Manager) check(ctx context.Context, refreshAddrs bool) {
 	stats := m.stats(ctx)
+	m.retryReleases(ctx, stats)
 	if len(stats) == 0 {
 		return
 	}

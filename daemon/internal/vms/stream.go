@@ -80,14 +80,14 @@ func sandboxProps(user, image, target string) []string {
 		"ProtectSystem=strict", "ProtectHome=yes", "ProtectProc=invisible",
 		"ProtectKernelTunables=yes", "ProtectKernelModules=yes", "ProtectKernelLogs=yes",
 		"ProtectControlGroups=yes", "ProtectClock=yes", "ProtectHostname=yes",
-		"RestrictAddressFamilies=none", "RestrictNamespaces=yes", "RestrictSUIDSGID=yes",
+		"RestrictAddressFamilies=AF_UNIX", "RestrictNamespaces=yes", "RestrictSUIDSGID=yes",
 		"RestrictRealtime=yes", "LockPersonality=yes", "MemoryDenyWriteExecute=yes",
 		"SystemCallArchitectures=native", "SystemCallFilter=@system-service", "SystemCallErrorNumber=EPERM",
 		"UMask=0077", "MemoryMax=4G", "TasksMax=64", "RuntimeMaxSec=12h",
 	}
-	// Pools, shares and state are mounted under these; whatever is
+	// Pools and shares are mounted under these, sockets under /run; what is
 	// elsewhere is still only readable as an unprivileged user.
-	for _, d := range []string{"/mnt", "/srv", "/media", "/var", "/run", "/root"} {
+	for _, d := range []string{"/mnt", "/srv", "/media", "/run"} {
 		p = append(p, "TemporaryFileSystem="+d+":ro")
 	}
 	if image != "" {
@@ -233,10 +233,12 @@ var errTooBig = errors.New("bigger than allowed")
 type capWriter struct {
 	w       io.Writer
 	n, done int64
+	over    bool // a write was refused
 }
 
 func (c *capWriter) Write(p []byte) (int, error) {
 	if c.done+int64(len(p)) > c.n {
+		c.over = true
 		return 0, errTooBig
 	}
 	k, err := c.w.Write(p)

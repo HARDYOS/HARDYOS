@@ -525,7 +525,7 @@ func (m *Manager) stageImport(ctx context.Context, t *Task, st *stored, name str
 				m.tasks.progress(t.ID, 1+29*float64(read)/float64(size), "Unpacking "+name)
 			}
 		})
-		if w.done >= limit || errors.Is(err, errTooBig) {
+		if w.over || errors.Is(err, errTooBig) {
 			return "", tooBig
 		}
 		if err != nil {

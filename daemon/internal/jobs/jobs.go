@@ -65,6 +65,21 @@ func (c *Context) Params(v any) error { return json.Unmarshal(c.job.Params, v) }
 // ID returns the job's ID.
 func (c *Context) ID() string { return c.job.ID }
 
+// Lock takes another kind's lock key (e.g. "network") for part of a job,
+// so it doesn't overlap jobs holding that key; it returns the unlock.
+// Take keys in one order (the job's own first) to avoid deadlocks.
+func (c *Context) Lock(key string) func() {
+	c.m.mu.Lock()
+	l := c.m.locks[key]
+	if l == nil {
+		l = &sync.Mutex{}
+		c.m.locks[key] = l
+	}
+	c.m.mu.Unlock()
+	l.Lock()
+	return l.Unlock
+}
+
 // Progress reports completion (0-100) and a short status message.
 // Updates are published immediately and persisted at most once a second.
 func (c *Context) Progress(pct float64, msg string) {

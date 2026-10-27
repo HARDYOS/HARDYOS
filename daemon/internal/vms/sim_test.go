@@ -2,6 +2,7 @@ package vms
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -528,6 +529,8 @@ type fakeDevices struct {
 	mu       sync.Mutex
 	calls    []string
 	checkErr error
+	// releaseFails: this many Releases fail before one works.
+	releaseFails int
 }
 
 func (d *fakeDevices) Check(_ context.Context, vm string, ds []devices.Device) error {
@@ -552,6 +555,10 @@ func (d *fakeDevices) Release(_ context.Context, vm string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.calls = append(d.calls, "release "+vm)
+	if d.releaseFails > 0 {
+		d.releaseFails--
+		return errors.New("virsh: libvirt is busy")
+	}
 	return nil
 }
 

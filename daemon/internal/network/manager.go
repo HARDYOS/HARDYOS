@@ -369,6 +369,11 @@ func (m *Manager) run(ctx context.Context, name string, args ...string) error {
 func (m *Manager) Apply(ctx context.Context, c Config) (*PendingInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.applyLocked(ctx, c)
+}
+
+// applyLocked is Apply with m.mu held.
+func (m *Manager) applyLocked(ctx context.Context, c Config) (*PendingInfo, error) {
 	cur := m.Current()
 	// Settings from a page that doesn't know about bridges keep them.
 	if c.Bridges == nil {
@@ -772,18 +777,10 @@ func writeOrRemove(path string, content *string) error {
 		}
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	mode := os.FileMode(0o644)
-	tmp := path + ".hardyos-tmp"
-	if err := os.WriteFile(tmp, []byte(*content), mode); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp, mode); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	// A fixed temporary name next to the file would let anyone who could
+	// plant a link there make root write through it; WriteAtomic uses a
+	// fresh name made with O_EXCL|O_NOFOLLOW in the opened parent.
+	return rootfile.WriteAtomic(path, []byte(*content), 0o644)
 }
 
 // AddrOf returns the address part of a CIDR (for messages).

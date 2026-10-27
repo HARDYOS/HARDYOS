@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -91,12 +92,22 @@ func TestLibvirtIntegration(t *testing.T) {
 	must(t, "zfs", "create", pool+"/isos")
 	must(t, "chmod", "755", "/mnt/"+pool, "/mnt/"+pool+"/isos")
 
+	// Imports run qemu-img sandboxed as this user (packaging makes it).
+	if _, err := user.Lookup(ImportUser); err != nil {
+		must(t, "useradd", "--system", "--user-group", "--no-create-home", "--shell", "/usr/sbin/nologin", ImportUser)
+		t.Cleanup(func() { _ = exec.Command("userdel", ImportUser).Run() })
+	}
+
 	m := &Manager{Runner: sysexec.Exec{}, Root: "/", Library: datasetLibrary{ds: pool + "/isos", mp: "/mnt/" + pool + "/isos"}}
 
 	caps := m.Capabilities(ctx)
 	t.Logf("capabilities: %+v", caps)
 	if !caps.KVM || caps.Libvirt == "" {
 		t.Fatalf("KVM or libvirt missing: %+v", caps)
+	}
+	// QEMU is confined by AppArmor, or VMs don't run.
+	if !caps.Supported || caps.Security != SecurityModel {
+		t.Fatalf("VMs aren't confined: %+v", caps)
 	}
 
 	// The ISO library: a download by link, checked by hash.
@@ -185,7 +196,7 @@ func TestLibvirtIntegration(t *testing.T) {
 	s2 := cur.Spec
 	s2.Disks[0].SizeGB = 2
 	s2.Disks = append(s2.Disks, Disk{Name: "disk1", SizeGB: 1, Bus: BusVirtioSCSI})
-	if _, err := m.Update(ctx, UpdateArgs{Spec: s2}); err != nil {
+	if _, err := m.Update(ctx, UpdateArgs{Spec: s2, AllowOvercommit: true}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := m.Rollback(ctx, RollbackArgs{ID: "cirros", Snapshot: snap.Name, Confirm: "cirros"}); err != nil {

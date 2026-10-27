@@ -654,6 +654,44 @@ func mustFrag(t *testing.T) func(string, error) string {
 	}
 }
 
+// Devices that couldn't be given back when a VM stopped are retried in the
+// background on later watcher ticks, with backoff, until it works.
+func TestReleaseRetried(t *testing.T) {
+	old := releaseFirstRetry
+	releaseFirstRetry = 10 * time.Millisecond
+	defer func() { releaseFirstRetry = old }()
+	e := newEnv(t)
+	gamingVM(t, e)
+	ctx := context.Background()
+	if _, err := e.m.Start(ctx, "game"); err != nil {
+		t.Fatal(err)
+	}
+	e.devs.mu.Lock()
+	e.devs.releaseFails = 2
+	e.devs.mu.Unlock()
+	if _, err := e.m.Stop(ctx, StopArgs{ID: "game", Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 200; i++ {
+		e.m.check(ctx, false)
+		e.m.statsMu.Lock()
+		left := len(e.m.releases)
+		e.m.statsMu.Unlock()
+		if left == 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := strings.Count(e.devs.log(), "release game"); n != 3 {
+		t.Fatalf("released %d times: %s", n, e.devs.log())
+	}
+	e.m.statsMu.Lock()
+	defer e.m.statsMu.Unlock()
+	if len(e.m.releases) != 0 {
+		t.Fatal("still waiting to release")
+	}
+}
+
 // L12: VMs on the private network may only ask the server for DHCP and DNS.
 func TestNATGuard(t *testing.T) {
 	e := newEnv(t)

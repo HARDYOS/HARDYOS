@@ -98,6 +98,11 @@ xz-utils
 libvirt-daemon-system
 libvirt-daemon-driver-qemu
 libvirt-daemon-config-network
+# Network filters: clean-traffic keeps VMs on the home network to their own
+# MAC and IP addresses (decision 137); nwfilter applies it with ebtables.
+libvirt-daemon-driver-nwfilter
+libvirt-daemon-config-nwfilter
+ebtables
 libvirt-clients
 qemu-system-x86
 qemu-utils

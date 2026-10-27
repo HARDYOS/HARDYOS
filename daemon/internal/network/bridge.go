@@ -187,36 +187,24 @@ func (m *Manager) ipv4Of(ctx context.Context, dev string) []netip.Prefix {
 func (m *Manager) EnsureBridge(ctx context.Context) (string, error) {
 	m.bridgeMu.Lock()
 	defer m.bridgeMu.Unlock()
+	// The new settings are built from the current ones and applied under
+	// one hold of m.mu, so a change saved in between (Control Panel) can't
+	// be overwritten with what was there before it.
+	m.mu.Lock()
 	if name := m.BridgeName(); name != "" {
+		m.mu.Unlock()
 		return name, nil
 	}
-	m.mu.Lock()
-	p, err := m.loadPending()
+	next, port, before, gw, err := m.bridgeConfigLocked(ctx)
+	if err == nil {
+		m.log().Info("network: creating the bridge for virtual machines", "bridge", DefaultBridge, "port", port)
+		if _, aerr := m.applyLocked(ctx, next); aerr != nil {
+			err = fmt.Errorf("setting up the bridge for VMs: %w", aerr)
+		}
+	}
 	m.mu.Unlock()
 	if err != nil {
 		return "", err
-	}
-	if p != nil {
-		return "", ErrPending
-	}
-	c := m.Current()
-	port, err := m.uplink(ctx, c)
-	if err != nil {
-		return "", err
-	}
-	mac := strings.TrimSpace(m.readFile(filepath.Join("sys/class/net", port, "address")))
-	if !macRE.MatchString(strings.ToLower(mac)) {
-		mac = ""
-	}
-	before := m.ipv4Of(ctx, port)
-	gw := m.defaultGateway(ctx)
-	next, err := WithBridge(c, DefaultBridge, port, mac)
-	if err != nil {
-		return "", err
-	}
-	m.log().Info("network: creating the bridge for virtual machines", "bridge", DefaultBridge, "port", port)
-	if _, err := m.Apply(ctx, next); err != nil {
-		return "", fmt.Errorf("setting up the bridge for VMs: %w", err)
 	}
 	want := addressing(next, DefaultBridge)
 	if err := m.checkBridge(ctx, DefaultBridge, want, before, gw); err != nil {
@@ -231,6 +219,30 @@ func (m *Manager) EnsureBridge(ctx context.Context) (string, error) {
 	}
 	m.log().Info("network: bridge for virtual machines ready", "bridge", DefaultBridge, "port", port)
 	return DefaultBridge, nil
+}
+
+// bridgeConfigLocked builds the settings with the VM bridge, m.mu held.
+func (m *Manager) bridgeConfigLocked(ctx context.Context) (next Config, port string, before []netip.Prefix, gw string, err error) {
+	p, err := m.loadPending()
+	if err != nil {
+		return next, "", nil, "", err
+	}
+	if p != nil {
+		return next, "", nil, "", ErrPending
+	}
+	c := m.Current()
+	port, err = m.uplink(ctx, c)
+	if err != nil {
+		return next, "", nil, "", err
+	}
+	mac := strings.TrimSpace(m.readFile(filepath.Join("sys/class/net", port, "address")))
+	if !macRE.MatchString(strings.ToLower(mac)) {
+		mac = ""
+	}
+	before = m.ipv4Of(ctx, port)
+	gw = m.defaultGateway(ctx)
+	next, err = WithBridge(c, DefaultBridge, port, mac)
+	return next, port, before, gw, err
 }
 
 func addressing(c Config, name string) Addressing {

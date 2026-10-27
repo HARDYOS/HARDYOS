@@ -112,6 +112,8 @@ type VMCreateRequest struct {
 	Password  string             `json:"password,omitempty"`
 	Start     bool               `json:"start"`
 	Downloads []vms.DownloadArgs `json:"downloads,omitempty"`
+	// AllowOvercommit: the disks may be bigger than the pool's free space.
+	AllowOvercommit bool `json:"allowOvercommit,omitempty"`
 }
 
 // checkSpec gives quick answers to obvious mistakes; hardyd-priv checks
@@ -152,7 +154,7 @@ func (s *Server) handleVMCreate(w http.ResponseWriter, r *http.Request, u *auth.
 		writeError(w, http.StatusBadRequest, "invalid", "at most 4 downloads")
 		return
 	}
-	p := vmCreateParams{Spec: req.Spec, Start: req.Start, Downloads: req.Downloads}
+	p := vmCreateParams{Spec: req.Spec, Start: req.Start, Downloads: req.Downloads, AllowOvercommit: req.AllowOvercommit}
 	if req.Password != "" {
 		p.PasswordRef = jobSecrets.put(req.Password)
 	}
@@ -176,11 +178,14 @@ func checkSpecLoose(w http.ResponseWriter, sp *vms.Spec) bool {
 	return checkSpec(w, &s)
 }
 
-// VMUpdateRequest changes a VM.
+// VMUpdateRequest changes a VM. Removing disks needs the VM's name typed
+// in Confirm.
 type VMUpdateRequest struct {
-	Spec        vms.Spec `json:"spec"`
-	Password    string   `json:"password,omitempty"`
-	RemoveDisks []string `json:"removeDisks,omitempty"`
+	Spec            vms.Spec `json:"spec"`
+	Password        string   `json:"password,omitempty"`
+	RemoveDisks     []string `json:"removeDisks,omitempty"`
+	Confirm         string   `json:"confirm,omitempty"`
+	AllowOvercommit bool     `json:"allowOvercommit,omitempty"`
 }
 
 func (s *Server) handleVMUpdate(w http.ResponseWriter, r *http.Request, u *auth.User) {
@@ -196,7 +201,11 @@ func (s *Server) handleVMUpdate(w http.ResponseWriter, r *http.Request, u *auth.
 	if !checkSpecLoose(w, &req.Spec) {
 		return
 	}
-	p := vmUpdateParams{UpdateArgs: vms.UpdateArgs{Spec: req.Spec, RemoveDisks: req.RemoveDisks}}
+	if len(req.RemoveDisks) > 0 && !vms.Confirms(req.Confirm, &v.Spec) {
+		writeError(w, http.StatusBadRequest, "confirm_required", "type the VM's name ("+v.Name+") to confirm deleting "+strings.Join(req.RemoveDisks, ", "))
+		return
+	}
+	p := vmUpdateParams{UpdateArgs: vms.UpdateArgs{Spec: req.Spec, RemoveDisks: req.RemoveDisks, Confirm: req.Confirm, AllowOvercommit: req.AllowOvercommit}}
 	if req.Password != "" {
 		p.PasswordRef = jobSecrets.put(req.Password)
 	}
@@ -329,13 +338,26 @@ func (s *Server) handleVMSnapshot(w http.ResponseWriter, r *http.Request, u *aut
 	s.submit(w, r, u, JobKindVMSnapshot, "Snapshot of "+v.Name, vms.SnapshotArgs{ID: v.ID, Label: req.Label}, "vms.snapshot", v.ID, nil)
 }
 
+// VMSnapshotDeleteRequest deletes a snapshot; Confirm is the VM's name.
+type VMSnapshotDeleteRequest struct {
+	Confirm string `json:"confirm"`
+}
+
 func (s *Server) handleVMSnapshotDelete(w http.ResponseWriter, r *http.Request, u *auth.User) {
+	var req VMSnapshotDeleteRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
 	v, ok := s.getVM(w, r)
 	if !ok {
 		return
 	}
+	if !vms.Confirms(req.Confirm, &v.Spec) {
+		writeError(w, http.StatusBadRequest, "confirm_required", "type the VM's name ("+v.Name+") to confirm")
+		return
+	}
 	name := r.PathValue("name")
-	s.submit(w, r, u, JobKindVMSnapshotDelete, "Delete snapshot "+name+" of "+v.Name, vms.DeleteSnapshotArgs{ID: v.ID, Snapshot: name},
+	s.submit(w, r, u, JobKindVMSnapshotDelete, "Delete snapshot "+name+" of "+v.Name, vms.DeleteSnapshotArgs{ID: v.ID, Snapshot: name, Confirm: req.Confirm},
 		"vms.snapshot.delete", v.ID+"@"+name, nil)
 }
 

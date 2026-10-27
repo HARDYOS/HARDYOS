@@ -25,6 +25,10 @@ import (
 // VMConsoleMaxLife bounds one console session.
 const VMConsoleMaxLife = 12 * time.Hour
 
+// vmConsoleRecheck is how often an open console checks that its desktop
+// session is still signed in and still an administrator's.
+var vmConsoleRecheck = 15 * time.Second
+
 // VMConsoleSession is a console's one-time pass and where to use it.
 type VMConsoleSession struct {
 	Token   string    `json:"token"`
@@ -73,15 +77,44 @@ func (s *Server) handleVMConsoleWS(w http.ResponseWriter, r *http.Request, u *au
 	conn.SetReadLimit(4 << 20)
 	started := time.Now()
 	s.record(r, u, "vms.console.open", id, audit.Success, "")
-	reason := relayVNC(ctx, conn, vnc)
+	session := ""
+	if c, err := r.Cookie(SessionCookie); err == nil {
+		session = c.Value
+	}
+	// Signing out, being demoted or disabled closes the screen too.
+	still := func() bool {
+		info, err := s.peekSession(ctx, session)
+		if err != nil || info.UserID != u.ID {
+			return false
+		}
+		cur, err := s.sessionUser(r, session, info.UserID)
+		return err == nil && cur.IsAdmin()
+	}
+	reason := relayVNC(ctx, conn, vnc, still)
 	s.record(r, u, "vms.console.close", id, audit.Success, fmt.Sprintf("%s after %s", reason, time.Since(started).Round(time.Second)))
 }
 
-// relayVNC copies RFB bytes between the VM's VNC server and the browser.
-func relayVNC(ctx context.Context, conn *websocket.Conn, vnc *os.File) string {
+// relayVNC copies RFB bytes between the VM's VNC server and the browser
+// while still() says the person may (checked every vmConsoleRecheck).
+func relayVNC(ctx context.Context, conn *websocket.Conn, vnc *os.File, still func() bool) string {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	done := make(chan string, 2)
+	done := make(chan string, 3)
+	go func() {
+		t := time.NewTicker(vmConsoleRecheck)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if !still() {
+					done <- "the session ended or is no longer an administrator's"
+					return
+				}
+			}
+		}
+	}()
 	go func() {
 		buf := make([]byte, 64<<10)
 		for {

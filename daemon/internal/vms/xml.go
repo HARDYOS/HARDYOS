@@ -36,8 +36,7 @@ type Paths struct {
 
 // RomRunDir is where part D puts the QEMU-readable copies of GPU ROM
 // files at VM start; fragments may name ROM files only directly in it.
-// TODO(merge devices-sec): use devices.RomRunDir once that branch is in.
-const RomRunDir = "/run/hardyos-roms"
+const RomRunDir = devices.RomRunDir
 
 type domainXML struct {
 	XMLName       xml.Name    `xml:"domain"`
