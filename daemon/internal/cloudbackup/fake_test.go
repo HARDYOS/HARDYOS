@@ -380,6 +380,10 @@ type fakeFiles struct {
 	ops    []string
 }
 
+func (f *fakeFiles) IdentityOf(context.Context, fileworker.Who) (*fileworker.Identity, error) {
+	return &fileworker.Identity{UID: 4242, GID: 4242, Groups: []int{4300}}, nil
+}
+
 func (f *fakeFiles) RulesLevel(_ context.Context, who fileworker.Who, share string) (string, error) {
 	return f.level, nil
 }

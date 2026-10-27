@@ -167,8 +167,7 @@ warning or critical).
 | `cloudbackup.targets` | list destinations (nothing secret) |
 | `cloudbackup.target.save` | test the bucket, create or open the repository, keep the destination sealed |
 | `cloudbackup.target.remove` | forget a destination (name to confirm); the bucket is untouched |
-| `cloudbackup.kit` | the recovery kit: hardyd-priv checks the administrator's password itself (`internal/rootauth`) |
-| `rootauth.change` | an administrator's own password change, taken by root's verifier only with the old password |
+| `cloudbackup.kit` | the recovery kit (hardyd asks only after re-checking the password; hardyd-priv writes it to the journal) |
 | `cloudbackup.backup` / `.restore` / `.prune` / `.check` / `.rebuild` | start a task |
 | `cloudbackup.task` / `.cancel` | follow or stop a task |
 | `cloudbackup.versions` / `.browse` | versions of a destination, a folder of a version |
@@ -195,13 +194,27 @@ warning or critical).
   `<bucket>.<endpoint host>`), resolves names itself and refuses loopback,
   link-local, private (unless "on my network"), translation and
   documentation ranges and this server's own addresses.
+- **Sockets**: a seccomp filter lets restic make only `AF_INET` and
+  `AF_INET6` sockets, so no local socket (hardyd-priv's, Docker's,
+  netlink) can be made at all.
 - **Files**: hardyd-priv re-executes itself (`__hardyos-restic-sandbox`) in
-  a new mount namespace, makes every mount read-only except restic's cache
-  and a restore's staging folder, hides `/var/lib/hardyos`, `/etc/hardyos`,
-  `/etc/ssh`, `/root` and Samba's private folder under empty tmpfs mounts,
-  keeps only the run's capabilities (`DAC_READ_SEARCH` for a backup of
-  folders; `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `FSETID`, `MKNOD` for a
-  restore; none otherwise), sets no_new_privs and executes restic.
+  new mount and PID namespaces and builds an allowlist root: an empty
+  tmpfs holding only the restic binary and the CA bundle (read-only), a
+  /dev with null, zero, random and urandom, a /proc of its own PID
+  namespace (only restic visible), the folder a backup reads (read-only),
+  the destination's own cache folder and a restore's staging folder
+  (read-write). Everything is nosuid and nodev; nothing else of the host
+  exists in there. Any step that fails stops the run.
+- **Identity**: restic runs as the `hardyos-restic` user (made by the
+  package), never root, with only the run's capabilities as ambient
+  capabilities (`DAC_READ_SEARCH` for a backup of folders; `CHOWN`,
+  `DAC_OVERRIDE`, `FOWNER` for a restore; none otherwise) and
+  no_new_privs. The repository key is a pipe on fd 3; the S3/B2 keys are
+  in its environment (restic has no file option for them), which only its
+  own user in its own PID namespace can read.
+- **Cache**: one folder per destination
+  (`/var/cache/hardyos-restic/<id>`), owned by `hardyos-restic`, emptied
+  when it grows past 8 GB.
 - **Restores** unpack into a staging dataset with a quota (the version's
   size plus headroom; refused when the pool hasn't that much free) and are
   copied from there by descriptor. Links never come back into an app's own
@@ -238,20 +251,20 @@ Panel › Replication). A tab gets `go(tab, args)` and `args`.
 
 ### Not yet
 
-- Restic's listing has no ACLs, so a version shows the names of everything
-  in a folder to anyone the folder's rules let in; contents are still read
-  as the person.
+- Restic's listing has no ACLs, so a person opens a version's folder only
+  when its owner, group or other bits let them read and search it (a folder
+  only an ACL opens stays closed in versions); contents are still read as
+  the person.
 - VM disks are read whole at every backup (zvol streams; restic deduplicates
   but still reads every block).
 - Hard links come back as separate files.
-- A compromised hardyd can't get a repository key, but it can still add a
-  destination of its own and back everything up to it, the settings item
-  included (which holds the master key, pool keys, TLS and SSH host
-  keys). hardyd-priv writes every new destination and every settings
-  backup to the journal ("AUDIT cloud backup: ..."), which hardyd can't
-  change; watch for unexpected ones.
-- Local administrators made in the web interface aren't known to root's
-  verifier until `hardyctl reset-password` sets their password (root can't
-  tell a real administrator from one a compromised hardyd made); until then
-  they download the recovery kit through the first administrator or a
-  domain administrator.
+- A compromised hardyd can get a repository key (the recovery kit is
+  behind hardyd's own password check), and it can add a destination of its
+  own and back everything up to it, the settings item included (which
+  holds the master key, pool keys, TLS and SSH host keys). hardyd-priv
+  writes every kit, new destination and settings backup to the journal
+  ("AUDIT cloud backup: ..."), which hardyd can't change; watch for
+  unexpected ones. Root-side attestation of the administrator is the
+  future fix (decision 235).
+- The `server=` tag isn't signed: anyone who can write snapshots holds the
+  repository key, which opens everything anyway (decision 238).

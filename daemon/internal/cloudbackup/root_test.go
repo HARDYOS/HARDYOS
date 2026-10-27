@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/hardyos/hardyos/daemon/internal/fileworker"
@@ -40,6 +41,14 @@ func TestBackupBrowseRestoreShare(t *testing.T) {
 	write(t, filepath.Join(share, ".recycle", "old.txt"), "recycled")
 	if err := os.Symlink("/etc/passwd", filepath.Join(share, "link")); err != nil {
 		t.Fatal(err)
+	}
+	// A file an app's user owned: it comes back as root's (decision 238).
+	write(t, filepath.Join(share, "from-app.txt"), "app")
+	asRoot := os.Getuid() == 0
+	if asRoot {
+		if err := os.Lchown(filepath.Join(share, "from-app.txt"), 30005, 31002); err != nil {
+			t.Fatal(err)
+		}
 	}
 	e.shares.add("media", "Media", share)
 
@@ -91,7 +100,7 @@ func TestBackupBrowseRestoreShare(t *testing.T) {
 	for _, en := range entries {
 		names = append(names, en.Name+":"+en.Type)
 	}
-	if got := strings.Join(names, ","); got != "Photos:dir,link:symlink,notes.txt:file" {
+	if got := strings.Join(names, ","); got != "Photos:dir,from-app.txt:file,link:symlink,notes.txt:file" {
 		t.Fatalf("browse: %s", got)
 	}
 	if _, err := e.root.Browse(ctx, BrowseArgs{Target: tg.ID, Snapshot: v1.Snapshot, Path: "../x"}); err == nil {
@@ -149,6 +158,12 @@ func TestBackupBrowseRestoreShare(t *testing.T) {
 	if l, err := os.Readlink(filepath.Join(share, "link")); err != nil || l != "/etc/passwd" {
 		t.Errorf("the link came back as %q, %v", l, err)
 	}
+	if asRoot {
+		var st syscall.Stat_t
+		if err := syscall.Lstat(filepath.Join(share, "from-app.txt"), &st); err != nil || st.Uid != 0 || st.Gid != 0 {
+			t.Errorf("an app's file came back owned by %d:%d (%v)", st.Uid, st.Gid, err)
+		}
+	}
 	if got := read(t, filepath.Join(share, ".recycle", "old.txt")); got != "recycled" {
 		t.Error("the recycle bin was touched by a rollback")
 	}
@@ -184,6 +199,10 @@ func TestPersonRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	write(t, filepath.Join(share, "Photos", "a.jpg"), "photo")
+	write(t, filepath.Join(share, "Locked", "secret.txt"), "secret")
+	if err := os.Chmod(filepath.Join(share, "Locked"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	e.shares.add("family", "Family", share)
 	if x, _ := e.backup(tg.ID, "daily", "p1", Item{Kind: ItemShare, ID: "family"}); x.Error != "" {
 		t.Fatal(x.Error)
@@ -200,8 +219,19 @@ func TestPersonRestore(t *testing.T) {
 	if _, err := e.root.StartRestore(ctx, RestoreArgs{Target: tg.ID, Snapshot: snap, Mode: ModeCopy, Folder: "x", Who: who}); err == nil {
 		t.Fatal("restore without access started")
 	}
-	// Read only: no restore.
+	// A person lists only folders they could open in the version
+	// (decision 237); the closed folder's name shows in its parent.
 	e.files.level = "read"
+	if l, err := e.root.Browse(ctx, BrowseArgs{Target: tg.ID, Snapshot: snap, Who: who}); err != nil || len(l) == 0 {
+		t.Fatalf("browse the folder: %v %v", l, err)
+	}
+	if _, err := e.root.Browse(ctx, BrowseArgs{Target: tg.ID, Snapshot: snap, Path: "Locked", Who: who}); err == nil {
+		t.Fatal("a person listed a folder they couldn't open")
+	}
+	if l, err := e.root.Browse(ctx, BrowseArgs{Target: tg.ID, Snapshot: snap, Path: "Locked"}); err != nil || len(l) != 1 {
+		t.Fatalf("an administrator lists it: %v %v", l, err)
+	}
+	// Read only: no restore.
 	x := e.wait(e.root.StartRestore(ctx, RestoreArgs{Target: tg.ID, Snapshot: snap, Mode: ModeCopy, Folder: "x", Paths: []string{"mine.txt"}, Who: who}))
 	if x.Error == "" {
 		t.Fatal("restored into a read-only folder")
@@ -397,6 +427,32 @@ func TestBackupVMAndApp(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(vmDir, "evil.fd")); !errors.Is(err, os.ErrNotExist) {
 		t.Error("a link in the VM's folder was restored")
+	}
+
+	// Disk images must be this run's of this server, one per disk
+	// (decision 238).
+	repo, _ := e.root.repo(tg.ID)
+	forge := func(server string) {
+		t.Helper()
+		_, err := e.root.Restic.Backup(ctx, repo, ResticBackup{Stdin: strings.NewReader("EVIL"), StdinName: DiskName("web", "disk0"),
+			Tags: []string{"task=all", "run=v1", "item=vm:web", "part=disk:disk0", "server=" + server}}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshotCache.drop(tg.ID)
+	}
+	forge(strings.Repeat("cd", 16))
+	x = e.wait(e.root.StartRestore(ctx, RestoreArgs{Target: tg.ID, Snapshot: vmItem.Snapshot, Mode: ModeRollback, Confirm: "Web"}))
+	if x.Error != "" {
+		t.Fatal(x.Error)
+	}
+	if got := read(t, e.vms.disks["web/disk0"]); got != strings.Repeat("D", 70000) {
+		t.Fatal("another server's disk image was written")
+	}
+	forge(e.root.ServerID())
+	x = e.wait(e.root.StartRestore(ctx, RestoreArgs{Target: tg.ID, Snapshot: vmItem.Snapshot, Mode: ModeRollback, Confirm: "Web"}))
+	if !strings.Contains(x.Error, "two images") {
+		t.Fatalf("two images of one disk: %q", x.Error)
 	}
 }
 

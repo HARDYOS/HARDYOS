@@ -692,6 +692,12 @@ func (s *Server) DoIn(ctx context.Context, op string, who Who, in Root, a Args) 
 	return s.run(ctx, who, ident, []*root{r}, Request{Op: op, Path: a.Path, ReadOnly: true})
 }
 
+// IdentityOf is the Linux identity who's files are read and written as
+// (for callers outside this package that check permissions themselves).
+func (s *Server) IdentityOf(ctx context.Context, who Who) (*Identity, error) {
+	return s.identity(ctx, who)
+}
+
 // RulesLevel is the access the folder's rules give who (Level), for
 // callers outside this package; "none" when the folder doesn't exist.
 func (s *Server) RulesLevel(ctx context.Context, who Who, share string) (string, error) {

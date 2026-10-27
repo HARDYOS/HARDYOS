@@ -10,7 +10,6 @@ import (
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
-	"github.com/hardyos/hardyos/daemon/internal/priv"
 )
 
 // setupMu serializes first-admin creation so two browsers can't both win.
@@ -192,13 +191,6 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request, u 
 	if err := s.users.SetPassword(r.Context(), u.ID, req.NewPassword); err != nil {
 		writeUserError(s, w, err)
 		return
-	}
-	// Root keeps its own verifier for administrators (decision 230); it
-	// takes the new password only if the old one matches what it has.
-	if u.Role == auth.RoleAdmin && s.cfg.Priv != nil {
-		if err := s.cfg.Priv.Call(r.Context(), priv.OpAdminPasswordChange, priv.AdminPasswordChangeArgs{Username: u.Username, Old: req.CurrentPassword, New: req.NewPassword}, nil); err != nil {
-			s.log.Info("root didn't take the new administrator password", "user", u.Username, "err", err)
-		}
 	}
 	// Sign out every other session; keep this browser signed in with a fresh one.
 	_ = s.sessions.RevokeUser(r.Context(), u.ID)

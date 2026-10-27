@@ -61,6 +61,7 @@ type Files interface {
 	Do(ctx context.Context, op string, a fileworker.Args) (json.RawMessage, *os.File, error)
 	DoIn(ctx context.Context, op string, who fileworker.Who, in fileworker.Root, a fileworker.Args) (json.RawMessage, *os.File, error)
 	RulesLevel(ctx context.Context, who fileworker.Who, share string) (string, error)
+	IdentityOf(ctx context.Context, who fileworker.Who) (*fileworker.Identity, error)
 }
 
 // Root runs cloud backups inside hardyd-priv.

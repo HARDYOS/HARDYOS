@@ -271,19 +271,33 @@ func (r *Root) Browse(ctx context.Context, a BrowseArgs) ([]Entry, error) {
 	}
 	base := snap.Paths[0]
 	dir := path.Join(append([]string{base}, parts...)...)
-	ck := a.Target + "\x00" + snap.ID + "\x00" + dir
-	if a.Who != nil {
-		ck += "\x00person"
+	if a.Who != nil && !a.Who.Admin {
+		// A person opens only folders they could open in that version: the
+		// item's folder and every folder down to this one must give them
+		// read and search by owner, group or other (decision 237).
+		ident, err := r.Files.IdentityOf(ctx, *a.Who)
+		if err != nil {
+			return nil, err
+		}
+		cur := parentOf(base)
+		for _, name := range append([]string{path.Base(base)}, parts...) {
+			nodes, err := r.lsCached(ctx, repo, a.Target, snap.ID, cur, a.Who)
+			if err != nil {
+				return nil, err
+			}
+			var n *Node
+			for i := range nodes {
+				if nodes[i].Name == name {
+					n = &nodes[i]
+				}
+			}
+			if n == nil || n.Type != "dir" || !canOpenDir(n, ident) {
+				return nil, problemf("you couldn't open that folder in this version")
+			}
+			cur = path.Join(cur, name)
+		}
 	}
-	if e, ok := r.cachedBrowse(ck); ok {
-		return e, nil
-	}
-	done, err := r.startBrowse(ctx, a.Who)
-	if err != nil {
-		return nil, err
-	}
-	nodes, err := r.Restic.Ls(ctx, repo, snap.ID, dir)
-	done()
+	nodes, err := r.lsCached(ctx, repo, a.Target, snap.ID, dir, a.Who)
 	if err != nil {
 		return nil, err
 	}
@@ -301,6 +315,43 @@ func (r *Root) Browse(ctx context.Context, a BrowseArgs) ([]Entry, error) {
 		}
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
-	r.cacheBrowse(ck, out)
 	return out, nil
+}
+
+// lsCached lists a folder of a snapshot, from the cache (restic's listing,
+// the same for everyone; each caller filters it for whoever asked).
+func (r *Root) lsCached(ctx context.Context, repo *Repo, target, snap, dir string, who *fileworker.Who) ([]Node, error) {
+	ck := target + "\x00" + snap + "\x00" + dir
+	if n, ok := r.cachedBrowse(ck); ok {
+		return n, nil
+	}
+	done, err := r.startBrowse(ctx, who)
+	if err != nil {
+		return nil, err
+	}
+	nodes, err := r.Restic.Ls(ctx, repo, snap, dir)
+	done()
+	if err != nil {
+		return nil, err
+	}
+	r.cacheBrowse(ck, nodes)
+	return nodes, nil
+}
+
+// canOpenDir: the folder's mode gives ident read and search (the owner's,
+// group's or others' bits, like the kernel picks them; ACLs aren't in
+// restic's listing, so a folder only an ACL opens stays closed here).
+func canOpenDir(n *Node, ident *fileworker.Identity) bool {
+	bits := n.Mode & 0o7
+	inGroup := n.GID == ident.GID
+	for _, g := range ident.Groups {
+		inGroup = inGroup || g == n.GID
+	}
+	switch {
+	case n.UID == ident.UID:
+		bits = (n.Mode >> 6) & 0o7
+	case inGroup:
+		bits = (n.Mode >> 3) & 0o7
+	}
+	return bits&0o5 == 0o5
 }

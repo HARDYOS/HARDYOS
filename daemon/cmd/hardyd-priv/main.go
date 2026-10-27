@@ -7,7 +7,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"github.com/hardyos/hardyos/daemon/internal/rootauth"
 	"github.com/hardyos/hardyos/daemon/internal/rootfile"
 	"log/slog"
 	"os"
@@ -211,7 +210,7 @@ func main() {
 		// the settings; the destination an installer's "Restore from
 		// backup" left is taken over now (after the settings restore above).
 		cb := &cloudbackup.Root{
-			Restic: &cloudbackup.Restic{Sandbox: &cloudbackup.Sandbox{}}, Vol: &cloudbackup.ZFS{Runner: sysexec.Exec{}}, DBOwner: hardydUID,
+			Restic: &cloudbackup.Restic{Sandbox: cloudbackup.SystemSandbox()}, Vol: &cloudbackup.ZFS{Runner: sysexec.Exec{}}, DBOwner: hardydUID,
 			Shares: shm, Apps: am, VMs: vmm, System: bk, Log: log,
 			Key: func() ([]byte, error) { return priv.RootKeyFor(zfs.KeyDir, "cloud-backup") },
 		}
@@ -219,14 +218,7 @@ func main() {
 			cb.Files = fw
 		}
 		cb.OnStart()
-		// Root checks an administrator's password itself for the recovery
-		// kit (decision 230); the installer's first administrator is taken
-		// at the first start, before hardyd has ever run.
-		ra := &rootauth.Checker{Domain: dc}
-		if err := ra.Seed(install.SeedFile); err != nil {
-			log.Warn("administrator verifiers", "err", err)
-		}
-		priv.RegisterCloudBackup(s, cb, ra)
+		priv.RegisterCloudBackup(s, cb)
 		go vmm.OnStart(ctx)
 		go vmm.Watch(ctx)
 		// Replication between servers: snapshots, zfs send and receive
@@ -262,7 +254,7 @@ func main() {
 		_, _ = sysexec.Exec{}.Run(context.Background(), nil, "agetty", "--reload")
 		// "Restore from backup": list a repository's versions and stage one's
 		// settings into the new system.
-		priv.RegisterInstallCloud(s, &cloudbackup.Root{Restic: &cloudbackup.Restic{Sandbox: &cloudbackup.Sandbox{}}, Log: log}, "/target")
+		priv.RegisterInstallCloud(s, &cloudbackup.Root{Restic: &cloudbackup.Restic{Sandbox: cloudbackup.SystemSandbox()}, Log: log}, "/target")
 		priv.RegisterInstaller(s, &install.Installer{
 			Runner:  sysexec.Exec{},
 			Root:    "/",

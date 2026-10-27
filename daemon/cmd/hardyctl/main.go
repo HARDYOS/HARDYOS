@@ -23,7 +23,6 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/boot"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
-	"github.com/hardyos/hardyos/daemon/internal/rootauth"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 	"github.com/hardyos/hardyos/daemon/internal/syslock"
@@ -169,7 +168,6 @@ func recovery(dbPath string, args []string, fromStdin, createAdmin bool) error {
 			return err
 		}
 		_ = log.Record(ctx, audit.Entry{Actor: actor, Action: "recovery.create_admin", Target: u.Username, Outcome: audit.Success})
-		rootVerifier(u.Username, pw)
 		fmt.Printf("Created administrator %q.\n", u.Username)
 		return nil
 	}
@@ -187,24 +185,8 @@ func recovery(dbPath string, args []string, fromStdin, createAdmin bool) error {
 	}
 	_ = sessions.RevokeUser(ctx, u.ID)
 	_ = log.Record(ctx, audit.Entry{Actor: actor, Action: "recovery.reset_password", Target: u.Username, Outcome: audit.Success})
-	if u.Role == auth.RoleAdmin {
-		rootVerifier(u.Username, pw)
-	}
 	fmt.Printf("Password for %q reset; the account is enabled and its sessions were signed out.\n", u.Username)
 	return nil
-}
-
-// rootVerifier records the administrator's password with root's own
-// verifier too (internal/rootauth, decision 230), which the recovery kit
-// checks. Only root can; others are told.
-func rootVerifier(username, pw string) {
-	if os.Geteuid() != 0 {
-		fmt.Fprintln(os.Stderr, "Not root: the system's own copy for the backup recovery kit wasn't updated.")
-		return
-	}
-	if err := (&rootauth.Checker{}).Set(username, pw); err != nil {
-		fmt.Fprintln(os.Stderr, "The system's own copy for the backup recovery kit wasn't updated:", err)
-	}
 }
 
 func readNewPassword(fromStdin bool) (string, error) {

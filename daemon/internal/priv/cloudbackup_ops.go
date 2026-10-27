@@ -10,7 +10,6 @@ import (
 	"log/slog"
 
 	"github.com/hardyos/hardyos/daemon/internal/cloudbackup"
-	"github.com/hardyos/hardyos/daemon/internal/rootauth"
 )
 
 // Cloud backup operation names (docs/backup.md). restic runs only through
@@ -33,11 +32,8 @@ const (
 	OpCloudOffer        = "cloudbackup.offer"
 	OpCloudOfferDismiss = "cloudbackup.offer.dismiss"
 	// Live installer only.
-	// OpAdminPasswordChange tells root an administrator changed their own
-	// password (root checks the old one against its verifier first).
-	OpAdminPasswordChange = "rootauth.change"
-	OpInstallCloudProbe   = "install.cloud.probe"
-	OpInstallCloudStage   = "install.cloud.stage"
+	OpInstallCloudProbe = "install.cloud.probe"
+	OpInstallCloudStage = "install.cloud.stage"
 )
 
 // CloudTargetRef names a destination.
@@ -46,19 +42,12 @@ type CloudTargetRef struct {
 	Confirm string `json:"confirm,omitempty"`
 }
 
-// CloudKitArgs asks for a destination's recovery kit: root checks the
-// administrator's password itself (internal/rootauth, decision 230).
+// CloudKitArgs asks for a destination's recovery kit. hardyd checked the
+// administrator's password again; User is who it says asked (for the
+// journal only: root can't verify it, decision 235).
 type CloudKitArgs struct {
-	ID       string `json:"id"`
-	Username string `json:"username"`
-	Password string `json:"password"`
-}
-
-// AdminPasswordChangeArgs: an administrator's own password change.
-type AdminPasswordChangeArgs struct {
-	Username string `json:"username"`
-	Old      string `json:"old"`
-	New      string `json:"new"`
+	ID   string `json:"id"`
+	User string `json:"user,omitempty"`
 }
 
 // CloudCheckArgs checks a destination's repository.
@@ -108,12 +97,11 @@ func cloudErr(err error) error {
 	return Errorf(CodeFailed, "%v", err)
 }
 
-// RegisterCloudBackup adds the cloud backup operations. ra checks an
-// administrator's password as root for the recovery kit. Handing out a
-// kit, adding a destination and backing up the settings (keys included)
-// are written to hardyd-priv's own log (the journal), which hardyd can't
+// RegisterCloudBackup adds the cloud backup operations. Handing out a kit,
+// adding a destination and backing up the settings (keys included) are
+// written to hardyd-priv's own log (the journal), which hardyd can't
 // change.
-func RegisterCloudBackup(s *Server, r *cloudbackup.Root, ra *rootauth.Checker) {
+func RegisterCloudBackup(s *Server, r *cloudbackup.Root) {
 	journal := s.Logger
 	if journal == nil {
 		journal = slog.Default()
@@ -136,28 +124,11 @@ func RegisterCloudBackup(s *Server, r *cloudbackup.Root, ra *rootauth.Checker) {
 		return map[string]bool{"removed": true}, cloudErr(r.Remove(a.ID, a.Confirm))
 	}))
 	s.Handle(OpCloudKit, typed(func(ctx context.Context, a CloudKitArgs) (any, error) {
-		if ra == nil {
-			return nil, Errorf(CodeFailed, "the recovery kit isn't available here")
-		}
-		if err := ra.Check(ctx, a.Username, a.Password); err != nil {
-			journal.Warn("AUDIT cloud backup: recovery kit refused", "target", a.ID, "user", a.Username, "reason", err.Error())
-			return nil, Errorf(CodeBadArgs, "%v", err)
-		}
 		k, err := r.Kit(a.ID)
 		if err == nil {
-			journal.Warn("AUDIT cloud backup: recovery kit handed out", "target", a.ID, "user", a.Username)
+			journal.Warn("AUDIT cloud backup: recovery kit handed out", "target", a.ID, "user (as hardyd says)", a.User)
 		}
 		return k, cloudErr(err)
-	}))
-	s.Handle(OpAdminPasswordChange, typed(func(ctx context.Context, a AdminPasswordChangeArgs) (any, error) {
-		if ra == nil {
-			return map[string]bool{"changed": false}, nil
-		}
-		if err := ra.Change(ctx, a.Username, a.Old, a.New); err != nil {
-			return nil, Errorf(CodeBadArgs, "%v", err)
-		}
-		journal.Info("AUDIT administrator verifier changed", "user", a.Username)
-		return map[string]bool{"changed": true}, nil
 	}))
 	s.Handle(OpCloudBackup, typed(func(ctx context.Context, a cloudbackup.BackupArgs) (any, error) {
 		t, err := r.StartBackup(a)

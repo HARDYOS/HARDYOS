@@ -1545,15 +1545,13 @@ B2, with restic doing the storage.
   127.0.0.1 that only reaches the destination's host and port and dials an
   address it resolved and allowed itself (`AddrAllowed`, never this
   server's own). In hardyd-priv restic is sandboxed (`sandbox_linux.go`):
-  its own network namespace with only loopback (the proxy's socket is made
-  in it), a mount namespace read-only except the cache and a restore's
-  staging folder with root's secrets hidden, and only the run's
-  capabilities (decisions 226, 232).
-- **Recovery kit.** `cloudbackup.kit` checks the administrator's password in
-  hardyd-priv (`internal/rootauth`: Kerberos against the local DC and
-  group SIDs for domain accounts, root's own argon2id verifier for local
-  ones); kits, new destinations and settings backups are logged to the
-  journal (decision 230).
+  its own network and PID namespaces, an allowlist root (tmpfs with only
+  the binary, the CA bundle, a minimal /dev, its own /proc and the run's
+  folders), the `hardyos-restic` user with only the run's capabilities,
+  and a seccomp filter allowing only internet sockets (decisions 232, 236).
+- **Recovery kit.** `cloudbackup.kit` is behind hardyd's re-auth, rate limit
+  and audit; hardyd-priv writes kits, new destinations and settings
+  backups to the journal (decision 235).
 - **Backups** run as a hardyd-priv task followed by the hardyd job
   `backup.cloud.run` (polls `cloudbackup.task`, cancels with
   `cloudbackup.cancel`). Per item: a snapshot `@hardyos-cloud-<run>`,

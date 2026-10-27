@@ -285,7 +285,7 @@ func (r *Root) restoreShare(ctx context.Context, tc taskCtx, repo *Repo, snap *S
 	if a.Who != nil {
 		return res, r.restoreAsPerson(ctx, tc, *a.Who, sh, st, rels, a, res)
 	}
-	cs := &copyStats{keepOwner: true}
+	cs := &copyStats{keepOwner: true, mapManaged: true}
 	shareFD, err := openFolder(sh.Path, sh.RootDev)
 	if err != nil {
 		return nil, err
@@ -529,13 +529,13 @@ func addNote(res *RestoreResult, format string, a ...any) {
 // fillFrom copies a staged item folder over a dataset's folder (all of
 // it, removing what the version doesn't have; hidden names at the top
 // are kept unless keepHidden is false).
-func (r *Root) fillFrom(ctx context.Context, st *staged, dir string, dev uint64, keepHidden bool, allowLink func([]string) bool) (*copyStats, error) {
+func (r *Root) fillFrom(ctx context.Context, st *staged, dir string, dev uint64, keepHidden bool, allowLink func([]string) bool, mapManaged bool) (*copyStats, error) {
 	dfd, err := openFolder(dir, dev)
 	if err != nil {
 		return nil, err
 	}
 	defer closeFD(dfd)
-	cs := &copyStats{keepOwner: true, allowLink: allowLink}
+	cs := &copyStats{keepOwner: true, allowLink: allowLink, mapManaged: mapManaged}
 	names, err := readNames(st.fd)
 	if err != nil {
 		return nil, err
@@ -572,7 +572,7 @@ func (r *Root) restoreApp(ctx context.Context, tc taskCtx, repo *Repo, snap *Sna
 		if err != nil {
 			return err
 		}
-		cs, err := r.fillFrom(ctx, st, dir, dev, false, linksOnlyInData)
+		cs, err := r.fillFrom(ctx, st, dir, dev, false, linksOnlyInData, false)
 		if cs != nil {
 			res.Files, res.Folders, res.Bytes, res.Skipped = cs.Files+cs.Links, cs.Dirs, cs.Bytes, cs.Skipped
 			res.Notes = append(res.Notes, cs.Notes...)
@@ -606,8 +606,17 @@ func (r *Root) vmFill(ctx context.Context, tc taskCtx, repo *Repo, snap *Snapsho
 	disks := map[string]string{}
 	f.DiskBytes = map[string]int64{}
 	for _, s := range all {
-		if s.Tag("run") == snap.Tag("run") && s.Tag("item") == it.Key() {
+		// The disks of this very run of this server (decision 238): a disk
+		// snapshot another server, or someone with the key, put in the same
+		// run is never written to this VM, and two for one disk stop it.
+		if s.Tag("run") == snap.Tag("run") && s.Tag("item") == it.Key() && s.Tag("server") == snap.Tag("server") {
 			if d, ok := strings.CutPrefix(s.Tag("part"), "disk:"); ok {
+				if disks[d] != "" {
+					return f, fmt.Errorf("the version has two images of %s", d)
+				}
+				if s.Paths == nil || len(s.Paths) != 1 || s.Paths[0] != "/"+DiskName(it.ID, d) {
+					return f, fmt.Errorf("the version's image of %s isn't one HardyOS made", d)
+				}
 				disks[d] = s.ID
 				if s.Summary != nil {
 					f.DiskBytes[d] = s.Summary.TotalBytes

@@ -172,7 +172,7 @@ func TestS3CredentialsAndEgress(t *testing.T) {
 	srv := httptest.NewTLSServer(fake)
 	defer srv.Close()
 	ca := filepath.Join(e.base, "ca.pem")
-	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600); err != nil {
+	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	port := strings.TrimPrefix(srv.URL, "https://127.0.0.1:")

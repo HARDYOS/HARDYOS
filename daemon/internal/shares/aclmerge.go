@@ -19,18 +19,16 @@ func ManagedUID(uid uint32) bool {
 // inherited from its folder). backup and current are xattr values (nil:
 // none); mode is the restored mode, the base when the backup has no ACL.
 // isDefault: the folder's default ACL (no base from the mode).
-func MergeRestoredACL(backup, current []byte, mode uint32, isDefault bool) ([]byte, error) {
+//
+// An ACL that can't be read counts as none: a backup's never comes back
+// (the mode stands), and HardyOS's entries the destination has are kept.
+func MergeRestoredACL(backup, current []byte, mode uint32, isDefault bool) []byte {
 	var b, c acl
-	var err error
 	if backup != nil {
-		if b, err = decodeACL(backup); err != nil {
-			return nil, err
-		}
+		b, _ = decodeACL(backup)
 	}
 	if current != nil {
-		if c, err = decodeACL(current); err != nil {
-			return nil, err
-		}
+		c, _ = decodeACL(current)
 	}
 	if b == nil {
 		if isDefault {
@@ -76,9 +74,9 @@ func MergeRestoredACL(backup, current []byte, mode uint32, isDefault bool) ([]by
 	}
 	if !out.hasNamed() {
 		if isDefault && backup != nil {
-			return out.encode(), nil
+			return out.encode()
 		}
-		return nil, nil
+		return nil
 	}
-	return out.encode(), nil
+	return out.encode()
 }

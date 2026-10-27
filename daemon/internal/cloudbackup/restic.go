@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -60,6 +62,8 @@ type Restic struct {
 	// KillGrace is how long a cancelled restic gets to remove its lock
 	// before its process group is killed (default 15 s).
 	KillGrace time.Duration
+	// CacheLimit bounds each destination's cache (DefaultCacheLimit).
+	CacheLimit int64
 	// Sandbox, when set, runs restic isolated (sandbox_linux.go); hardyd-priv
 	// always sets it.
 	Sandbox *Sandbox
@@ -97,8 +101,10 @@ type call struct {
 	// upload/download limits apply.
 	limit bool
 	// writable is where restic may write besides its cache (a restore's
-	// staging folder); caps the capabilities it keeps (sandbox only).
+	// staging folder), readable what it reads besides (a backup's folder);
+	// caps the capabilities it keeps (sandbox only).
 	writable []string
+	readable []string
 	caps     []int
 }
 
@@ -136,11 +142,7 @@ func lastLines(s string, n int) string {
 
 // env builds restic's environment: a fixed PATH, its cache, the repository
 // and the credentials. Nothing from hardyd-priv's own environment.
-func (r *Restic) env(repo *Repo, proxy string) []string {
-	cache := r.CacheDir
-	if cache == "" {
-		cache = DefaultCacheDir
-	}
+func (r *Restic) env(repo *Repo, proxy, cache string) []string {
 	env := []string{
 		"PATH=/usr/sbin:/usr/bin:/sbin:/bin",
 		"LC_ALL=C",
@@ -170,7 +172,8 @@ func (r *Restic) env(repo *Repo, proxy string) []string {
 // whole process group (SIGINT, so it removes its lock), then kills it if it
 // hasn't stopped after 15 seconds.
 func (r *Restic) run(ctx context.Context, repo *Repo, c call) ([]byte, error) {
-	if err := os.MkdirAll(r.cacheDir(), 0o700); err != nil {
+	cache, err := r.prepareCache(repo)
+	if err != nil {
 		return nil, err
 	}
 	global := []string{"--retry-lock", "2m"}
@@ -203,16 +206,31 @@ func (r *Restic) run(ctx context.Context, repo *Repo, c call) ([]byte, error) {
 	defer pr.Close()
 	var cmd *exec.Cmd
 	if r.Sandbox != nil {
-		rw := append([]string{r.cacheDir()}, c.writable...)
+		// restic opens the key as /dev/fd/3, which checks the pipe's owner.
+		if err := pr.Chown(r.Sandbox.UID, r.Sandbox.GID); err != nil {
+			pw.Close()
+			return nil, err
+		}
+		rw := append([]string{cache}, c.writable...)
+		ro := append([]string{}, c.readable...)
+		if r.CACert != "" {
+			ro = append(ro, r.CACert)
+		}
 		if repo.Target.Kind == KindLocal {
 			// A folder repository (tests and development only).
 			if err := os.MkdirAll(repo.Target.Path, 0o700); err != nil {
 				pw.Close()
 				return nil, err
 			}
+			if err := chownTree(repo.Target.Path, r.Sandbox.UID, r.Sandbox.GID); err != nil {
+				pw.Close()
+				return nil, err
+			}
 			rw = append(rw, repo.Target.Path)
+		} else {
+			ro = append(ro, CABundle)
 		}
-		cmd, err = r.Sandbox.command(r.binary(), append(global, c.args...), rw, c.caps)
+		cmd, err = r.Sandbox.command(r.binary(), append(global, c.args...), ro, rw, c.caps)
 		if err != nil {
 			pw.Close()
 			return nil, err
@@ -221,7 +239,7 @@ func (r *Restic) run(ctx context.Context, repo *Repo, c call) ([]byte, error) {
 		cmd = exec.Command(r.binary(), append(global, c.args...)...)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	}
-	cmd.Dir = r.cacheDir()
+	cmd.Dir = cache
 	cmd.ExtraFiles = []*os.File{pr} // fd 3: the repository key
 	cmd.Stdin = c.stdin
 	var out bytes.Buffer
@@ -256,7 +274,7 @@ func (r *Restic) run(ctx context.Context, repo *Repo, c call) ([]byte, error) {
 			eg = p
 			proxy = p.URL()
 		}
-		cmd.Env = r.env(repo, proxy)
+		cmd.Env = r.env(repo, proxy, cache)
 		return cmd.Start()
 	}
 	if r.Sandbox != nil {
@@ -323,6 +341,78 @@ func (r *Restic) run(ctx context.Context, repo *Repo, c call) ([]byte, error) {
 		return out.Bytes(), werr
 	}
 	return out.Bytes(), nil
+}
+
+// DefaultCacheLimit bounds a destination's cache (it's emptied above it;
+// restic rebuilds what it needs from the repository).
+const DefaultCacheLimit int64 = 8 << 30
+
+// prepareCache makes the destination's own cache folder (the only place
+// restic writes besides a restore's staging), owned by the sandbox's user,
+// and empties it when it has grown past the limit.
+func (r *Restic) prepareCache(repo *Repo) (string, error) {
+	if err := os.MkdirAll(r.cacheDir(), 0o700); err != nil {
+		return "", err
+	}
+	if !idRE.MatchString(repo.Target.ID) {
+		return "", fmt.Errorf("bad destination id %q", repo.Target.ID)
+	}
+	dir := filepath.Join(r.cacheDir(), repo.Target.ID)
+	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return "", err
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil || !fi.IsDir() {
+		return "", fmt.Errorf("restic's cache %s isn't a folder", dir)
+	}
+	limit := r.CacheLimit
+	if limit <= 0 {
+		limit = DefaultCacheLimit
+	}
+	if treeSize(dir) > limit {
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			_ = os.RemoveAll(filepath.Join(dir, e.Name()))
+		}
+	}
+	if r.Sandbox != nil {
+		if err := chownTree(dir, r.Sandbox.UID, r.Sandbox.GID); err != nil {
+			return "", err
+		}
+	}
+	return dir, nil
+}
+
+// treeSize adds up the sizes below dir (never following a link).
+func treeSize(dir string) int64 {
+	var n int64
+	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err == nil && d.Type().IsRegular() {
+			if fi, err := d.Info(); err == nil {
+				n += fi.Size()
+			}
+		}
+		return nil
+	})
+	return n
+}
+
+// chownTree gives dir and everything below it to uid:gid when the top
+// isn't theirs yet (never following a link).
+func chownTree(dir string, uid, gid int) error {
+	var st syscall.Stat_t
+	if err := syscall.Lstat(dir, &st); err != nil {
+		return err
+	}
+	if int(st.Uid) == uid && int(st.Gid) == gid {
+		return nil
+	}
+	return filepath.WalkDir(dir, func(p string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Lchown(p, uid, gid)
+	})
 }
 
 func (r *Restic) cacheDir() string {
@@ -434,11 +524,11 @@ func (r *Restic) Backup(ctx context.Context, repo *Repo, a ResticBackup, progres
 	}
 	var sum *Summary
 	var lerr error
-	caps := capsRead
+	caps, readable := capsRead, []string{a.Path}
 	if a.Stdin != nil {
-		caps = capsNone
+		caps, readable = capsNone, nil
 	}
-	_, err := r.run(ctx, repo, call{args: args, stdin: a.Stdin, limit: true, caps: caps, lines: func(l []byte) {
+	_, err := r.run(ctx, repo, call{args: args, stdin: a.Stdin, limit: true, caps: caps, readable: readable, lines: func(l []byte) {
 		var m struct {
 			Type       string  `json:"message_type"`
 			Percent    float64 `json:"percent_done"`

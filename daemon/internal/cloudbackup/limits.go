@@ -47,8 +47,8 @@ type limits struct {
 }
 
 type browseCached struct {
-	at      time.Time
-	entries []Entry
+	at    time.Time
+	nodes []Node
 }
 
 func (l *limits) init() {
@@ -95,7 +95,7 @@ func (r *Root) startBrowse(ctx context.Context, who *fileworker.Who) (func(), er
 	}
 }
 
-func (r *Root) cachedBrowse(key string) ([]Entry, bool) {
+func (r *Root) cachedBrowse(key string) ([]Node, bool) {
 	l := &r.lim
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -104,10 +104,10 @@ func (r *Root) cachedBrowse(key string) ([]Entry, bool) {
 	if !ok || time.Since(c.at) > browseCacheLifetime {
 		return nil, false
 	}
-	return c.entries, true
+	return c.nodes, true
 }
 
-func (r *Root) cacheBrowse(key string, e []Entry) {
+func (r *Root) cacheBrowse(key string, e []Node) {
 	l := &r.lim
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -119,7 +119,7 @@ func (r *Root) cacheBrowse(key string, e []Entry) {
 			}
 		}
 	}
-	l.cache[key] = browseCached{at: time.Now(), entries: e}
+	l.cache[key] = browseCached{at: time.Now(), nodes: e}
 }
 
 // startPersonRestore lets a person have one restore running, and people

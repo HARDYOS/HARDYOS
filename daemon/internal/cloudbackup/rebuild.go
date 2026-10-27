@@ -337,7 +337,7 @@ func (r *Root) rebuildShare(ctx context.Context, tc taskCtx, repo *Repo, snap *S
 		return err
 	}
 	defer r.unstage(st)
-	_, err = r.fillFrom(ctx, st, sh.Path, sh.RootDev, true, nil)
+	_, err = r.fillFrom(ctx, st, sh.Path, sh.RootDev, true, nil, true)
 	return err
 }
 
@@ -355,7 +355,7 @@ func (r *Root) rebuildApp(ctx context.Context, tc taskCtx, repo *Repo, snap *Sna
 		if err != nil {
 			return err
 		}
-		_, err = r.fillFrom(ctx, st, dir, dev, false, linksOnlyInData)
+		_, err = r.fillFrom(ctx, st, dir, dev, false, linksOnlyInData, false)
 		return err
 	})
 }

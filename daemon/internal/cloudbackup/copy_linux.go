@@ -75,6 +75,10 @@ type copyStats struct {
 	// keepOwner: restore owners and permissions as in the backup (root
 	// restores). Otherwise new entries keep root's defaults (not used).
 	keepOwner bool
+	// mapManaged: owners that are HardyOS's own identities (apps' users,
+	// NFS identities, hardyos-files) become root (shared folders, decision
+	// 238); an app's own data keeps its user (remapped by the app engine).
+	mapManaged bool
 	// allowLink says whether a link in the backup may be made again at
 	// path (components below the folder restored into); nil allows every
 	// link. Apps' and VMs' own files are read by root, so links there are
@@ -100,8 +104,15 @@ func (s *copyStats) note(format string, a ...any) {
 // aclXattrs are copied with ownership.
 var aclXattrs = []string{"system.posix_acl_access", "system.posix_acl_default"}
 
-func copyMeta(src, dst int, st *unix.Stat_t, isDir bool) error {
-	if err := unix.Fchown(dst, int(st.Uid), int(st.Gid)); err != nil && !errors.Is(err, unix.EPERM) {
+func copyMeta(src, dst int, st *unix.Stat_t, isDir, mapManaged bool) error {
+	uid, gid := int(st.Uid), int(st.Gid)
+	if mapManaged && shares.ManagedUID(st.Uid) {
+		uid = 0
+	}
+	if mapManaged && shares.ManagedUID(st.Gid) {
+		gid = 0
+	}
+	if err := unix.Fchown(dst, uid, gid); err != nil && !errors.Is(err, unix.EPERM) {
 		return err
 	}
 	mode := st.Mode & 0o7777
@@ -120,10 +131,7 @@ func copyMeta(src, dst int, st *unix.Stat_t, isDir bool) error {
 		if isDefault && !isDir {
 			continue
 		}
-		merged, err := shares.MergeRestoredACL(getXattr(src, x), getXattr(dst, x), mode, isDefault)
-		if err != nil {
-			merged = nil // an ACL that can't be read doesn't come back
-		}
+		merged := shares.MergeRestoredACL(getXattr(src, x), getXattr(dst, x), mode, isDefault)
 		if merged == nil {
 			_ = unix.Fremovexattr(dst, x)
 			continue
@@ -181,7 +189,7 @@ func copyFile(srcDir int, name string, dstDir int, dstName string, replace bool,
 	if err != nil {
 		return fail(err)
 	}
-	if err := copyMeta(sfd, dfd, st, false); err != nil {
+	if err := copyMeta(sfd, dfd, st, false, s.mapManaged); err != nil {
 		return fail(err)
 	}
 	if err := dst.Close(); err != nil {
@@ -285,7 +293,7 @@ func copyDir(ctx context.Context, srcDir int, name string, dstDir int, dstName s
 		}
 	}
 	s.Dirs++
-	return copyMeta(sfd, dfd, st, true)
+	return copyMeta(sfd, dfd, st, true, s.mapManaged)
 }
 
 func readNames(dirfd int) ([]string, error) {
