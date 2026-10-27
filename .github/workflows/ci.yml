@@ -170,6 +170,48 @@ jobs:
           sudo docker ps -a --filter label=org.hardyos.app
           for c in $(sudo docker ps -aq --filter label=org.hardyos.app); do sudo docker logs --tail 80 "$c" 2>&1; done
 
+  office:
+    name: Office (OnlyOffice Document Server)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache: false
+      - name: start the Document Server pinned in the catalog
+        run: |
+          image=$(sed -n 's/^ *image: *//p' apps/catalog/onlyoffice/compose.yaml)
+          echo "image: $image"
+          secret=$(openssl rand -hex 32)
+          echo "OFFICE_JWT_SECRET=$secret" >> "$GITHUB_ENV"
+          docker run -d --name ds -p 127.0.0.1:18080:80 \
+            -e JWT_ENABLED=true -e JWT_SECRET="$secret" -e JWT_HEADER=Authorization -e JWT_IN_BODY=false \
+            -e PLUGINS_ENABLED=false -e WOPI_ENABLED=false -e ALLOW_PRIVATE_IP_ADDRESS=false -e ALLOW_META_IP_ADDRESS=false \
+            --add-host host.docker.internal:host-gateway --security-opt no-new-privileges:true "$image"
+          gw=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')
+          echo "OFFICE_LISTEN=$gw:44251" >> "$GITHUB_ENV"
+      - name: build test binary
+        working-directory: daemon
+        run: go test -c -o "$RUNNER_TEMP/office.test" ./internal/office
+      - name: open, download (one-time), convert and save back through a signed callback with the real Document Server
+        env:
+          HARDYOS_OFFICE_INTEGRATION: "1"
+          OFFICE_DS_URL: http://127.0.0.1:18080
+          OFFICE_CALLBACK_BASE: http://host.docker.internal:44251
+        run: |
+          for i in $(seq 1 100); do
+            [ "$(curl -fsS http://127.0.0.1:18080/healthcheck 2>/dev/null)" = "true" ] && break
+            sleep 3
+          done
+          "$RUNNER_TEMP/office.test" -test.run TestDocumentServerIntegration -test.v -test.timeout 15m
+      - name: Document Server logs
+        if: failure()
+        run: |
+          docker ps -a
+          docker logs --tail 120 ds 2>&1 || true
+          docker exec ds sh -c 'tail -60 /var/log/onlyoffice/documentserver/docservice/out.log' || true
+
   vms:
     name: Virtual machines (KVM)
     runs-on: ubuntu-24.04
