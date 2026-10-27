@@ -195,7 +195,7 @@ func recovery(dbPath string, args []string, fromStdin, createAdmin bool) error {
 }
 
 // rootVerifier records the administrator's password with root's own
-// verifier too (internal/rootauth, decision 180), which the recovery kit
+// verifier too (internal/rootauth, decision 230), which the recovery kit
 // checks. Only root can; others are told.
 func rootVerifier(username, pw string) {
 	if os.Geteuid() != 0 {

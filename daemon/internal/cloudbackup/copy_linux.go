@@ -114,7 +114,7 @@ func copyMeta(src, dst int, st *unix.Stat_t, isDir bool) error {
 		return err
 	}
 	// ACLs: people's entries as in the backup, HardyOS's own (apps, NFS,
-	// hardyos-files) as the destination has them now (decision 178).
+	// hardyos-files) as the destination has them now (decision 228).
 	for _, x := range aclXattrs {
 		isDefault := x == "system.posix_acl_default"
 		if isDefault && !isDir {

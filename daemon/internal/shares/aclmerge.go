@@ -4,7 +4,7 @@ package shares
 // backup holds two kinds of entries: people's and groups' (part of the
 // files, restored as they were) and HardyOS's own (hardyos-files, apps'
 // users, folders' NFS identities), which say who HardyOS lets in today and
-// must never come back from an old version (decision 178): an app removed
+// must never come back from an old version (decision 228): an app removed
 // since, or an NFS export turned off, would get its access back.
 
 // ManagedUID reports whether uid's ACL entries on shared folders are

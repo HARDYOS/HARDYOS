@@ -10,7 +10,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/rootauth"
 )
 
-// The recovery kit needs a password root checks itself (decision 180):
+// The recovery kit needs a password root checks itself (decision 230):
 // hardyd asking isn't enough.
 func TestCloudKitNeedsRootCheckedPassword(t *testing.T) {
 	dir := t.TempDir()

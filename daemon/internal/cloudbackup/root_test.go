@@ -206,7 +206,7 @@ func TestPersonRestore(t *testing.T) {
 	if x.Error == "" {
 		t.Fatal("restored into a read-only folder")
 	}
-	// People choose what to restore (decision 181).
+	// People choose what to restore (decision 231).
 	if _, err := e.root.StartRestore(ctx, RestoreArgs{Target: tg.ID, Snapshot: snap, Mode: ModeCopy, Folder: "x", Who: who}); err == nil {
 		t.Fatal("a person restored a whole folder")
 	}
@@ -239,7 +239,7 @@ func TestPersonRestore(t *testing.T) {
 		t.Fatalf("not through the person's file operations: %s", ops)
 	}
 
-	// Their access today counts too (decision 177): nothing goes over a
+	// Their access today counts too (decision 227): nothing goes over a
 	// file they can't read now, or into a folder they can't open now.
 	write(t, filepath.Join(share, "mine.txt"), "mine now")
 	if err := os.Chmod(filepath.Join(share, "mine.txt"), 0o600); err != nil {
@@ -264,7 +264,7 @@ func TestPersonRestore(t *testing.T) {
 		t.Fatal("restored into a folder the person can't open now")
 	}
 
-	// Versions carry the server's id (decision 179): another server sharing
+	// Versions carry the server's id (decision 229): another server sharing
 	// the bucket sees them labelled, and its people can't open them.
 	me := e.root.ServerID()
 	if versions[0].Server != me || !versions[0].ThisServer {
@@ -316,7 +316,7 @@ func TestBackupVMAndApp(t *testing.T) {
 	write(t, filepath.Join(appDir, "data", "db.sqlite"), "app data v1")
 	write(t, filepath.Join(appDir, ".hardyos", "app.env"), "SECRET=1")
 	// Links root would follow when it reads an app's or VM's own files
-	// (decision 173): only links under an app's data/ come back.
+	// (decision 223): only links under an app's data/ come back.
 	for _, l := range [][2]string{
 		{"/etc/shadow", filepath.Join(appDir, ".hardyos", "icon.png")},
 		{"/etc/hostname", filepath.Join(appDir, "data", "host")},

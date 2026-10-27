@@ -193,7 +193,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request, u 
 		writeUserError(s, w, err)
 		return
 	}
-	// Root keeps its own verifier for administrators (decision 180); it
+	// Root keeps its own verifier for administrators (decision 230); it
 	// takes the new password only if the old one matches what it has.
 	if u.Role == auth.RoleAdmin && s.cfg.Priv != nil {
 		if err := s.cfg.Priv.Call(r.Context(), priv.OpAdminPasswordChange, priv.AdminPasswordChangeArgs{Username: u.Username, Old: req.CurrentPassword, New: req.NewPassword}, nil); err != nil {

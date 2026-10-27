@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// Findings from the security review (decision 183).
+// Findings from the security review (decision 233).
 func TestReviewSmallFixes(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()

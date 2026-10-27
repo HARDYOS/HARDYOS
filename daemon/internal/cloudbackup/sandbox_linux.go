@@ -14,7 +14,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// The restic sandbox (decisions 176 and 182). restic parses data from a
+// The restic sandbox (decisions 226 and 232). restic parses data from a
 // bucket someone else can write to and runs as root, so the kernel holds it
 // to what each run needs:
 //

@@ -8,7 +8,7 @@ import (
 )
 
 // A VM's folder can come back from a backup: a link as its NVRAM or seed
-// must never be handed to libvirt (decision 173).
+// must never be handed to libvirt (decision 223).
 func TestCheckStateFilesRefusesLinks(t *testing.T) {
 	root := t.TempDir()
 	m := &Manager{Root: root}

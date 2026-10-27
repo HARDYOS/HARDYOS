@@ -88,7 +88,7 @@ function routes(extra: Record<string, Handler> = {}, tasks: unknown[] = [task]):
 describe("Backup app", () => {
   it("has tabs other parts can add to", () => {
     expect(BUILTIN_TABS.map((t) => t.id)).toEqual(["tasks", "restore", "destinations", "history"]);
-    expect(Array.isArray(EXTRA_TABS)).toBe(true);
+    expect(EXTRA_TABS.map((t) => t.id)).toEqual(["replication"]);
   });
 
   it("lists tasks with their last run and switches tabs", async () => {

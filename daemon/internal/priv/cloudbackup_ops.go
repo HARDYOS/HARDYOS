@@ -47,7 +47,7 @@ type CloudTargetRef struct {
 }
 
 // CloudKitArgs asks for a destination's recovery kit: root checks the
-// administrator's password itself (internal/rootauth, decision 180).
+// administrator's password itself (internal/rootauth, decision 230).
 type CloudKitArgs struct {
 	ID       string `json:"id"`
 	Username string `json:"username"`

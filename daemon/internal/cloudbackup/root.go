@@ -214,7 +214,7 @@ func (r *Root) Save(ctx context.Context, a SaveArgs) (*SaveResult, error) {
 		}
 		creds = old.Creds
 		t.CreatedAt = old.Target.CreatedAt
-		// The saved keys never go to another host (decision 183).
+		// The saved keys never go to another host (decision 233).
 		if endpointHost(&old.Target) != endpointHost(&t) && (a.AccessKey == "" || a.SecretKey == "") {
 			return nil, problemf("the destination's address changed: enter its access keys again")
 		}

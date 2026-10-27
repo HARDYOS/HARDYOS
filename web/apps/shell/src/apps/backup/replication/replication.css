@@ -1,0 +1,79 @@
+/* Replication between servers (phase 6 part B). */
+.repl {
+  gap: 16px;
+}
+.repl-task {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--hos-radius);
+  background: var(--hos-surface);
+  border: 1px solid var(--hos-surface-border);
+}
+.repl-items {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 10px 12px;
+  max-height: 240px;
+  overflow: auto;
+  border-radius: var(--hos-radius-sm);
+  border: 1px solid var(--hos-surface-border);
+  background: var(--hos-surface);
+}
+.repl-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.repl-check > span:first-of-type {
+  flex: 1;
+}
+.repl-browse {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--hos-radius-sm);
+  border: 1px solid var(--hos-surface-border);
+  background: var(--hos-surface);
+}
+.repl-files {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 200px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.repl-files li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.repl-files .link-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.repl-code {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: var(--hos-radius);
+  border: 1px solid var(--hos-accent);
+  background: var(--hos-accent-soft);
+}
+.repl-code__value {
+  font-size: 20px;
+  letter-spacing: 0.06em;
+  color: var(--hos-accent-text);
+  user-select: all;
+}

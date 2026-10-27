@@ -161,7 +161,7 @@ func (f *RestoreFill) note(format string, args ...any) {
 // the disks the version has are resized to it and overwritten. Disks the
 // VM has now and the version doesn't are never destroyed: they stay
 // attached, after the version's, so the safety snapshot keeps every
-// dataset it was taken of (decision 175).
+// dataset it was taken of (decision 225).
 func (m *Manager) RestoreFromBackup(ctx context.Context, id, confirm string, f RestoreFill) (*VM, error) {
 	spec := f.Spec
 	spec.Normalize()

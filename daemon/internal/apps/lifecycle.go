@@ -37,7 +37,7 @@ var (
 // (installed before HardyOS kept it) rebuilt from its parts, with no bytes,
 // so it counts as untrusted.
 func installedPackage(ia *installedApp) (*Package, error) {
-	if raw, err := readMeta(ia.meta(packageFile)); err == nil {
+	if raw, err := readStateFile(ia.meta(packageFile)); err == nil {
 		pkg, err := ReadPackage(raw)
 		if err != nil {
 			return nil, fmt.Errorf("the installed package of %s: %w", ia.state.ID, err)
@@ -53,13 +53,13 @@ func installedPackage(ia *installedApp) (*Package, error) {
 	if err := mf.Validate(); err != nil {
 		return nil, err
 	}
-	compose, err := readMeta(ia.meta(ComposeFile))
+	compose, err := readStateFile(ia.meta(ComposeFile))
 	if err != nil {
 		return nil, err
 	}
 	pkg := &Package{Manifest: mf, Compose: compose}
 	if mf.Icon != "" {
-		pkg.Icon, _ = readMeta(ia.meta("icon" + filepath.Ext(mf.Icon)))
+		pkg.Icon, _ = readStateFile(ia.meta("icon" + filepath.Ext(mf.Icon)))
 	}
 	return pkg, nil
 }
@@ -103,7 +103,7 @@ func (m *Manager) Config(ctx context.Context, id string) (*AppConfig, error) {
 		return nil, err
 	}
 	env := map[string]string{}
-	if b, err := readMeta(ia.meta(envFile)); err == nil {
+	if b, err := readStateFile(ia.meta(envFile)); err == nil {
 		env = parseEnv(b)
 	}
 	cfg := &AppConfig{
@@ -379,7 +379,7 @@ func problemWords(err error) string {
 // restoreImages points moving tags back at the images the snapshot ran,
 // where those are still on the server.
 func (m *Manager) restoreImages(ctx context.Context, ia *installedApp) {
-	b, err := readMeta(ia.meta(imagesFile))
+	b, err := readStateFile(ia.meta(imagesFile))
 	if err != nil {
 		return
 	}
@@ -412,7 +412,7 @@ func (m *Manager) restoreImages(ctx context.Context, ia *installedApp) {
 
 // readResolvedFile reads a resolved compose file from disk.
 func readResolvedFile(path string) (Resolved, error) {
-	b, err := readMeta(path)
+	b, err := readStateFile(path)
 	if err != nil {
 		return nil, err
 	}

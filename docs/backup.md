@@ -167,7 +167,8 @@ warning or critical).
 | `cloudbackup.targets` | list destinations (nothing secret) |
 | `cloudbackup.target.save` | test the bucket, create or open the repository, keep the destination sealed |
 | `cloudbackup.target.remove` | forget a destination (name to confirm); the bucket is untouched |
-| `cloudbackup.kit` | the recovery kit (hardyd calls it only after re-checking the password) |
+| `cloudbackup.kit` | the recovery kit: hardyd-priv checks the administrator's password itself (`internal/rootauth`) |
+| `rootauth.change` | an administrator's own password change, taken by root's verifier only with the old password |
 | `cloudbackup.backup` / `.restore` / `.prune` / `.check` / `.rebuild` | start a task |
 | `cloudbackup.task` / `.cancel` | follow or stop a task |
 | `cloudbackup.versions` / `.browse` | versions of a destination, a folder of a version |
@@ -178,12 +179,35 @@ warning or critical).
 
 - Host name `hardyos` for every snapshot.
 - Tags: `hardyos`, `task=<task id>`, `run=<run id>`, `item=share:<id>` /
-  `app:<id>` / `vm:<id>` / `system` / `manifest`, and `part=files` or
-  `part=disk:<name>` for VMs.
+  `app:<id>` / `vm:<id>` / `system` / `manifest`, `server=<install id>`,
+  and `part=files` or `part=disk:<name>` for VMs.
 - Paths: `/run/hardyos-backup/mnt/<kind>/<id>` for folders, and the stdin
   names `vm-<vm>-<disk>.raw`, `hardyos-settings.hbak`, `hardyos-run.json`.
 - The settings archive is the `.hbak` format of settings backups, sealed
   with the repository key.
+
+### How restic is contained
+
+- **Network**: each run gets its own network namespace with only loopback.
+  The egress proxy's socket is made inside it (by a thread that entered it
+  and then starts restic); the proxy dials out from the host. The proxy
+  allows only the destination's host (and, for S3, exactly
+  `<bucket>.<endpoint host>`), resolves names itself and refuses loopback,
+  link-local, private (unless "on my network"), translation and
+  documentation ranges and this server's own addresses.
+- **Files**: hardyd-priv re-executes itself (`__hardyos-restic-sandbox`) in
+  a new mount namespace, makes every mount read-only except restic's cache
+  and a restore's staging folder, hides `/var/lib/hardyos`, `/etc/hardyos`,
+  `/etc/ssh`, `/root` and Samba's private folder under empty tmpfs mounts,
+  keeps only the run's capabilities (`DAC_READ_SEARCH` for a backup of
+  folders; `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `FSETID`, `MKNOD` for a
+  restore; none otherwise), sets no_new_privs and executes restic.
+- **Restores** unpack into a staging dataset with a quota (the version's
+  size plus headroom; refused when the pool hasn't that much free) and are
+  copied from there by descriptor. Links never come back into an app's own
+  files or a VM's folder, ACL entries of hardyos-files, apps and NFS
+  identities are taken from the destination as it is now, and people's
+  restores check their access today.
 
 ### Testing
 
@@ -195,19 +219,22 @@ warning or critical).
   `setpriv --reuid=65534 --regid=65534 --clear-groups env -C daemon/internal/cloudbackup TMPDIR=/dev/shm/<dir> <test binary>`.
 - `HARDYOS_ZFS_INTEGRATION=1` (root, a throwaway machine) runs
   `TestZFSIntegrationCloudBackup` on a file-backed pool (CI's ZFS job).
+- As root, the tests run restic in the sandbox (the test binary is the
+  helper) and `TestSandbox` checks what a sandboxed process can reach;
+  without root restic runs directly.
 
-### Joining the notification service
+### Notifications
 
-`cmd/hardyd` sets `cloudbackups.Service.Notifier` to `NopNotifier{}`. When
-`internal/notify` gains its event delivery, replace it with an adapter that
-copies the event's fields into `notify.Event` (they are the same: Kind,
-Severity, Title, Body, Link, Time).
+`cmd/hardyd` hands `cloudbackups` events to the alert dispatcher
+(`notify.Event` has the same fields). Kinds start with `backup.` (the
+routing category); links are `backup/tasks/<id>` and `backup/targets/<id>`
+(the desktop opens the Backup app on that tab).
 
 ### Adding a tab
 
 Add an entry to `EXTRA_TABS` in `web/apps/shell/src/apps/backup/tabs.ts`
-(replication: `./replication/ReplicationTab`). A tab gets `go(tab, args)` and
-`args`.
+(replication's sending side is one; its receiving side stays in Control
+Panel › Replication). A tab gets `go(tab, args)` and `args`.
 
 ### Not yet
 
@@ -217,3 +244,14 @@ Add an entry to `EXTRA_TABS` in `web/apps/shell/src/apps/backup/tabs.ts`
 - VM disks are read whole at every backup (zvol streams; restic deduplicates
   but still reads every block).
 - Hard links come back as separate files.
+- A compromised hardyd can't get a repository key, but it can still add a
+  destination of its own and back everything up to it, the settings item
+  included (which holds the master key, pool keys, TLS and SSH host
+  keys). hardyd-priv writes every new destination and every settings
+  backup to the journal ("AUDIT cloud backup: ..."), which hardyd can't
+  change; watch for unexpected ones.
+- Local administrators made in the web interface aren't known to root's
+  verifier until `hardyctl reset-password` sets their password (root can't
+  tell a real administrator from one a compromised hardyd made); until then
+  they download the recovery kit through the first administrator or a
+  domain administrator.

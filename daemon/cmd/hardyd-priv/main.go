@@ -31,6 +31,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/network"
 	"github.com/hardyos/hardyos/daemon/internal/nfs"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
+	"github.com/hardyos/hardyos/daemon/internal/replica"
 	"github.com/hardyos/hardyos/daemon/internal/sftp"
 	"github.com/hardyos/hardyos/daemon/internal/shares"
 	"github.com/hardyos/hardyos/daemon/internal/smb"
@@ -219,7 +220,7 @@ func main() {
 		}
 		cb.OnStart()
 		// Root checks an administrator's password itself for the recovery
-		// kit (decision 180); the installer's first administrator is taken
+		// kit (decision 230); the installer's first administrator is taken
 		// at the first start, before hardyd has ever run.
 		ra := &rootauth.Checker{Domain: dc}
 		if err := ra.Seed(install.SeedFile); err != nil {
@@ -228,6 +229,11 @@ func main() {
 		priv.RegisterCloudBackup(s, cb, ra)
 		go vmm.OnStart(ctx)
 		go vmm.Watch(ctx)
+		// Replication between servers: snapshots, zfs send and receive
+		// (into <pool>/replicas/<source>/ only), restores. VMs are frozen
+		// by their guest agent for the snapshot when they can be.
+		replItems := &priv.ReplicationItems{Shares: shm, Apps: am, VMs: vmm}
+		priv.RegisterReplication(s, &replica.Manager{Runner: sysexec.Exec{}, Items: replItems, Restore: replItems, Freeze: vmm.Frozen, Log: log})
 		priv.RegisterBootRepair(s, priv.StorageEnv{Runner: sysexec.Exec{}, Root: os.DirFS("/")}, "/", boot.ConfigPath)
 		// Monitoring: SMART self-tests and the UPS (NUT's configuration in
 		// /etc/nut and its services). The monitor's polling is logged quietly.

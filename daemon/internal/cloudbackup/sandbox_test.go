@@ -94,7 +94,7 @@ func testSandbox(t *testing.T) *Sandbox {
 
 // TestSandbox runs the probe as restic in the sandbox: writes only where
 // allowed, root's secrets hidden, only the egress proxy reachable, only the
-// run's capabilities (decisions 176 and 182). Root only.
+// run's capabilities (decisions 226 and 232). Root only.
 func TestSandbox(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("the sandbox needs root")

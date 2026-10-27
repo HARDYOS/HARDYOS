@@ -756,7 +756,7 @@ func (s *Service) runJob(jc *jobs.Context) (any, error) {
 }
 
 func (s *Service) notifyRun(ctx context.Context, t *Task, r *Run, err error) {
-	e := Event{Time: s.now().UTC(), Link: "backup://tasks/" + t.ID}
+	e := Event{Time: s.now().UTC(), Link: "backup/tasks/" + t.ID}
 	if err == nil {
 		e.Kind, e.Severity, e.Title = EventBackupSucceeded, SeverityInfo, "Backup finished: "+t.Name
 		e.Body = fmt.Sprintf("%d files, %s new data sent.", r.Files, humanBytes(r.Added))
@@ -867,7 +867,7 @@ func (s *Service) upkeepJob(jc *jobs.Context, kind string) (any, error) {
 func (s *Service) notifyCheck(ctx context.Context, target string, err error) {
 	s.notifier().Notify(context.WithoutCancel(ctx), Event{Kind: EventCheckFailed, Severity: SeverityCritical,
 		Title: "Backup check failed", Body: fmt.Sprintf("The backups at %s didn't pass their check: %v", target, err),
-		Link: "backup://targets/" + target, Time: s.now().UTC()})
+		Link: "backup/targets/" + target, Time: s.now().UTC()})
 }
 
 func (s *Service) rebuildJob(jc *jobs.Context) (any, error) {
@@ -998,7 +998,7 @@ func (s *Service) missed(ctx context.Context, t *Task, slot time.Time, why strin
 		s.finishRun(r, RunMissed, map[string]string{"slot": slot.UTC().Format(time.RFC3339)}, errors.New(why))
 	}
 	s.notifier().Notify(ctx, Event{Kind: EventBackupMissed, Severity: SeverityWarning, Title: "Backup missed: " + t.Name,
-		Body: fmt.Sprintf("The backup due %s didn't run: %s.", slot.Format("Jan 2 15:04"), why), Link: "backup://tasks/" + t.ID, Time: s.now().UTC()})
+		Body: fmt.Sprintf("The backup due %s didn't run: %s.", slot.Format("Jan 2 15:04"), why), Link: "backup/tasks/" + t.ID, Time: s.now().UTC()})
 }
 
 func (s *Service) tickMaintenance(ctx context.Context, now time.Time) {

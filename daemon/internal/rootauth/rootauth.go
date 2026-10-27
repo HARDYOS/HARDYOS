@@ -1,5 +1,5 @@
 // Package rootauth checks an administrator's password inside hardyd-priv,
-// without trusting hardyd (decision 180). hardyd checks passwords against
+// without trusting hardyd (decision 230). hardyd checks passwords against
 // its own database, which a compromised hardyd can change; the few root
 // operations that hand out something no backup or restore needs (the cloud
 // backup recovery kit: the repository key) ask root to check the password

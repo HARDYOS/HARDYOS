@@ -4189,6 +4189,329 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/replication": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** This server's replication identity, the servers it sends to and its tasks (admin) */
+        get: operations["getReplication"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/replication/items": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Shared folders, apps and VMs on this server that can be replicated */
+        get: operations["listReplicationItems"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/replication/targets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Pair with a receiving server using the pairing code it showed (a job; the code never goes in the job's parameters) */
+        post: operations["pairReplicationTarget"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/replication/targets/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Forget a paired server (a job; its name typed to confirm; no task may still use it). Its replicas stay there. */
+        delete: operations["deleteReplicationTarget"];
+        options?: never;
+        head?: never;
+        /** Change where a paired server is reached (a job) */
+        patch: operations["updateReplicationTarget"];
+        trace?: never;
+    };
+    "/replication/targets/{id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Check that a paired server answers and still knows this one (changes nothing) */
+        post: operations["testReplicationTarget"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/replication/targets/{id}/replicas": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** This server's items kept on a paired server */
+        get: operations["listReplicationReplicas"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/replication/targets/{id}/replicas/{kind}/{item}/snapshots": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                kind: components["schemas"]["ReplicationKind"];
+                item: string;
+            };
+            cookie?: never;
+        };
+        /** A replicated item's snapshots on a paired server, oldest first */
+        get: operations["listReplicationReplicaSnapshots"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/replication/targets/{id}/replicas/{kind}/{item}/browse": {
+        parameters: {
+            query: {
+                snapshot: string;
+                path?: string;
+                child?: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+                kind: components["schemas"]["ReplicationKind"];
+                item: string;
+            };
+            cookie?: never;
+        };
+        /** List a folder inside a replica's snapshot (mounted read-only on the receiving server for the moment it takes; only when that server allows it for this one) */
+        get: operations["browseReplicationReplica"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/replication/targets/{id}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Copy a replica's snapshot back to this server (a job) — a shared folder as a new folder, a VM or an app only when its id is free */
+        post: operations["restoreReplication"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/replication/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create a replication task (a job) */
+        post: operations["createReplicationTask"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/replication/tasks/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete a task and its snapshots on this server (a job; its name typed to confirm). Replicas on the other server stay. */
+        delete: operations["deleteReplicationTask"];
+        options?: never;
+        head?: never;
+        /** Change a replication task (a job; its server can't change) */
+        patch: operations["updateReplicationTask"];
+        trace?: never;
+    };
+    "/replication/tasks/{id}/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Run a task now (a job) */
+        post: operations["runReplicationTask"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/replication/tasks/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Stop a running task (its zfs send is killed; the next run resumes the interrupted transfer) */
+        post: operations["cancelReplicationTask"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/replication/tasks/{id}/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** A task's runs, newest first (also restores under "restore:<target id>") */
+        get: operations["listReplicationRuns"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/replication/receive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The receiving side — open pairing code, servers that send here and their replicas with sizes */
+        get: operations["getReplicationReceive"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/replication/receive/pairing": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Make a one-time pairing code for another server (valid 30 minutes, shown once; replaces an open one) */
+        post: operations["openReplicationPairing"];
+        /** Close the open pairing code (a job) */
+        delete: operations["closeReplicationPairing"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/replication/receive/sources/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Stop receiving from a server, and with deleteReplicas destroy everything it sent (a job; its name typed to confirm) */
+        delete: operations["deleteReplicationSource"];
+        options?: never;
+        head?: never;
+        /** Change this server's rules for a sending server (a job) */
+        patch: operations["updateReplicationSource"];
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -7369,6 +7692,252 @@ export interface components {
             hostname: string;
             items: string[];
             target: string;
+        };
+        /** @enum {string} */
+        ReplicationKind: "share" | "app" | "vm";
+        ReplicationItem: {
+            kind: components["schemas"]["ReplicationKind"];
+            id: string;
+        };
+        ReplicationLocalItem: {
+            kind: components["schemas"]["ReplicationKind"];
+            id: string;
+            name: string;
+            pool: string;
+            dataset: string;
+            /** Format: int64 */
+            usedBytes: number;
+        };
+        ReplicationTarget: {
+            id: string;
+            /** @description The receiving server's name */
+            name: string;
+            /** @example nas2.home.example:44400 */
+            address: string;
+            /** @description This server's id on the receiving server */
+            sourceId: string;
+            /** @description Start of the receiving server's pinned key (SHA-256, hex); empty when it can't be read (pair again) */
+            pin: string;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        ReplicationTask: {
+            id: string;
+            name: string;
+            targetId: string;
+            items: components["schemas"]["ReplicationItem"][];
+            intervalMinutes: number;
+            /** @description KiB per second; 0 for no limit */
+            bandwidthKBps: number;
+            keepLocal: number;
+            keepRemote: number;
+            enabled: boolean;
+            /** Format: date-time */
+            lastRunAt: string | null;
+            /** Format: date-time */
+            lastSuccessAt: string | null;
+            lastError: string;
+            /** Format: int64 */
+            lastBytes: number;
+            /** @enum {string} */
+            alert: "" | "failed" | "stale";
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+            targetName: string;
+            /** @description The job running it now */
+            runningJob: string;
+            /** Format: date-time */
+            nextRunAt: string | null;
+            /** @description No success for three intervals (at least an interval and an hour) */
+            stale: boolean;
+        };
+        ReplicationTaskRequest: {
+            name: string;
+            /** @description Ignored when changing a task */
+            targetId?: string;
+            items: components["schemas"]["ReplicationItem"][];
+            intervalMinutes: number;
+            bandwidthKBps?: number;
+            keepLocal: number;
+            keepRemote: number;
+            enabled: boolean;
+        };
+        ReplicationOverview: {
+            hostname: string;
+            /** @description This server's key (SHA-256, hex), to compare when pairing */
+            pin: string;
+            port: number;
+            targets: components["schemas"]["ReplicationTarget"][];
+            tasks: components["schemas"]["ReplicationTask"][];
+        };
+        ReplicationPairRequest: {
+            /** @description host, host:port, IP or [IPv6]:port (default port 44400) */
+            address: string;
+            /** @description The pairing code the receiving server showed */
+            code: string;
+        };
+        ReplicationConfirm: {
+            confirm: string;
+        };
+        ReplicationSnapshot: {
+            /** @example hardyos-repl-a1b2c3d4e5-20261027T101500Z */
+            name: string;
+            guid: string;
+            /** Format: date-time */
+            created: string;
+        };
+        ReplicationRemoteItem: {
+            kind: components["schemas"]["ReplicationKind"];
+            id: string;
+            name: string;
+            /** @description Where it lives on the sending server */
+            pool: string;
+            /** Format: int64 */
+            usedBytes: number;
+            snapshots: number;
+            lastSnapshot?: string;
+            /** Format: date-time */
+            lastAt?: string;
+            /** @description An interrupted transfer waits to be resumed */
+            partial: boolean;
+        };
+        ReplicationBrowse: {
+            path: string;
+            truncated: boolean;
+            entries: {
+                name: string;
+                dir: boolean;
+                /** Format: int64 */
+                size: number;
+                /** Format: date-time */
+                modified: string;
+            }[];
+        };
+        ReplicationRestoreRequest: {
+            kind: components["schemas"]["ReplicationKind"];
+            id: string;
+            snapshot: string;
+            /** @description Shared folders: where the new folder goes. VMs: the pool the VM was on. Apps: unused (the apps pool) */
+            pool?: string;
+            /** @description Shared folders: the new folder's id */
+            newId?: string;
+            /** @description Shared folders: the new folder's name */
+            name?: string;
+            confirm: boolean;
+        };
+        ReplicationRun: {
+            /** Format: int64 */
+            id: number;
+            taskId: string;
+            jobId: string;
+            /** @enum {string} */
+            kind: "replicate" | "restore";
+            /** Format: date-time */
+            startedAt: string;
+            /** Format: date-time */
+            finishedAt: string | null;
+            /** @enum {string} */
+            state: "running" | "succeeded" | "failed" | "cancelled";
+            /** Format: int64 */
+            bytes: number;
+            message: string;
+        };
+        ReplicationPairing: {
+            pool: string;
+            /** Format: int64 */
+            quotaBytes: number;
+            minKeep: number;
+            minAgeDays: number;
+            /** Format: date-time */
+            expiresAt: string;
+        };
+        ReplicationPairingRequest: {
+            /** @description The pool that keeps the new source's replicas */
+            pool: string;
+            /**
+             * Format: int64
+             * @description The source's space limit (required)
+             */
+            quotaBytes: number;
+            /** @description Snapshots kept of each item at least, whatever the source asks (default 3) */
+            minKeep?: number;
+            /** @description Snapshots received more recently than this are never pruned (default 7) */
+            minAgeDays?: number;
+        };
+        ReplicationSourceRules: {
+            /**
+             * Format: int64
+             * @description Space limit (required)
+             */
+            quotaBytes: number;
+            minKeep: number;
+            /** @description Snapshots received more recently are never pruned */
+            minAgeDays: number;
+            /** @description Least time between two snapshots of an item (0: any) */
+            minIntervalMinutes: number;
+            maxDatasets: number;
+            maxSnapshots: number;
+            /** @description Let the source browse its replicas here (mounts its data on this server for a moment; off by default) */
+            allowBrowse: boolean;
+        };
+        ReplicationPairingCode: {
+            job: components["schemas"]["Job"];
+            /** @example ABCDE-FGHIJ-KLMNO-PQRST-UVWXYZ */
+            code: string;
+            /** Format: date-time */
+            expiresAt: string;
+            port: number;
+            hostname: string;
+        };
+        ReplicationSource: {
+            id: string;
+            /** @description The sending server's name */
+            name: string;
+            pool: string;
+            /** Format: int64 */
+            quotaBytes: number;
+            minKeep: number;
+            minAgeDays: number;
+            minIntervalMinutes: number;
+            maxDatasets: number;
+            maxSnapshots: number;
+            allowBrowse: boolean;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            lastSeenAt: string | null;
+            items: {
+                kind: components["schemas"]["ReplicationKind"];
+                id: string;
+                name: string;
+                pool: string;
+                taskId: string;
+                /** Format: date-time */
+                updatedAt: string;
+            }[];
+            /** Format: int64 */
+            usedBytes: number;
+            replicas: components["schemas"]["ReplicationRemoteItem"][];
+        };
+        ReplicationAddress: {
+            address: string;
+            interface: string;
+            /** @description The NetBird interface (wt0) */
+            netbird: boolean;
+        };
+        ReplicationReceive: {
+            /** @description Other servers can connect (a code is open or a source is paired) */
+            receiving: boolean;
+            hostname: string;
+            port: number;
+            pin: string;
+            pairing: components["schemas"]["ReplicationPairing"] | null;
+            sources: components["schemas"]["ReplicationSource"][];
+            /** @description Where other servers can reach this one */
+            addresses: components["schemas"]["ReplicationAddress"][];
+            problem?: string;
         };
     };
     responses: {
@@ -13999,6 +14568,506 @@ export interface operations {
             };
             400: components["responses"]["Invalid"];
             401: components["responses"]["Unauthorized"];
+        };
+    };
+    getReplication: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Overview */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReplicationOverview"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    listReplicationItems: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Items */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        items: components["schemas"]["ReplicationLocalItem"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    pairReplicationTarget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplicationPairRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    deleteReplicationTarget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplicationConfirm"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateReplicationTarget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description host, host:port, IP or [IPv6]:port (default port 44400) */
+                    address: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    testReplicationTarget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description It answered */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        ok: boolean;
+                        name: string;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            502: components["responses"]["Failed"];
+        };
+    };
+    listReplicationReplicas: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Replicas */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        items: components["schemas"]["ReplicationRemoteItem"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            502: components["responses"]["Failed"];
+        };
+    };
+    listReplicationReplicaSnapshots: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                kind: components["schemas"]["ReplicationKind"];
+                item: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Snapshots */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        snapshots: components["schemas"]["ReplicationSnapshot"][];
+                    };
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            502: components["responses"]["Failed"];
+        };
+    };
+    browseReplicationReplica: {
+        parameters: {
+            query: {
+                snapshot: string;
+                path?: string;
+                child?: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+                kind: components["schemas"]["ReplicationKind"];
+                item: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The folder */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReplicationBrowse"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            502: components["responses"]["Failed"];
+        };
+    };
+    restoreReplication: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplicationRestoreRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    createReplicationTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplicationTaskRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    deleteReplicationTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplicationConfirm"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateReplicationTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplicationTaskRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    runReplicationTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    cancelReplicationTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Cancelled */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        cancelled: boolean;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listReplicationRuns: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Runs */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        runs: components["schemas"]["ReplicationRun"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    getReplicationReceive: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Receiving */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReplicationReceive"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    openReplicationPairing: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplicationPairingRequest"];
+            };
+        };
+        responses: {
+            /** @description The code, and the job that stores it (sealed) */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReplicationPairingCode"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    closeReplicationPairing: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    deleteReplicationSource: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description The sending server's name */
+                    confirm: string;
+                    deleteReplicas: boolean;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateReplicationSource: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplicationSourceRules"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
         };
     };
 }

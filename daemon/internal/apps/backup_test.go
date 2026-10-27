@@ -122,10 +122,10 @@ func TestReadMetaRefusesLinks(t *testing.T) {
 	must(t, os.WriteFile(secret, []byte("TOP SECRET"), 0o600))
 	link := filepath.Join(dir, "icon.png")
 	must(t, os.Symlink(secret, link))
-	if b, err := readMeta(link); err == nil {
+	if b, err := readStateFile(link); err == nil {
 		t.Errorf("read through a link: %q", b)
 	}
-	if _, err := readMeta(secret); err != nil {
+	if _, err := readStateFile(secret); err != nil {
 		t.Errorf("regular file: %v", err)
 	}
 }

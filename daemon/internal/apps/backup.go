@@ -9,7 +9,6 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/hardyos/hardyos/daemon/internal/rootfile"
 	"github.com/hardyos/hardyos/daemon/internal/zfs"
 )
 
@@ -54,13 +53,6 @@ func (m *Manager) BackupSources(ctx context.Context) ([]BackupSource, error) {
 	return out, nil
 }
 
-// readMeta reads one of an app's own files (.hardyos/...): never through a
-// link, a regular file root wrote (under rootfile.Enforce), at most
-// rootfile.MaxStateBytes. An app's dataset can come back from a backup, so
-// nothing in it is followed (a link there must not make root read, say,
-// the master key as the app's icon).
-func readMeta(path string) ([]byte, error) { return rootfile.ReadFile(path) }
-
 // Fill writes an app's data into its mounted dataset (dir is the
 // dataset's mountpoint, dataset its name).
 type Fill func(ctx context.Context, dir, dataset string) error
@@ -103,7 +95,7 @@ func (m *Manager) RestoreData(ctx context.Context, id, confirm string, fill Fill
 	// the live install as the previous state: catalog only if those bytes
 	// are shipped (or are the package root found in the catalog), else the
 	// live label (upload when the live app was a catalog one).
-	raw, _ := readMeta(back.meta(packageFile))
+	raw, _ := readStateFile(back.meta(packageFile))
 	src, name, sum, err := m.deriveSource(raw, "", "", &ia.state)
 	if err != nil {
 		return err
@@ -178,7 +170,7 @@ func (m *Manager) RestoreNew(ctx context.Context, id, pool string, fill Fill) er
 	// catalog, otherwise an upload whose extra permissions an
 	// administrator grants again), no grants, and the user ID is kept only
 	// when no other app has it.
-	raw, _ := readMeta(ia.meta(packageFile))
+	raw, _ := readStateFile(ia.meta(packageFile))
 	src, name, sum, err := m.deriveSource(raw, "", "", nil)
 	if err != nil {
 		return err

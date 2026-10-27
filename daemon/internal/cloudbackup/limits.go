@@ -8,7 +8,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/fileworker"
 )
 
-// Limits on what restores can cost (decision 181). Every restore unpacks
+// Limits on what restores can cost (decision 231). Every restore unpacks
 // into a staging dataset with a quota (the version's size plus headroom,
 // refused when the pool hasn't that much free); a person restores chosen
 // files only, at most MaxUserBytes, one restore at a time; listing a

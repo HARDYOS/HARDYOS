@@ -55,7 +55,7 @@ func (r *Root) probeRepo(a ProbeArgs) (*Repo, error) {
 //
 // It runs on the installer before anything is set up, against whatever the
 // kit names, so it's bounded (Root.AccessTimeout, 90 s) and its errors are
-// HardyOS's own words: nothing the far end sends is shown (decision 183).
+// HardyOS's own words: nothing the far end sends is shown (decision 233).
 func (r *Root) Probe(ctx context.Context, a ProbeArgs) ([]ProbeVersion, error) {
 	repo, err := r.probeRepo(a)
 	if err != nil {

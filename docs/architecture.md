@@ -1498,7 +1498,7 @@ and IOMMU flags on real firmware.
 
 ## Cloud backups
 
-Phase 6 part A (decisions 160-172; user and developer guide
+Phase 6 part A (decisions 160-172, security review 223-233; user and developer guide
 [backup.md](backup.md)). Versioned, encrypted backups of shared folders,
 apps, VMs and the server's settings to S3-compatible storage or Backblaze
 B2, with restic doing the storage.
@@ -1543,7 +1543,17 @@ B2, with restic doing the storage.
   process group of its own (SIGINT on cancel, SIGKILL 15 s later), stderr
   bounded. Every connection goes through a per-run CONNECT proxy on
   127.0.0.1 that only reaches the destination's host and port and dials an
-  address it resolved and allowed itself (`AddrAllowed`).
+  address it resolved and allowed itself (`AddrAllowed`, never this
+  server's own). In hardyd-priv restic is sandboxed (`sandbox_linux.go`):
+  its own network namespace with only loopback (the proxy's socket is made
+  in it), a mount namespace read-only except the cache and a restore's
+  staging folder with root's secrets hidden, and only the run's
+  capabilities (decisions 226, 232).
+- **Recovery kit.** `cloudbackup.kit` checks the administrator's password in
+  hardyd-priv (`internal/rootauth`: Kerberos against the local DC and
+  group SIDs for domain accounts, root's own argon2id verifier for local
+  ones); kits, new destinations and settings backups are logged to the
+  journal (decision 230).
 - **Backups** run as a hardyd-priv task followed by the hardyd job
   `backup.cloud.run` (polls `cloudbackup.task`, cancels with
   `cloudbackup.cancel`). Per item: a snapshot `@hardyos-cloud-<run>`,
@@ -1570,7 +1580,14 @@ B2, with restic doing the storage.
   `apps.RestoreData` (the rollback path), VMs through
   `vms.RestoreFromBackup` (off, name typed, a VM snapshot first; disks
   written with `O_EXCL` on the zvol), settings through
-  `backup.Root.StageContents` (applied at the next start).
+  `backup.Root.StageContents` (applied at the next start). Staging has a
+  quota (the version's size plus headroom); links never come back into
+  apps' or VMs' own files; HardyOS's own ACL entries come from the
+  destination as it is now; an app's source, grants and user ID come from
+  the live install (or its package bytes); a VM's spec is checked before
+  anything changes and no disk is destroyed; people restore chosen files
+  of this server's versions, checked against their access today
+  (decisions 223-231).
 - **Schedule** (hardyd, every minute): each enabled task's latest slot
   (manual, every N hours, daily, weekly; server time) starts a run, or is
   reported missed when more than 30 minutes late or while the previous run
@@ -1594,6 +1611,101 @@ B2, with restic doing the storage.
   command line and environment, real file workers for `DoIn`, the API and
   the schedule with a stub root helper, web component tests, and
   `TestZFSIntegrationCloudBackup` on a file-backed pool in CI's ZFS job.
+
+## Replication between servers
+
+Phase 6 part B (decisions 180-199; guide `docs/replication.md`, which has
+the threat model). Scheduled
+incremental ZFS replication of chosen shared folders, apps and VMs to
+another HardyOS server, over the LAN or NetBird. One way, no promotion yet
+(phase 8).
+
+```
+ server A (source)                                          server B (receiver)
+ hardyd  replication.Service ── HTTPS :44400, TLS 1.3 ───►  hardyd  replication.Service (listens while receiving)
+   │  jobs replication.run/restore   mutual TLS, pinned keys     │  per-request pin → paired source
+   │  PrivRoot                                                    │  PrivRoot
+   ▼  repl.snapshot / repl.send (fd) / repl.prune                 ▼  repl.recv (fd) / repl.recv.state / .prune / .abort
+ hardyd-priv  replica.Manager: zfs snapshot -r, zfs send    hardyd-priv  replica.Manager: DRR_BEGIN check,
+                                                                      zfs receive -u -s into <pool>/replicas/<src>/<kind>/<id>
+```
+
+- **Code**: root side `internal/replica` and `priv/replication_ops.go`
+  (`repl.*` ops); hardyd side `internal/replication` (identity, pairing,
+  store, receiving server, client, runs, schedule) and
+  `api/handlers_replication.go`; web
+  `apps/shell/src/apps/backup/replication/`; migration
+  `0018_replication.sql`.
+- **Streams as file descriptors.** `repl.send` starts `zfs send` (its own
+  process group) and hands hardyd the read end of its stdout over the priv
+  socket (SCM_RIGHTS); `repl.recv` hands hardyd the write end of a pipe
+  whose first 312 bytes root checks before starting `zfs receive` with
+  them and the rest. Root keeps a registry of streams (`repl.stream` for
+  the outcome and bytes, `repl.cancel` kills the group; 72 h at most, one
+  receive per target). hardyd never runs zfs, only moves bytes: on A with
+  the task's bandwidth limit and a byte count for the job's progress, on B
+  from the request body into the pipe.
+- **Identity and pairing.** One ECDSA P-256 key per server, sealed in the
+  settings table (`replication.identity`, secretbox purpose
+  `replication`). B opens a one-time 128-bit code (sealed in
+  `repl_pairing`, 30 minutes, 5 failures) for a pool, quota and minimum
+  kept snapshots; A proves the code over both keys' SHA-256 pins on the
+  TLS connection, B answers with its own proof and a source id. Pins are
+  sealed per row (`repl_targets`, `repl_sources`, AAD = table and id).
+- **Wire API on B** (`/repl/v1/`): `pair` (any client certificate, right
+  code), and for paired sources `hello`, `items` (PUT names/pools, GET
+  replicas with sizes), `state`, `abort`, `stream` (PUT the zfs stream;
+  answered after `zfs receive` exits), `prune` (keep = max(task's keep,
+  source's minimum)), `snapshots`, `children`, `browse`, `send` (GET a
+  replica's snapshot back, outcome in a trailer). The pool and source id
+  always come from B's record of the caller.
+- **Confinement on B.** `<pool>/replicas` (role `replicas`, never mounted,
+  read only), `<pool>/replicas/<source>` (quota), `/<kind>/<item>[/<child>]`;
+  every component validated (`replica.Target`), existing datasets checked
+  for HardyOS's role/replica properties before use. The receiving
+  administrator's rules per source (`repl_sources`): a required quota,
+  minimum kept snapshots and minimum age (received snapshots are stamped
+  `org.hardyos:received`; younger ones are never pruned), an optional
+  minimum interval, dataset and snapshot counts (root counts them; ZFS's
+  limits don't bind root), and browsing (off by default). A pool with
+  replicas keeps a 2 GiB reservation on `<pool>/system`. Receive options:
+  `-u -s`, file systems `canmount=off`, a mountpoint under
+  `/mnt/<pool>/replicas`, `readonly=on`, `exec/setuid/devices=off`,
+  `-x sharenfs/sharesmb` and every HardyOS service property; volumes
+  `readonly=on`, `volmode=none`, `refreservation=none`; all
+  `org.hardyos:replica=<source>`. Stream policy: single-dataset
+  substreams only, known features, no dedup/redacted/holds/clone/raw, the
+  asked-for snapshot, incremental over an existing replica, never `-F`.
+- **Runs.** Per item: `zfs snapshot -r` (`hardyos-repl-<task>-<UTC>`; VMs
+  through `vms.Manager.Frozen`, the guest agent's freeze), then per
+  dataset, parent first: resume a token (decoded by A's root and accepted
+  only for the task's snapshots of that dataset, by GUID) or send `-i` from the newest snapshot
+  whose GUID B has, or the whole snapshot for a new replica. Pruning (both
+  sides) only touches the task's labels and only below the newest label
+  every dataset of the item has. Runs are jobs (`replication.run`, one per
+  task at a time) recorded in `repl_runs`; `Service.Run` ticks every minute
+  for due tasks and stale ones, and keeps the listener up while a code is
+  open or a source is paired.
+- **Notifications** go through `replication.Notifier`
+  (`Event{Kind, Severity, Title, Body, Link, Time}`): failure (warning,
+  once), stale (critical, once; three intervals, at least an interval and
+  an hour), recovered and restored (info). hardyd passes them to the
+  alert dispatcher (category `replication`, link `backup/replication`:
+  the sending side is the Backup app's Replication tab; Control Panel ›
+  Replication keeps the receiving side, decision 234).
+- **Restore** pulls a replica's snapshot back (`repl.replica.send` on B,
+  `repl.restore.recv` on A, the same stream check): a shared folder as a
+  new one (`shares.Manager.RestoreProps`: administrators only, SMB off), a
+  VM under its own id when free (`vms.Manager.Adopt`: read and checked
+  like any VM on a pool, defined off), an app's data when not installed
+  (`apps.Manager.AdoptRestored`: kept data, reinstall to run). Copies carry
+  `org.hardyos:restoring=1` until finished; an unfinished one is
+  destroyed.
+- **Later promotion.** Replicas keep their kind and id in the path and
+  B keeps each item's name, pool and task (`repl_source_items`); the
+  service properties stripped on receive come back from those records
+  when a replica is promoted (phase 8). Raw sends need only the policy
+  switch (`Policy.AllowRaw`) and a send flag.
 
 ## Monitoring and alerts
 

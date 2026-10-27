@@ -9,7 +9,7 @@ import (
 )
 
 // Restoring a VM from a backup checks the version's spec before anything
-// changes and never destroys a disk the version doesn't have (decision 175).
+// changes and never destroys a disk the version doesn't have (decision 225).
 func TestRestoreFromBackupChecksFirstAndKeepsDisks(t *testing.T) {
 	zvolReady = func(os.FileInfo) bool { return true }
 	t.Cleanup(func() { zvolReady = func(fi os.FileInfo) bool { return fi.Mode()&os.ModeDevice != 0 } })

@@ -40,6 +40,7 @@ tags:
   - name: oidc
   - name: vms
   - name: cloudbackup
+  - name: replication
   - name: alerts
   - name: monitor
   - name: ups
@@ -4778,6 +4779,376 @@ paths:
                   versions: { type: array, items: { $ref: "#/components/schemas/InstallBackupVersion" } }
         "400": { $ref: "#/components/responses/Invalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  # ---- replication API (phase 6 part B; docs/replication.md) ----
+  /replication:
+    get:
+      operationId: getReplication
+      summary: This server's replication identity, the servers it sends to and its tasks (admin)
+      tags: [replication]
+      responses:
+        "200":
+          description: Overview
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReplicationOverview" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /replication/items:
+    get:
+      operationId: listReplicationItems
+      summary: Shared folders, apps and VMs on this server that can be replicated
+      tags: [replication]
+      responses:
+        "200":
+          description: Items
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/ReplicationLocalItem" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /replication/targets:
+    post:
+      operationId: pairReplicationTarget
+      summary: Pair with a receiving server using the pairing code it showed (a job; the code never goes in the job's parameters)
+      tags: [replication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReplicationPairRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /replication/targets/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    patch:
+      operationId: updateReplicationTarget
+      summary: Change where a paired server is reached (a job)
+      tags: [replication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [address]
+              properties:
+                address: { type: string, description: "host, host:port, IP or [IPv6]:port (default port 44400)" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: deleteReplicationTarget
+      summary: Forget a paired server (a job; its name typed to confirm; no task may still use it). Its replicas stay there.
+      tags: [replication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReplicationConfirm" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /replication/targets/{id}/test:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: testReplicationTarget
+      summary: Check that a paired server answers and still knows this one (changes nothing)
+      tags: [replication]
+      responses:
+        "200":
+          description: It answered
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, name]
+                properties:
+                  ok: { type: boolean }
+                  name: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Failed" }
+  /replication/targets/{id}/replicas:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: listReplicationReplicas
+      summary: This server's items kept on a paired server
+      tags: [replication]
+      responses:
+        "200":
+          description: Replicas
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/ReplicationRemoteItem" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Failed" }
+  /replication/targets/{id}/replicas/{kind}/{item}/snapshots:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: kind, in: path, required: true, schema: { $ref: "#/components/schemas/ReplicationKind" } }
+      - { name: item, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: listReplicationReplicaSnapshots
+      summary: A replicated item's snapshots on a paired server, oldest first
+      tags: [replication]
+      responses:
+        "200":
+          description: Snapshots
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [snapshots]
+                properties:
+                  snapshots: { type: array, items: { $ref: "#/components/schemas/ReplicationSnapshot" } }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Failed" }
+  /replication/targets/{id}/replicas/{kind}/{item}/browse:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: kind, in: path, required: true, schema: { $ref: "#/components/schemas/ReplicationKind" } }
+      - { name: item, in: path, required: true, schema: { type: string } }
+      - { name: snapshot, in: query, required: true, schema: { type: string } }
+      - { name: path, in: query, required: false, schema: { type: string } }
+      - { name: child, in: query, required: false, schema: { type: string } }
+    get:
+      operationId: browseReplicationReplica
+      summary: List a folder inside a replica's snapshot (mounted read-only on the receiving server for the moment it takes; only when that server allows it for this one)
+      tags: [replication]
+      responses:
+        "200":
+          description: The folder
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReplicationBrowse" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/Failed" }
+  /replication/targets/{id}/restore:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: restoreReplication
+      summary: Copy a replica's snapshot back to this server (a job) — a shared folder as a new folder, a VM or an app only when its id is free
+      tags: [replication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReplicationRestoreRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /replication/tasks:
+    post:
+      operationId: createReplicationTask
+      summary: Create a replication task (a job)
+      tags: [replication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReplicationTaskRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /replication/tasks/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    patch:
+      operationId: updateReplicationTask
+      summary: Change a replication task (a job; its server can't change)
+      tags: [replication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReplicationTaskRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: deleteReplicationTask
+      summary: Delete a task and its snapshots on this server (a job; its name typed to confirm). Replicas on the other server stay.
+      tags: [replication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReplicationConfirm" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /replication/tasks/{id}/run:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: runReplicationTask
+      summary: Run a task now (a job)
+      tags: [replication]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /replication/tasks/{id}/cancel:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: cancelReplicationTask
+      summary: Stop a running task (its zfs send is killed; the next run resumes the interrupted transfer)
+      tags: [replication]
+      responses:
+        "200":
+          description: Cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [cancelled]
+                properties:
+                  cancelled: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /replication/tasks/{id}/history:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: listReplicationRuns
+      summary: A task's runs, newest first (also restores under "restore:<target id>")
+      tags: [replication]
+      responses:
+        "200":
+          description: Runs
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [runs]
+                properties:
+                  runs: { type: array, items: { $ref: "#/components/schemas/ReplicationRun" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /replication/receive:
+    get:
+      operationId: getReplicationReceive
+      summary: The receiving side — open pairing code, servers that send here and their replicas with sizes
+      tags: [replication]
+      responses:
+        "200":
+          description: Receiving
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReplicationReceive" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /replication/receive/pairing:
+    post:
+      operationId: openReplicationPairing
+      summary: Make a one-time pairing code for another server (valid 30 minutes, shown once; replaces an open one)
+      tags: [replication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReplicationPairingRequest" }
+      responses:
+        "202":
+          description: The code, and the job that stores it (sealed)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReplicationPairingCode" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    delete:
+      operationId: closeReplicationPairing
+      summary: Close the open pairing code (a job)
+      tags: [replication]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /replication/receive/sources/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    patch:
+      operationId: updateReplicationSource
+      summary: Change this server's rules for a sending server (a job)
+      tags: [replication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReplicationSourceRules" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: deleteReplicationSource
+      summary: Stop receiving from a server, and with deleteReplicas destroy everything it sent (a job; its name typed to confirm)
+      tags: [replication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm, deleteReplicas]
+              properties:
+                confirm: { type: string, description: The sending server's name }
+                deleteReplicas: { type: boolean }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  # ---- end of replication API ----
 components:
   securitySchemes:
     session:
@@ -8051,3 +8422,239 @@ components:
         items: { type: array, items: { type: string } }
         target: { type: string }
     # ---- end of cloud backup API schemas ----
+    # ---- replication API schemas ----
+    ReplicationKind:
+      type: string
+      enum: [share, app, vm]
+    ReplicationItem:
+      type: object
+      required: [kind, id]
+      properties:
+        kind: { $ref: "#/components/schemas/ReplicationKind" }
+        id: { type: string }
+    ReplicationLocalItem:
+      type: object
+      required: [kind, id, name, pool, dataset, usedBytes]
+      properties:
+        kind: { $ref: "#/components/schemas/ReplicationKind" }
+        id: { type: string }
+        name: { type: string }
+        pool: { type: string }
+        dataset: { type: string }
+        usedBytes: { type: integer, format: int64 }
+    ReplicationTarget:
+      type: object
+      required: [id, name, address, sourceId, pin, createdAt]
+      properties:
+        id: { type: string }
+        name: { type: string, description: The receiving server's name }
+        address: { type: string, examples: ["nas2.home.example:44400"] }
+        sourceId: { type: string, description: This server's id on the receiving server }
+        pin: { type: string, description: "Start of the receiving server's pinned key (SHA-256, hex); empty when it can't be read (pair again)" }
+        createdAt: { type: string, format: date-time }
+    ReplicationTask:
+      type: object
+      required: [id, name, targetId, items, intervalMinutes, bandwidthKBps, keepLocal, keepRemote, enabled, lastRunAt, lastSuccessAt, lastError, lastBytes, alert, createdAt, updatedAt, targetName, runningJob, nextRunAt, stale]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        targetId: { type: string }
+        items: { type: array, items: { $ref: "#/components/schemas/ReplicationItem" } }
+        intervalMinutes: { type: integer, minimum: 5, maximum: 10080 }
+        bandwidthKBps: { type: integer, minimum: 0, description: KiB per second; 0 for no limit }
+        keepLocal: { type: integer, minimum: 1 }
+        keepRemote: { type: integer, minimum: 1 }
+        enabled: { type: boolean }
+        lastRunAt: { type: [string, "null"], format: date-time }
+        lastSuccessAt: { type: [string, "null"], format: date-time }
+        lastError: { type: string }
+        lastBytes: { type: integer, format: int64 }
+        alert: { type: string, enum: ["", failed, stale] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        targetName: { type: string }
+        runningJob: { type: string, description: The job running it now, if any }
+        nextRunAt: { type: [string, "null"], format: date-time }
+        stale: { type: boolean, description: "No success for three intervals (at least an interval and an hour)" }
+    ReplicationTaskRequest:
+      type: object
+      required: [name, items, intervalMinutes, keepLocal, keepRemote, enabled]
+      properties:
+        name: { type: string, maxLength: 60 }
+        targetId: { type: string, description: Ignored when changing a task }
+        items: { type: array, items: { $ref: "#/components/schemas/ReplicationItem" }, minItems: 1, maxItems: 100 }
+        intervalMinutes: { type: integer, minimum: 5, maximum: 10080 }
+        bandwidthKBps: { type: integer, minimum: 0 }
+        keepLocal: { type: integer, minimum: 1, maximum: 1000 }
+        keepRemote: { type: integer, minimum: 1, maximum: 1000 }
+        enabled: { type: boolean }
+    ReplicationOverview:
+      type: object
+      required: [hostname, pin, port, targets, tasks]
+      properties:
+        hostname: { type: string }
+        pin: { type: string, description: "This server's key (SHA-256, hex), to compare when pairing" }
+        port: { type: integer }
+        targets: { type: array, items: { $ref: "#/components/schemas/ReplicationTarget" } }
+        tasks: { type: array, items: { $ref: "#/components/schemas/ReplicationTask" } }
+    ReplicationPairRequest:
+      type: object
+      required: [address, code]
+      properties:
+        address: { type: string, description: "host, host:port, IP or [IPv6]:port (default port 44400)" }
+        code: { type: string, description: The pairing code the receiving server showed }
+    ReplicationConfirm:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: string }
+    ReplicationSnapshot:
+      type: object
+      required: [name, guid, created]
+      properties:
+        name: { type: string, examples: ["hardyos-repl-a1b2c3d4e5-20261027T101500Z"] }
+        guid: { type: string }
+        created: { type: string, format: date-time }
+    ReplicationRemoteItem:
+      type: object
+      required: [kind, id, name, pool, usedBytes, snapshots, partial]
+      properties:
+        kind: { $ref: "#/components/schemas/ReplicationKind" }
+        id: { type: string }
+        name: { type: string }
+        pool: { type: string, description: Where it lives on the sending server }
+        usedBytes: { type: integer, format: int64 }
+        snapshots: { type: integer }
+        lastSnapshot: { type: string }
+        lastAt: { type: string, format: date-time }
+        partial: { type: boolean, description: An interrupted transfer waits to be resumed }
+    ReplicationBrowse:
+      type: object
+      required: [path, entries, truncated]
+      properties:
+        path: { type: string }
+        truncated: { type: boolean }
+        entries:
+          type: array
+          items:
+            type: object
+            required: [name, dir, size, modified]
+            properties:
+              name: { type: string }
+              dir: { type: boolean }
+              size: { type: integer, format: int64 }
+              modified: { type: string, format: date-time }
+    ReplicationRestoreRequest:
+      type: object
+      required: [kind, id, snapshot, confirm]
+      properties:
+        kind: { $ref: "#/components/schemas/ReplicationKind" }
+        id: { type: string }
+        snapshot: { type: string }
+        pool: { type: string, description: "Shared folders: where the new folder goes. VMs: the pool the VM was on. Apps: unused (the apps pool)" }
+        newId: { type: string, description: "Shared folders: the new folder's id" }
+        name: { type: string, description: "Shared folders: the new folder's name" }
+        confirm: { type: boolean }
+    ReplicationRun:
+      type: object
+      required: [id, taskId, jobId, kind, startedAt, finishedAt, state, bytes, message]
+      properties:
+        id: { type: integer, format: int64 }
+        taskId: { type: string }
+        jobId: { type: string }
+        kind: { type: string, enum: [replicate, restore] }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: [string, "null"], format: date-time }
+        state: { type: string, enum: [running, succeeded, failed, cancelled] }
+        bytes: { type: integer, format: int64 }
+        message: { type: string }
+    ReplicationPairing:
+      type: object
+      required: [pool, quotaBytes, minKeep, minAgeDays, expiresAt]
+      properties:
+        pool: { type: string }
+        quotaBytes: { type: integer, format: int64 }
+        minKeep: { type: integer }
+        minAgeDays: { type: integer }
+        expiresAt: { type: string, format: date-time }
+    ReplicationPairingRequest:
+      type: object
+      required: [pool, quotaBytes]
+      properties:
+        pool: { type: string, description: The pool that keeps the new source's replicas }
+        quotaBytes: { type: integer, format: int64, minimum: 1, description: The source's space limit (required) }
+        minKeep: { type: integer, minimum: 1, description: "Snapshots kept of each item at least, whatever the source asks (default 3)" }
+        minAgeDays: { type: integer, minimum: 0, maximum: 3650, description: "Snapshots received more recently than this are never pruned (default 7)" }
+    ReplicationSourceRules:
+      type: object
+      required: [quotaBytes, minKeep, minAgeDays, minIntervalMinutes, maxDatasets, maxSnapshots, allowBrowse]
+      properties:
+        quotaBytes: { type: integer, format: int64, minimum: 1, description: Space limit (required) }
+        minKeep: { type: integer, minimum: 1, maximum: 1000 }
+        minAgeDays: { type: integer, minimum: 0, maximum: 3650, description: Snapshots received more recently are never pruned }
+        minIntervalMinutes: { type: integer, minimum: 0, maximum: 10080, description: "Least time between two snapshots of an item (0: any)" }
+        maxDatasets: { type: integer, minimum: 1 }
+        maxSnapshots: { type: integer, minimum: 1 }
+        allowBrowse: { type: boolean, description: "Let the source browse its replicas here (mounts its data on this server for a moment; off by default)" }
+    ReplicationPairingCode:
+      type: object
+      required: [job, code, expiresAt, port, hostname]
+      properties:
+        job: { $ref: "#/components/schemas/Job" }
+        code: { type: string, examples: ["ABCDE-FGHIJ-KLMNO-PQRST-UVWXYZ"] }
+        expiresAt: { type: string, format: date-time }
+        port: { type: integer }
+        hostname: { type: string }
+    ReplicationSource:
+      type: object
+      required: [id, name, pool, quotaBytes, minKeep, minAgeDays, minIntervalMinutes, maxDatasets, maxSnapshots, allowBrowse, createdAt, lastSeenAt, items, usedBytes, replicas]
+      properties:
+        id: { type: string }
+        name: { type: string, description: The sending server's name }
+        pool: { type: string }
+        quotaBytes: { type: integer, format: int64 }
+        minKeep: { type: integer }
+        minAgeDays: { type: integer }
+        minIntervalMinutes: { type: integer }
+        maxDatasets: { type: integer }
+        maxSnapshots: { type: integer }
+        allowBrowse: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        lastSeenAt: { type: [string, "null"], format: date-time }
+        items:
+          type: array
+          items:
+            type: object
+            required: [kind, id, name, pool, taskId, updatedAt]
+            properties:
+              kind: { $ref: "#/components/schemas/ReplicationKind" }
+              id: { type: string }
+              name: { type: string }
+              pool: { type: string }
+              taskId: { type: string }
+              updatedAt: { type: string, format: date-time }
+        usedBytes: { type: integer, format: int64 }
+        replicas: { type: array, items: { $ref: "#/components/schemas/ReplicationRemoteItem" } }
+    ReplicationAddress:
+      type: object
+      required: [address, interface, netbird]
+      properties:
+        address: { type: string }
+        interface: { type: string }
+        netbird: { type: boolean, description: The NetBird interface (wt0) }
+    ReplicationReceive:
+      type: object
+      required: [receiving, hostname, port, pin, pairing, sources, addresses]
+      properties:
+        receiving: { type: boolean, description: Other servers can connect (a code is open or a source is paired) }
+        hostname: { type: string }
+        port: { type: integer }
+        pin: { type: string }
+        pairing:
+          oneOf:
+            - { $ref: "#/components/schemas/ReplicationPairing" }
+            - { type: "null" }
+        sources: { type: array, items: { $ref: "#/components/schemas/ReplicationSource" } }
+        addresses: { type: array, items: { $ref: "#/components/schemas/ReplicationAddress" }, description: Where other servers can reach this one }
+        problem: { type: string }
+    # ---- end of replication API schemas ----
