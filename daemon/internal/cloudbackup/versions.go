@@ -28,11 +28,15 @@ type VersionItem struct {
 
 // Version is one run.
 type Version struct {
-	Run      string        `json:"run"`
-	Task     string        `json:"task"`
-	Time     time.Time     `json:"time"`
-	Manifest string        `json:"manifest,omitempty"`
-	Items    []VersionItem `json:"items"`
+	Run string `json:"run"`
+	// Server is the install id of the server that made it; ThisServer
+	// whether that's this one (people only ever see those).
+	Server     string        `json:"server,omitempty"`
+	ThisServer bool          `json:"thisServer"`
+	Task       string        `json:"task"`
+	Time       time.Time     `json:"time"`
+	Manifest   string        `json:"manifest,omitempty"`
+	Items      []VersionItem `json:"items"`
 }
 
 type snapCache struct {
@@ -96,7 +100,7 @@ func GroupVersions(snaps []Snapshot) []Version {
 		}
 		v := byRun[run]
 		if v == nil {
-			v = &Version{Run: run, Task: task, Time: s.Time}
+			v = &Version{Run: run, Task: task, Time: s.Time, Server: s.Tag("server")}
 			byRun[run] = v
 			items[run] = map[string]*VersionItem{}
 		}
@@ -148,7 +152,12 @@ func (r *Root) Versions(ctx context.Context, target string) ([]Version, error) {
 	if err != nil {
 		return nil, err
 	}
-	return GroupVersions(s), nil
+	v := GroupVersions(s)
+	me := r.ServerID()
+	for i := range v {
+		v[i].ThisServer = v[i].Server == me
+	}
+	return v, nil
 }
 
 // findSnapshot looks a snapshot up and returns its item.
@@ -237,6 +246,9 @@ func (r *Root) Browse(ctx context.Context, a BrowseArgs) ([]Entry, error) {
 	}
 	if it.Kind != ItemShare && it.Kind != ItemApp {
 		return nil, problemf("only shared folders and apps can be browsed")
+	}
+	if a.Who != nil && !r.ours(snap) {
+		return nil, problemf("that version was made by another server")
 	}
 	if err := r.checkWho(ctx, a.Who, it); err != nil {
 		return nil, err

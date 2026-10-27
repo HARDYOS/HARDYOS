@@ -134,6 +134,11 @@ func (r *Root) StageInto(ctx context.Context, a ProbeArgs, targetRoot string) (*
 	if _, err := br.StageContents(c); err != nil {
 		return nil, err
 	}
+	if id := sys.Tag("server"); serverIDRE.MatchString(id) {
+		if err := rootfile.WriteInRootDir(filepath.Join(targetRoot, strings.TrimPrefix(DefaultDir, "/"), ServerIDFile), []byte(id+"\n"), 0o600, 0o700); err != nil {
+			return nil, err
+		}
+	}
 	b, _ := json.Marshal(Connect{Target: repo.Target, Creds: repo.Creds, Run: a.Run})
 	if err := rootfile.WriteInRootDir(filepath.Join(targetRoot, strings.TrimPrefix(DefaultDir, "/"), ConnectFile), b, 0o600, 0o700); err != nil {
 		return nil, err

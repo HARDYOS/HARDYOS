@@ -88,8 +88,11 @@ func (c *stubCloud) register(s *priv.Server) {
 		return c.tasks[a.ID], nil
 	})
 	h(priv.OpCloudVersions, func(json.RawMessage) (any, error) {
-		return priv.CloudVersionsResult{Versions: []cloudbackup.Version{{Run: "r1", Task: "t1", Time: time.Now(),
-			Items: []cloudbackup.VersionItem{{Item: "share:media", Snapshot: "aaaaaaaa"}, {Item: "share:secret", Snapshot: "bbbbbbbb"}}}}}, nil
+		return priv.CloudVersionsResult{Versions: []cloudbackup.Version{{Run: "r1", Task: "t1", Time: time.Now(), ThisServer: true,
+			Items: []cloudbackup.VersionItem{{Item: "share:media", Snapshot: "aaaaaaaa"}, {Item: "share:secret", Snapshot: "bbbbbbbb"}}},
+			// Another server's version in the same bucket: never offered to people.
+			{Run: "r0", Task: "t9", Time: time.Now(), Server: "other",
+				Items: []cloudbackup.VersionItem{{Item: "share:media", Snapshot: "cccccccc"}}}}}, nil
 	})
 	h(priv.OpCloudBrowse, func(raw json.RawMessage) (any, error) {
 		var a cloudbackup.BrowseArgs
@@ -279,6 +282,9 @@ func TestCloudBackupAPI(t *testing.T) {
 	// Another folder's version can't be restored into this one.
 	if code := admin.do("POST", "/api/v1/files/backups/restore", map[string]any{"share": "media", "target": "offsite", "snapshot": "bbbbbbbb", "mode": "copy", "folder": "x"}, nil); code != 404 {
 		t.Fatalf("other folder's version = %d", code)
+	}
+	if code := admin.do("POST", "/api/v1/files/backups/restore", map[string]any{"share": "media", "target": "offsite", "snapshot": "cccccccc", "mode": "copy", "folder": "x"}, nil); code != 404 {
+		t.Fatalf("other server's version = %d", code)
 	}
 	if code := admin.do("POST", "/api/v1/files/backups/restore", map[string]any{"share": "media", "target": "offsite", "snapshot": "aaaaaaaa", "mode": "rollback"}, nil); code != 400 {
 		t.Fatalf("a person's rollback = %d", code)

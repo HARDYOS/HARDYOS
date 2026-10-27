@@ -75,7 +75,10 @@ function routes(extra: Record<string, Handler> = {}, tasks: unknown[] = [task]):
     "GET /vms": () => ({ vms: [{ id: "web", name: "Web server" }], kept: [] }),
     "GET /backup/runs": () => ({ runs: [run] }),
     "GET /backup/targets/off/versions": () => ({
-      versions: [{ run: "r1", task: "t1", time: "2026-10-26T01:30:00Z", manifest: "m", items: [{ item: "share:media", snapshot: "aaaaaaaa", time: "", files: 3, bytes: 300 }] }],
+      versions: [
+        { run: "r1", task: "t1", time: "2026-10-26T01:30:00Z", manifest: "m", thisServer: true, items: [{ item: "share:media", snapshot: "aaaaaaaa", time: "", files: 3, bytes: 300 }] },
+        { run: "r0", task: "t9", time: "2026-10-20T01:30:00Z", manifest: "m0", server: "0123456789abcdef0123456789abcdef", thisServer: false, items: [{ item: "share:media", snapshot: "bbbbbbbb", time: "", files: 1, bytes: 10 }] },
+      ],
     }),
     "GET /backup/targets/off/browse": () => ({ entries: [{ name: "Photos", path: "Photos", dir: true, type: "dir", size: 0, modified: "2026-10-01T00:00:00Z" }, { name: "a.txt", path: "a.txt", dir: false, type: "file", size: 12, modified: "2026-10-01T00:00:00Z" }] }),
     ...extra,
@@ -157,6 +160,9 @@ describe("Backup app", () => {
     );
     wrap(<BackupView initial="restore" />);
     const versions = await screen.findByRole("region", { name: "Versions" });
+    // Another server's version in the same bucket is labelled.
+    expect(await within(versions).findByText("From another server")).toBeTruthy();
+    expect(within(versions).getAllByText("From another server")).toHaveLength(1);
     fireEvent.click((await within(versions).findAllByRole("button"))[0]!);
 
     // A rollback needs the folder's name typed.

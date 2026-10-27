@@ -97,6 +97,8 @@ type Root struct {
 	tasks     taskTable
 	itemMu    sync.Mutex
 	items     map[string]*sync.Mutex
+	idMu      sync.Mutex
+	serverID  string
 }
 
 // DefaultDir is root's backup state directory.

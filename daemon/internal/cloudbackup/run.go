@@ -161,8 +161,9 @@ func (r *Root) runBackup(ctx context.Context, tc taskCtx, repo *Repo, a BackupAr
 	m := Manifest{Format: 1, Run: a.Run, Task: a.Task, Time: r.now(), Hostname: a.System.Hostname, Version: a.System.Version,
 		Shares: []ShareRecord{}, Apps: []apps.BackupSource{}, VMs: []VMRecord{}}
 	snap := "hardyos-cloud-" + a.Run
+	server := "server=" + r.ServerID()
 	tags := func(it Item, extra ...string) []string {
-		return append([]string{"task=" + a.Task, "run=" + a.Run, "item=" + it.Key()}, extra...)
+		return append([]string{"task=" + a.Task, "run=" + a.Run, "item=" + it.Key(), server}, extra...)
 	}
 	var shareList []shares.Share
 	if r.Shares != nil {
@@ -213,7 +214,7 @@ func (r *Root) runBackup(ctx context.Context, tc taskCtx, repo *Repo, a BackupAr
 	tc.progress(96, "Recording what this version holds")
 	mb, _ := json.MarshalIndent(m, "", "  ")
 	sum, err := r.Restic.Backup(ctx, repo, ResticBackup{Stdin: bytes.NewReader(mb), StdinName: ManifestName,
-		Tags: []string{"task=" + a.Task, "run=" + a.Run, "item=manifest"}}, nil)
+		Tags: []string{"task=" + a.Task, "run=" + a.Run, "item=manifest", server}}, nil)
 	if err != nil {
 		return res, fmt.Errorf("saving the run's manifest: %w", err)
 	}

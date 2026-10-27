@@ -78,6 +78,9 @@ func (r *Root) StartRestore(ctx context.Context, a RestoreArgs) (*Task, error) {
 	if err := r.checkWho(ctx, a.Who, it); err != nil {
 		return nil, err
 	}
+	if a.Who != nil && !r.ours(snap) {
+		return nil, problemf("that version was made by another server")
+	}
 	if len(a.Paths) > 1000 {
 		return nil, problemf("choose at most 1000 files and folders")
 	}
@@ -679,6 +682,10 @@ func (r *Root) restoreSettings(ctx context.Context, tc taskCtx, repo *Repo, snap
 		return nil, errors.New("the settings have no user accounts, so nobody could sign in after restoring them")
 	}
 	if _, err := r.System.StageContents(c); err != nil {
+		return nil, err
+	}
+	// The restored server carries on as the one that made the versions.
+	if err := r.adoptServerID(snap.Tag("server")); err != nil {
 		return nil, err
 	}
 	return &RestoreResult{Restart: true, Notes: []string{"The settings are restored when the server restarts."}}, nil

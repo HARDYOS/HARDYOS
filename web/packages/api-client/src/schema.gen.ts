@@ -6669,6 +6669,10 @@ export interface components {
             /** Format: date-time */
             time: string;
             manifest?: string;
+            /** @description Install id of the server that made the version */
+            server?: string;
+            /** @description Made by this server (people only ever see these; others are another server's sharing the bucket) */
+            thisServer: boolean;
             items: components["schemas"]["BackupVersionItem"][];
         };
         BackupEntry: {

@@ -253,6 +253,34 @@ func TestPersonRestore(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(share, "Photos", "a.jpg")); err == nil {
 		t.Fatal("restored into a folder the person can't open now")
 	}
+
+	// Versions carry the server's id (decision 179): another server sharing
+	// the bucket sees them labelled, and its people can't open them.
+	me := e.root.ServerID()
+	if versions[0].Server != me || !versions[0].ThisServer {
+		t.Fatalf("version's server: %+v (this is %s)", versions[0], me)
+	}
+	other := strings.Repeat("ab", 16)
+	if err := e.root.adoptServerID(other); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := e.root.Versions(ctx, tg.ID); v[0].ThisServer {
+		t.Fatal("another server's version shown as this one's")
+	}
+	if _, err := e.root.Browse(ctx, BrowseArgs{Target: tg.ID, Snapshot: snap, Who: who}); err == nil || !strings.Contains(err.Error(), "another server") {
+		t.Fatalf("a person browsed another server's version: %v", err)
+	}
+	if _, err := e.root.StartRestore(ctx, RestoreArgs{Target: tg.ID, Snapshot: snap, Mode: ModeCopy, Folder: "y", Who: who}); err == nil {
+		t.Fatal("a person restored another server's version")
+	}
+	if _, err := e.root.Browse(ctx, BrowseArgs{Target: tg.ID, Snapshot: snap}); err != nil {
+		t.Fatalf("an administrator can't open another server's version: %v", err)
+	}
+	// The id survives a restart (it's in root's state directory).
+	again := &Root{Dir: e.root.Dir}
+	if again.ServerID() != other {
+		t.Fatal("the server's id wasn't kept")
+	}
 }
 
 func TestBackupVMAndApp(t *testing.T) {

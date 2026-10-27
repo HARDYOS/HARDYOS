@@ -7331,12 +7331,14 @@ components:
         bytes: { type: integer, format: int64 }
     BackupVersion:
       type: object
-      required: [run, task, time, items]
+      required: [run, task, time, items, thisServer]
       properties:
         run: { type: string }
         task: { type: string }
         time: { type: string, format: date-time }
         manifest: { type: string }
+        server: { type: string, description: Install id of the server that made the version }
+        thisServer: { type: boolean, description: "Made by this server (people only ever see these; others are another server's sharing the bucket)" }
         items: { type: array, items: { $ref: "#/components/schemas/BackupVersionItem" } }
     BackupEntry:
       type: object

@@ -593,6 +593,9 @@ func (s *Server) handleFileBackupVersions(w http.ResponseWriter, r *http.Request
 			continue
 		}
 		for _, v := range res.Versions {
+			if !v.ThisServer {
+				continue // another server's (decision 179)
+			}
 			for _, it := range v.Items {
 				if it.Item == "share:"+share && it.Snapshot != "" {
 					out = append(out, FileBackupVersion{Target: t.ID, TargetName: t.Name, Run: v.Run, Time: v.Time, Snapshot: it.Snapshot})
@@ -654,7 +657,7 @@ func (s *Server) handleFileBackupRestore(w http.ResponseWriter, r *http.Request,
 	ok := false
 	for _, v := range vr.Versions {
 		for _, it := range v.Items {
-			ok = ok || (it.Item == "share:"+req.Share && it.Snapshot == req.Snapshot)
+			ok = ok || (v.ThisServer && it.Item == "share:"+req.Share && it.Snapshot == req.Snapshot)
 		}
 	}
 	if !ok {

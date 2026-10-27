@@ -110,6 +110,11 @@ export function RestoreBrowser({ args }: BackupTabProps) {
                       {taskName(v.task)} · <span className="mono">{v.items.length}</span> item{v.items.length === 1 ? "" : "s"}
                     </span>
                     {!v.manifest && <span className="small bk-warn">Incomplete</span>}
+                    {!v.thisServer && (
+                      <span className="small bk-warn" title={v.server ? `Server ${v.server.slice(0, 8)}` : undefined}>
+                        From another server
+                      </span>
+                    )}
                   </button>
                 </li>
               ))}
