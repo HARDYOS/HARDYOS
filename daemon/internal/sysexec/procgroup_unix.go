@@ -30,3 +30,15 @@ func own(cmd *exec.Cmd) {
 	}
 	cmd.WaitDelay = WaitDelay
 }
+
+func ownGroup(cmd *exec.Cmd) { cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} }
+
+// KillGroup kills a started command's process group (OwnGroup).
+func KillGroup(cmd *exec.Cmd) {
+	if cmd.Process == nil {
+		return
+	}
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		_ = cmd.Process.Kill()
+	}
+}

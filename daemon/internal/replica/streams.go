@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
@@ -37,14 +36,7 @@ type execProc struct{ cmd *exec.Cmd }
 
 func (p execProc) Wait() error { return p.cmd.Wait() }
 
-func (p execProc) Kill() {
-	if p.cmd.Process == nil {
-		return
-	}
-	if err := syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL); err != nil {
-		_ = p.cmd.Process.Kill()
-	}
-}
+func (p execProc) Kill() { sysexec.KillGroup(p.cmd) }
 
 // Start implements Starter.
 func (ExecStarter) Start(name string, args []string, stdin io.Reader, stdout, stderr io.Writer) (Proc, error) {
