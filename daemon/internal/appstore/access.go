@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/hardyos/hardyos/daemon/internal/ports"
 )
 
 // Principal kinds for app access.
@@ -274,7 +276,7 @@ func (s *Store) AllocateProxyPort(ctx context.Context, appID string, base int, a
 		}
 	}
 	for port := base; port < base+1000 && port <= 65535; port++ {
-		if taken[port] || avoid[port] {
+		if taken[port] || avoid[port] || ports.Reserved(port) {
 			continue
 		}
 		if _, err := db.ExecContext(ctx, `INSERT INTO app_proxy_ports (app_id, port) VALUES (?, ?)

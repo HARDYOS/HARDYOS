@@ -39,6 +39,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/publish"
 	"github.com/hardyos/hardyos/daemon/internal/replication"
+	"github.com/hardyos/hardyos/daemon/internal/sdlisten"
 	"github.com/hardyos/hardyos/daemon/internal/secretbox"
 	"github.com/hardyos/hardyos/daemon/internal/storage"
 	"github.com/hardyos/hardyos/daemon/internal/store"
@@ -46,6 +47,9 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/updates"
 	"github.com/hardyos/hardyos/daemon/internal/version"
 )
+
+// mailOptions is the mail sign-in socket (from systemd, or -mail-auth-socket).
+var mailOptions api.MailOptions
 
 func main() {
 	var (
@@ -57,9 +61,12 @@ func main() {
 		webRoot     = flag.String("web-root", "/usr/share/hardyos/web", "directory holding the built web desktop (empty to disable)")
 		logLevel    = flag.String("log-level", "info", "debug, info, warn or error")
 		showVersion = flag.Bool("version", false, "print version and exit")
+		mailAuth    = flag.String("mail-auth-socket", "", "listen for the mail server's sign-ins on this Unix socket when systemd didn't pass hardyd-mail-auth.socket (development)")
 		proxies     = flag.String("trusted-proxies", "", "reverse proxies (addresses or CIDRs, comma separated) whose X-Forwarded-For is believed; empty for none")
 	)
 	flag.Parse()
+	// Sockets systemd made for hardyd (the mail sign-in socket).
+	sockets, sockErr := sdlisten.Listeners()
 
 	if *showVersion {
 		v := version.Get()
@@ -67,6 +74,10 @@ func main() {
 		return
 	}
 	log := newLogger(*logLevel)
+	if sockErr != nil {
+		log.Warn("sockets from systemd", "err", sockErr)
+	}
+	mailOptions = api.MailOptions{Listener: sockets["mail-auth"], Socket: *mailAuth}
 	slog.SetDefault(log)
 	trusted, err := clientip.ParseTrusted(*proxies)
 	if err != nil {
@@ -251,13 +262,14 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		// After an update, confirm the new version once it has stayed up for
 		// a minute and report the result.
 		go upd.ConfirmWhenHealthy(ctx, time.Minute)
-		go upd.RunChecks(ctx)                      // look for new versions on GitHub daily
-		go bk.Run(ctx)                             // nightly settings backup
-		go cloud.Run(ctx)                          // cloud backup schedules, prunes and checks
-		go repl.Run(ctx)                           // replication schedule, stale alerts, receiving from other servers
-		go alerts.Run(ctx)                         // alert delivery and quiet-hours summaries
-		go mon.Run(ctx)                            // checks, self-test schedule, UPS, resource history
-		go handler.RunMail(ctx, api.MailOptions{}) // Dovecot's sign-ins, mailboxes for new accounts, mail alerts
+		go upd.RunChecks(ctx) // look for new versions on GitHub daily
+		go bk.Run(ctx)        // nightly settings backup
+		go cloud.Run(ctx)     // cloud backup schedules, prunes and checks
+		go repl.Run(ctx)      // replication schedule, stale alerts, receiving from other servers
+		go alerts.Run(ctx)    // alert delivery and quiet-hours summaries
+		go mon.Run(ctx)       // checks, self-test schedule, UPS, resource history
+		// Dovecot's sign-ins, mailboxes for new accounts, mail alerts.
+		go handler.RunMail(ctx, mailOptions)
 		if p := handler.OIDC(); p != nil {
 			go p.Start(ctx) // sign-in provider: signing keys on schedule, expired sign-ins removed
 		}

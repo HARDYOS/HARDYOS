@@ -1,0 +1,16 @@
+[Unit]
+Description=HardyOS mail sign-in socket (Dovecot asks hardyd)
+Documentation=https://github.com/HARDYOS/HARDYOS/blob/main/docs/mail.md
+# Decision 301: Dovecot's sign-in questions (passwords included) reach
+# hardyd over this socket only. systemd makes it so that only hardyd's user
+# and the dovecot group can connect; no local program can stand in for
+# hardyd by taking a TCP port first. hardyd gets it as "mail-auth".
+
+[Socket]
+ListenStream=/run/hardyos-mail-auth.sock
+SocketUser=hardyd
+SocketGroup=dovecot
+SocketMode=0660
+RemoveOnStop=yes
+FileDescriptorName=mail-auth
+Service=hardyd.service

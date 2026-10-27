@@ -21,6 +21,10 @@ type User struct {
 	Created            string   `json:"created"`
 	LastLogon          int64    `json:"lastLogon"` // unix seconds, 0 = never
 	Builtin            bool     `json:"builtin"`
+	// ObjectGUID and SID stay with the account when it is renamed (mail
+	// ties mailboxes to them).
+	ObjectGUID string `json:"objectGuid,omitempty"`
+	SID        string `json:"sid,omitempty"`
 }
 
 // Group is a domain security group.

@@ -159,13 +159,31 @@ smtpd_tls_protocols = >=TLSv1.2
 smtpd_tls_received_header = yes
 smtp_tls_security_level = may
 smtp_tls_loglevel = 1
-# Limits per sender address.
-smtpd_client_connection_rate_limit = 60
-smtpd_client_message_rate_limit = 120
+# Limits per client address (decision 308).
 anvil_rate_time_unit = 60s
+smtpd_client_connection_count_limit = 10
+smtpd_client_connection_rate_limit = 30
+smtpd_client_message_rate_limit = 60
+smtpd_client_recipient_rate_limit = 200
+smtpd_client_new_tls_session_rate_limit = 60
+smtpd_recipient_limit = 50
+smtpd_soft_error_limit = 3
+smtpd_hard_error_limit = 5
+smtpd_error_sleep_time = 2s
+smtpd_junk_command_limit = 20
+# postscreen in front of smtpd: clients that talk before the greeting (most
+# spam bots) are turned away before they cost a process. No blocklists:
+# nothing is sent to third parties.
+postscreen_greet_action = enforce
+postscreen_dnsbl_sites =
+postscreen_blacklist_action = drop
 MAINCF
-# Take port 25 back from anything else HardyOS's script put there before.
-postconf -M smtp/inet="smtp inet n - y - - smtpd" >/dev/null
+# Port 25: postscreen, then smtpd (takes port 25 back from anything else
+# HardyOS's script put there before).
+postconf -M smtp/inet="smtp inet n - y - 1 postscreen" >/dev/null
+postconf -M smtpd/pass="smtpd pass - - y - - smtpd" >/dev/null
+postconf -M dnsblog/unix="dnsblog unix - - y - 0 dnsblog" >/dev/null
+postconf -M tlsproxy/unix="tlsproxy unix - - y - 0 tlsproxy" >/dev/null
 postfix check
 systemctl enable --now postfix >/dev/null
 systemctl reload postfix
@@ -188,14 +206,25 @@ defaults
     timeout client 30m
     timeout server 30m
 
+# Per client address: at most 20 connections at once and 60 a minute
+# (IPv6 counted by address; HardyOS blocks failed sign-ins per /64).
+backend per_client
+    stick-table type ipv6 size 200k expire 10m store conn_cur,conn_rate(60s)
+
 frontend imaps
     bind :::993 v4v6
+    tcp-request connection track-sc0 src table per_client
+    tcp-request connection reject if { sc0_conn_cur gt 20 } || { sc0_conn_rate gt 60 }
     default_backend hardyos_imaps
 frontend submissions
     bind :::465 v4v6
+    tcp-request connection track-sc0 src table per_client
+    tcp-request connection reject if { sc0_conn_cur gt 20 } || { sc0_conn_rate gt 60 }
     default_backend hardyos_submissions
 frontend submission
     bind :::587 v4v6
+    tcp-request connection track-sc0 src table per_client
+    tcp-request connection reject if { sc0_conn_cur gt 20 } || { sc0_conn_rate gt 60 }
     default_backend hardyos_submission
 
 backend hardyos_imaps
