@@ -8,6 +8,7 @@ import { toast } from "../../ui/toasts";
 import { restore, useVersions } from "./fileApi";
 import { CloseIcon, DownloadIcon, HistoryIcon } from "./icons";
 import { basename, downloadUrl, parent } from "./paths";
+import { CloudVersions } from "./CloudVersions";
 
 /** Kind of snapshot, from its automatic name (hardyos-auto-daily_2026-10-20-0000). */
 function snapshotKind(name: string): string {
@@ -107,6 +108,7 @@ export function VersionsPanel({ share, entry, canWrite, onClose }: { share: stri
             </ul>
           </>
         )}
+        <CloudVersions share={share} entry={entry} canWrite={canWrite} />
       </div>
     </aside>
   );

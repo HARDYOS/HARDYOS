@@ -657,3 +657,53 @@ func (s *Server) shares(ctx context.Context, who Who, ident *Identity) (json.Raw
 	b, _ := json.Marshal(out)
 	return b, nil, nil
 }
+
+// Root is a folder outside the shared folders that hardyd-priv vouches
+// for itself (a copy staged from a cloud backup in a dataset only root can
+// reach): its path and the device of its verified mount.
+type Root struct {
+	Name string
+	Path string
+	Dev  uint64
+}
+
+// readOps are what DoIn runs.
+var readOps = map[string]bool{OpList: true, OpStat: true, OpOpen: true}
+
+// DoIn runs a read-only operation (list, stat, open) as who, beneath in,
+// the same way Do does in a shared folder: the worker is the person, so
+// the permissions on disk (as they were in the backup) decide. The caller
+// has already checked the folder's access rules.
+func (s *Server) DoIn(ctx context.Context, op string, who Who, in Root, a Args) (data json.RawMessage, file *os.File, err error) {
+	log := s.log().With("op", op, "principal", who.Principal, "local", who.Local, "admin", who.Admin, "in", in.Path, "path", a.Path)
+	if !readOps[op] {
+		return nil, nil, errorf(CodeBadArgs, "only reading is possible there")
+	}
+	ident, err := s.identity(ctx, who)
+	if err != nil {
+		log.Warn("file operation refused", "err", err)
+		return nil, nil, err
+	}
+	defer func() { log.Info("file operation (staged)", "uid", ident.UID, "ok", err == nil) }()
+	if _, err := OpPath(op, a.Path, false); err != nil {
+		return nil, nil, err
+	}
+	r := &root{id: "staged", name: in.Name, path: in.Path, dev: in.Dev, level: shares.LevelRead}
+	return s.run(ctx, who, ident, []*root{r}, Request{Op: op, Path: a.Path, ReadOnly: true})
+}
+
+// IdentityOf is the Linux identity who's files are read and written as
+// (for callers outside this package that check permissions themselves).
+func (s *Server) IdentityOf(ctx context.Context, who Who) (*Identity, error) {
+	return s.identity(ctx, who)
+}
+
+// RulesLevel is the access the folder's rules give who (Level), for
+// callers outside this package; "none" when the folder doesn't exist.
+func (s *Server) RulesLevel(ctx context.Context, who Who, share string) (string, error) {
+	r, err := s.findRoot(ctx, who, share)
+	if err != nil {
+		return shares.LevelNone, err
+	}
+	return r.level, nil
+}

@@ -82,7 +82,7 @@ export default function ControlPanel({ args }: AppProps) {
       {section === "notifications" && <Notifications />}
       {section === "updates" && <Updates />}
       {section === "backup" && <Backup />}
-      {section === "replication" && <ReplicationPage initialTab={args?.tab === "accept" ? "accept" : "send"} />}
+      {section === "replication" && <ReplicationPage />}
       {section === "security" && (
         <>
           <PageHeader title="Security" subtitle="Who can do what, and every sign-in and change to the system, newest first." />

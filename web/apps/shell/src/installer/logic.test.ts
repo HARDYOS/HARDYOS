@@ -1,6 +1,6 @@
 import type { Disk } from "@hardy/api-client";
 import { describe, expect, it } from "vitest";
-import { formatCode, hostnameError, ineligibleReason, networkErrors, stepIndex, suggestBootDisks, usernameError } from "./logic";
+import { RESTORE_STEP, formatCode, hostnameError, ineligibleReason, networkErrors, stepIndex, suggestBootDisks, usernameError } from "./logic";
 
 const GB = 1e9;
 function disk(name: string, p: Partial<Disk> = {}): Disk {
@@ -75,5 +75,9 @@ describe("helpers", () => {
   it("maps job messages to steps", () => {
     expect(stepIndex("Creating the boot pool")).toBe(2);
     expect(stepIndex("something else")).toBe(-1);
+    // Restoring from a cloud backup adds a step before the boot loader.
+    expect(stepIndex(RESTORE_STEP)).toBe(-1);
+    expect(stepIndex(RESTORE_STEP, true)).toBe(5);
+    expect(stepIndex("Installing the boot loader", true)).toBe(6);
   });
 });

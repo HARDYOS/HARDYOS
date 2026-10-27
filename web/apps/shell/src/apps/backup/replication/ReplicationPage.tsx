@@ -1,33 +1,25 @@
-import { useState } from "react";
-import { PageHeader } from "../../../ui";
+import { useShell } from "../../../shell";
+import { Button, PageHeader } from "../../../ui";
 import { AcceptPanel } from "./AcceptPanel";
-import { ReplicationTab } from "./ReplicationTab";
-
-const TABS = [
-  ["send", "Send to another server"],
-  ["accept", "Accept from another server"],
-] as const;
 
 /**
- * Control Panel › Replication. A temporary home for the Backup app's
- * Replication tab, with the receiving side next to it.
+ * Control Panel › Replication: the receiving side ("Accept from another
+ * server"). Sending to another server is the Backup app's Replication tab.
  */
-export function ReplicationPage({ initialTab = "send" }: { initialTab?: "send" | "accept" }) {
-  const [tab, setTab] = useState<"send" | "accept">(initialTab);
+export function ReplicationPage() {
+  const shell = useShell();
   return (
     <>
       <PageHeader
         title="Replication"
-        subtitle="Copy shared folders, apps and VMs to another HardyOS server on a schedule, over your network or NetBird. After the first copy, only changes travel."
+        subtitle="Let another HardyOS server send its shared folders, apps and VMs here. To send this server's to another one, use the Backup app."
       />
-      <div className="tabs" role="tablist" aria-label="Replication sections">
-        {TABS.map(([id, label]) => (
-          <button key={id} type="button" role="tab" className="tabs__tab" aria-selected={tab === id} onClick={() => setTab(id)}>
-            {label}
-          </button>
-        ))}
-      </div>
-      {tab === "send" ? <ReplicationTab /> : <AcceptPanel />}
+      <p className="small">
+        <Button variant="ghost" size="sm" onClick={() => shell.openApp("os.hardy.backup", { tab: "replication" })}>
+          Send to another server: open Backup › Replication
+        </Button>
+      </p>
+      <AcceptPanel />
     </>
   );
 }

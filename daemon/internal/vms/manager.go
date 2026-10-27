@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/devices"
@@ -1229,6 +1230,9 @@ func notDefined(err error) bool {
 // define (re)defines the libvirt domain from the spec; devs are prepared
 // devices (only when starting).
 func (m *Manager) define(ctx context.Context, st *stored, devs []devices.Prepared) error {
+	if err := m.checkStateFiles(st); err != nil {
+		return err
+	}
 	p, err := m.paths(ctx, st)
 	if err != nil {
 		return err
@@ -1252,6 +1256,36 @@ func (m *Manager) define(ctx context.Context, st *stored, devs []devices.Prepare
 	// HardyOS starts VMs itself, in order (Autostart).
 	if _, err := m.virsh(ctx, "autostart", "--disable", st.spec.ID); err != nil {
 		m.log().Debug("vms: turning off libvirt's autostart", "id", st.spec.ID, "err", err)
+	}
+	return nil
+}
+
+// checkStateFiles makes sure the files libvirt is handed from the VM's
+// folder (NVRAM, cloud-init seed) and its TPM folder are what root put
+// there: a regular file root owns with one name, a real folder. The
+// folder can come back from a backup, where a link must never make libvirt
+// open, say, a key file.
+func (m *Manager) checkStateFiles(st *stored) error {
+	for _, name := range []string{"nvram.fd", seedFile, "tpm"} {
+		fi, err := os.Lstat(filepath.Join(m.sys(st.dir), name))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if name == "tpm" {
+			if !fi.IsDir() {
+				return fmt.Errorf("the VM's %s isn't a folder", name)
+			}
+			continue
+		}
+		if !fi.Mode().IsRegular() {
+			return fmt.Errorf("the VM's %s isn't a regular file", name)
+		}
+		if sys, ok := fi.Sys().(*syscall.Stat_t); ok && rootfile.Enforce && (sys.Uid != 0 || sys.Nlink != 1) {
+			return fmt.Errorf("the VM's %s isn't root's own file", name)
+		}
 	}
 	return nil
 }

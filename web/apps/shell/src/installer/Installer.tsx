@@ -7,13 +7,13 @@ import { BrandIcon, BrandMark, Wordmark } from "../brand";
 import { AlertIcon, CheckIcon, CpuIcon, DiskIcon, LockIcon, NetworkIcon, RestartIcon } from "../icons";
 import { Alert, Badge, Button, Field, Loading, Progress, Select, Spinner, TextInput } from "../ui";
 import {
-  INSTALL_STEPS,
   MAX_BOOT_DISKS,
   browserTimeZone,
   diskWarning,
   formatCode,
   hostnameError,
   ineligibleReason,
+  installSteps,
   networkErrors,
   stepIndex,
   suggestBootDisks,
@@ -97,9 +97,10 @@ function UnlockScreen() {
 
 /* ---------- Wizard ---------- */
 
-type StepId = "welcome" | "disks" | "settings" | "account" | "review";
+type StepId = "welcome" | "restore" | "disks" | "settings" | "account" | "review";
 const STEPS: { id: StepId; label: string }[] = [
   { id: "welcome", label: "Welcome" },
+  { id: "restore", label: "Restore from backup" },
   { id: "disks", label: "Boot disks" },
   { id: "settings", label: "Name and network" },
   { id: "account", label: "Administrator" },
@@ -116,6 +117,12 @@ interface Form {
   username: string;
   password: string;
   confirm: string;
+  /** Restore from a cloud backup (the recovery kit and the bucket's keys). */
+  restore: boolean;
+  kit: string;
+  accessKey: string;
+  secretKey: string;
+  run: string;
 }
 
 function Wizard({ version, lastFailure }: { version: string; lastFailure?: Job }) {
@@ -131,6 +138,11 @@ function Wizard({ version, lastFailure }: { version: string; lastFailure?: Job }
     username: "",
     password: "",
     confirm: "",
+    restore: false,
+    kit: "",
+    accessKey: "",
+    secretKey: "",
+    run: "",
   });
   const [suggested, setSuggested] = useState(false);
   useEffect(() => {
@@ -156,6 +168,7 @@ function Wizard({ version, lastFailure }: { version: string; lastFailure?: Job }
   };
   const valid: Record<StepId, boolean> = {
     welcome: true,
+    restore: !form.restore || !!form.run,
     disks: !errors.disks,
     settings: !errors.hostname && Object.keys(errors.network).length === 0,
     account: !errors.username && !errors.password && !errors.confirm,
@@ -201,6 +214,8 @@ function Wizard({ version, lastFailure }: { version: string; lastFailure?: Job }
             </Alert>
           ) : step === "welcome" ? (
             <Welcome hw={hw.data} version={version} />
+          ) : step === "restore" ? (
+            <RestoreStep form={form} set={set} />
           ) : step === "disks" ? (
             <DisksStep hw={hw.data} selected={form.disks} onChange={(disks) => set({ disks })} />
           ) : step === "settings" ? (
@@ -463,6 +478,7 @@ function ReviewStep({
             plan,
             admin: { username: form.username, displayName: form.displayName, password: form.password },
             confirmWipe: true,
+            restore: form.restore ? { kit: form.kit, accessKey: form.accessKey, secretKey: form.secretKey, run: form.run } : undefined,
           },
         }),
       ),
@@ -522,6 +538,16 @@ function ReviewStep({
         </SummaryRow>
         <SummaryRow label="Administrator" onEdit={() => onEdit("account")}>
           {form.displayName ? `${form.displayName} (${form.username})` : form.username}
+          {form.restore && <span className="small muted"> (used only if the backup's accounts can't be restored)</span>}
+        </SummaryRow>
+        <SummaryRow label="Restore" onEdit={() => onEdit("restore")}>
+          {form.restore ? (
+            <>
+              Settings, accounts and the domain from the backup version <span className="mono">{form.run}</span>; shared folders, apps and VMs from Backup after the first start
+            </>
+          ) : (
+            "A fresh server"
+          )}
         </SummaryRow>
       </dl>
       {check.isPending && <Loading label="Checking the disks…" />}
@@ -568,7 +594,9 @@ function useElapsed(since?: string | null) {
 }
 
 function Installing({ job }: { job: Job }) {
-  const current = stepIndex(job.message ?? "");
+  const restoring = !!(job.params as { restore?: boolean } | null)?.restore;
+  const steps = installSteps(restoring);
+  const current = stepIndex(job.message ?? "", restoring);
   const elapsed = useElapsed(job.startedAt ?? job.createdAt);
   return (
     <div className="lock-screen wallpaper">
@@ -582,7 +610,7 @@ function Installing({ job }: { job: Job }) {
           <span className="mono">{elapsed}</span>
         </div>
         <ol className="inst__progress-steps">
-          {INSTALL_STEPS.map((s, i) => (
+          {steps.map((s, i) => (
             <li key={s} className={i < current ? "is-done" : i === current ? "is-current" : ""}>
               <span className="inst__progress-dot">{i < current ? <CheckIcon size={12} /> : i === current ? <Spinner size={12} /> : null}</span>
               {s}
@@ -648,5 +676,75 @@ function Finished({ job }: { job: Job }) {
         )}
       </div>
     </div>
+  );
+}
+
+/** "Restore from backup": a recovery kit and the bucket's keys open the backups; the chosen version's settings come back at the first start. */
+function RestoreStep({ form, set }: { form: Form; set: (p: Partial<Form>) => void }) {
+  const probe = useMutation({
+    mutationFn: () => unwrap(api.POST("/installer/cloud/probe", { body: { kit: form.kit, accessKey: form.accessKey, secretKey: form.secretKey } })),
+    onSuccess: (r) => set({ run: r.versions[0]?.run ?? "" }),
+  });
+  const versions = probe.data?.versions ?? [];
+  async function loadFile(f: File | undefined) {
+    if (f) set({ kit: await f.text(), run: "" });
+  }
+  return (
+    <>
+      <StepHeader title="Restore from backup">
+        Rebuilding a server that was lost? Open its cloud backup here: this server gets its settings, accounts and domain back at the first start, and the Backup app then
+        brings back the shared folders, apps and virtual machines. Skip this for a new server.
+      </StepHeader>
+      <div className="inst__choice" role="radiogroup" aria-label="Install as">
+        <label className={!form.restore ? "is-on" : ""}>
+          <input type="radio" checked={!form.restore} onChange={() => set({ restore: false, run: "" })} /> A fresh server
+        </label>
+        <label className={form.restore ? "is-on" : ""}>
+          <input type="radio" checked={form.restore} onChange={() => set({ restore: true })} /> Restore from a cloud backup
+        </label>
+      </div>
+      {form.restore && (
+        <div className="inst__restore">
+          <Field label="Recovery kit" hint="Paste the whole file, or open it.">
+            {(id) => (
+              <>
+                <textarea id={id} className="input mono inst__kit" rows={5} value={form.kit} spellCheck={false} onChange={(e) => set({ kit: e.target.value, run: "" })} />
+                <input type="file" accept=".txt,text/plain" aria-label="Open the recovery kit file" onChange={(e) => void loadFile(e.target.files?.[0])} />
+              </>
+            )}
+          </Field>
+          <div className="inst__row2">
+            <Field label="Access key (B2: key ID)">
+              {(id) => <TextInput id={id} className="input mono" autoComplete="off" value={form.accessKey} onChange={(e) => set({ accessKey: e.target.value.trim(), run: "" })} />}
+            </Field>
+            <Field label="Secret key (B2: application key)">
+              {(id) => <TextInput id={id} type="password" className="input mono" autoComplete="off" value={form.secretKey} onChange={(e) => set({ secretKey: e.target.value.trim(), run: "" })} />}
+            </Field>
+          </div>
+          <Button onClick={() => probe.mutate()} busy={probe.isPending} disabled={!form.kit || !form.accessKey || !form.secretKey}>
+            Find the backups
+          </Button>
+          {probe.error && <Alert tone="bad">{errorMessage(probe.error)}</Alert>}
+          {probe.isSuccess && versions.length === 0 && <Alert tone="warn">There's no version with settings in these backups.</Alert>}
+          {versions.length > 0 && (
+            <fieldset className="inst__versions">
+              <legend>Version to restore</legend>
+              {versions.map((v) => (
+                <label key={v.run} className={form.run === v.run ? "is-on" : ""}>
+                  <input type="radio" name="run" checked={form.run === v.run} onChange={() => set({ run: v.run })} />
+                  <span>
+                    <strong>{new Date(v.time).toLocaleString()}</strong>
+                    <span className="small muted">
+                      {v.hostname ? `${v.hostname} · ` : ""}
+                      {v.items.length} items
+                    </span>
+                  </span>
+                </label>
+              ))}
+            </fieldset>
+          )}
+        </div>
+      )}
+    </>
   );
 }
