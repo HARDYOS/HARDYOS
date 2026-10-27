@@ -60,6 +60,9 @@ type Restic struct {
 	// KillGrace is how long a cancelled restic gets to remove its lock
 	// before its process group is killed (default 15 s).
 	KillGrace time.Duration
+	// Sandbox, when set, runs restic isolated (sandbox_linux.go); hardyd-priv
+	// always sets it.
+	Sandbox *Sandbox
 }
 
 func (r *Restic) killGrace() time.Duration {
@@ -93,6 +96,10 @@ type call struct {
 	lines func([]byte)
 	// upload/download limits apply.
 	limit bool
+	// writable is where restic may write besides its cache (a restore's
+	// staging folder); caps the capabilities it keeps (sandbox only).
+	writable []string
+	caps     []int
 }
 
 // RunError is restic failing.
@@ -178,33 +185,44 @@ func (r *Restic) run(ctx context.Context, repo *Repo, c call) ([]byte, error) {
 			global = append(global, "--limit-download", strconv.Itoa(repo.Target.LimitDownloadKiB))
 		}
 	}
-	proxy := ""
-	var eg *egressProxy
-	if rules, err := rulesFor(&repo.Target); err != nil {
+	rules, err := rulesFor(&repo.Target)
+	if err != nil {
 		return nil, err
-	} else if rules != nil {
-		res := r.Resolver
-		if res == nil {
-			res = defaultResolver{}
-		}
-		eg, err = startEgress(rules, res, r.TestAllow)
-		if err != nil {
-			return nil, err
-		}
-		defer eg.Close()
-		proxy = eg.URL()
 	}
+	var eg *egressProxy
+	defer func() {
+		if eg != nil {
+			eg.Close()
+		}
+	}()
 
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
 	defer pr.Close()
-	cmd := exec.Command(r.binary(), append(global, c.args...)...)
-	cmd.Env = r.env(repo, proxy)
+	var cmd *exec.Cmd
+	if r.Sandbox != nil {
+		rw := append([]string{r.cacheDir()}, c.writable...)
+		if repo.Target.Kind == KindLocal {
+			// A folder repository (tests and development only).
+			if err := os.MkdirAll(repo.Target.Path, 0o700); err != nil {
+				pw.Close()
+				return nil, err
+			}
+			rw = append(rw, repo.Target.Path)
+		}
+		cmd, err = r.Sandbox.command(r.binary(), append(global, c.args...), rw, c.caps)
+		if err != nil {
+			pw.Close()
+			return nil, err
+		}
+	} else {
+		cmd = exec.Command(r.binary(), append(global, c.args...)...)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
 	cmd.Dir = r.cacheDir()
 	cmd.ExtraFiles = []*os.File{pr} // fd 3: the repository key
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdin = c.stdin
 	var out bytes.Buffer
 	var stdout io.ReadCloser
@@ -222,7 +240,31 @@ func (r *Restic) run(ctx context.Context, repo *Repo, c call) ([]byte, error) {
 	}
 	var errb bytes.Buffer
 	cmd.Stderr = &limitWriter{w: &errb, n: 256 << 10}
-	if err := cmd.Start(); err != nil {
+	// The proxy's socket and restic start together: in the sandbox both
+	// in restic's own network namespace.
+	start := func() error {
+		proxy := ""
+		if rules != nil {
+			res := r.Resolver
+			if res == nil {
+				res = defaultResolver{}
+			}
+			p, err := startEgress(rules, res, r.TestAllow)
+			if err != nil {
+				return err
+			}
+			eg = p
+			proxy = p.URL()
+		}
+		cmd.Env = r.env(repo, proxy)
+		return cmd.Start()
+	}
+	if r.Sandbox != nil {
+		err = inNewNetns(start)
+	} else {
+		err = start()
+	}
+	if err != nil {
 		pw.Close()
 		return nil, fmt.Errorf("starting restic: %w", err)
 	}
@@ -392,7 +434,11 @@ func (r *Restic) Backup(ctx context.Context, repo *Repo, a ResticBackup, progres
 	}
 	var sum *Summary
 	var lerr error
-	_, err := r.run(ctx, repo, call{args: args, stdin: a.Stdin, limit: true, lines: func(l []byte) {
+	caps := capsRead
+	if a.Stdin != nil {
+		caps = capsNone
+	}
+	_, err := r.run(ctx, repo, call{args: args, stdin: a.Stdin, limit: true, caps: caps, lines: func(l []byte) {
 		var m struct {
 			Type       string  `json:"message_type"`
 			Percent    float64 `json:"percent_done"`
@@ -556,7 +602,7 @@ func (r *Restic) Restore(ctx context.Context, repo *Repo, snap, src, target stri
 		what += ":" + src
 	}
 	args = append(args, "--", what)
-	_, err := r.run(ctx, repo, call{args: args, limit: true, lines: func(l []byte) {
+	_, err := r.run(ctx, repo, call{args: args, limit: true, writable: []string{target}, caps: capsRestore, lines: func(l []byte) {
 		var m struct {
 			Type       string  `json:"message_type"`
 			Percent    float64 `json:"percent_done"`

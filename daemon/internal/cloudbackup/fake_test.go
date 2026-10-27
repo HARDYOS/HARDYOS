@@ -463,7 +463,7 @@ func newEnv(t *testing.T) *env {
 		apps: &fakeApps{vol: vol, srcs: map[string]apps.BackupSource{}, dirs: map[string]string{}}}
 	e.files = &fakeFiles{shares: sh, level: shares.LevelWrite}
 	e.root = &Root{
-		Restic:     &Restic{Binary: bin, CacheDir: filepath.Join(base, "cache")},
+		Restic:     &Restic{Binary: bin, CacheDir: filepath.Join(base, "cache"), Sandbox: testSandbox(t)},
 		Vol:        vol,
 		Shares:     sh,
 		System:     e.system,

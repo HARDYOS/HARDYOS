@@ -48,6 +48,11 @@ func main() {
 	if len(os.Args) == 2 && os.Args[1] == fileworker.Subcommand {
 		fileworker.ChildMain()
 	}
+	// restic's sandbox: the same binary sets up restic's mount namespace and
+	// capabilities, then executes restic (internal/cloudbackup).
+	if len(os.Args) > 1 && os.Args[1] == cloudbackup.SandboxArg {
+		os.Exit(cloudbackup.SandboxMain(os.Args[1:]))
+	}
 	var (
 		socket      = flag.String("socket", priv.DefaultSocket, "unix socket path")
 		allowUser   = flag.String("allow-user", "hardyd", "user allowed to connect besides root")
@@ -203,7 +208,7 @@ func main() {
 		// the settings; the destination an installer's "Restore from
 		// backup" left is taken over now (after the settings restore above).
 		cb := &cloudbackup.Root{
-			Restic: &cloudbackup.Restic{}, Vol: &cloudbackup.ZFS{Runner: sysexec.Exec{}},
+			Restic: &cloudbackup.Restic{Sandbox: &cloudbackup.Sandbox{}}, Vol: &cloudbackup.ZFS{Runner: sysexec.Exec{}},
 			Shares: shm, Apps: am, VMs: vmm, System: bk, Log: log,
 			Key: func() ([]byte, error) { return priv.RootKeyFor(zfs.KeyDir, "cloud-backup") },
 		}
@@ -235,7 +240,7 @@ func main() {
 		_, _ = sysexec.Exec{}.Run(context.Background(), nil, "agetty", "--reload")
 		// "Restore from backup": list a repository's versions and stage one's
 		// settings into the new system.
-		priv.RegisterInstallCloud(s, &cloudbackup.Root{Restic: &cloudbackup.Restic{}, Log: log}, "/target")
+		priv.RegisterInstallCloud(s, &cloudbackup.Root{Restic: &cloudbackup.Restic{Sandbox: &cloudbackup.Sandbox{}}, Log: log}, "/target")
 		priv.RegisterInstaller(s, &install.Installer{
 			Runner:  sysexec.Exec{},
 			Root:    "/",

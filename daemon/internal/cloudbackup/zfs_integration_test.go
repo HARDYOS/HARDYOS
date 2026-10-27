@@ -98,7 +98,7 @@ func TestZFSIntegrationCloudBackup(t *testing.T) {
 	runDir := filepath.Join(dir, "run")
 	key := bytes.Repeat([]byte{7}, 32)
 	r := &Root{
-		Restic:     &Restic{Binary: bin, CacheDir: filepath.Join(dir, "cache")},
+		Restic:     &Restic{Binary: bin, CacheDir: filepath.Join(dir, "cache"), Sandbox: testSandbox(t)},
 		Vol:        &ZFS{Runner: sysexec.Exec{}, RunDir: runDir},
 		Shares:     &zfsShares{id: "family", dataset: pool + "/shares/family", path: share},
 		Dir:        filepath.Join(dir, "state"),

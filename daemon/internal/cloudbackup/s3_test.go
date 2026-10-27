@@ -190,9 +190,15 @@ func TestS3CredentialsAndEgress(t *testing.T) {
 		t.Fatal("a loopback endpoint was accepted with allow LAN")
 	}
 	tgt.AllowLAN = false
-	// The test lets loopback through on both checks (save and proxy).
+	// The test lets loopback through on both checks (save and proxy), for
+	// a name (the fake's certificate is for example.com): restic, like any
+	// Go program, never uses a proxy for a loopback address, and in the
+	// sandbox it can reach nothing but the proxy.
 	allow := func(a netip.Addr) bool { return a.IsLoopback() }
 	e.root.TestAllow, e.root.Restic.TestAllow = allow, allow
+	res0 := staticResolver{"example.com": {netip.MustParseAddr("127.0.0.1")}}
+	e.root.Resolver, e.root.Restic.Resolver = res0, res0
+	tgt.Endpoint = "https://example.com:" + port
 
 	// A wrong access key: the save fails, nothing is kept.
 	if _, err := e.root.Save(ctx, SaveArgs{Target: tgt, AccessKey: "AKIDWRONG0000", SecretKey: "secret-secret"}); err == nil {
@@ -310,6 +316,10 @@ func TestAddrAllowed(t *testing.T) {
 		{"::ffff:127.0.0.1", true, false},
 		{"64:ff9b::7f00:1", true, false},
 		{"224.0.0.1", true, false},
+		{"::7f00:1", true, false},
+		{"fec0::1", true, false},
+		{"100::1", true, false},
+		{"2001:db8::1", true, false},
 	} {
 		err := AddrAllowed(netip.MustParseAddr(c.a), c.lan)
 		if (err == nil) != c.ok {
@@ -350,5 +360,68 @@ func TestTargetValidation(t *testing.T) {
 	}
 	if CheckCredentials(KindS3, Credentials{AccessKey: "AK ID", SecretKey: "x"}) == nil {
 		t.Error("a key with a space was accepted")
+	}
+}
+
+func TestEgressRulesAndOwnAddresses(t *testing.T) {
+	tg := Target{ID: "aws", Name: "AWS", Kind: KindS3, Endpoint: "https://s3.us-east-1.amazonaws.com", Bucket: "my-bucket"}
+	rules, err := rulesFor(&tg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	match := func(h string, port int) bool {
+		for _, r := range rules {
+			if r.matches(h, port) {
+				return true
+			}
+		}
+		return false
+	}
+	for h, want := range map[string]bool{
+		"s3.us-east-1.amazonaws.com":                    true,
+		"my-bucket.s3.us-east-1.amazonaws.com":          true, // virtual-host style
+		"MY-BUCKET.s3.us-east-1.amazonaws.com":          true,
+		"other.s3.us-east-1.amazonaws.com":              false,
+		"x.my-bucket.s3.us-east-1.amazonaws.com":        false,
+		"my-bucket.s3.us-east-1.amazonaws.com.evil.com": false,
+	} {
+		if match(h, 443) != want {
+			t.Errorf("%s: want %v", h, want)
+		}
+	}
+	if match("my-bucket.s3.us-east-1.amazonaws.com", 80) {
+		t.Error("another port")
+	}
+	ip := Target{ID: "m", Name: "M", Kind: KindS3, Endpoint: "https://203.0.113.10:9000", Bucket: "b-1"}
+	if rules, _ := rulesFor(&ip); len(rules) != 1 {
+		t.Errorf("an IP endpoint has no bucket host: %+v", rules)
+	}
+
+	// The server's own addresses are never a destination, LAN or not.
+	old := ownAddrs
+	ownAddrs = func() []netip.Addr {
+		return []netip.Addr{netip.MustParseAddr("192.168.1.5"), netip.MustParseAddr("8.8.4.4")}
+	}
+	t.Cleanup(func() { ownAddrs = old })
+	for _, a := range []string{"192.168.1.5", "8.8.4.4"} {
+		lan := Target{ID: "m", Name: "M", Kind: KindS3, Endpoint: "https://" + a + ":9000", Bucket: "bkt", AllowLAN: true}
+		if err := CheckEndpoint(context.Background(), &lan, staticResolver{}, nil); err == nil || !strings.Contains(err.Error(), "own address") {
+			t.Errorf("%s: %v", a, err)
+		}
+	}
+	eg, err := startEgress([]hostRule{{host: "nas.example", port: 9000, allowLAN: true}}, staticResolver{"nas.example": {netip.MustParseAddr("192.168.1.5")}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eg.Close()
+	conn, err := net.Dial("tcp", eg.ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "CONNECT nas.example:9000 HTTP/1.1\r\nHost: nas.example:9000\r\n\r\n")
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil || resp.StatusCode != http.StatusForbidden || !strings.Contains(eg.lastRefusal(), "own address") {
+		t.Fatalf("own address through the proxy: %v %v %q", resp, err, eg.lastRefusal())
 	}
 }

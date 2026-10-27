@@ -36,7 +36,39 @@ var (
 	nat64loc  = netip.MustParsePrefix("64:ff9b:1::/48")
 	sixToFour = netip.MustParsePrefix("2002::/16")
 	teredo    = netip.MustParsePrefix("2001::/32")
+	v4compat  = netip.MustParsePrefix("::/96")
+	siteLocal = netip.MustParsePrefix("fec0::/10")
+	discard6  = netip.MustParsePrefix("100::/64")
+	doc6      = netip.MustParsePrefix("2001:db8::/32")
+	doc6new   = netip.MustParsePrefix("3fff::/20")
 )
+
+// ownAddrs lists this server's own addresses (overridden in tests).
+var ownAddrs = func() []netip.Addr {
+	l, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	var out []netip.Addr
+	for _, a := range l {
+		if p, err := netip.ParsePrefix(a.String()); err == nil {
+			out = append(out, p.Addr().Unmap())
+		}
+	}
+	return out
+}
+
+// isOwn says whether a is one of this server's addresses: its own services
+// (the web UI, SMB, the API) are never a backup destination.
+func isOwn(a netip.Addr) bool {
+	a = a.Unmap()
+	for _, o := range ownAddrs() {
+		if o == a {
+			return true
+		}
+	}
+	return false
+}
 
 // AddrAllowed says whether restic may connect to a. Loopback, link-local
 // (cloud metadata services), multicast, unspecified, reserved and
@@ -48,6 +80,7 @@ func AddrAllowed(a netip.Addr, allowLAN bool) error {
 	case !a.IsValid(), a.IsUnspecified(), a.IsLoopback(), a.IsLinkLocalUnicast(), a.IsLinkLocalMulticast(),
 		a.IsMulticast(), a.IsInterfaceLocalMulticast(), thisNet.Contains(a), reserved.Contains(a), ietf.Contains(a),
 		bench.Contains(a), nat64.Contains(a), nat64loc.Contains(a), sixToFour.Contains(a), teredo.Contains(a),
+		v4compat.Contains(a), siteLocal.Contains(a), discard6.Contains(a), doc6.Contains(a), doc6new.Contains(a),
 		a == netip.AddrFrom4([4]byte{255, 255, 255, 255}):
 		return fmt.Errorf("%s is not an address backups may be sent to", a)
 	case a.IsPrivate(), cgnat.Contains(a):
@@ -85,7 +118,13 @@ func rulesFor(t *Target) ([]hostRule, error) {
 		if err != nil {
 			return nil, err
 		}
-		return []hostRule{{host: host, port: port, allowLAN: t.AllowLAN}}, nil
+		rules := []hostRule{{host: host, port: port, allowLAN: t.AllowLAN}}
+		// Virtual-host-style requests (AWS: <bucket>.s3.<region>.amazonaws.com)
+		// go to exactly this bucket's name under the endpoint's host.
+		if net.ParseIP(host) == nil && !strings.Contains(t.Bucket, ".") && s3BucketRE.MatchString(t.Bucket) {
+			rules = append(rules, hostRule{host: t.Bucket + "." + host, port: port, allowLAN: t.AllowLAN})
+		}
+		return rules, nil
 	case KindB2:
 		return []hostRule{{suffix: ".backblazeb2.com", port: 443}}, nil
 	}
@@ -228,6 +267,9 @@ func (p *egressProxy) handle(c net.Conn) {
 	var why error
 	for _, a := range addrs {
 		err := AddrAllowed(a, rule.allowLAN)
+		if err == nil && isOwn(a) {
+			err = fmt.Errorf("%s is this server's own address", a)
+		}
 		if err != nil && p.testAllow != nil && p.testAllow(a) {
 			err = nil
 		}
@@ -292,7 +334,11 @@ func CheckEndpoint(ctx context.Context, t *Target, r Resolver, testAllow func(ne
 		}
 	}
 	for _, a := range addrs {
-		if err := AddrAllowed(a, t.AllowLAN); err != nil && (testAllow == nil || !testAllow(a)) {
+		err := AddrAllowed(a, t.AllowLAN)
+		if err == nil && isOwn(a) {
+			err = fmt.Errorf("%s is this server's own address", a)
+		}
+		if err != nil && (testAllow == nil || !testAllow(a)) {
 			return &Problem{Msg: err.Error()}
 		}
 	}
