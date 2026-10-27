@@ -423,7 +423,7 @@ type AccountSync struct {
 func (a AccountSync) Changed() bool { return len(a.Created) > 0 }
 
 // SyncAccounts gives every domain account a mailbox and follows accounts
-// being turned off, on or deleted (decision 237).
+// being turned off, on or deleted (decision 244).
 func (s *Service) SyncAccounts(ctx context.Context) (*AccountSync, error) {
 	out := &AccountSync{Created: []string{}, Disabled: []string{}, Deleted: []string{}, Restored: []string{}}
 	if s.Dir == nil {

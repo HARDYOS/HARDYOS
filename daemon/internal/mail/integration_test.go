@@ -9,7 +9,7 @@
 //	go test -c -tags mailintegration -o mail.test ./internal/mail
 //	sudo ./mail.test -test.v
 //
-// It checks what decision 230-240 promise: no open relay on any port,
+// It checks what decisions 240, 241 and 246 promise: no open relay on any port,
 // submission only with TLS and a sign-in, senders only their own
 // addresses, the relay port only from the VPS, PROXY headers only from the
 // VPS, internet brute force blocked without locking out the LAN, spam to

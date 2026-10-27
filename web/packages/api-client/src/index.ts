@@ -254,6 +254,28 @@ export type VMCreateRequest = S["VMCreateRequest"];
 export type VMUpdateRequest = S["VMUpdateRequest"];
 export type VMConsoleSession = S["VMConsoleSession"];
 
+// Versioned cloud backups (phase 6 part A).
+export type BackupItem = S["BackupItem"];
+export type BackupSchedule = S["BackupSchedule"];
+export type BackupRetention = S["BackupRetention"];
+export type BackupMaintenance = S["BackupMaintenance"];
+export type BackupTarget = S["BackupTarget"];
+export type BackupTargetRequest = S["BackupTargetRequest"];
+export type BackupRun = S["BackupRun"];
+export type BackupTask = S["BackupTask"];
+export type BackupTaskInput = S["BackupTaskInput"];
+export type BackupRebuildOffer = S["BackupRebuildOffer"];
+export type CloudBackupOverview = S["CloudBackupOverview"];
+export type RecoveryKit = S["RecoveryKit"];
+export type BackupVersion = S["BackupVersion"];
+export type BackupVersionItem = S["BackupVersionItem"];
+export type BackupEntry = S["BackupEntry"];
+export type BackupRestoreRequest = S["BackupRestoreRequest"];
+export type BackupRebuildRequest = S["BackupRebuildRequest"];
+export type FileBackupVersion = S["FileBackupVersion"];
+export type InstallRestore = S["InstallRestore"];
+export type InstallBackupVersion = S["InstallBackupVersion"];
+
 // Replication between HardyOS servers (phase 6 part B).
 export type ReplicationKind = S["ReplicationKind"];
 export type ReplicationItem = S["ReplicationItem"];

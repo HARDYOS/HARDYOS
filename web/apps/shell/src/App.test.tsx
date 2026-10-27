@@ -216,6 +216,11 @@ describe("App", () => {
     expect(await screen.findByText("Install HardyOS 0.1.0")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
 
+    // A fresh server by default (no restore from a cloud backup).
+    expect(await screen.findByRole("heading", { name: "Restore from backup" })).toBeTruthy();
+    expect((screen.getByRole("radio", { name: "A fresh server" }) as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
     // The two small SSDs are suggested; the live USB can't be picked.
     expect(await screen.findByText("Choose the boot disks")).toBeTruthy();
     const boxes = screen.getAllByRole("checkbox") as HTMLInputElement[];

@@ -1,0 +1,39 @@
+#!/bin/sh
+# Cloud backups: restic, the release binary pinned by version and SHA-256
+# (decision 160), installed as /usr/lib/hardyos/restic. hardyd-priv runs only
+# that path, through named operations (daemon/internal/cloudbackup).
+#
+# Why not Debian's package: HardyOS relies on restic's JSON output, exit
+# codes (10 = no repository, 11 = locked, 12 = wrong key, from 0.17) and
+# `--stdin` with a file name; Debian 13's 0.18.0 would do, but CI (Ubuntu)
+# would test another one. CI tests exactly this binary (the same pin is in
+# .github/workflows/ci.yml). A release binary is one static file with no
+# dependencies, verified here against the hash in this repository, so the
+# image never gets a restic nobody tested.
+#
+# To move to a newer restic: change RESTIC_VERSION and every hash below
+# (from the release's SHA256SUMS, checked against its signature), and the
+# same pin in CI.
+set -e
+
+RESTIC_VERSION=0.18.1
+arch=$(dpkg --print-architecture)
+case "$arch" in
+  amd64) sum=680838f19d67151adba227e1570cdd8af12c19cf1735783ed1ba928bc41f363d ;;
+  arm64) sum=87f53fddde38764095e9c058a3b31834052c37e5826d2acf34e18923c006bd45 ;;
+  *) echo "ERROR: no pinned restic for $arch" >&2; exit 1 ;;
+esac
+
+file="restic_${RESTIC_VERSION}_linux_${arch}.bz2"
+tmp=$(mktemp -d)
+curl -fsSL --retry 3 -o "$tmp/$file" "https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/${file}"
+echo "$sum  $tmp/$file" | sha256sum -c -
+bunzip2 "$tmp/$file"
+install -D -o root -g root -m 0755 "$tmp/restic_${RESTIC_VERSION}_linux_${arch}" /usr/lib/hardyos/restic
+rm -rf "$tmp"
+
+# Its cache: root only (hardyd-priv makes it again if it's gone).
+install -d -o root -g root -m 0700 /var/cache/hardyos-restic
+
+/usr/lib/hardyos/restic version
+echo "restic $RESTIC_VERSION installed at /usr/lib/hardyos/restic"

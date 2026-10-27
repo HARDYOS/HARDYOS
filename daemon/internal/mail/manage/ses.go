@@ -18,7 +18,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/notify"
 )
 
-// Amazon SES (decision 234): all outgoing mail goes through SES's SMTP
+// Amazon SES (decision 242): all outgoing mail goes through SES's SMTP
 // interface. One IAM access key does both jobs: its SMTP password is
 // derived from the secret key (AWS's documented conversion), and the SES
 // API v2 is asked about the domains (verification, Easy DKIM tokens,

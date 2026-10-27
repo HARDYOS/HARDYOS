@@ -347,6 +347,21 @@ func (r *Root) Stage(src, password string) (*Staged, error) {
 	if err != nil {
 		return nil, err
 	}
+	return r.StageContents(c)
+}
+
+// StageContents stages an unpacked backup (checked again here: only the
+// fixed list of paths) for the next start. Cloud backups use it for a
+// settings restore from a repository.
+func (r *Root) StageContents(c *Contents) (*Staged, error) {
+	if c == nil || c.DB == nil {
+		return nil, errors.New("the backup has no database")
+	}
+	for _, f := range c.Files {
+		if !AllowedPath(f.Path) {
+			return nil, fmt.Errorf("the backup holds %s, which HardyOS never restores", f.Path)
+		}
+	}
 	pending := r.p(PendingDir)
 	if err := os.RemoveAll(pending); err != nil {
 		return nil, err

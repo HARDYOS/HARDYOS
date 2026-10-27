@@ -17,7 +17,7 @@ import (
 	"golang.org/x/crypto/acme"
 )
 
-// The mail server's certificate (decision 235): Let's Encrypt with the
+// The mail server's certificate (decision 243): Let's Encrypt with the
 // DNS-01 challenge answered through Cloudflare. Mail apps connect to the
 // VPS's address, which forwards TCP home, so HTTP-01 would have to go
 // through the VPS; DNS-01 needs nothing there and works while home is

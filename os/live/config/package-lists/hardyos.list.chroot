@@ -4,6 +4,8 @@ dbus
 sudo
 ca-certificates
 curl
+# Unpacking the pinned restic release (0160-restic hook)
+bzip2
 jq
 less
 nano

@@ -20,7 +20,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 )
 
-// Sign-in for the mail server (decision 232). Dovecot never checks a
+// Sign-in for the mail server (decision 241). Dovecot never checks a
 // password itself: every IMAP and SMTP sign-in becomes an OAuth2 password
 // grant to hardyd on 127.0.0.1 (passdb oauth2), and every attempt is first
 // put to hardyd's auth policy endpoint with the client's real address
@@ -48,7 +48,7 @@ func Inside(a netip.Addr) bool {
 
 var cgnat = netip.MustParsePrefix("100.64.0.0/10")
 
-// Throttle limits failed mail sign-ins (decision 233). Sign-ins from the
+// Throttle limits failed mail sign-ins (decision 241). Sign-ins from the
 // internet: per address 10 failures in 15 minutes block that address for
 // an hour; per mailbox they're slowed down (doubling delays). Sign-ins from
 // inside are only ever slowed down, per address, and never share a bucket

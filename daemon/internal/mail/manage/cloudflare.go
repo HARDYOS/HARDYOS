@@ -15,7 +15,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/notify"
 )
 
-// Cloudflare DNS (decision 236, optional): with an API token limited to
+// Cloudflare DNS (decision 243, optional): with an API token limited to
 // "Zone › DNS › Edit" on the mail domains' zones, HardyOS publishes the
 // records it shows and answers ACME DNS-01 challenges for the mail
 // server's certificate. The token is sealed in hardyd's database and never

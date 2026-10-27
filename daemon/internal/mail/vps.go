@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-// The VPS (decision 231). Mail from the internet arrives at the VPS's
+// The VPS (decision 240). Mail from the internet arrives at the VPS's
 // Postfix on port 25, which relays it to HardyOS over NetBird and queues
 // it for up to 14 days while home is offline (it accepts only recipients
 // it has verified with HardyOS before: address verification, cached for a

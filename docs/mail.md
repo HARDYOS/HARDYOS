@@ -8,7 +8,7 @@ app in the dock is where each person reads mail (webmail) and finds how to
 set up their devices.
 
 Architecture: [architecture.md › Mail server](architecture.md#mail-server);
-decisions 230-249.
+decisions 239-249.
 
 ```
                       internet
@@ -226,11 +226,13 @@ connection and rate limits.
 ## Backups
 
 Mail lives in `<pool>/mail` (mailboxes, calendars, DKIM keys, the TLS
-certificate). Pool snapshots and backups of that dataset keep it; settings
-backups keep the configuration and sealed secrets. Replicating the mail
-dataset to another HardyOS server (a "Mail" item in Replication) is a
-follow-up: the replication code knows shared folders, apps and VMs, and a
-new kind needs its own restore rules.
+certificate); settings backups keep the configuration and sealed secrets.
+Cloud backups (Backup & Restore) and replication to another HardyOS server
+don't offer the mail dataset as an item yet: both know shared folders, apps
+and VMs (and cloud backups the system), and a "Mail" kind needs its own
+restore rules (into a stopped mail server, never over live mailboxes), its
+own rebuild step and its place in both UIs. That's the follow-up; until
+then, snapshots of the pool keep older states of the mail dataset.
 
 ## Troubleshooting
 

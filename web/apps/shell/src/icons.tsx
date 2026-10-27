@@ -234,3 +234,9 @@ export const ClipboardIcon = svg(
   </>,
 );
 export const DownloadIcon = svg(<path d="M12 3v12M7 10l5 5 5-5M4 19h16" />);
+export const CloudUpIcon = svg(
+  <>
+    <path d="M7 18h10a4 4 0 0 0 .5-7.97A6 6 0 0 0 6.1 9.5 4.25 4.25 0 0 0 7 18z" />
+    <path d="M12 11v5M9.5 13.5 12 11l2.5 2.5" />
+  </>,
+);

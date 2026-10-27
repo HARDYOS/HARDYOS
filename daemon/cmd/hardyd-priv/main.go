@@ -19,6 +19,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/apps"
 	"github.com/hardyos/hardyos/daemon/internal/backup"
 	"github.com/hardyos/hardyos/daemon/internal/boot"
+	"github.com/hardyos/hardyos/daemon/internal/cloudbackup"
 	"github.com/hardyos/hardyos/daemon/internal/devices"
 	"github.com/hardyos/hardyos/daemon/internal/domain"
 	"github.com/hardyos/hardyos/daemon/internal/fileworker"
@@ -49,6 +50,11 @@ func main() {
 	// reads or writes (internal/fileworker). Never returns.
 	if len(os.Args) == 2 && os.Args[1] == fileworker.Subcommand {
 		fileworker.ChildMain()
+	}
+	// restic's sandbox: the same binary sets up restic's mount namespace and
+	// capabilities, then executes restic (internal/cloudbackup).
+	if len(os.Args) > 1 && os.Args[1] == cloudbackup.SandboxArg {
+		os.Exit(cloudbackup.SandboxMain(os.Args[1:]))
 	}
 	var (
 		socket      = flag.String("socket", priv.DefaultSocket, "unix socket path")
@@ -123,7 +129,9 @@ func main() {
 		// rebuilt inside every new version before it's offered for boot.
 		gpus := &gpu.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log}
 		updater.Hooks = append(updater.Hooks, update.Hook{Name: "Installing the NVIDIA driver into the new version", Run: gpus.PrepareNewRoot})
-		s.OpTimeouts = map[string]time.Duration{priv.OpUpdateStage: 45 * time.Minute}
+		// Testing a cloud backup destination waits for the bucket (bounded
+		// inside to 90 s per step).
+		s.OpTimeouts = map[string]time.Duration{priv.OpUpdateStage: 45 * time.Minute, priv.OpCloudTargetSave: 5 * time.Minute}
 		devs := &devices.Host{Runner: sysexec.Exec{}, Root: "/", Log: log}
 		priv.RegisterDevices(s, devs, gpus)
 		priv.RegisterSystem(s, sysexec.Exec{}, updater.BeforeReboot)
@@ -183,7 +191,8 @@ func main() {
 			}
 		}()
 		// File Manager and share links: files read and written as the person.
-		if err := priv.StartFiles(ctx, s, shm, fsm.HomesPool, log); err != nil {
+		fw, err := priv.StartFiles(ctx, s, shm, fsm.HomesPool, log)
+		if err != nil {
 			log.Error("file access isn't available", "err", err)
 		}
 		go am.OnStart(ctx)
@@ -204,6 +213,19 @@ func main() {
 		devs.Assignments = vmm.Assignments
 		go reconcileDevices(ctx, devs, log)
 		priv.RegisterVMs(s, vmm)
+		// Versioned cloud backups (restic) of shared folders, apps, VMs and
+		// the settings; the destination an installer's "Restore from
+		// backup" left is taken over now (after the settings restore above).
+		cb := &cloudbackup.Root{
+			Restic: &cloudbackup.Restic{Sandbox: cloudbackup.SystemSandbox()}, Vol: &cloudbackup.ZFS{Runner: sysexec.Exec{}}, DBOwner: hardydUID,
+			Shares: shm, Apps: am, VMs: vmm, System: bk, Log: log,
+			Key: func() ([]byte, error) { return priv.RootKeyFor(zfs.KeyDir, "cloud-backup") },
+		}
+		if fw != nil {
+			cb.Files = fw
+		}
+		cb.OnStart()
+		priv.RegisterCloudBackup(s, cb)
 		go vmm.OnStart(ctx)
 		go vmm.Watch(ctx)
 		// Replication between servers: snapshots, zfs send and receive
@@ -237,6 +259,9 @@ func main() {
 		}
 		// Refresh the login banners that are already on screen.
 		_, _ = sysexec.Exec{}.Run(context.Background(), nil, "agetty", "--reload")
+		// "Restore from backup": list a repository's versions and stage one's
+		// settings into the new system.
+		priv.RegisterInstallCloud(s, &cloudbackup.Root{Restic: &cloudbackup.Restic{Sandbox: cloudbackup.SystemSandbox()}, Log: log}, "/target")
 		priv.RegisterInstaller(s, &install.Installer{
 			Runner:  sysexec.Exec{},
 			Root:    "/",
