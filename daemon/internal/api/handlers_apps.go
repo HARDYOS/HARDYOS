@@ -87,16 +87,40 @@ func takeSettings(settings map[string]string, ref, what string) (map[string]stri
 	return out, nil
 }
 
-// pullImages downloads each service's image, reporting from% to to%.
+// pullImages downloads each service's image, reporting from% to to%. While
+// an image downloads, the root helper is asked every couple of seconds how
+// far it has got, so a big image moves the bar instead of sitting still.
 func pullImages(jc *jobs.Context, pc *priv.Client, id string, services []apps.ServiceImage, from, to float64) ([]string, error) {
 	var notes []string
+	step := (to - from) / float64(max(len(services), 1))
 	for i, sv := range services {
-		jc.Progress(from+float64(i)*(to-from)/float64(max(len(services), 1)),
-			fmt.Sprintf("Downloading %s (%d of %d): %s", sv.Service, i+1, len(services), sv.Image))
+		base := from + float64(i)*step
+		what := fmt.Sprintf("Downloading %s (%d of %d)", sv.Service, i+1, len(services))
+		jc.Progress(base, what+": "+sv.Image)
 		var pr apps.PullResult
+		done := make(chan error, 1)
 		// Each call gets the helper's full time limit; big images on slow
 		// links take a while.
-		if err := pc.Call(jc, priv.OpAppsPull, priv.AppPullArgs{ID: id, Service: sv.Service}, &pr); err != nil {
+		go func() { done <- pc.Call(jc, priv.OpAppsPull, priv.AppPullArgs{ID: id, Service: sv.Service}, &pr) }()
+		tick := time.NewTicker(2 * time.Second)
+		var err error
+	wait:
+		for {
+			select {
+			case err = <-done:
+				break wait
+			case <-tick.C:
+				var p apps.PullProgress
+				ctx, cancel := context.WithTimeout(jc, 5*time.Second)
+				perr := pc.Call(ctx, priv.OpAppsPullStatus, priv.AppPullArgs{ID: id, Service: sv.Service}, &p)
+				cancel()
+				if perr == nil && p.Active && p.Total > 0 {
+					jc.Progress(base+step*pullFraction(p), fmt.Sprintf("%s: %s of %s", what, mb(p.Current), mb(p.Total)))
+				}
+			}
+		}
+		tick.Stop()
+		if err != nil {
 			return notes, err
 		}
 		if pr.Cached {
@@ -104,6 +128,22 @@ func pullImages(jc *jobs.Context, pc *priv.Client, id string, services []apps.Se
 		}
 	}
 	return notes, nil
+}
+
+// pullFraction is how much of an image is down, kept a little short of the
+// end: Docker learns layer sizes as it goes and still unpacks afterwards.
+func pullFraction(p apps.PullProgress) float64 {
+	if p.Total <= 0 {
+		return 0
+	}
+	return min(float64(p.Current)/float64(p.Total), 1) * 0.95
+}
+
+func mb(n int64) string {
+	if n >= 1<<30 {
+		return fmt.Sprintf("%.1f GB", float64(n)/(1<<30))
+	}
+	return fmt.Sprintf("%d MB", (n+(1<<19))>>20)
 }
 
 func appUp(jc *jobs.Context, pc *priv.Client, id string) error {

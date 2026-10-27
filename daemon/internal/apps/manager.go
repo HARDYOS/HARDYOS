@@ -89,6 +89,10 @@ type Manager struct {
 
 	// clock replaces time.Now in tests.
 	clock func() time.Time
+
+	// pulls: how far each image download has got (apps.pull_progress).
+	pullsMu sync.Mutex
+	pulls   map[string]*pullState
 }
 
 func (m *Manager) now() time.Time {
@@ -1405,6 +1409,14 @@ func (m *Manager) Pull(ctx context.Context, id, service string) (*PullResult, er
 				return nil, ctx.Err()
 			case <-time.After(time.Duration(attempt*attempt) * 5 * time.Second):
 			}
+		}
+		// Through Docker's API when it's there, so the install can show how
+		// far the download has got; otherwise Compose, as before.
+		st := m.pullState(id, service)
+		if pullErr = m.apiPull(ctx, image, st); pullErr == nil {
+			return &PullResult{}, nil
+		} else if !errors.Is(pullErr, errNoEngineAPI) {
+			continue
 		}
 		if _, pullErr = m.runCompose(ctx, m.composeArgs(ia, "pull", "--quiet", service)...); pullErr == nil {
 			return &PullResult{}, nil

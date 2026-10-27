@@ -2,6 +2,7 @@ package apps
 
 import (
 	"context"
+	"os/exec"
 
 	"fmt"
 	"io"
@@ -534,4 +535,38 @@ func dockerOut(t *testing.T, ctx context.Context, args ...string) []byte {
 		t.Fatalf("docker %v: %v", args, err)
 	}
 	return out
+}
+
+// TestDockerIntegrationPullProgress downloads a small image through the
+// engine's API (as installs do) and checks the progress it reported.
+func TestDockerIntegrationPullProgress(t *testing.T) {
+	if os.Getenv("HARDYOS_DOCKER_INTEGRATION") != "1" {
+		t.Skip("set HARDYOS_DOCKER_INTEGRATION=1 to run against a real Docker engine")
+	}
+	sock := DockerSocket
+	if _, err := os.Stat(sock); err != nil {
+		sock = "/var/run/docker.sock"
+	}
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "run"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(sock, filepath.Join(root, DockerSocket)); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{Root: root}
+	const image = "mirror.gcr.io/library/busybox:1.36"
+	_ = exec.Command("docker", "image", "rm", "-f", image).Run() // download it for real
+	st := m.pullState("hardyos-it", "pull")
+	if err := m.apiPull(context.Background(), image, st); err != nil {
+		t.Fatal(err)
+	}
+	p := m.PullStatus("hardyos-it", "pull")
+	if p.Active || p.Layers == 0 || p.Total == 0 || p.Current != p.Total {
+		t.Errorf("progress after the download = %+v", p)
+	}
+	if out, err := exec.Command("docker", "image", "inspect", image).CombinedOutput(); err != nil {
+		t.Errorf("image not there after the pull: %v %s", err, out)
+	}
+	t.Logf("downloaded %s: %d bytes in %d layers", image, p.Total, p.Layers)
 }
