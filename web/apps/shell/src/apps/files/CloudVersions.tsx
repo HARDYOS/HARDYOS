@@ -5,10 +5,11 @@ import { api, errorMessage, unwrap } from "../../api";
 import { dateTime, relativeTime } from "../../format";
 import { CloudUpIcon } from "../../icons";
 import { Button } from "../../ui";
-import { RestoreDialog } from "../backup/Restore";
+import { Dialog } from "../../ui/Dialog";
+import { toast } from "../../ui/toasts";
+import { FolderBrowser, RestoreDialog } from "../backup/Restore";
 import { JobProgress } from "../backup/parts";
 import "../backup/backup.css";
-import { toast } from "../../ui/toasts";
 
 /**
  * "Previous versions" from cloud backups: every version of this shared
@@ -24,9 +25,14 @@ export function CloudVersions({ share, entry, canWrite }: { share: string; entry
   });
   const qc = useQueryClient();
   const [pick, setPick] = useState<FileBackupVersion | null>(null);
-  const [job, setJob] = useState<string | null>(null);
+  const [browsing, setBrowsing] = useState<FileBackupVersion | null>(null);
+  const [job, setJob] = useState<{ id: string; label: string } | null>(null);
   const list = q.data?.versions ?? [];
   if (q.isError || (q.isSuccess && list.length === 0)) return null;
+
+  const restoreFiles = (v: FileBackupVersion) => async (paths: string[], mode: "copy" | "in_place", folder: string) =>
+    unwrap(api.POST("/files/backups/restore", { body: { share, target: v.target, snapshot: v.snapshot, paths, mode, folder: mode === "copy" ? folder : undefined } }));
+
   return (
     <section className="fm-cloud" aria-label="Versions in cloud backups">
       <h3 className="fm-cloud__title">
@@ -44,24 +50,27 @@ export function CloudVersions({ share, entry, canWrite }: { share: string; entry
                   {v.targetName} · {dateTime(v.time)}
                 </span>
               </div>
-              {canWrite && (
-                <div className="fm-version__actions">
-                  <Button size="sm" onClick={() => setPick(v)} aria-label={`Restore from the backup of ${dateTime(v.time)}`} disabled={!!job}>
+              <div className="fm-version__actions">
+                <Button size="sm" onClick={() => setBrowsing(v)} aria-label={`Browse the backup of ${dateTime(v.time)}`}>
+                  Browse
+                </Button>
+                {canWrite && (
+                  <Button size="sm" onClick={() => setPick(v)} aria-label={`Restore ${entry.name} from the backup of ${dateTime(v.time)}`} disabled={!!job}>
                     Restore
                   </Button>
-                </div>
-              )}
+                )}
+              </div>
             </li>
           ))}
         </ul>
       )}
       {job && (
         <JobProgress
-          id={job}
-          label={`Restoring ${entry.name}`}
+          id={job.id}
+          label={job.label}
           onDone={(j) => {
             void qc.invalidateQueries({ queryKey: ["files", "list", share] });
-            if (j.state === "succeeded") toast("success", "Restored from the backup", entry.name);
+            if (j.state === "succeeded") toast("success", "Restored from the backup", job.label);
             setTimeout(() => setJob(null), 4000);
           }}
         />
@@ -72,18 +81,39 @@ export function CloudVersions({ share, entry, canWrite }: { share: string; entry
           onClose={() => setPick(null)}
           onRestore={async (mode, folder) => {
             try {
-              const r = await unwrap(
-                api.POST("/files/backups/restore", {
-                  body: { share, target: pick.target, snapshot: pick.snapshot, paths: [entry.path], mode, folder: mode === "copy" ? folder : undefined },
-                }),
-              );
-              setJob(r.job.id);
+              const r = await restoreFiles(pick)([entry.path], mode, folder);
+              setJob({ id: r.job.id, label: `Restoring ${entry.name}` });
             } catch (e) {
               throw new Error(errorMessage(e));
             }
           }}
         />
       )}
+      {browsing && (
+        <Dialog title={`Backup of ${dateTime(browsing.time)}`} width={720} onClose={() => setBrowsing(null)}>
+          <FolderBrowser
+            target={browsing.target}
+            snapshot={browsing.snapshot}
+            share={canWrite}
+            name="This folder"
+            browse={(path) => useFileBrowse(share, browsing, path)}
+            submit={restoreFiles(browsing)}
+            onJob={(j) => {
+              setJob(j);
+              setBrowsing(null);
+            }}
+          />
+        </Dialog>
+      )}
     </section>
   );
+}
+
+/** A folder of a version, listed as the person. */
+function useFileBrowse(share: string, v: FileBackupVersion, path: string) {
+  return useQuery({
+    queryKey: ["files", "cloud-browse", share, v.target, v.snapshot, path],
+    queryFn: () => unwrap(api.GET("/files/backups/browse", { params: { query: { share, target: v.target, snapshot: v.snapshot, path } } })),
+    staleTime: 60_000,
+  });
 }
