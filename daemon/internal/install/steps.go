@@ -509,6 +509,11 @@ func (in *Installer) Finish(ctx context.Context) error {
 		if h := Holders(in.Root, in.target()); len(h) > 0 {
 			why = append(why, "in use by "+strings.Join(h, ", "))
 		}
+		if in.Root == "/" {
+			if other := OtherNamespaceMounts(in.target()); len(other) > 0 {
+				why = append(why, "mounted in other mount namespaces: "+strings.Join(other, ", "))
+			}
+		}
 		if len(why) > 0 {
 			return fmt.Errorf("%w (%s)", err, strings.Join(why, "; "))
 		}

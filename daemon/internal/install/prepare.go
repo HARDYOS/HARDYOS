@@ -27,42 +27,39 @@ func FinishRoot(ctx context.Context, r sysexec.Runner, root, target string) erro
 	for _, rel := range []string{"etc/hardyos/live-installer", "var/lib/dbus/machine-id"} {
 		_ = os.Remove(path(rel))
 	}
-	if err := bindSystemDirs(ctx, r, root, target); err != nil {
-		return err
-	}
-	defer func() { _ = unbindSystemDirs(context.WithoutCancel(ctx), r, root, target) }()
-
-	run := func(args ...string) error {
-		_, err := sysexec.Output(ctx, r, "chroot", append([]string{target}, args...)...)
-		var ce *sysexec.CommandError
-		if errors.As(err, &ce) {
-			return errors.New(ce.Error())
+	return WithSystemDirs(ctx, r, root, target, func() error {
+		run := func(args ...string) error {
+			_, err := sysexec.Output(ctx, r, "chroot", append([]string{target}, args...)...)
+			var ce *sysexec.CommandError
+			if errors.As(err, &ce) {
+				return errors.New(ce.Error())
+			}
+			return err
 		}
-		return err
-	}
-	if live := installedLivePackages(ctx, r, target); len(live) > 0 {
-		if err := run(append([]string{"env", "DEBIAN_FRONTEND=noninteractive", "dpkg", "--purge"}, live...)...); err != nil {
-			return fmt.Errorf("remove live-system packages: %w", err)
+		if live := installedLivePackages(ctx, r, target); len(live) > 0 {
+			if err := run(append([]string{"env", "DEBIAN_FRONTEND=noninteractive", "dpkg", "--purge"}, live...)...); err != nil {
+				return fmt.Errorf("remove live-system packages: %w", err)
+			}
 		}
-	}
-	// Creates only the host keys that are missing (kept keys stay).
-	if err := run("ssh-keygen", "-A"); err != nil {
-		return err
-	}
-	kernels, err := os.ReadDir(path("lib/modules"))
-	if err != nil {
-		return err
-	}
-	for _, k := range kernels {
-		if _, err := os.Stat(path("boot/vmlinuz-" + k.Name())); err != nil {
-			continue
+		// Creates only the host keys that are missing (kept keys stay).
+		if err := run("ssh-keygen", "-A"); err != nil {
+			return err
 		}
-		_ = os.Remove(path("boot/initrd.img-" + k.Name()))
-		if err := run("update-initramfs", "-c", "-k", k.Name()); err != nil {
-			return fmt.Errorf("build initramfs for %s: %w", k.Name(), err)
+		kernels, err := os.ReadDir(path("lib/modules"))
+		if err != nil {
+			return err
 		}
-	}
-	return nil
+		for _, k := range kernels {
+			if _, err := os.Stat(path("boot/vmlinuz-" + k.Name())); err != nil {
+				continue
+			}
+			_ = os.Remove(path("boot/initrd.img-" + k.Name()))
+			if err := run("update-initramfs", "-c", "-k", k.Name()); err != nil {
+				return fmt.Errorf("build initramfs for %s: %w", k.Name(), err)
+			}
+		}
+		return nil
+	})
 }
 
 func installedLivePackages(ctx context.Context, r sysexec.Runner, target string) []string {
@@ -133,8 +130,22 @@ func mountCmd(ctx context.Context, r sysexec.Runner, args ...string) error {
 
 // WithSystemDirs runs fn with /dev, /proc, /sys and /run mounted inside
 // target (an unpacked system under root), for work done with chroot, and
-// unmounts them afterwards. Update hooks (the GPU drivers) use it.
+// unmounts them afterwards. The installer, updates and the GPU drivers'
+// update hook use it.
+//
+// On a server (the real command runner) all of it happens in a mount
+// namespace of its own (privateMountNS): fn must run its commands from the
+// calling goroutine, so they're born in that namespace. Nothing mounted
+// there reaches the server or its services' namespaces, and it all goes
+// away with the namespace.
 func WithSystemDirs(ctx context.Context, r sysexec.Runner, root, target string, fn func() error) error {
+	if _, real := r.(sysexec.Exec); real && root == "/" {
+		return privateMountNS(func() error { return withSystemDirs(ctx, r, root, target, fn) })
+	}
+	return withSystemDirs(ctx, r, root, target, fn)
+}
+
+func withSystemDirs(ctx context.Context, r sysexec.Runner, root, target string, fn func() error) error {
 	if err := bindSystemDirs(ctx, r, root, target); err != nil {
 		return err
 	}

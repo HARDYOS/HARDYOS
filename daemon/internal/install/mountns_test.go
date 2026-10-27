@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -136,6 +137,125 @@ func TestSystemDirsBusyTeardown(t *testing.T) {
 	} else {
 		mustRun(t, "umount", target)
 	}
+}
+
+// TestWithSystemDirsLeavesNoCopies reproduces the installer's "pool is
+// busy": services (libvirtd, logind, ...) run in mount namespaces that are
+// slaves of the server's, made at boot; a target mounted later on the
+// server shows in them too. Binds made on the server under that target
+// were copied into every such namespace, and unmounting them after cutting
+// propagation left the copies there, holding the target. WithSystemDirs
+// works in a private namespace of its own: nothing reaches the service's
+// namespace, a daemon left running in the chroot is stopped, and the
+// target unmounts (or its pool exports) cleanly, in the service's
+// namespace too. The old way is checked to be visible in
+// OtherNamespaceMounts.
+func TestWithSystemDirsLeavesNoCopies(t *testing.T) {
+	if !inMountNS(t, "TestWithSystemDirsLeavesNoCopies") {
+		return
+	}
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skip("setsid isn't installed")
+	}
+	mustRun(t, "mount", "--make-rshared", "/")
+	before := devSubmounts(t)
+	// A "service" with its own namespace, a slave of ours, made first.
+	svc := exec.Command("unshare", "-m", "--propagation", "slave", "sleep", "120")
+	if err := svc.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = svc.Process.Kill(); _ = svc.Wait() }()
+	time.Sleep(200 * time.Millisecond)
+	svcMounts := func() []string {
+		b, _ := os.ReadFile(filepath.Join("/proc", strconv.Itoa(svc.Process.Pid), "mountinfo"))
+		var out []string
+		for _, line := range strings.Split(string(b), "\n") {
+			if f := strings.Fields(line); len(f) > 4 {
+				out = append(out, f[4])
+			}
+		}
+		return out
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	_ = os.MkdirAll(target, 0o755)
+	pool := ""
+	if os.Getenv("HARDYOS_ZFS_INTEGRATION") == "1" {
+		if _, err := exec.LookPath("zpool"); err == nil {
+			pool = "hardyosnscopytest"
+			_ = exec.Command("zpool", "destroy", "-f", pool).Run()
+			img := filepath.Join(dir, "pool.img")
+			f, _ := os.Create(img)
+			_ = f.Truncate(256 << 20)
+			f.Close()
+			mustRun(t, "zpool", "create", "-m", target, pool, img)
+			defer func() { _ = exec.Command("zpool", "destroy", "-f", pool).Run() }()
+		}
+	}
+	if pool == "" {
+		mustRun(t, "mount", "-t", "tmpfs", "hardyos-test-target", target)
+	}
+	if !contains(svcMounts(), target) {
+		t.Fatalf("the target didn't propagate to the service: %v", svcMounts())
+	}
+	ctx := context.Background()
+	held := filepath.Join(target, "dev/null")
+	err := WithSystemDirs(ctx, sysexec.Exec{}, "/", target, func() error {
+		if _, err := os.Stat(held); err != nil {
+			return err
+		}
+		// A daemon a package starts and leaves running.
+		_, err := sysexec.Output(ctx, sysexec.Exec{}, "setsid", "-f", "sh", "-c", "exec 3<"+held+" >/dev/null 2>&1; exec sleep 60")
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range svcMounts() {
+		if strings.HasPrefix(m, target+"/") {
+			t.Errorf("copied into the service's namespace: %s", m)
+		}
+	}
+	checkHostAndTarget(t, before, target)
+	if other := OtherNamespaceMounts(target); len(other) > 0 {
+		t.Errorf("still mounted elsewhere: %v", other)
+	}
+	if h := Holders("/", target); len(h) > 0 {
+		t.Errorf("left running: %v", h)
+	}
+	if pool != "" {
+		mustRun(t, "zpool", "export", pool)
+	} else {
+		mustRun(t, "umount", target)
+	}
+	if contains(svcMounts(), target) {
+		t.Error("the target is still mounted in the service's namespace")
+	}
+
+	// The old way (binds on the server, cut off, then unmounted) leaves
+	// copies in the service's namespace, and the diagnostics name them.
+	mustRun(t, "mount", "-t", "tmpfs", "hardyos-test-target", target)
+	if err := bindSystemDirs(ctx, sysexec.Exec{}, "/", target); err != nil {
+		t.Fatal(err)
+	}
+	_ = unbindSystemDirs(ctx, sysexec.Exec{}, "/", target)
+	other := OtherNamespaceMounts(target)
+	if len(other) == 0 || !strings.Contains(strings.Join(other, " "), target+"/dev (pid "+strconv.Itoa(svc.Process.Pid)) {
+		t.Errorf("copies in other namespaces not found: %v", other)
+	}
+	// Ending the service's namespace frees the target.
+	_ = svc.Process.Kill()
+	_ = svc.Wait()
+	mustRun(t, "umount", target)
+}
+
+func contains(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
 }
 
 func checkHostAndTarget(t *testing.T, before map[string]bool, target string) {

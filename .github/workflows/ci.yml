@@ -62,7 +62,7 @@ jobs:
       - name: installer on loop devices
         run: sudo HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/install.test" -test.run TestInstallIntegration -test.v
       - name: chroot mounts in a private mount namespace (host /dev kept, busy teardown, pool export)
-        run: sudo HARDYOS_MOUNTNS_TEST=1 HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/install.test" -test.run 'TestSystemDirs' -test.v
+        run: sudo HARDYOS_MOUNTNS_TEST=1 HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/install.test" -test.run 'SystemDirs' -test.v
       - name: settings backups on a pool
         run: sudo HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/backup.test" -test.run TestZFSBackupIntegration -test.v
 

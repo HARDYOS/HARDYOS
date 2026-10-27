@@ -55,7 +55,7 @@ func (Exec) RunEnv(ctx context.Context, env []string, stdin []byte, name string,
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
-	err := cmd.Run()
+	err := ignoreWaitDelay(cmd.Run())
 	res := Result{Stdout: out.Bytes(), Stderr: errb.Bytes()}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {

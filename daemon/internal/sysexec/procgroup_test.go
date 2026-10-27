@@ -13,6 +13,24 @@ import (
 	"time"
 )
 
+// A command that succeeds but leaves a process holding its output open
+// (a daemon) returns once WaitDelay is up, as a success.
+func TestLeftoverHoldingOutputIsNotAnError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("takes WaitDelay")
+	}
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	res, err := Exec{}.Run(context.Background(), nil, "/bin/sh", "-c", "sleep 30 & echo $! > "+pidFile+"; echo started")
+	if b, _ := os.ReadFile(pidFile); len(b) > 0 {
+		if pid, _ := strconv.Atoi(strings.TrimSpace(string(b))); pid > 0 {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	}
+	if err != nil || res.ExitCode != 0 || !strings.Contains(string(res.Stdout), "started") {
+		t.Fatalf("res %+v err %v", res, err)
+	}
+}
+
 // A timed-out command is killed with everything it started (an apt run's
 // dpkg, a DKMS build's compiler), and Run returns even though a child
 // still held the output pipe.
