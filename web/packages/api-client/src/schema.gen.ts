@@ -6575,6 +6575,8 @@ export interface components {
         };
         OfficeSessionView: {
             share: string;
+            /** @description The folder: a shared folder id, or "Home of alice" (every person has their own Home) */
+            place: string;
             path: string;
             /** @description Names of the people in it now */
             editors: string[];

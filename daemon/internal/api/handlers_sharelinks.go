@@ -200,6 +200,7 @@ func (s *Server) handleShareLinkRevoke(w http.ResponseWriter, r *http.Request, u
 		return
 	}
 	s.record(r, u, "sharelink.revoke", l.Share+"/"+l.Path, audit.Success, "link #"+strconv.FormatInt(l.ID, 10)+" of "+l.CreatedBy)
+	s.office.dropLink(l.ID, "the share link was turned off")
 	s.remote.trigger() // the last active link gone: files.<base> goes too
 	writeJSON(w, http.StatusOK, l)
 }

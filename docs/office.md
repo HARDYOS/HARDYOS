@@ -57,7 +57,8 @@ In the File Manager:
   opened.
 
 Each file opens in its own window. If you can read a file but not change
-it, it opens read only and says so.
+it, it opens read only and says so. Home folders are each person's own: two
+people opening "plan.docx" in their own Home edit two different files.
 
 ### Working together
 
@@ -95,15 +96,18 @@ open documents in their browser:
 
 - **People can: View only** (the default) opens documents read only in the
   browser editor.
-- **Edit in their browser** must be chosen on purpose. Their changes are
+- **Edit in their browser** must be chosen on purpose. At most 5 people
+  edit through one link at once (more open it read only). Download and Print
+  are offered only on edit links without a download limit. Their changes are
   saved over the shared copy, as you (the person who made the link), so you
   must still be allowed to change the file. Consider a password and a short
   expiry. Only files the editor can save (and folders) can be shared for
   editing.
 
-Visitors are asked for a name to show the others in the document. Everything
-else about links stays the same: expiry, password, turning a link off, and
-the audit log (`office.open` and `files.write` by "link #3 of alice
+Visitors are asked for a name to show the others in the document (brackets
+and quotes are left out). Turning a link off puts its visitors out of the
+document straight away. Everything else about links stays the same: expiry,
+password, and the audit log (`office.open` and `files.write` by "link #3 of alice
 (visitor: Sam)"). Turning a link off or letting it expire stops its editors
 saving.
 
@@ -144,8 +148,9 @@ editing session isn't automated; after changes, check on a test server:
    audit log has `files.write` by the last person who typed.
 4. Make an edit link, open it from another device: "Name (guest)" shows; the
    save is recorded as "link #N of you (visitor: Name)".
-5. `curl http://<server>:8418/` from another computer must fail (the
-   Document Server listens on 127.0.0.1 only).
+5. The Document Server publishes no port: `docker ps` shows none for it,
+   and on the server `sudo -u nobody curl http://<its address>/healthcheck`
+   is refused (only hardyd may connect).
 
 ## For developers
 

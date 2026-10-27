@@ -19,6 +19,17 @@ describe("markdown", () => {
     expect(b[5]).toEqual({ t: "code", lang: "js", text: "let x = 1;" });
   });
 
+  it("limits how deep quotes nest", () => {
+    let depth = 0;
+    let blocks = parse(">".repeat(5000) + " deep");
+    while (blocks[0]?.t === "quote") {
+      depth++;
+      blocks = blocks[0].blocks;
+    }
+    expect(depth).toBe(8);
+    expect(blocks[0]).toEqual({ t: "p", text: ">".repeat(4992) + " deep" });
+  });
+
   it("never turns a note into HTML or unsafe links", () => {
     const onNote = vi.fn();
     const { container } = render(

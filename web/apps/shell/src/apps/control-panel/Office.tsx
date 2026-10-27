@@ -177,9 +177,9 @@ function Usage({ st }: { st: OfficeStatus }) {
           </thead>
           <tbody>
             {(st.sessions ?? []).map((s) => (
-              <tr key={`${s.share}:${s.path}`}>
+              <tr key={`${s.place}:${s.path}`}>
                 <td>
-                  <span className="mono small">{s.share === "~home" ? "Home" : s.share}</span> / {s.path}
+                  <span className="mono small">{s.place}</span> / {s.path}
                   {s.state === "error" && <div className="small" style={{ color: "var(--hos-bad)" }}>{s.error}</div>}
                 </td>
                 <td>{s.editors.length ? s.editors.join(", ") : <span className="muted">nobody now</span>}</td>

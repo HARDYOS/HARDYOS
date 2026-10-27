@@ -193,7 +193,7 @@ describe("Control Panel › Office", () => {
           appState: "running",
           version: "9.4.0.1",
           settings: { enabled: true, maxFileMB: 100, fontsShare: "" },
-          sessions: [{ share: "docs", path: "Plan.docx", editors: ["Cade", "Sam (guest)"], opened: T, saves: 2, state: "open" }],
+          sessions: [{ share: "docs", place: "docs", path: "Plan.docx", editors: ["Cade", "Sam (guest)"], opened: T, saves: 2, state: "open" }],
           listeners: { officePort: 44250, office: true, internal: "172.17.0.1:44251" },
         }),
         "POST /office/disable": (c) =>

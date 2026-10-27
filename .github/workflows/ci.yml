@@ -186,32 +186,26 @@ jobs:
         with:
           go-version-file: daemon/go.mod
           cache: false
-      - name: start the Document Server pinned in the catalog
+      - name: start the Document Server pinned in the catalog (own network, no published port, the app's Compose labels)
         run: |
           image=$(sed -n 's/^ *image: *//p' apps/catalog/onlyoffice/compose.yaml)
           echo "image: $image"
           secret=$(openssl rand -hex 32)
           echo "OFFICE_JWT_SECRET=$secret" >> "$GITHUB_ENV"
-          docker run -d --name ds -p 127.0.0.1:18080:80 \
+          docker network create hardyos-onlyoffice_default
+          docker run -d --name ds --network hardyos-onlyoffice_default \
+            --label com.docker.compose.project=hardyos-onlyoffice --label com.docker.compose.service=documentserver \
             -e JWT_ENABLED=true -e JWT_SECRET="$secret" -e JWT_HEADER=Authorization -e JWT_IN_BODY=false \
             -e PLUGINS_ENABLED=false -e WOPI_ENABLED=false -e ALLOW_PRIVATE_IP_ADDRESS=false -e ALLOW_META_IP_ADDRESS=false \
             --add-host host.docker.internal:host-gateway --security-opt no-new-privileges:true "$image"
-          gw=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')
-          echo "OFFICE_LISTEN=$gw:44251" >> "$GITHUB_ENV"
       - name: build test binary
         working-directory: daemon
         run: go test -c -o "$RUNNER_TEMP/office.test" ./internal/office
-      - name: open, download (one-time), convert and save back through a signed callback with the real Document Server
-        env:
-          HARDYOS_OFFICE_INTEGRATION: "1"
-          OFFICE_DS_URL: http://127.0.0.1:18080
-          OFFICE_CALLBACK_BASE: http://host.docker.internal:44251
+      - name: firewall rules, one-time download, convert, signed commands and save back through a signed callback with the real Document Server
         run: |
-          for i in $(seq 1 100); do
-            [ "$(curl -fsS http://127.0.0.1:18080/healthcheck 2>/dev/null)" = "true" ] && break
-            sleep 3
-          done
-          "$RUNNER_TEMP/office.test" -test.run TestDocumentServerIntegration -test.v -test.timeout 15m
+          sudo HARDYOS_OFFICE_INTEGRATION=1 OFFICE_JWT_SECRET="$OFFICE_JWT_SECRET" \
+            OFFICE_CALLBACK_BASE=http://host.docker.internal:44251 OFFICE_DS_CONTAINER=ds \
+            "$RUNNER_TEMP/office.test" -test.run TestDocumentServerIntegration -test.v -test.timeout 15m
       - name: Document Server logs
         if: failure()
         run: |

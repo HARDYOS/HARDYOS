@@ -108,6 +108,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request, me *au
 		_ = s.sessions.RevokeUser(r.Context(), u.ID)
 		s.proxy.endUser(u.ID)
 		s.endOIDCUser(r.Context(), u.ID)
+		s.office.dropUser(u.ID, "the account was turned off")
 	}
 	s.record(r, me, "user.update", u.Username, audit.Success, "")
 	writeJSON(w, http.StatusOK, u)
@@ -129,6 +130,7 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request, me *au
 		return
 	}
 	s.record(r, me, "user.delete", u.Username, audit.Success, "")
+	s.office.dropUser(id, "the account was deleted")
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -199,12 +199,12 @@ func TestDesktopCookieOnPublishedHosts(t *testing.T) {
 	if res, err := planted.client.Do(req); err != nil || res.StatusCode != 401 {
 		t.Fatalf("old-name cookie on a published host = %v %v", res, err)
 	}
-	// Migration: over HTTPS on the desktop's own (unpublished) address the
-	// old name still works for one release; on a published name it doesn't.
+	// Over HTTPS the old name is never read, on the LAN address either
+	// (decision 268): another port of the same host could have planted it.
 	lan := httptest.NewRequest("GET", "https://192.168.1.5/api/v1/auth/me", nil)
 	lan.AddCookie(&http.Cookie{Name: LegacySessionCookie, Value: token})
-	if _, ok := e.server.sessionToken(lan); !ok {
-		t.Fatal("old cookie refused on the LAN address during the migration")
+	if _, ok := e.server.sessionToken(lan); ok {
+		t.Fatal("old cookie accepted over HTTPS on the LAN address")
 	}
 	pub := httptest.NewRequest("GET", "https://nas.home.example.net/api/v1/auth/me", nil)
 	pub.AddCookie(&http.Cookie{Name: LegacySessionCookie, Value: token})

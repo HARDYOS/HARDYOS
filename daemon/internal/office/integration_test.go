@@ -8,29 +8,37 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
+	stdnet "net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/hardyos/hardyos/daemon/internal/dsnet"
 	"github.com/hardyos/hardyos/daemon/internal/files"
 	"github.com/hardyos/hardyos/daemon/internal/store"
+	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 )
 
-// TestDocumentServerIntegration runs against a real OnlyOffice Document
-// Server container (CI job "Office"; gated like the Docker apps job):
+// TestDocumentServerIntegration runs as root against a real OnlyOffice
+// Document Server container (CI job "Office"; gated like the Docker apps
+// job), started without a published port and with the Compose labels of
+// the onlyoffice app, so dsnet finds it as hardyd-priv would:
 //
 //	HARDYOS_OFFICE_INTEGRATION=1
-//	OFFICE_DS_URL=http://127.0.0.1:18080          the container's published port
 //	OFFICE_JWT_SECRET=...                         the secret it was started with
-//	OFFICE_LISTEN=172.17.0.1:44251                where this test listens for it
 //	OFFICE_CALLBACK_BASE=http://host.docker.internal:44251
+//	OFFICE_DS_CONTAINER=ds                        its name (docker exec checks)
+//
+// The test applies dsnet's firewall rules (allowing its own uid, root, as
+// hardyd's) and listens on the host gateway's 44251. It removes the rules
+// at the end.
 //
 // For each new-document template it opens the file through Service.Open
 // (a signed config with a one-time download URL), has the Document Server
@@ -47,14 +55,31 @@ func TestDocumentServerIntegration(t *testing.T) {
 	if os.Getenv("HARDYOS_OFFICE_INTEGRATION") != "1" {
 		t.Skip("set HARDYOS_OFFICE_INTEGRATION=1 with a Document Server running (see the comment)")
 	}
-	dsURL, _ := url.Parse(os.Getenv("OFFICE_DS_URL"))
 	secret := []byte(os.Getenv("OFFICE_JWT_SECRET"))
-	listen := os.Getenv("OFFICE_LISTEN")
 	base := os.Getenv("OFFICE_CALLBACK_BASE")
-	if dsURL == nil || dsURL.Host == "" || len(secret) < 16 || listen == "" || base == "" {
-		t.Fatal("OFFICE_DS_URL, OFFICE_JWT_SECRET, OFFICE_LISTEN and OFFICE_CALLBACK_BASE are needed")
+	container := os.Getenv("OFFICE_DS_CONTAINER")
+	if len(secret) < 16 || base == "" || container == "" {
+		t.Fatal("OFFICE_JWT_SECRET, OFFICE_CALLBACK_BASE and OFFICE_DS_CONTAINER are needed")
+	}
+	if os.Geteuid() != 0 {
+		t.Fatal("run as root: the test sets the Document Server's firewall rules")
 	}
 	ctx := context.Background()
+	net := &dsnet.Manager{Runner: sysexec.Exec{}, HardydUID: func() (int, error) { return os.Getuid(), nil }}
+	var addr *dsnet.Addr
+	for i := 0; ; i++ {
+		var err error
+		if addr, err = net.Apply(ctx); err == nil {
+			break
+		} else if i > 60 {
+			t.Fatalf("finding the Document Server: %v", err)
+		}
+		time.Sleep(2 * time.Second)
+	}
+	defer func() { _ = net.Remove(context.Background()) }()
+	dsIP := netip.MustParseAddr(addr.IP)
+	dsURL := &url.URL{Scheme: "http", Host: addr.IP + ":80"}
+	listen := addr.HostGW + ":44251"
 	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "h.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -73,14 +98,14 @@ func TestDocumentServerIntegration(t *testing.T) {
 		},
 		Audit: func(_ context.Context, a AuditEvent) { audits = append(audits, a) },
 	}
-	ln, err := net.Listen("tcp", listen)
+	ln, err := stdnet.Listen("tcp", listen)
 	if err != nil {
 		t.Fatal(err)
 	}
-	peers := DockerPeers()
 	var refused int
 	srv := &http.Server{Handler: svc.InternalHandler(func(a netip.Addr) bool {
-		ok := peers(a) || localAddr(a)
+		// Only the Document Server (and this test, posting callbacks itself).
+		ok := a == dsIP || localAddr(a)
 		if !ok {
 			refused++
 		}
@@ -120,7 +145,11 @@ func TestDocumentServerIntegration(t *testing.T) {
 				t.Fatal("the one-time document URL worked twice")
 			}
 			// Save it back as a status-2 callback, posted the way the
-			// Document Server posts them.
+			// Document Server posts them, after it said who's in the document.
+			hdr1, body1 := signed(t, secret, map[string]any{"key": key, "status": StatusEditing, "users": []string{ed.Participant.ID}})
+			if resp := postCallback(t, "http://"+listen+"/office/callback/"+key, hdr1, body1); !strings.Contains(resp, `"error":0`) {
+				t.Fatalf("status 1: %s", resp)
+			}
 			cb := map[string]any{"key": key, "status": StatusReady, "url": out, "users": []string{ed.Participant.ID}, "filetype": ext}
 			hdr, body := signed(t, secret, cb)
 			resp := postCallback(t, "http://"+listen+"/office/callback/"+key, hdr, body)
@@ -155,6 +184,59 @@ func TestDocumentServerIntegration(t *testing.T) {
 		if resp.StatusCode == http.StatusOK && !strings.Contains(string(b), `"error"`) {
 			t.Fatalf("unsigned conversion accepted: %s", b)
 		}
+	})
+
+	t.Run("commands", func(t *testing.T) {
+		// The command service takes HardyOS's signed commands...
+		code, raw, err := svc.Command(ctx, map[string]any{"c": "version"})
+		if err != nil || code != 0 || !strings.Contains(string(raw), "version") {
+			t.Fatalf("version: %d %s %v", code, raw, err)
+		}
+		// ...dropping someone from a document that isn't open is "no such
+		// document", not a bad token...
+		if err := svc.Drop(ctx, DeriveKey(secret, "docs", "none.docx", 1, time.Now(), "x"), []string{"p1"}); err != nil {
+			t.Fatalf("drop: %v", err)
+		}
+		// ...and a command signed with another secret is refused.
+		other := &Service{Secret: func(context.Context) ([]byte, error) { return []byte("not the office secret at all!!"), nil },
+			Internal: svc.Internal, HTTP: direct}
+		if code, raw, err := other.Command(ctx, map[string]any{"c": "version"}); err == nil && code == 0 {
+			t.Fatalf("forged command accepted: %s", raw)
+		}
+	})
+
+	t.Run("firewall", func(t *testing.T) {
+		// Something else listening on the host gateway: the Document Server
+		// must not reach it (an "insert image from URL" at the server).
+		other, err := stdnet.Listen("tcp", addr.HostGW+":18092")
+		if err != nil {
+			t.Fatal(err)
+		}
+		hits := 0
+		osrv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits++
+			b, _ := Blank(KindDocument)
+			_, _ = w.Write(b)
+		})}
+		go func() { _ = osrv.Serve(other) }()
+		defer osrv.Close()
+		if _, err := convert(dsURL, secret, "http://"+addr.HostGW+":18092/x.docx", "docx", "pdf", "fw"+newID("")); err == nil || hits != 0 {
+			t.Fatalf("the Document Server fetched from another port of the server (err %v, hits %d)", err, hits)
+		}
+		// From inside the container, too.
+		if out, err := exec.Command("docker", "exec", container, "curl", "-sS", "-m", "5", "http://"+addr.HostGW+":18092/").CombinedOutput(); err == nil {
+			t.Fatalf("the container reached the server's other port: %s", out)
+		}
+		// Only hardyd's uid (here: root) connects to it; anyone else is refused.
+		if out, err := exec.Command("setpriv", "--reuid=65534", "--regid=65534", "--clear-groups",
+			"curl", "-sS", "-m", "5", dsURL.String()+"/healthcheck").CombinedOutput(); err == nil {
+			t.Fatalf("another uid reached the Document Server: %s", out)
+		}
+		resp, err := direct.Get(dsURL.String() + "/healthcheck")
+		if err != nil {
+			t.Fatalf("root (as hardyd) can't reach it: %v", err)
+		}
+		resp.Body.Close()
 	})
 
 	t.Run("proxy", func(t *testing.T) {
@@ -248,9 +330,9 @@ func postCallback(t *testing.T, u, hdr string, body []byte) string {
 // localAddr: the test itself posts callbacks from one of this machine's
 // own addresses (which one depends on the host's routing).
 func localAddr(a netip.Addr) bool {
-	addrs, _ := net.InterfaceAddrs()
+	addrs, _ := stdnet.InterfaceAddrs()
 	for _, x := range addrs {
-		if n, ok := x.(*net.IPNet); ok {
+		if n, ok := x.(*stdnet.IPNet); ok {
 			if ip, ok := netip.AddrFromSlice(n.IP); ok && ip.Unmap() == a {
 				return true
 			}

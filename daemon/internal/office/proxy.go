@@ -1,6 +1,10 @@
 package office
 
 import (
+	"mime"
+	"path"
+	"regexp"
+
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -94,38 +98,65 @@ func (g *Gate) Valid(r *http.Request) bool {
 	return hmac.Equal([]byte(sig), []byte(g.sign(r.Host, exp)))
 }
 
-// blockedDS are Document Server paths browsers never need: its
-// server-to-server APIs (they enforce the JWT anyway), the example app,
-// the admin panel, plugins (turned off) and WOPI.
-var blockedDS = []string{
-	"/coauthoring/", "/converter", "/convertservice.ashx", "/command", "/docbuilder",
-	"/info", "/internal/", "/example", "/admin", "/wopi", "/hosting/", "/healthcheck",
-	"/sdkjs-plugins/", "/plugins.json", "/metrics",
+// allowedDS are the Document Server paths browsers use (decision 264): the
+// editors' code and fonts, the co-editing socket, the file cache, uploads
+// (inserted images), downloads, printing and spelling dictionaries, plus
+// "download as" and its large-file path. Everything else (the command and
+// conversion services, the admin panel, the example, plugins, WOPI, info)
+// isn't proxied at all.
+var allowedDS = []string{
+	"/web-apps/", "/sdkjs/", "/fonts/", "/doc/", "/cache/files/", "/upload/",
+	"/downloadfile/", "/printfile/", "/dictionaries/", "/downloadas/", "/savefile/",
 }
 
-// dsPathAllowed reports whether a path (after the prefix) may be proxied.
-// The Document Server puts a version segment ("/9.4.0-129/") in front of
-// its static paths; it's skipped for the check.
-func dsPathAllowed(p string) bool {
-	if !strings.HasPrefix(p, "/") || strings.Contains(p, "..") || strings.Contains(p, "\\") {
-		return false
+// versionRE is the version segment the Document Server puts in front of
+// its static paths ("/9.4.0-129/").
+var versionRE = regexp.MustCompile(`^/[0-9]{1,4}(\.[0-9]{1,4}){0,3}-[0-9A-Za-z]{1,32}/`)
+
+// dsPath checks a request's escaped path below DSPrefix and returns the
+// path the Document Server sees with the version segment taken off (for
+// matching only), or false. Encoded slashes, backslashes and dots, double
+// slashes and anything path.Clean would change are refused, so what was
+// checked is exactly what's forwarded.
+func dsPath(escaped string) (rest, unversioned string, ok bool) {
+	rest, found := strings.CutPrefix(escaped, DSPrefix)
+	if !found || !strings.HasPrefix(rest, "/") || len(rest) > 4096 {
+		return "", "", false
 	}
-	lp := strings.ToLower(p)
-	check := []string{lp}
-	if i := strings.IndexByte(lp[1:], '/'); i > 0 {
-		seg := lp[1 : i+1]
-		if seg != "" && seg[0] >= '0' && seg[0] <= '9' {
-			check = append(check, lp[i+1:])
+	low := strings.ToLower(rest)
+	if strings.Contains(low, "%2f") || strings.Contains(low, "%5c") || strings.Contains(low, "%2e") || strings.Contains(low, "%00") ||
+		strings.ContainsAny(rest, "\\\x00") || strings.Contains(rest, "//") {
+		return "", "", false
+	}
+	if c := path.Clean(rest); c != rest && c+"/" != rest {
+		return "", "", false
+	}
+	dec, err := url.PathUnescape(rest)
+	if err != nil || dec != path.Clean(dec) && path.Clean(dec)+"/" != dec {
+		return "", "", false
+	}
+	unversioned = rest
+	if m := versionRE.FindString(rest); m != "" {
+		unversioned = rest[len(m)-1:]
+	}
+	for _, a := range allowedDS {
+		if strings.HasPrefix(unversioned, a) {
+			return rest, unversioned, true
 		}
 	}
-	for _, c := range check {
-		for _, b := range blockedDS {
-			if strings.HasPrefix(c, b) || c+"/" == b || (strings.HasSuffix(b, "/") && c == strings.TrimSuffix(b, "/")) {
-				return false
-			}
-		}
-	}
-	return true
+	return "", "", false
+}
+
+// dsPathAllowed reports whether an escaped path below the prefix may be
+// proxied (tests).
+func dsPathAllowed(rest string) bool {
+	_, _, ok := dsPath(DSPrefix + rest)
+	return ok
+}
+
+// fileLike: responses that are someone's file, not the editor's own code.
+func fileLike(unversioned string) bool {
+	return strings.HasPrefix(unversioned, "/cache/files/") || strings.HasPrefix(unversioned, "/upload/")
 }
 
 // Proxy is the Document Server behind hardyd at DSPrefix.
@@ -145,9 +176,14 @@ func (p *Proxy) init() {
 				if err != nil {
 					return
 				}
+				rest, _, ok := dsPath(pr.In.URL.EscapedPath())
+				if !ok {
+					return
+				}
 				pr.SetURL(in)
-				pr.Out.URL.Path = strings.TrimPrefix(pr.In.URL.Path, DSPrefix)
-				pr.Out.URL.RawPath = ""
+				// Exactly the path that was checked, as it was written.
+				dec, _ := url.PathUnescape(rest)
+				pr.Out.URL.Path, pr.Out.URL.RawPath = dec, rest
 				pr.Out.Host = in.Host
 				scheme := "http"
 				if pr.In.TLS != nil {
@@ -175,6 +211,23 @@ func (p *Proxy) init() {
 				h.Set("Content-Security-Policy", "frame-ancestors 'self'")
 				h.Set("X-Content-Type-Options", "nosniff")
 				h.Set("Referrer-Policy", "no-referrer")
+				// Files from the cache and uploads (documents, inserted images)
+				// never run as a page on this origin: opened directly they
+				// download, framed they're sandboxed (PDFs excepted, which
+				// browsers won't show sandboxed; print uses them). The editor's
+				// own fetches of them aren't pages and are unaffected.
+				if _, unv, ok := dsPath(DSPrefix + resp.Request.URL.EscapedPath()); ok && fileLike(unv) {
+					switch resp.Request.Header.Get("Sec-Fetch-Dest") {
+					case "", "document", "embed", "object":
+						h.Set("Content-Security-Policy", "sandbox; default-src 'none'")
+						name := path.Base(resp.Request.URL.Path)
+						h.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": name}))
+					case "iframe", "frame":
+						if !strings.HasPrefix(strings.ToLower(h.Get("Content-Type")), "application/pdf") {
+							h.Set("Content-Security-Policy", "sandbox; default-src 'none'")
+						}
+					}
+				}
 				return nil
 			},
 			ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -187,8 +240,7 @@ func (p *Proxy) init() {
 // ServeHTTP proxies one request under DSPrefix.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.init()
-	rest := strings.TrimPrefix(r.URL.Path, DSPrefix)
-	if rest == r.URL.Path || !dsPathAllowed(rest) {
+	if _, _, ok := dsPath(r.URL.EscapedPath()); !ok {
 		http.NotFound(w, r)
 		return
 	}

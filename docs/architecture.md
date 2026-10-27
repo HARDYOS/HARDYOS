@@ -1755,7 +1755,7 @@ browser (desktop window, or a share link page)
    │  https://<server>:44250            (office origin: editor page + proxy)
    │  https://files.<base>/s/-/ds/...   (share links from the internet, via the app gateway)
    ▼
-hardyd ── /s/-/ds/* ──▶ Document Server  127.0.0.1:<port>  (catalog app "onlyoffice")
+hardyd ── /s/-/ds/* ──▶ Document Server  <container address>:80  (catalog app "onlyoffice", no published port)
    ▲                          │
    │  http://host.docker.internal:44251   (internal listener on docker0)
    └─ GET /office/file/<one-time token>   ◀┘  document to open
@@ -1768,18 +1768,26 @@ hardyd ── /s/-/ds/* ──▶ Document Server  127.0.0.1:<port>  (catalog ap
   multi-arch index), installed, reconfigured and stopped by the jobs
   `office.enable` / `office.disable` / `office.settings` (lock
   `app:onlyoffice`), never by the App Store's install (refused,
-  `managed_app`). Its WEB port is published on 127.0.0.1 only; JWT on for
-  browser, inbox and outbox; plugins, WOPI and macros off; an optional
-  fonts share bound read only.
+  `managed_app`). It publishes no port. hardyd-priv's `office.dsnet` op
+  finds it by its Compose labels and keeps iptables chains in step: only
+  hardyd's uid may connect to it (host-network apps and other processes
+  can't), it may reach the server only at the docker0 gateway on 44251, and
+  nothing it sends on reaches private, link-local, CGNAT, loopback,
+  multicast or reserved addresses; hardyd learns its address from the op.
+  JWT on for browser, inbox and outbox; plugins, WOPI and macros off; an
+  optional fonts share bound read only.
 - **Secret.** 32 random bytes as hex, made by hardyd, sealed with secretbox
   (purpose `office`, AAD `settings:office.secret`) in the settings table, and
   handed to the app as its `JWT_SECRET` setting (root-only `app.env`).
 - **Settings and state** (`internal/office`): `office.settings` in the
   settings table; migration `0050_office.sql`: `office_sessions` (one
-  version of one file open under a document key; the version on disk it
-  expects), `office_participants` (each opening: a random id the Document
+  version of one file open under a document key; its `location`, the share
+  id or `~home:<principal>` because every person's home is their own; the
+  version on disk it expects; who the Document Server last listed and when),
+  `office_participants` (each opening: a random id the Document
   Server reports back as the user id, the HardyOS account or share link, the
-  display name, edit or view), `office_callbacks` (callbacks acted on), and
+  display name, edit or view, the client address, when last listed and when
+  they left), `office_callbacks` (callbacks acted on), and
   `share_links.access`.
 - **Opening** (`POST /office/open`, `Service.Open`). The file is checked as
   the person (`files.Access.Stat`): a format the editor opens, not too big;
@@ -1787,7 +1795,9 @@ hardyd ── /s/-/ds/* ──▶ Document Server  127.0.0.1:<port>  (catalog ap
   are editing (counted from the Document Server's status-1 callbacks), else
   view with the reason. People opening a file while its session is open get
   its key (co-editing); a session nobody is in is closed when the file
-  changed. The key is an HMAC of share, path, size, mtime and a nonce under a
+  changed. At most 5 people edit through one share link and 30 openings come
+  from one address in 10 minutes. The key is an HMAC of location, path,
+  size, mtime and a nonce under a
   key derived from the secret. The config (document URL, callback URL,
   user id and display name, mode, permissions, customization) is signed
   (HS256, 15-minute `exp`). The desktop gets
@@ -1796,19 +1806,24 @@ hardyd ── /s/-/ds/* ──▶ Document Server  127.0.0.1:<port>  (catalog ap
   same host on another port, must match); the editor page is served there
   with the config, a gate cookie and a CSP allowing only its own scripts and
   frames and framing only by the desktop's origin.
-- **Proxy** (`office.Proxy`). Everything under `/s/-/ds/` goes to the
-  Document Server with the prefix stripped and `X-Forwarded-Host:
+- **Proxy** (`office.Proxy`). Only the editor's paths under `/s/-/ds/`
+  (an allowlist: `/web-apps/`, `/sdkjs/`, `/fonts/`, `/doc/`,
+  `/cache/files/`, `/upload/`, `/downloadfile/`, `/printfile/`,
+  `/dictionaries/`, `/downloadas/`, `/savefile/`, after an optional version
+  segment, checked on the escaped path with encoded slashes, backslashes and
+  dots, double slashes and unclean paths refused) go to the Document Server,
+  exactly as checked, with the prefix stripped and `X-Forwarded-Host:
   <host>/s/-/ds` (OnlyOffice's virtual-path setup), only with a valid gate
   cookie (HMAC over host and expiry, 12 h, per-process key), never with
-  HardyOS's cookies or Authorization, without the server-to-server APIs
-  (`/coauthoring/`, `/converter`, `/command`, `/docbuilder`, `/info`,
-  `/internal/`, `/example`, `/admin`, plugins, ...), and with Set-Cookie and
-  framing headers replaced (`frame-ancestors 'self'`). It's served on the
+  HardyOS's cookies or Authorization, and with Set-Cookie and framing
+  headers replaced (`frame-ancestors 'self'`). Files from the cache and
+  uploads are attachments with a `sandbox` CSP when opened as a page. It's served on the
   office origin and, through the app gateway, on `files.<base>`; on the
   desktop's own origin `/s/-/ds/` is a 404, so the Document Server's scripts
   never run there.
 - **Internal listener** (`office.InternalHandler`, plain HTTP on the
-  docker0 address, port 44251): only loopback and Docker bridge peers;
+  docker0 address, port 44251): only the Document Server container's
+  address; refused callbacks audited at most 20 a minute;
   `GET /office/file/<token>`: a 256-bit token made for one participant of
   one session, 15 minutes, one completed transfer, read as that participant
   (`Identity`) through `files.Access.Open`; `POST /office/callback/<key>`.
@@ -1818,12 +1833,15 @@ hardyd ── /s/-/ds/* ──▶ Document Server  127.0.0.1:<port>  (catalog ap
   must be the URL's and a known session's. Status 1 records who's in it
   (known participant ids only), 4 closes, 3/7 are recorded, 2 and 6 save.
   A save names a participant (`users[0]`, the last editor) who opened it
-  for editing; `Identity` re-checks them (account enabled and in the domain;
+  for editing, whom the Document Server listed and who is in the document or
+  left at most 30 minutes ago, in a session it reported on within a day;
+  its `filetype` is one the editor writes for that kind of document;
+  `Identity` re-checks them (and their folder must be the session's) (account enabled and in the domain;
   a link not revoked or expired, still `edit`, still containing the file,
   its creator still valid), then `Stat(...).Writable` and `OpenWrite` as
   them; the URL must name the Document Server's file cache (`/cache/files/`
   on its internal address or on a public base the proxy served, checked as
-  written and decoded) and is fetched only from 127.0.0.1:<port> (no proxy,
+  written and decoded) and is fetched only from its address (no proxy,
   no redirects), at most the size limit, into `.hardyos-upload-<id>` and
   renamed over the file (or, when the file changed outside the editor or is
   gone, next to it as "name (edited by X date).ext"). A callback already
@@ -1831,6 +1849,13 @@ hardyd ── /s/-/ds/* ──▶ Document Server  127.0.0.1:<port>  (catalog ap
   session closed is refused. Refusals answer `{"error":1}` so the Document
   Server keeps the edits as a forgotten file. Saves are audited as
   `files.write` by the person (or "link #N of creator (visitor: name)").
+- **Putting people out.** A JWT-signed `drop` to the command service
+  (`/coauthoring/CommandService.ashx` on the internal address) ends a
+  participant's editing: when their link is turned off, their account is
+  turned off, deleted or gone from the domain, when a status-1 callback lists
+  someone who fails the re-check, and from a sweep every minute, which also
+  closes sessions nobody has been in for 30 minutes or the Document Server
+  hasn't reported on for a day. Audited as `office.drop`.
 - **Share links**: `access` view or edit (edit only for files the editor
   saves, and folders; chosen explicitly). `/s/<token>/office` asks the
   visitor's name, then serves the editor on the office origin (a redirect

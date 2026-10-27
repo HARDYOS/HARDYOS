@@ -2,8 +2,11 @@
 # (docs/office.md, decisions 250-262). Enabled from Control Panel > Office,
 # which sets JWT_SECRET; the App Store doesn't install it on its own.
 #
-# - Published on 127.0.0.1 only: browsers reach it through hardyd's proxy,
-#   never directly from the network.
+# - No published port: hardyd reaches it at its container address, and
+#   hardyd-priv's office.dsnet rules let only hardyd's uid connect to it,
+#   let it reach the server only on hardyd's internal listener (44251) and
+#   keep it off private addresses (decision 266). Browsers reach it through
+#   hardyd's proxy.
 # - JWT on every way in and out (browser, requests to it, callbacks), with
 #   the secret HardyOS generated and keeps sealed.
 # - Plugins off (they load code from outside), WOPI off, private and
@@ -28,8 +31,6 @@ services:
       USE_UNAUTHORIZED_STORAGE: "false"
       GENERATE_FONTS: "true"
       TZ: ${HARDY_TZ}
-    ports:
-      - "127.0.0.1:${HARDY_PORT_WEB}:80"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

@@ -194,13 +194,17 @@ func TestCleanName(t *testing.T) {
 type fakeFiles struct {
 	mu       sync.Mutex
 	dirs     map[string]string
+	homes    map[string]string // principal -> their "~home"
 	readOnly map[string]bool
 	reads    []string // principals that opened files
 	writes   []string // principal + path written
 }
 
-func (f *fakeFiles) path(share, p string) (string, error) {
+func (f *fakeFiles) path(who files.Who, share, p string) (string, error) {
 	d, ok := f.dirs[share]
+	if share == files.HomeShare {
+		d, ok = f.homes[who.Principal]
+	}
 	if !ok {
 		return "", &files.Error{Kind: files.ErrNotFound, Msg: "no share"}
 	}
@@ -229,7 +233,7 @@ func (f *fakeFiles) entry(full, p string, who files.Who) (*files.Entry, error) {
 }
 
 func (f *fakeFiles) Stat(_ context.Context, who files.Who, share, p string) (*files.Entry, error) {
-	full, err := f.path(share, p)
+	full, err := f.path(who, share, p)
 	if err != nil {
 		return nil, err
 	}
@@ -237,7 +241,7 @@ func (f *fakeFiles) Stat(_ context.Context, who files.Who, share, p string) (*fi
 }
 
 func (f *fakeFiles) Open(_ context.Context, who files.Who, share, p string) (*os.File, *files.Entry, error) {
-	full, err := f.path(share, p)
+	full, err := f.path(who, share, p)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -265,7 +269,7 @@ func (f *fakeFiles) Create(_ context.Context, who files.Who, share, p string, ov
 	if err := f.writable(who); err != nil {
 		return nil, err
 	}
-	full, err := f.path(share, p)
+	full, err := f.path(who, share, p)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +284,7 @@ func (f *fakeFiles) OpenWrite(_ context.Context, who files.Who, share, p string)
 	if err := f.writable(who); err != nil {
 		return nil, nil, err
 	}
-	full, err := f.path(share, p)
+	full, err := f.path(who, share, p)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -296,8 +300,8 @@ func (f *fakeFiles) Replace(_ context.Context, who files.Who, share, from, to st
 	if err := f.writable(who); err != nil {
 		return err
 	}
-	a, _ := f.path(share, from)
-	b, _ := f.path(share, to)
+	a, _ := f.path(who, share, from)
+	b, _ := f.path(who, share, to)
 	f.mu.Lock()
 	f.writes = append(f.writes, who.Principal+" "+to)
 	f.mu.Unlock()
@@ -308,8 +312,8 @@ func (f *fakeFiles) Rename(_ context.Context, who files.Who, share, from, toShar
 	if err := f.writable(who); err != nil {
 		return err
 	}
-	a, _ := f.path(share, from)
-	b, _ := f.path(toShare, to)
+	a, _ := f.path(who, share, from)
+	b, _ := f.path(who, toShare, to)
 	if _, err := os.Stat(b); err == nil {
 		return &files.Error{Kind: files.ErrExists, Msg: "exists"}
 	}
@@ -319,8 +323,8 @@ func (f *fakeFiles) Rename(_ context.Context, who files.Who, share, from, toShar
 	return os.Rename(a, b)
 }
 
-func (f *fakeFiles) DeleteItem(_ context.Context, _ files.Who, share, p string, _ bool) (bool, error) {
-	full, _ := f.path(share, p)
+func (f *fakeFiles) DeleteItem(_ context.Context, who files.Who, share, p string, _ bool) (bool, error) {
+	full, _ := f.path(who, share, p)
 	return false, os.Remove(full)
 }
 
@@ -332,10 +336,16 @@ type env struct {
 	ds     *httptest.Server
 	dsMu   sync.Mutex
 	dsFile map[string][]byte // path under /cache/files/ -> content
-	// noWrite: principals Identity refuses to write as.
+	// noWrite: principals Identity refuses to write as; gone: refused
+	// entirely; as: a participant name acting as another principal.
 	noWrite map[string]bool
-	audits  []AuditEvent
-	amu     sync.Mutex
+	gone    map[string]bool
+	as      map[string]string
+	// commands the fake Document Server received (verified JWT).
+	cmdMu    sync.Mutex
+	commands []map[string]any
+	audits   []AuditEvent
+	amu      sync.Mutex
 }
 
 func newEnv(t *testing.T) *env {
@@ -346,9 +356,26 @@ func newEnv(t *testing.T) *env {
 	}
 	t.Cleanup(func() { db.Close() })
 	dir := t.TempDir()
-	e := &env{t: t, dir: dir, dsFile: map[string][]byte{}, noWrite: map[string]bool{},
+	e := &env{t: t, dir: dir, dsFile: map[string][]byte{}, noWrite: map[string]bool{}, gone: map[string]bool{}, as: map[string]string{},
 		fs: &fakeFiles{dirs: map[string]string{"docs": dir}, readOnly: map[string]bool{}}}
 	e.ds = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == CommandPath {
+			tok, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+			claims, err := VerifyJWT(testSecret, tok, VerifyOptions{RequireExp: true})
+			if err != nil {
+				_, _ = io.WriteString(w, `{"error":6}`)
+				return
+			}
+			var c struct {
+				Payload map[string]any `json:"payload"`
+			}
+			_ = json.Unmarshal(claims, &c)
+			e.cmdMu.Lock()
+			e.commands = append(e.commands, c.Payload)
+			e.cmdMu.Unlock()
+			_, _ = io.WriteString(w, `{"error":0}`)
+			return
+		}
 		e.dsMu.Lock()
 		b, ok := e.dsFile[r.URL.Path]
 		e.dsMu.Unlock()
@@ -367,6 +394,12 @@ func newEnv(t *testing.T) *env {
 		CallbackBase: func() string { return "http://host.docker.internal:44251" },
 		Identity: func(_ context.Context, p Participant, _ *Session, write bool) (files.Who, error) {
 			who := files.Who{Principal: p.Name}
+			if a, ok := e.as[p.Name]; ok {
+				who.Principal = a
+			}
+			if e.gone[p.Name] {
+				return files.Who{}, errors.New("gone")
+			}
 			if write && e.noWrite[p.Name] {
 				return files.Who{}, errors.New("no longer allowed")
 			}
@@ -430,6 +463,17 @@ func (e *env) callback(key string, cb map[string]any) (*CallbackResult, error) {
 		return nil, err
 	}
 	return e.svc.HandleCallback(context.Background(), key, parsed)
+}
+
+// join is a status-1 callback: the Document Server says these people are in.
+func (e *env) join(key string, ids ...string) {
+	e.t.Helper()
+	if ids == nil {
+		ids = []string{}
+	}
+	if _, err := e.callback(key, map[string]any{"key": key, "status": 1, "users": ids}); err != nil {
+		e.t.Fatal(err)
+	}
 }
 
 func cfgKey(ed *Editor) string { return ed.Config["document"].(map[string]any)["key"].(string) }
@@ -632,6 +676,7 @@ func TestCallbackReplayAndForgery(t *testing.T) {
 	e.write("plan.docx", "v1")
 	a := e.open("plan.docx", "alice", true)
 	key := cfgKey(a)
+	e.join(key, a.Participant.ID)
 	cb := map[string]any{"key": key, "status": 2, "url": e.cacheURL("v2"), "users": []string{a.Participant.ID}}
 	if _, err := e.callback(key, cb); err != nil {
 		t.Fatal(err)
@@ -652,6 +697,7 @@ func TestCallbackReplayAndForgery(t *testing.T) {
 
 	// Forged: another secret, through the HTTP handler.
 	b := e.open("plan.docx", "alice", true)
+	e.join(cfgKey(b), b.Participant.ID)
 	h := e.svc.InternalHandler(func(netip.Addr) bool { return true })
 	post := func(key, auth string, body []byte) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/office/callback/"+key, bytes.NewReader(body))
@@ -717,6 +763,7 @@ func TestCallbackLostWriteAccess(t *testing.T) {
 	a := e.open("plan.docx", "alice", true)
 	v := e.open("plan.docx", "victor", false)
 	key := cfgKey(a)
+	e.join(key, a.Participant.ID, v.Participant.ID)
 	// A viewer named as the last editor: refused.
 	if _, err := e.callback(key, map[string]any{"key": key, "status": 6, "url": e.cacheURL("v"), "users": []string{v.Participant.ID}}); !errors.Is(err, ErrCallbackUser) {
 		t.Fatalf("viewer: %v", err)
@@ -755,6 +802,7 @@ func TestCallbackConflictCopy(t *testing.T) {
 	e.write("plan.docx", "v1")
 	a := e.open("plan.docx", "alice", true)
 	key := cfgKey(a)
+	e.join(key, a.Participant.ID)
 	// Someone changes the file outside the editor (SMB, another app).
 	time.Sleep(10 * time.Millisecond)
 	e.write("plan.docx", "changed over SMB")
@@ -772,6 +820,7 @@ func TestCallbackURLMustBeDocumentServerCache(t *testing.T) {
 	e.write("plan.docx", "v1")
 	a := e.open("plan.docx", "alice", true)
 	key := cfgKey(a)
+	e.join(key, a.Participant.ID)
 	e.svc.NoteBase("https://nas.lan:44250/s/-/ds")
 	good := e.cacheURL("via proxy")
 	gu, _ := url.Parse(good)
@@ -821,6 +870,7 @@ func TestCallbackSizeLimit(t *testing.T) {
 	e.write("plan.docx", "v1")
 	a := e.open("plan.docx", "alice", true)
 	key := cfgKey(a)
+	e.join(key, a.Participant.ID)
 	e.svc.MaxFileBytes = func() int64 { return 4 }
 	if _, err := e.callback(key, map[string]any{"key": key, "status": 6, "url": e.cacheURL("way too big"), "users": []string{a.Participant.ID}}); err == nil {
 		t.Fatal("saved more than the limit")

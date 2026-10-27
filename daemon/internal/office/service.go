@@ -50,6 +50,22 @@ const (
 	// idleSession: an open session nobody is in that hasn't heard from
 	// the Document Server for this long is treated as over.
 	idleSession = 24 * time.Hour
+	// MaxSessionQuiet: a session the Document Server hasn't reported on (no
+	// one joining or leaving) for this long takes no more saves and is
+	// closed (decision 265).
+	MaxSessionQuiet = 24 * time.Hour
+	// EmptySessionQuiet: a session nobody is in is closed after this long.
+	EmptySessionQuiet = 30 * time.Minute
+	// LeftGrace: someone who left the document can still be the author of
+	// its save for this long (the Document Server saves after everyone left).
+	LeftGrace = 30 * time.Minute
+	// LinkEditors is how many people at once may edit through one share
+	// link; IPOpens how many openings one address may make in IPWindow.
+	LinkEditors = 5
+	IPOpens     = 30
+	IPWindow    = 10 * time.Minute
+	// maxDownloads bounds the document URLs waiting to be used.
+	maxDownloads = 10000
 )
 
 // Files is what office needs from the file worker client (files.Service).
@@ -108,6 +124,10 @@ type Service struct {
 	downloads map[string]*download // sha256(token) -> download
 	keyLocks  map[string]*sync.Mutex
 	bases     map[string]time.Time // public Document Server bases the proxy served
+	opened    map[string]time.Time // link openings audited recently (coalescing)
+
+	refusalWindow          time.Time
+	refusals, refusalsLost int
 }
 
 func (s *Service) now() time.Time {
@@ -152,6 +172,9 @@ var (
 	ErrNotDocument = errors.New("the editor doesn't open this kind of file")
 	ErrTooBig      = errors.New("this file is too big for the editor")
 	ErrIsFolder    = errors.New("folders can't be opened in the editor")
+	// ErrTooMany: too many openings from one address, or document URLs
+	// waiting, right now.
+	ErrTooMany = errors.New("too many documents are being opened right now; try again in a few minutes")
 )
 
 // OpenRequest asks for an editor on one file.
@@ -172,6 +195,11 @@ type OpenRequest struct {
 	MayEdit  bool
 	// Lang is the editor's language (default "en").
 	Lang string
+	// IP is the address the request came from (limits, audit).
+	IP string
+	// NoDownload hides Download and Print (view links, links with a
+	// download limit).
+	NoDownload bool
 }
 
 // Editor is what the editor page needs.
@@ -208,6 +236,20 @@ func CleanName(name, fallback string) string {
 		return fallback
 	}
 	return out
+}
+
+// CleanGuestName is CleanName for share link visitors: no brackets or
+// quotes, so a name can't pose as part of the "(guest)" label or the audit
+// actor.
+func CleanGuestName(name string) string {
+	name = strings.Map(func(r rune) rune {
+		switch r {
+		case '(', ')', '[', ']', '{', '}', '<', '>', '"', '\'', '`', '\\':
+			return -1
+		}
+		return r
+	}, name)
+	return CleanName(name, "Guest")
 }
 
 // Open finds or starts the session for a file, adds the participant and
@@ -251,7 +293,14 @@ func (s *Service) Open(ctx context.Context, req OpenRequest) (*Editor, error) {
 	s.openMu.Lock()
 	defer s.openMu.Unlock()
 	now := s.now()
-	sess, err := s.db().openSession(ctx, req.Share, req.Path)
+	if req.IP != "" && s.db().countFrom(ctx, req.IP, now.Add(-IPWindow)) >= IPOpens {
+		return nil, ErrTooMany
+	}
+	if mode == ModeEdit && req.Kind == KindLink && s.linkEditors(ctx, req.LinkID, now) >= LinkEditors {
+		mode, why = ModeView, fmt.Sprintf("%d people are already editing through this link, the most one link allows at once. The file opened read only.", LinkEditors)
+	}
+	location := LocationOf(req.Share, req.Who)
+	sess, err := s.db().openSession(ctx, location, req.Path)
 	if err != nil && !errors.Is(err, ErrNoSession) {
 		return nil, err
 	}
@@ -271,8 +320,8 @@ func (s *Service) Open(ctx context.Context, req OpenRequest) (*Editor, error) {
 	}
 	if sess == nil {
 		sess = &Session{
-			Key:   DeriveKey(keyKey(secret), req.Share, req.Path, e.Size, e.Modified, newID("")),
-			Share: req.Share, Path: req.Path, FileType: f.Ext,
+			Key:   DeriveKey(keyKey(secret), location, req.Path, e.Size, e.Modified, newID("")),
+			Share: req.Share, Location: location, Path: req.Path, FileType: f.Ext,
 			BaseModified: e.Modified, BaseSize: e.Size, State: StateOpen, Active: []string{},
 			CreatedAt: now, UpdatedAt: now,
 		}
@@ -281,12 +330,15 @@ func (s *Service) Open(ctx context.Context, req OpenRequest) (*Editor, error) {
 		}
 	}
 	p := &Participant{ID: newID("p"), Key: sess.Key, Kind: req.Kind, UserID: req.UserID, LinkID: req.LinkID,
-		Name: CleanName(req.Name, "Guest"), Mode: mode, Created: now}
+		Name: CleanName(req.Name, "Guest"), Mode: mode, IP: req.IP, Created: now}
+	token, err := s.newDownload(sess.Key, p.ID, now)
+	if err != nil {
+		return nil, err
+	}
 	if err := s.db().addParticipant(ctx, p); err != nil {
 		return nil, err
 	}
-	token := s.newDownload(sess.Key, p.ID, now)
-	cfg := s.config(f, e.Name, sess, p, token, req.Lang)
+	cfg := s.config(f, e.Name, sess, p, token, req.Lang, !req.NoDownload)
 	claims := map[string]any{}
 	for k, v := range cfg {
 		claims[k] = v
@@ -302,9 +354,59 @@ func (s *Service) Open(ctx context.Context, req OpenRequest) (*Editor, error) {
 	if why != "" {
 		detail += " (asked to edit: " + why + ")"
 	}
-	s.audit(ctx, AuditEvent{Action: "office.open", Target: req.Share + ":/" + req.Path, Outcome: audit.Success,
-		Detail: detail + ", session " + sess.Key[:8], Participant: p})
+	if s.firstOpen(req, location, now) {
+		s.audit(ctx, AuditEvent{Action: "office.open", Target: req.Share + ":/" + req.Path, Outcome: audit.Success,
+			Detail: detail + ", session " + sess.Key[:8], Participant: p})
+	}
 	return &Editor{Config: cfg, Mode: mode, Session: sess, Participant: p, ViewReason: why}, nil
+}
+
+// firstOpen reports whether an opening should be audited: always for
+// accounts; for a share link once per link, address and file in 10 minutes
+// (a visitor reloading the page isn't a new row each time).
+func (s *Service) firstOpen(req OpenRequest, location string, now time.Time) bool {
+	if req.Kind != KindLink {
+		return true
+	}
+	k := fmt.Sprintf("%d\x00%s\x00%s\x00%s", req.LinkID, req.IP, location, req.Path)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.opened == nil {
+		s.opened = map[string]time.Time{}
+	}
+	if t, ok := s.opened[k]; ok && now.Sub(t) < 10*time.Minute {
+		return false
+	}
+	if len(s.opened) > 10000 {
+		for x, t := range s.opened {
+			if now.Sub(t) >= 10*time.Minute {
+				delete(s.opened, x)
+			}
+		}
+	}
+	if len(s.opened) <= 10000 {
+		s.opened[k] = now
+	}
+	return true
+}
+
+// linkEditors counts a link's editing participants in open sessions that
+// are in a document or opened it in the last 10 minutes and haven't left.
+func (s *Service) linkEditors(ctx context.Context, linkID int64, now time.Time) int {
+	list, err := s.db().linkParticipants(ctx, linkID)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, p := range list {
+		if p.Mode != ModeEdit || !p.LeftAt.IsZero() {
+			continue
+		}
+		if !p.SeenAt.IsZero() || now.Sub(p.Created) < 10*time.Minute {
+			n++
+		}
+	}
+	return n
 }
 
 // sameVersion: e is the version the session expects.
@@ -331,7 +433,7 @@ func (s *Service) activeEditors(ctx context.Context, cur *Session) int {
 	return n
 }
 
-func (s *Service) config(f Format, title string, sess *Session, p *Participant, token, lang string) map[string]any {
+func (s *Service) config(f Format, title string, sess *Session, p *Participant, token, lang string, download bool) map[string]any {
 	if lang == "" {
 		lang = "en"
 	}
@@ -339,7 +441,7 @@ func (s *Service) config(f Format, title string, sess *Session, p *Participant, 
 	base := strings.TrimRight(s.CallbackBase(), "/")
 	perms := map[string]any{
 		"edit": edit, "review": edit && f.DocumentType == "word", "comment": edit,
-		"download": true, "print": true, "copy": true, "chat": edit,
+		"download": download, "print": download, "copy": true, "chat": edit,
 		"fillForms": edit, "modifyFilter": edit, "modifyContentControl": edit,
 	}
 	return map[string]any{
@@ -393,7 +495,7 @@ func hashToken(t string) string {
 	return hex.EncodeToString(h[:])
 }
 
-func (s *Service) newDownload(key, participant string, now time.Time) string {
+func (s *Service) newDownload(key, participant string, now time.Time) (string, error) {
 	b := make([]byte, 32)
 	_, _ = rand.Read(b)
 	token := hex.EncodeToString(b)
@@ -407,8 +509,11 @@ func (s *Service) newDownload(key, participant string, now time.Time) string {
 			delete(s.downloads, k)
 		}
 	}
+	if len(s.downloads) >= maxDownloads {
+		return "", ErrTooMany
+	}
 	s.downloads[hashToken(token)] = &download{key: key, participant: participant, expires: now.Add(DownloadLifetime)}
-	return token
+	return token, nil
 }
 
 // Errors from a document download.
@@ -468,6 +573,10 @@ func (s *Service) ServeDownload(w http.ResponseWriter, r *http.Request, token st
 	who, err := s.Identity(ctx, *p, sess, false)
 	if err != nil {
 		s.audit(ctx, AuditEvent{Action: "office.download", Target: sess.Share + ":/" + sess.Path, Outcome: audit.Denied, Detail: err.Error(), Participant: p})
+		http.Error(w, "no access", http.StatusForbidden)
+		return
+	}
+	if LocationOf(sess.Share, who) != sess.Location {
 		http.Error(w, "no access", http.StatusForbidden)
 		return
 	}

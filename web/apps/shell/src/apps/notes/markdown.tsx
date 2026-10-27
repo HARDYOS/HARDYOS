@@ -21,8 +21,12 @@ const FENCE = /^\s{0,3}(```|~~~)\s*([\w+-]*)\s*$/;
 const RULE = /^\s{0,3}([-*_])(\s*\1){2,}\s*$/;
 const TASK = /^\[( |x|X)\]\s+(.*)$/;
 
+/** Quotes nest at most this deep; deeper ">" lines are plain text. */
+export const MAX_QUOTE_DEPTH = 8;
+
 /** Parses Markdown into blocks. */
-export function parse(src: string): Block[] {
+export function parse(src: string, depth = 0): Block[] {
+  const quotes = depth < MAX_QUOTE_DEPTH;
   const lines = src.replace(/\r\n?/g, "\n").split("\n");
   const out: Block[] = [];
   let i = 0;
@@ -52,10 +56,10 @@ export function parse(src: string): Block[] {
       i++;
       continue;
     }
-    if (/^\s{0,3}>/.test(line)) {
+    if (quotes && /^\s{0,3}>/.test(line)) {
       const inner: string[] = [];
       while (i < lines.length && /^\s{0,3}>/.test(lines[i]!)) inner.push(lines[i++]!.replace(/^\s{0,3}>\s?/, ""));
-      out.push({ t: "quote", blocks: parse(inner.join("\n")) });
+      out.push({ t: "quote", blocks: parse(inner.join("\n"), depth + 1) });
       continue;
     }
     const ordered = ORDERED.test(line);
@@ -82,7 +86,7 @@ export function parse(src: string): Block[] {
       !FENCE.test(lines[i]!) &&
       !HEADING.test(lines[i]!) &&
       !RULE.test(lines[i]!) &&
-      !/^\s{0,3}>/.test(lines[i]!) &&
+      !(quotes && /^\s{0,3}>/.test(lines[i]!)) &&
       !BULLET.test(lines[i]!) &&
       !ORDERED.test(lines[i]!)
     )

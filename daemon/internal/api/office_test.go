@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,6 +33,14 @@ type officeEnv struct {
 	admin  *client
 	origin string // the office origin
 	ds     *httptest.Server
+	dsMu   sync.Mutex
+	dsSeen []string // paths and commands the Document Server got
+}
+
+func (e *officeEnv) seen() []string {
+	e.dsMu.Lock()
+	defer e.dsMu.Unlock()
+	return append([]string(nil), e.dsSeen...)
 }
 
 func newOfficeEnv(t *testing.T) *officeEnv {
@@ -42,12 +51,23 @@ func newOfficeEnv(t *testing.T) *officeEnv {
 		t.Fatal(err)
 	}
 	fk := &fakeFiles{dirs: map[string]string{"docs": t.TempDir()}, readOnly: map[string]bool{}, recycle: map[string]bool{}}
+	env := &officeEnv{}
 	ds := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Cookie") != "" {
 			http.Error(w, "cookies reached the Document Server", http.StatusTeapot)
 			return
 		}
-		_, _ = io.WriteString(w, "ds:"+r.URL.Path)
+		seen := r.URL.EscapedPath()
+		if r.URL.Path == office.CommandPath {
+			b, _ := io.ReadAll(r.Body)
+			seen += " " + string(b)
+			_, _ = io.WriteString(w, `{"error":0}`)
+		} else {
+			_, _ = io.WriteString(w, "ds:"+r.URL.Path)
+		}
+		env.dsMu.Lock()
+		env.dsSeen = append(env.dsSeen, seen)
+		env.dsMu.Unlock()
 	}))
 	dsURL, _ := url.Parse(ds.URL)
 	broker := events.NewBroker()
@@ -70,8 +90,8 @@ func newOfficeEnv(t *testing.T) *officeEnv {
 		m.Wait()
 		db.Close()
 	})
-	env := &officeEnv{testEnv: &testEnv{srv: srv, db: db, broker: broker}, s: s, fk: fk, ds: ds,
-		origin: "http://127.0.0.1:" + strconv.Itoa(port)}
+	env.testEnv, env.s, env.fk, env.ds = &testEnv{srv: srv, db: db, broker: broker}, s, fk, ds
+	env.origin = "http://127.0.0.1:" + strconv.Itoa(port)
 	env.admin = env.client(t)
 	env.admin.do("POST", "/api/v1/setup/admin", map[string]string{"username": "cade", "password": "supersecret1"}, nil)
 	// Turned on directly (the enable job needs Docker).
@@ -326,5 +346,111 @@ func TestOfficeShareLinks(t *testing.T) {
 	}
 	if res, _ := oget(t, nr, env.origin+edit.URL+"/office?name=Sam"); res.StatusCode != http.StatusGone {
 		t.Fatalf("revoked link editor = %d", res.StatusCode)
+	}
+}
+
+// Security review M1: the proxy can't be talked into other Document Server
+// paths with encoded slashes or dots, at the ServeMux level.
+func TestOfficeProxyEncodedPaths(t *testing.T) {
+	env := newOfficeEnv(t)
+	put(t, env.fk.dirs["docs"], "plan.docx", "doc")
+	var op OfficeOpened
+	env.admin.do("POST", "/api/v1/office/open", map[string]string{"share": "docs", "path": "plan.docx"}, &op)
+	if res, _ := oget(t, env.admin.http, op.URL); res.StatusCode != 200 {
+		t.Fatalf("editor = %d", res.StatusCode)
+	}
+	nr := noRedirect(env.admin)
+	for _, p := range []string{
+		"/s/-/ds/%2Fcoauthoring/CommandService.ashx",
+		"/s/-/ds/%2fcoauthoring/CommandService.ashx",
+		"/s/-/ds//coauthoring/CommandService.ashx",
+		"/s/-/ds/web-apps/%2E%2E/coauthoring/CommandService.ashx",
+		"/s/-/ds/web-apps/%2e%2e/%2e%2e/converter",
+		"/s/-/ds/web-apps/../coauthoring/CommandService.ashx",
+		"/s/-/ds/9.4.0-129/%2Fcoauthoring/x",
+		"/s/-/ds/coauthoring/CommandService.ashx",
+		"/s/-/ds/info/info.json",
+		"/s/-/ds/web-apps%5C..%5Ccoauthoring",
+	} {
+		u, err := url.Parse(env.origin + p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := nr.Do(&http.Request{Method: "GET", URL: u, Header: http.Header{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if res.StatusCode == 200 {
+			t.Errorf("%s = 200", p)
+		}
+	}
+	for _, s := range env.seen() {
+		low := strings.ToLower(s)
+		if strings.Contains(low, "coauthoring") || strings.Contains(low, "converter") || strings.Contains(low, "info") {
+			t.Fatalf("the Document Server got %q", s)
+		}
+	}
+	// What's allowed is forwarded exactly as checked.
+	res, body := oget(t, env.admin.http, env.origin+"/s/-/ds/9.4.0-129/web-apps/apps/a%20b.js")
+	if res.StatusCode != 200 || body != "ds:/9.4.0-129/web-apps/apps/a b.js" {
+		t.Fatalf("allowed path = %d %q", res.StatusCode, body)
+	}
+}
+
+// Security review M2: turning a link off puts its visitors out of the
+// document through the Document Server's command service.
+func TestOfficeRevokeDropsVisitors(t *testing.T) {
+	env := newOfficeEnv(t)
+	put(t, env.fk.dirs["docs"], "plan.docx", "doc")
+	var edit ShareLinkCreated
+	env.admin.do("POST", "/api/v1/sharelinks", map[string]any{"share": "docs", "path": "plan.docx", "access": "edit"}, &edit)
+	visitor := env.client(t)
+	res, page := oget(t, noRedirect(visitor), env.origin+edit.URL+"/office?name=Sam")
+	if res.StatusCode != 200 {
+		t.Fatalf("editor = %d", res.StatusCode)
+	}
+	cfg := editorConfig(t, page)
+	key := cfg["document"].(map[string]any)["key"].(string)
+	pid := cfg["editorConfig"].(map[string]any)["user"].(map[string]any)["id"].(string)
+	// The Document Server says Sam is in the document.
+	secret, err := env.s.office.settings.Secret(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb := map[string]any{"key": key, "status": 1, "users": []string{pid}}
+	tok, _ := office.SignJWT(secret, map[string]any{"payload": cb, "iat": time.Now().Unix(), "exp": time.Now().Add(time.Minute).Unix()})
+	body, _ := json.Marshal(cb)
+	env.s.office.mu.Lock()
+	iaddr := env.s.office.iaddr
+	env.s.office.mu.Unlock()
+	req, _ := http.NewRequest("POST", "http://"+iaddr+"/office/callback/"+key, strings.NewReader(string(body)))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := (&http.Client{Transport: &http.Transport{Proxy: nil}}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	env.admin.do("POST", "/api/v1/sharelinks/"+strconv.FormatInt(edit.Link.ID, 10)+"/revoke", nil, nil)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		for _, s := range env.seen() {
+			if strings.HasPrefix(s, office.CommandPath) && strings.Contains(s, `"drop"`) && strings.Contains(s, pid) {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no drop command: %v", env.seen())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestOfficePlaceLabel(t *testing.T) {
+	if got := placeLabel(`~home:home\alice`); got != "Home of alice" {
+		t.Fatalf("%q", got)
+	}
+	if got := placeLabel("media"); got != "media" {
+		t.Fatalf("%q", got)
 	}
 }

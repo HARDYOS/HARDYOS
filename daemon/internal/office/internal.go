@@ -1,14 +1,13 @@
 package office
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/netip"
-	"strings"
-	"sync"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
@@ -72,14 +71,14 @@ func (s *Service) serveCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	cb, err := ParseCallback(secret, r.Header.Get("Authorization"), body, s.now())
 	if err != nil {
-		s.audit(r.Context(), AuditEvent{Action: "office.callback", Target: "document " + key[:8], Outcome: audit.Denied, Detail: err.Error()})
+		s.auditRefusal(r.Context(), AuditEvent{Action: "office.callback", Target: "document " + key[:8], Outcome: audit.Denied, Detail: err.Error()})
 		callbackAnswer(w, http.StatusForbidden, 1, "refused")
 		return
 	}
 	res, err := s.HandleCallback(r.Context(), key, cb)
 	if err != nil {
 		if errors.Is(err, ErrCallbackKey) || errors.Is(err, ErrCallbackSession) {
-			s.audit(r.Context(), AuditEvent{Action: "office.callback", Target: "document " + key[:8], Outcome: audit.Denied, Detail: err.Error()})
+			s.auditRefusal(r.Context(), AuditEvent{Action: "office.callback", Target: "document " + key[:8], Outcome: audit.Denied, Detail: err.Error()})
 		}
 		// error 1: the Document Server keeps the document (as a "forgotten"
 		// file an administrator can recover) instead of dropping the edits.
@@ -90,52 +89,29 @@ func (s *Service) serveCallback(w http.ResponseWriter, r *http.Request) {
 	callbackAnswer(w, http.StatusOK, 0, "")
 }
 
-// DockerPeers allows loopback and the addresses of this server's Docker
-// bridge networks (docker0 and br-*), read from the interfaces at most every
-// 30 seconds.
-func DockerPeers() func(netip.Addr) bool {
-	var mu sync.Mutex
-	var nets []netip.Prefix
-	var at time.Time
-	return func(a netip.Addr) bool {
-		if a.IsLoopback() {
-			return true
-		}
-		mu.Lock()
-		if time.Since(at) > 30*time.Second {
-			nets, at = dockerNets(), time.Now()
-		}
-		list := nets
-		mu.Unlock()
-		for _, p := range list {
-			if p.Contains(a) {
-				return true
-			}
-		}
-		return false
-	}
-}
+// refusalAudits is how many refused callbacks are audited a minute; more
+// are only counted in the log, so a flood can't fill the audit log.
+const refusalAudits = 20
 
-func dockerNets() []netip.Prefix {
-	ifs, err := net.Interfaces()
-	if err != nil {
-		return nil
-	}
-	var out []netip.Prefix
-	for _, ifc := range ifs {
-		if ifc.Name != "docker0" && !strings.HasPrefix(ifc.Name, "br-") {
-			continue
+func (s *Service) auditRefusal(ctx context.Context, e AuditEvent) {
+	s.mu.Lock()
+	now := s.now()
+	if now.Sub(s.refusalWindow) >= time.Minute {
+		if s.refusalsLost > 0 {
+			s.log().Warn("office: refused callbacks not audited", "count", s.refusalsLost)
 		}
-		addrs, _ := ifc.Addrs()
-		for _, a := range addrs {
-			if n, ok := a.(*net.IPNet); ok {
-				if p, err := netip.ParsePrefix(n.String()); err == nil {
-					out = append(out, p.Masked())
-				}
-			}
-		}
+		s.refusalWindow, s.refusals, s.refusalsLost = now, 0, 0
 	}
-	return out
+	ok := s.refusals < refusalAudits
+	if ok {
+		s.refusals++
+	} else {
+		s.refusalsLost++
+	}
+	s.mu.Unlock()
+	if ok {
+		s.audit(ctx, e)
+	}
 }
 
 // HostGateway is the address containers reach the host at

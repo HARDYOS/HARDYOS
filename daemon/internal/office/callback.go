@@ -156,7 +156,16 @@ func (s *Service) HandleCallback(ctx context.Context, pathKey string, cb *Callba
 		if sess.State != StateOpen {
 			return &CallbackResult{}, nil
 		}
-		return &CallbackResult{}, s.db().setActive(ctx, sess.Key, s.knownUsers(ctx, sess.Key, cb.Users), now)
+		ids := s.knownUsers(ctx, sess.Key, cb.Users)
+		if err := s.db().setActive(ctx, sess, ids, now); err != nil {
+			return nil, err
+		}
+		// Everyone the Document Server lets in is checked again now: a link
+		// turned off or an account disabled since they opened it is dropped.
+		if bad := s.invalid(ctx, sess, ids); len(bad) > 0 {
+			go s.dropAsync(sess.Key, bad, "no longer allowed")
+		}
+		return &CallbackResult{}, nil
 	case StatusClosed:
 		if sess.State == StateOpen {
 			_ = s.db().setState(ctx, sess.Key, StateClosed, "", now)
@@ -243,6 +252,26 @@ func (s *Service) save(ctx context.Context, sess *Session, cb *Callback) (*Callb
 	if p.Mode != ModeEdit {
 		return nil, p, fmt.Errorf("%w (%s had it open read only)", ErrCallbackUser, p.Name)
 	}
+	// Saves come only from sessions the Document Server keeps reporting on,
+	// written by someone it listed as in the document now or a little while
+	// ago (decision 265): a Document Server that kept a document back can't
+	// write it later in someone's name.
+	now := s.now()
+	if now.Sub(sess.lastActivity()) > MaxSessionQuiet {
+		return nil, p, errors.New("the editing session went quiet more than a day ago; it takes no more saves")
+	}
+	switch {
+	case p.SeenAt.IsZero():
+		return nil, p, fmt.Errorf("%w (%s was never in the document)", ErrCallbackUser, p.Name)
+	case sess.isActive(p.ID):
+	case !p.LeftAt.IsZero() && now.Sub(p.LeftAt) <= LeftGrace:
+	default:
+		return nil, p, fmt.Errorf("%w (%s left the document too long ago)", ErrCallbackUser, p.Name)
+	}
+	ft := strings.ToLower(cb.FileType)
+	if ft != "" && !SaveFormat(sess.FileType, ft) {
+		return nil, p, fmt.Errorf("the Document Server saved an unexpected kind of file (%q)", cb.FileType)
+	}
 	src, err := s.InternalURL(cb.URL)
 	if err != nil {
 		return nil, p, err
@@ -250,6 +279,10 @@ func (s *Service) save(ctx context.Context, sess *Session, cb *Callback) (*Callb
 	who, err := s.Identity(ctx, *p, sess, true)
 	if err != nil {
 		return nil, p, fmt.Errorf("%s can't change this file any more: %w", p.Name, err)
+	}
+	if LocationOf(sess.Share, who) != sess.Location {
+		// A home folder is someone's own: only they (and their links) write it.
+		return nil, p, fmt.Errorf("%s can't change this file: it's in someone else's home folder", p.Name)
 	}
 	e, err := s.Files.Stat(ctx, who, sess.Share, sess.Path)
 	conflict := false
@@ -268,7 +301,7 @@ func (s *Service) save(ctx context.Context, sess *Session, cb *Callback) (*Callb
 	case !sameVersion(e, sess.BaseModified, sess.BaseSize):
 		conflict = true
 	}
-	if ft := strings.ToLower(cb.FileType); ft != "" && ft != sess.FileType {
+	if ft != "" && ft != sess.FileType {
 		// Saved in another format (an old binary file): never over the original.
 		target = strings.TrimSuffix(target, path.Ext(target)) + "." + ft
 		conflict = true

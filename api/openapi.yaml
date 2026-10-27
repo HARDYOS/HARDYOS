@@ -7306,9 +7306,10 @@ components:
         fontsShare: { type: string, description: 'Shared folder with extra fonts (read only into the Document Server); "" for none' }
     OfficeSessionView:
       type: object
-      required: [share, path, editors, opened, saves, state]
+      required: [share, place, path, editors, opened, saves, state]
       properties:
         share: { type: string }
+        place: { type: string, description: 'The folder: a shared folder id, or "Home of alice" (every person has their own Home)' }
         path: { type: string }
         editors: { type: array, items: { type: string }, description: Names of the people in it now }
         opened: { type: string, format: date-time }

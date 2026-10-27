@@ -38,6 +38,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/appstore"
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
+	"github.com/hardyos/hardyos/daemon/internal/dsnet"
 	"github.com/hardyos/hardyos/daemon/internal/files"
 	"github.com/hardyos/hardyos/daemon/internal/fileworker"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
@@ -102,6 +103,7 @@ type officeRuntime struct {
 	dsAt       time.Time
 	kick       chan struct{}
 	internalFn func() (*url.URL, error) // tests
+	dsIP       netip.Addr
 }
 
 type officeOriginKey struct{}
@@ -171,7 +173,7 @@ func (rt *officeRuntime) internal() (*url.URL, error) {
 		return rt.internalFn()
 	}
 	rt.mu.Lock()
-	if time.Since(rt.dsAt) < 10*time.Second {
+	if time.Since(rt.dsAt) < 30*time.Second {
 		u, err := rt.dsURL, rt.dsErr
 		rt.mu.Unlock()
 		return u, err
@@ -199,20 +201,34 @@ func (rt *officeRuntime) lookupInternal() (*url.URL, error) {
 	if rt.s.cfg.Priv == nil {
 		return nil, errors.New("the Document Server isn't available here")
 	}
-	o, err := rt.s.appsStatus(ctx)
-	if err != nil {
-		return nil, err
+	// Root finds the container by its Compose labels and (re)applies the
+	// rules that keep it to itself (decision 266); hardyd only learns where
+	// it is.
+	var a dsnet.Addr
+	if err := rt.s.cfg.Priv.Call(ctx, priv.OpOfficeDSNet, priv.OfficeDSNetArgs{}, &a); err != nil {
+		return nil, fmt.Errorf("the Document Server isn't running: %w", err)
 	}
-	a := findApp(o, office.AppID)
-	if a == nil {
-		return nil, errors.New("the Document Server app isn't installed")
+	ip, err := netip.ParseAddr(a.IP)
+	if err != nil || !ip.Is4() || !ip.IsPrivate() {
+		return nil, errors.New("the Document Server has an unexpected address")
 	}
-	for _, p := range a.Ports {
-		if p.Name == "WEB" && p.Port > 0 {
-			return &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(p.Port))}, nil
-		}
+	rt.mu.Lock()
+	rt.dsIP = ip
+	rt.mu.Unlock()
+	return &url.URL{Scheme: "http", Host: net.JoinHostPort(ip.String(), "80")}, nil
+}
+
+// allowPeer: only the Document Server container may use the internal
+// listener (decision 266); tests and development without root allow
+// loopback through Config.OfficeInternal.
+func (rt *officeRuntime) allowPeer(a netip.Addr) bool {
+	if rt.internalFn != nil {
+		return a.IsLoopback()
 	}
-	return nil, errors.New("the Document Server app has no port")
+	rt.mu.Lock()
+	ip := rt.dsIP
+	rt.mu.Unlock()
+	return ip.IsValid() && a == ip
 }
 
 func findApp(o *apps.Overview, id string) *apps.App {
@@ -276,6 +292,10 @@ func (s *Server) officeIdentity(ctx context.Context, p office.Participant, sess 
 		who, err := s.linkOwner(ctx, l.CreatedByID)
 		if err != nil {
 			return files.Who{}, errors.New("the person who shared the link can't use it any more")
+		}
+		// A link into a home folder is into its creator's home only.
+		if office.LocationOf(l.Share, who) != sess.Location {
+			return files.Who{}, errors.New("the file isn't in the shared link any more")
 		}
 		return who, nil
 	}
@@ -406,7 +426,9 @@ type OfficeStatus struct {
 
 // OfficeSessionView is one open document.
 type OfficeSessionView struct {
-	Share   string    `json:"share"`
+	Share string `json:"share"`
+	// Place names the folder: the shared folder's id, or "Home of alice".
+	Place   string    `json:"place"`
 	Path    string    `json:"path"`
 	Editors []string  `json:"editors"`
 	Opened  time.Time `json:"opened"`
@@ -482,7 +504,7 @@ func (s *Server) handleOfficeStatus(w http.ResponseWriter, r *http.Request, u *a
 		}
 	}
 	for _, x := range sessions {
-		v := OfficeSessionView{Share: x.Share, Path: x.Path, Opened: x.CreatedAt, Saves: x.Saves, State: x.State, Error: x.Error, Editors: []string{}}
+		v := OfficeSessionView{Share: x.Share, Place: placeLabel(x.Location), Path: x.Path, Opened: x.CreatedAt, Saves: x.Saves, State: x.State, Error: x.Error, Editors: []string{}}
 		names, _ := rt.svc.ActiveNames(ctx, x)
 		v.Editors = append(v.Editors, names...)
 		out.Sessions = append(out.Sessions, v)
@@ -491,6 +513,15 @@ func (s *Server) handleOfficeStatus(w http.ResponseWriter, r *http.Request, u *a
 	out.Listeners = &OfficeListenerState{OfficePort: rt.port(), Office: rt.srv != nil, Internal: rt.iaddr}
 	rt.mu.Unlock()
 	writeJSON(w, http.StatusOK, out)
+}
+
+// placeLabel shows a session's location: a shared folder's id, or
+// "Home of alice" for a home folder.
+func placeLabel(loc string) string {
+	if p, ok := strings.CutPrefix(loc, files.HomeShare+":"); ok {
+		return "Home of " + displayName(p)
+	}
+	return loc
 }
 
 func (rt *officeRuntime) port() int {
@@ -762,6 +793,9 @@ func (s *Server) runOfficeDisable(jc *jobs.Context) (any, error) {
 			if err := s.cfg.Priv.Call(ctx, priv.OpAppsStop, priv.AppRef{ID: office.AppID}, nil); err != nil {
 				return nil, err
 			}
+			if err := s.cfg.Priv.Call(ctx, priv.OpOfficeDSNet, priv.OfficeDSNetArgs{Remove: true}, nil); err != nil {
+				s.log.Warn("office: removing the Document Server's rules", "err", err)
+			}
 		}
 	}
 	jc.Progress(100, "The office suite is off")
@@ -897,7 +931,7 @@ func (s *Server) handleOfficeOpen(w http.ResponseWriter, r *http.Request, u *aut
 	}
 	ed, err := rt.svc.Open(s.officeCtx(r), office.OpenRequest{
 		Who: who, Share: req.Share, Path: p, Kind: office.KindUser, UserID: u.ID, Name: name,
-		WantEdit: req.Mode != "view", MayEdit: true, Lang: editorLang(r),
+		WantEdit: req.Mode != "view", MayEdit: true, Lang: editorLang(r), IP: s.clientIP(r),
 	})
 	if err != nil {
 		s.writeOfficeError(w, err)
@@ -1040,12 +1074,19 @@ func (o officeLinks) Serve(w http.ResponseWriter, r *http.Request, l *sharelinks
 	edit := l.Access == sharelinks.AccessEdit
 	ed, err := rt.svc.Open(rt.s.officeCtx(r), office.OpenRequest{
 		Who: owner, Share: l.Share, Path: target, Kind: office.KindLink, LinkID: l.ID,
-		Name: office.CleanName(visitor, "Guest") + " (guest)", WantEdit: edit, MayEdit: edit, Lang: editorLang(r),
+		Name: office.CleanGuestName(visitor) + " (guest)", WantEdit: edit, MayEdit: edit, Lang: editorLang(r),
+		IP: rt.s.clientIP(r),
+		// Download and print only where the link lets people keep a copy
+		// anyway: an edit link without a download limit (decision 275).
+		NoDownload: !edit || l.MaxDownloads > 0,
 	})
 	if err != nil {
 		msg := "This document can't be opened in the browser right now."
 		if errors.Is(err, office.ErrTooBig) {
 			msg = "This document is too big for the browser editor. Download it instead."
+		}
+		if errors.Is(err, office.ErrTooMany) {
+			msg = office.ErrTooMany.Error()
 		}
 		office.ServeMessage(w, http.StatusConflict, "Can't open the document", msg, "")
 		return
@@ -1149,6 +1190,8 @@ func (s *Server) RunOffice(ctx context.Context, opts OfficeOptions) {
 	defer rt.stopAll()
 	t := time.NewTicker(opts.Interval)
 	defer t.Stop()
+	sweep := time.NewTicker(time.Minute)
+	defer sweep.Stop()
 	for {
 		rt.reconcile(ctx)
 		select {
@@ -1156,12 +1199,50 @@ func (s *Server) RunOffice(ctx context.Context, opts OfficeOptions) {
 			return
 		case <-t.C:
 		case <-rt.kick:
+		case <-sweep.C:
+			if rt.enabled(ctx) {
+				rt.svc.Sweep(ctx)
+			}
 		}
 	}
 }
 
+// dropLink puts a turned-off link's visitors out of their documents.
+func (rt *officeRuntime) dropLink(id int64, why string) {
+	if rt == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if rt.enabled(ctx) {
+			rt.svc.DropLink(ctx, id, why)
+		}
+	}()
+}
+
+// dropUser puts an account out of every document.
+func (rt *officeRuntime) dropUser(id int64, why string) {
+	if rt == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if rt.enabled(ctx) {
+			rt.svc.DropUser(ctx, id, why)
+		}
+	}()
+}
+
 func (rt *officeRuntime) reconcile(ctx context.Context) {
 	on := rt.enabled(ctx)
+	if on {
+		// Keeps the container's address (the only peer the internal
+		// listener takes) and its firewall rules current (every 30 s at
+		// most; a restarted container gets a new address).
+		_, _ = rt.internal()
+	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	if !on {
@@ -1197,9 +1278,9 @@ func (rt *officeRuntime) reconcile(ctx context.Context) {
 			rt.s.log.Warn("office: can't listen for the Document Server", "addr", addr, "err", err)
 			return
 		}
-		srv := &http.Server{Handler: rt.svc.InternalHandler(office.DockerPeers()), ReadHeaderTimeout: 10 * time.Second,
+		srv := &http.Server{Handler: rt.svc.InternalHandler(rt.allowPeer), ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout: 2 * time.Minute, IdleTimeout: 60 * time.Second}
-		rt.isrv, rt.iaddr = srv, addr
+		rt.isrv, rt.iaddr = srv, ln.Addr().String()
 		go func() { _ = srv.Serve(ln) }()
 		rt.s.log.Info("office: listening for the Document Server", "addr", addr)
 	}
