@@ -86,6 +86,14 @@ export const CpuIcon = svg(
     <path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" />
   </>,
 );
+/** A graphics card: board, fan and bracket. */
+export const GpuIcon = svg(
+  <>
+    <rect x="2" y="6" width="17" height="11" rx="2" />
+    <circle cx="9" cy="11.5" r="3" />
+    <path d="M19 9h3M19 14h3M5 17v3M14 17v3" />
+  </>,
+);
 export const DomainIcon = svg(
   <>
     <rect x="9" y="3" width="6" height="5" rx="1" />

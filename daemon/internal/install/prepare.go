@@ -100,6 +100,17 @@ func bindSystemDirs(ctx context.Context, r sysexec.Runner, root, target string) 
 	return nil
 }
 
+// WithSystemDirs runs fn with /dev, /proc, /sys and /run mounted inside
+// target (an unpacked system under root), for work done with chroot, and
+// unmounts them afterwards. Update hooks (the GPU drivers) use it.
+func WithSystemDirs(ctx context.Context, r sysexec.Runner, root, target string, fn func() error) error {
+	if err := bindSystemDirs(ctx, r, root, target); err != nil {
+		return err
+	}
+	defer unbindSystemDirs(context.WithoutCancel(ctx), r, target)
+	return fn()
+}
+
 func unbindSystemDirs(ctx context.Context, r sysexec.Runner, target string) {
 	for _, m := range []string{"run", "sys", "proc", "dev"} {
 		_, _ = r.Run(ctx, nil, "umount", "-R", "-l", filepath.Join(target, m))

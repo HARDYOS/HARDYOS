@@ -1242,3 +1242,19 @@ func (m *Manager) Logs(ctx context.Context, id string, lines int) (string, error
 	}
 	return strings.Join(l, "\n"), nil
 }
+
+// Assignments lists every VM's configured devices, running or not
+// (devices.AssignmentsFunc: the Devices view shows "assigned to …").
+func (m *Manager) Assignments(ctx context.Context) (map[string][]devices.Device, error) {
+	l, err := m.all(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string][]devices.Device{}
+	for _, st := range l {
+		if len(st.spec.Devices) > 0 {
+			out[st.spec.ID] = append([]devices.Device{}, st.spec.Devices...)
+		}
+	}
+	return out, nil
+}

@@ -126,11 +126,12 @@ func TestDomainXMLGolden(t *testing.T) {
 		{"gaming-gpu.xml", func() *Spec {
 			s := fromTemplate(t, "gaming", "gaming")
 			s.Devices = []devices.Device{{Kind: devices.KindGPU, ID: "0000:01:00.0", Primary: true}}
-			s.Video = "none"
 			return s
 		}, x86, []devices.Prepared{{
 			Device: devices.Device{Kind: devices.KindGPU, ID: "0000:01:00.0"},
-			XML:    `<hostdev mode="subsystem" type="pci" managed="no"><source><address domain="0x0000" bus="0x01" slot="0x00" function="0x0"/></source></hostdev>`,
+			// As part D writes them: one per GPU function, indented by two.
+			XML: "  <hostdev mode='subsystem' type='pci' managed='no'>\n    <source>\n      <address domain='0x0000' bus='0x01' slot='0x00' function='0x0'/>\n    </source>\n  </hostdev>\n" +
+				"  <hostdev mode='subsystem' type='pci' managed='no'>\n    <source>\n      <address domain='0x0000' bus='0x01' slot='0x00' function='0x1'/>\n    </source>\n  </hostdev>\n",
 		}}},
 		{"linux-arm64.xml", func() *Spec {
 			s := fromTemplate(t, "web", "linux")
@@ -193,7 +194,7 @@ func TestDeviceFragments(t *testing.T) {
 	s := fromTemplate(t, "gaming", "gaming")
 	bad := []string{
 		`<emulator>/bin/sh</emulator>`,
-		`<hostdev/><hostdev/>`,
+		strings.Repeat(`<hostdev/>`, MaxHostdevs+1),
 		`<hostdev></hostdev><disk/>`,
 		`<hostdev>`,
 		`</devices><devices>`,

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 
+	"github.com/hardyos/hardyos/daemon/internal/devices"
 	"github.com/hardyos/hardyos/daemon/internal/network"
 	"github.com/hardyos/hardyos/daemon/internal/shares"
 	"github.com/hardyos/hardyos/daemon/internal/vms"
@@ -196,8 +197,9 @@ func vmsErr(err error) error {
 		return nil
 	}
 	var p vms.Problems
+	var dp devices.Problems
 	var ve *network.ValidationError
-	if errors.As(err, &p) || errors.As(err, &ve) || errors.Is(err, vms.ErrNotFound) ||
+	if errors.As(err, &p) || errors.As(err, &dp) || errors.As(err, &ve) || errors.Is(err, vms.ErrNotFound) ||
 		errors.Is(err, network.ErrPending) || errors.Is(err, network.ErrNoUplink) {
 		return Errorf(CodeBadArgs, "%v", err)
 	}

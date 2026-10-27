@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConsoleView } from "./Console";
-import { DevicesStep } from "./DevicesStep";
+import { inventory } from "./devices/devices.fixtures";
 import { VirtualMachinesView } from "./VirtualMachines";
 import { caps, linux, opnsense, win11 } from "./testFixtures";
 
@@ -66,7 +66,8 @@ function routes(extra: Record<string, Handler> = {}): Record<string, Handler> {
     "/vms/web": () => web,
     "/vms/win": () => win,
     "/vms/win/snapshots": () => [{ name: "vm-20261020-101500", label: "Fresh install", created: "2026-10-20T10:15:00Z", bytes: 1e9, consistent: true }],
-    "/devices": () => ({ __status: 404, code: "not_found", message: "no devices API" }),
+    "/devices": () => inventory(),
+    "POST /devices/check": () => ({ ok: true, problems: [] }),
     ...extra,
   };
 }
@@ -113,8 +114,8 @@ describe("Virtual Machines", () => {
     expect(screen.getByRole("radio", { name: /Home network/ }).getAttribute("aria-checked")).toBe("true");
     expect(screen.getByText(/sets up a bridge/)).toBeTruthy();
     next();
-    // Devices: part D isn't here yet.
-    expect(await screen.findByText(/Device passthrough comes with the Devices update/)).toBeTruthy();
+    // Devices: part D's picker, nothing chosen.
+    expect(await screen.findByRole("region", { name: "Graphics" })).toBeTruthy();
     next();
     expect(screen.getByText("Ready to create")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Create VM" }));
@@ -168,14 +169,6 @@ describe("Virtual Machines", () => {
     const body = calls.find((c) => c.method === "PUT")!.body as { spec: { disks: unknown[] }; removeDisks: string[] };
     expect(body.removeDisks).toEqual(["disk1"]);
     expect(body.spec.disks).toEqual([{ name: "disk0", sizeGB: 64, bus: "virtio-scsi" }]);
-  });
-
-  it("shows part D's devices when its API is there", async () => {
-    serve(routes({ "/devices": () => ({ gpus: [{ id: "0000:01:00.0", name: "Quadro RTX 4000" }], pci: [], usb: [] }) }), []);
-    const picked: unknown[] = [];
-    wrap(<DevicesStep template={win11} devices={[]} onChange={(d) => picked.push(d)} />);
-    fireEvent.click(await screen.findByRole("button", { name: /Quadro RTX 4000/ }));
-    expect(picked).toEqual([[{ kind: "gpu", id: "0000:01:00.0" }]]);
   });
 });
 

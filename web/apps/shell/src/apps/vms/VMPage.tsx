@@ -22,7 +22,7 @@ import { Alert, Badge, Button, Card, EmptyState, ErrorBox, Field, IconButton, Lo
 import { AreaChart } from "../../ui/Chart";
 import { ConfirmDialog, Dialog } from "../../ui/Dialog";
 import { toast } from "../../ui/toasts";
-import { DevicesStep } from "./DevicesStep";
+import { DevicePicker } from "./devices";
 import { Meter, StateBadge, VMGlyph } from "./parts";
 import { type VMAction, diskSize, isOn, memory, osLabel, pushSample, useLibrary, useSnapshots, useVM, vmAction, vmKeys } from "./vmApi";
 
@@ -563,11 +563,7 @@ function HardwareTab({ vm, onJob }: { vm: VM; onJob: (j: Job) => void }) {
       </div>
       {picking && (
         <Dialog title="Devices" onClose={() => setPicking(false)} width={640} footer={<Button variant="primary" onClick={() => setPicking(false)}>Done</Button>}>
-          <DevicesStep
-            template={{ gpu: vm.template === "gaming" } as VMTemplate}
-            devices={spec.devices}
-            onChange={(devices) => set({ devices })}
-          />
+          <DevicePicker vm={vm.id} value={spec.devices} onChange={(devices) => set({ devices })} />
         </Dialog>
       )}
     </div>

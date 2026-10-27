@@ -69,9 +69,9 @@ func call(jc *jobs.Context, pc *priv.Client, d time.Duration, op string, args, o
 	return pc.Call(ctx, op, args, out)
 }
 
-// followTask reports a download or import running in hardyd-priv until
+// followVMTask reports a download or import running in hardyd-priv until
 // it's over, scaled into from..to percent.
-func followTask(jc *jobs.Context, pc *priv.Client, t *vms.Task, from, to float64) error {
+func followVMTask(jc *jobs.Context, pc *priv.Client, t *vms.Task, from, to float64) error {
 	if t == nil {
 		return nil
 	}
@@ -155,7 +155,7 @@ func registerVMJobs(m *jobs.Manager, pc *priv.Client) {
 				return nil, err
 			}
 			step := 50.0 / float64(len(p.Downloads))
-			if err := followTask(jc, pc, res.Task, 2+step*float64(i), 2+step*float64(i+1)); err != nil {
+			if err := followVMTask(jc, pc, res.Task, 2+step*float64(i), 2+step*float64(i+1)); err != nil {
 				return nil, err
 			}
 		}
@@ -179,7 +179,7 @@ func registerVMJobs(m *jobs.Manager, pc *priv.Client) {
 			if err := call(jc, pc, time.Minute, priv.OpVMsISOVirtio, priv.VMVirtioArgs{Pool: s.Pool}, &res); err != nil {
 				return nil, err
 			}
-			if err := followTask(jc, pc, res.Task, 55, 75); err != nil {
+			if err := followVMTask(jc, pc, res.Task, 55, 75); err != nil {
 				return nil, fmt.Errorf("downloading the VirtIO drivers disc: %w", err)
 			}
 		}
@@ -199,7 +199,7 @@ func registerVMJobs(m *jobs.Manager, pc *priv.Client) {
 			if err := call(jc, pc, time.Minute, priv.OpVMsImport, vms.ImportArgs{ID: s.ID, Disk: d.Name}, &res); err != nil {
 				return nil, err
 			}
-			if err := followTask(jc, pc, res.Task, 80, 97); err != nil {
+			if err := followVMTask(jc, pc, res.Task, 80, 97); err != nil {
 				return nil, &jobs.FailedWith{Err: fmt.Errorf("the VM was created, but importing its disk failed: %w", err), Result: VMJobResult{VM: created.VM, Warnings: created.Warnings}}
 			}
 		}
@@ -246,7 +246,7 @@ func registerVMJobs(m *jobs.Manager, pc *priv.Client) {
 			if err := call(jc, pc, time.Minute, priv.OpVMsISOVirtio, priv.VMVirtioArgs{Pool: args.Spec.Pool}, &res); err != nil {
 				return nil, err
 			}
-			if err := followTask(jc, pc, res.Task, 25, 80); err != nil {
+			if err := followVMTask(jc, pc, res.Task, 25, 80); err != nil {
 				return nil, err
 			}
 		}
@@ -375,7 +375,7 @@ func registerVMJobs(m *jobs.Manager, pc *priv.Client) {
 		if err := call(jc, pc, time.Minute, priv.OpVMsISODownload, p, &res); err != nil {
 			return nil, err
 		}
-		if err := followTask(jc, pc, res.Task, 0, 100); err != nil {
+		if err := followVMTask(jc, pc, res.Task, 0, 100); err != nil {
 			return nil, err
 		}
 		file := ""

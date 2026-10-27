@@ -144,13 +144,32 @@ export type FileListing = S["FileListing"];
 export type FileBulkResult = S["FileBulkResult"];
 export type FileItemResult = S["FileItemResult"];
 export type FileUploadRequest = S["FileUploadRequest"];
-// Virtual machines (phase 5 part C)
+// Devices, GPUs and vGPU (part D)
+export type VMDevice = S["VMDevice"];
+export type DeviceProblem = S["DeviceProblem"];
+export type DevicesCheckResult = S["DevicesCheckResult"];
+export type DeviceInventory = S["DeviceInventory"];
+export type IOMMUState = S["IOMMUState"];
+export type IOMMUGroup = S["IOMMUGroup"];
+export type PCIDeviceInfo = S["PCIDeviceInfo"];
+export type USBDeviceInfo = S["USBDeviceInfo"];
+export type GPUInfo = S["GPUInfo"];
+export type GPUOwner = S["GPUOwner"];
+export type DeviceUser = S["DeviceUser"];
+export type StuckDevice = S["StuckDevice"];
+export type VGPUInfo = S["VGPUInfo"];
+export type VGPUType = S["VGPUType"];
+export type VGPUInstance = S["VGPUInstance"];
+export type NvidiaStatus = S["NvidiaStatus"];
+export type NvidiaLicenceText = S["NvidiaLicenceText"];
+export type GPUTask = S["GPUTask"];
+export type VGPUUpload = S["VGPUUpload"];
+// Virtual machines (phase 5 part C); VMDevice is part D's, above.
 export type VM = S["VM"];
 export type VMSpec = S["VMSpec"];
 export type VMDisk = S["VMDisk"];
 export type VMMedia = S["VMMedia"];
 export type VMNIC = S["VMNIC"];
-export type VMDevice = S["VMDevice"];
 export type VMCloudInit = S["VMCloudInit"];
 export type VMOverview = S["VMOverview"];
 export type VMKeptDisk = S["VMKeptDisk"];

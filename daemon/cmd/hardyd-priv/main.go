@@ -19,8 +19,10 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/apps"
 	"github.com/hardyos/hardyos/daemon/internal/backup"
 	"github.com/hardyos/hardyos/daemon/internal/boot"
+	"github.com/hardyos/hardyos/daemon/internal/devices"
 	"github.com/hardyos/hardyos/daemon/internal/domain"
 	"github.com/hardyos/hardyos/daemon/internal/fileworker"
+	"github.com/hardyos/hardyos/daemon/internal/gpu"
 	"github.com/hardyos/hardyos/daemon/internal/hw"
 	"github.com/hardyos/hardyos/daemon/internal/install"
 	"github.com/hardyos/hardyos/daemon/internal/network"
@@ -94,6 +96,13 @@ func main() {
 		// Before hardyd touches the state dataset: finish a settings restore,
 		// undo a failed update, or start the new version's confirm watchdog.
 		updater.OnBoot(ctx)
+		// GPUs and devices for VMs. The NVIDIA driver HardyOS installed is
+		// rebuilt inside every new version before it's offered for boot.
+		gpus := &gpu.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log}
+		updater.Hooks = append(updater.Hooks, update.Hook{Name: "Installing the NVIDIA driver into the new version", Run: gpus.PrepareNewRoot})
+		s.OpTimeouts = map[string]time.Duration{priv.OpUpdateStage: 45 * time.Minute}
+		devs := &devices.Host{Runner: sysexec.Exec{}, Root: "/", Log: log}
+		priv.RegisterDevices(s, devs, gpus)
 		priv.RegisterSystem(s, sysexec.Exec{}, updater.BeforeReboot)
 		priv.RegisterUpdates(s, updater)
 		// The domain controller, if one was set up. The NAS's resolver puts the
@@ -149,8 +158,11 @@ func main() {
 		// first and puts it on the new parent after.
 		netm.BeforeBridges = dc.HoldNetwork
 		netm.AfterBridges = dc.ReleaseNetwork
-		vmm := &vms.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log, Network: netm, Library: priv.VMLibrary(shm, shareHooks...)}
-		// Part D (devices, GPUs) sets vmm.Devices to its devices.Manager.
+		// Devices go to VMs through part D's Host, the same one its ops use;
+		// the Devices view shows which VM each device is assigned to.
+		vmm := &vms.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log, Network: netm, Library: priv.VMLibrary(shm, shareHooks...), Devices: devs}
+		devs.Assignments = vmm.Assignments
+		go reconcileDevices(ctx, devs, log)
 		priv.RegisterVMs(s, vmm)
 		go vmm.OnStart(ctx)
 		go vmm.Watch(ctx)
@@ -190,6 +202,25 @@ func main() {
 	if err := s.ListenAndServe(ctx, *socket, 0o660, gid); err != nil {
 		log.Error("serve failed", "err", err)
 		os.Exit(1)
+	}
+}
+
+// reconcileDevices gives back devices held for VMs that stopped while
+// hardyd-priv wasn't running. libvirt may come up after hardyd-priv, so
+// it tries for a while; nothing is released while the running VMs can't
+// be listed.
+func reconcileDevices(ctx context.Context, h *devices.Host, log *slog.Logger) {
+	for i := 0; i < 20; i++ {
+		err := h.Reconcile(ctx)
+		if err == nil {
+			return
+		}
+		log.Warn("devices: reconcile", "err", err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(30 * time.Second):
+		}
 	}
 }
 

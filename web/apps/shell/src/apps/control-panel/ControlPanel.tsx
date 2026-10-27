@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { initials } from "../../format";
-import { CalendarIcon, CpuIcon, DomainIcon, FolderIcon, GridIcon, LayersIcon, NetworkIcon, RefreshIcon, ShareIcon, ShieldIcon, UsersIcon } from "../../icons";
+import { CalendarIcon, CpuIcon, DomainIcon, GpuIcon, FolderIcon, GridIcon, LayersIcon, NetworkIcon, RefreshIcon, ShareIcon, ShieldIcon, UsersIcon } from "../../icons";
 import { type AppProps, useShell } from "../../shell";
 import { AppLayout, PageHeader, SideNav } from "../../ui";
 import { AuditLog } from "../shared";
@@ -8,6 +8,7 @@ import { Backup } from "./Backup";
 import { DateTime } from "./DateTime";
 import { Domain } from "./Domain";
 import { FileServices } from "./FileServices";
+import { DevicesView } from "../vms/devices";
 import { Hardware } from "./Hardware";
 import { Network } from "./Network";
 import { SharedFolders } from "./SharedFolders";
@@ -25,6 +26,7 @@ const SECTIONS = [
   { id: "network", label: "Network", icon: <NetworkIcon size={16} /> },
   { id: "time", label: "Date & Time", icon: <CalendarIcon size={16} /> },
   { id: "hardware", label: "Hardware", icon: <CpuIcon size={16} /> },
+  { id: "devices", label: "Devices & GPUs", icon: <GpuIcon size={16} /> },
   { id: "updates", label: "Updates", icon: <RefreshIcon size={16} /> },
   { id: "backup", label: "Backup & Restore", icon: <LayersIcon size={16} /> },
   { id: "security", label: "Security", icon: <ShieldIcon size={16} /> },
@@ -63,6 +65,7 @@ export default function ControlPanel({ args }: AppProps) {
       {section === "network" && <Network />}
       {section === "time" && <DateTime />}
       {section === "hardware" && <Hardware />}
+      {section === "devices" && <DevicesView />}
       {section === "updates" && <Updates />}
       {section === "backup" && <Backup />}
       {section === "security" && (

@@ -3097,6 +3097,228 @@ paths:
       responses:
         "202": { description: Restarting }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  # ---- devices API (part D: PCI/USB passthrough, GPUs, NVIDIA driver, vGPU) ----
+  /devices:
+    get:
+      operationId: getDevices
+      summary: IOMMU state and groups, PCI and USB devices, GPUs with their owner and vGPU slices
+      tags: [devices]
+      responses:
+        "200":
+          description: Device inventory
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceInventory" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /devices/check:
+    post:
+      operationId: checkDevices
+      summary: Check devices for a VM without changing anything (every problem in plain words)
+      tags: [devices]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DevicesCheckRequest" }
+      responses:
+        "200":
+          description: Whether the devices can go to the VM
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DevicesCheckResult" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/iommu/enable:
+    post:
+      operationId: enableIOMMU
+      summary: Add the IOMMU kernel flags for this CPU to every boot disk (takes effect after a restart)
+      tags: [devices]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/reconcile:
+    post:
+      operationId: reconcileDevices
+      summary: Give back devices held for VMs that aren't running
+      tags: [devices]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/gpus/{address}/sriov:
+    post:
+      operationId: setGPUVirtualFunctions
+      summary: Turn a GPU's SR-IOV virtual functions (vGPU slices) on or off
+      tags: [devices]
+      parameters:
+        - { name: address, in: path, required: true, schema: { type: string }, description: "PCI address, 0000:01:00.0" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [vfs]
+              properties:
+                vfs: { type: integer, minimum: 0, maximum: 64, description: "0 turns them off" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/slices/{id}/remove:
+    post:
+      operationId: removeVGPUSlice
+      summary: Remove a leftover vGPU slice no running VM uses
+      tags: [devices]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string }, description: mdev UUID or virtual function address }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/nvidia:
+    get:
+      operationId: getNvidiaStatus
+      summary: The NVIDIA driver, container toolkit and vGPU host driver on this server
+      tags: [devices]
+      responses:
+        "200":
+          description: NVIDIA status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NvidiaStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/nvidia/licence:
+    get:
+      operationId: getNvidiaLicence
+      summary: NVIDIA's licence text, read from the downloaded driver packages
+      tags: [devices]
+      responses:
+        "200":
+          description: Licence
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NvidiaLicenceText" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/nvidia/prepare:
+    post:
+      operationId: prepareNvidiaDriver
+      summary: Download the NVIDIA driver packages and read their licence (nothing is installed)
+      tags: [devices]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/nvidia/install:
+    post:
+      operationId: installNvidiaDriver
+      summary: Agree to NVIDIA's licence and install the driver and container toolkit
+      tags: [devices]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NvidiaInstallRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/nvidia/remove:
+    post:
+      operationId: removeNvidiaDriver
+      summary: Remove the NVIDIA driver and container toolkit
+      tags: [devices]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeviceConfirmRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/gpu-task:
+    get:
+      operationId: getGPUTask
+      summary: The running or last GPU driver task, with its log
+      tags: [devices]
+      responses:
+        "200":
+          description: Task
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GPUTaskResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/vgpu-driver/upload:
+    post:
+      operationId: uploadVGPUDriver
+      summary: Upload NVIDIA's vGPU host driver (.run) you got from NVIDIA; returns its SHA-256
+      description: The request body is the raw file; its name (NVIDIA-Linux-x86_64-<version>-vgpu-kvm.run) goes in X-HardyOS-Filename. Nothing is installed yet.
+      tags: [devices]
+      parameters:
+        - { name: X-HardyOS-Filename, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: Saved
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VGPUUpload" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413":
+          description: The file is too large
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /devices/vgpu-driver/install:
+    post:
+      operationId: installVGPUDriver
+      summary: Install an uploaded vGPU host driver (checksum checked again, DKMS build)
+      tags: [devices]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VGPUInstallRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/vgpu-driver/remove:
+    post:
+      operationId: removeVGPUDriver
+      summary: Uninstall NVIDIA's vGPU host driver
+      tags: [devices]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeviceConfirmRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  # ---- end of devices API paths (part D) ----
   # ---- virtual machines API (phase 5 part C, docs/vms.md) ----
   /vms:
     get:
@@ -5200,6 +5422,297 @@ components:
         overwrite: { type: boolean, description: Replace a file that's already there (never a folder) }
         modified: { type: integer, format: int64, description: The file's modification time in ms since 1970 (File.lastModified) }
     # ---- end of files API schemas (part C) ----
+    # ---- devices API schemas (part D) ----
+    VMDevice:
+      type: object
+      description: One device in a VM's spec (devices.Device)
+      required: [kind, id]
+      properties:
+        kind: { type: string, enum: [pci, usb, gpu, vgpu] }
+        id: { type: string, description: "PCI address (0000:01:00.0; the parent card for vgpu), USB vendor:product (046d:c52b) or port (1-4.2)" }
+        vgpuType: { type: string, description: The slice type for vgpu (a VGPUType id) }
+        romFile: { type: string, description: A GPU ROM file from the ROM library }
+        primary: { type: boolean, description: The GPU is the VM's main display }
+    DevicesCheckRequest:
+      type: object
+      required: [vm, devices]
+      properties:
+        vm: { type: string }
+        devices: { type: array, items: { $ref: "#/components/schemas/VMDevice" }, maxItems: 64 }
+    DeviceProblem:
+      type: object
+      required: [device, message]
+      properties:
+        device: { type: string, description: The device id it's about (empty for the VM as a whole) }
+        message: { type: string }
+    DevicesCheckResult:
+      type: object
+      required: [ok, problems]
+      properties:
+        ok: { type: boolean }
+        problems: { type: array, items: { $ref: "#/components/schemas/DeviceProblem" } }
+    DeviceInventory:
+      type: object
+      required: [iommu, groups, pci, usb, gpus, stuck]
+      properties:
+        iommu: { $ref: "#/components/schemas/IOMMUState" }
+        groups: { type: array, items: { $ref: "#/components/schemas/IOMMUGroup" } }
+        pci: { type: array, items: { $ref: "#/components/schemas/PCIDeviceInfo" } }
+        usb: { type: array, items: { $ref: "#/components/schemas/USBDeviceInfo" } }
+        gpus: { type: array, items: { $ref: "#/components/schemas/GPUInfo" } }
+        stuck: { type: array, items: { $ref: "#/components/schemas/StuckDevice" } }
+    IOMMUState:
+      type: object
+      required: [enabled, groups, cpuVendor, firmwareTable, flags, configured, active, restartNeeded, canTurnOn, kernelArgs, message]
+      properties:
+        enabled: { type: boolean }
+        groups: { type: integer }
+        cpuVendor: { type: string, description: "intel, amd or other" }
+        firmwareTable: { type: boolean, description: The firmware describes an IOMMU (it's on in the BIOS) }
+        flags: { type: array, items: { type: string }, description: The kernel flags this CPU needs }
+        configured: { type: boolean }
+        active: { type: boolean }
+        restartNeeded: { type: boolean }
+        canTurnOn: { type: boolean }
+        kernelArgs: { type: array, items: { type: string }, description: All extra kernel arguments configured }
+        message: { type: string }
+    IOMMUGroup:
+      type: object
+      required: [id, devices, explanation]
+      properties:
+        id: { type: integer }
+        devices: { type: array, items: { type: string } }
+        explanation: { type: string }
+    PCIDeviceInfo:
+      type: object
+      required: [address, vendorId, deviceId, vendor, name, class, kind, driver, iommuGroup, resetMethods, resettable, bridge, bootVga, critical, owner, assigned]
+      properties:
+        address: { type: string }
+        vendorId: { type: string }
+        deviceId: { type: string }
+        vendor: { type: string }
+        name: { type: string }
+        class: { type: string }
+        kind: { type: string, description: "Plain words: Graphics card, SATA controller..." }
+        driver: { type: string }
+        iommuGroup: { type: integer, nullable: true }
+        resetMethods: { type: array, items: { type: string } }
+        resettable: { type: boolean }
+        bridge: { type: boolean }
+        bootVga: { type: boolean }
+        physFn: { type: string }
+        critical: { type: string, description: Why the server needs it (empty if it can go to a VM) }
+        owner: { type: string, description: The VM using it now (empty for the server) }
+        assigned: { type: array, items: { type: string } }
+    USBDeviceInfo:
+      type: object
+      required: [port, bus, dev, vendorId, productId, manufacturer, product, speed, hub, critical, owner, assigned]
+      properties:
+        port: { type: string }
+        bus: { type: integer }
+        dev: { type: integer }
+        vendorId: { type: string }
+        productId: { type: string }
+        manufacturer: { type: string }
+        product: { type: string }
+        speed: { type: string }
+        hub: { type: boolean }
+        critical: { type: string }
+        owner: { type: string }
+        assigned: { type: array, items: { type: string } }
+    GPUInfo:
+      type: object
+      required: [address, vendor, vendorName, model, vramBytes, sharedMemory, functions, driver, bootVga, iommuGroup, owner, users, assigned, problem, hints, vgpu]
+      properties:
+        address: { type: string }
+        vendor: { type: string, enum: [nvidia, amd, intel, other] }
+        vendorName: { type: string }
+        model: { type: string }
+        vramBytes: { type: integer, format: int64, description: 0 when unknown }
+        sharedMemory: { type: boolean }
+        functions:
+          type: array
+          items:
+            type: object
+            required: [address, kind, driver]
+            properties:
+              address: { type: string }
+              kind: { type: string }
+              driver: { type: string }
+        driver: { type: string }
+        bootVga: { type: boolean }
+        iommuGroup: { type: integer, nullable: true }
+        owner: { $ref: "#/components/schemas/GPUOwner" }
+        users: { type: array, items: { $ref: "#/components/schemas/DeviceUser" } }
+        assigned: { type: array, items: { type: string } }
+        problem: { type: string, description: Why it can't go to a VM (empty if it can) }
+        hints: { type: array, items: { type: string } }
+        vgpu:
+          allOf: [{ $ref: "#/components/schemas/VGPUInfo" }]
+          nullable: true
+    GPUOwner:
+      type: object
+      required: [kind, label]
+      properties:
+        kind: { type: string, enum: [apps, vm, vgpu, none, stuck] }
+        vm: { type: string }
+        label: { type: string }
+    DeviceUser:
+      type: object
+      required: [pid, process, container]
+      properties:
+        pid: { type: integer }
+        process: { type: string }
+        app: { type: string }
+        container: { type: boolean }
+    StuckDevice:
+      type: object
+      required: [address, vm, driver, message]
+      properties:
+        address: { type: string }
+        vm: { type: string }
+        driver: { type: string }
+        message: { type: string }
+    VGPUInfo:
+      type: object
+      required: [mode, hostDriver, types, instances, vfs, maxVfs]
+      properties:
+        mode: { type: string, enum: [mdev, nvidia-vf, sriov-vf] }
+        hostDriver: { type: boolean }
+        types: { type: array, items: { $ref: "#/components/schemas/VGPUType" } }
+        instances: { type: array, items: { $ref: "#/components/schemas/VGPUInstance" } }
+        vfs: { type: integer }
+        maxVfs: { type: integer }
+        note: { type: string }
+    VGPUType:
+      type: object
+      required: [id, name, description, available, framebufferMb, maxInstances]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        available: { type: integer }
+        framebufferMb: { type: integer }
+        maxInstances: { type: integer }
+    VGPUInstance:
+      type: object
+      required: [id, type, parent, vm]
+      properties:
+        id: { type: string }
+        type: { type: string }
+        parent: { type: string }
+        vm: { type: string }
+    DeviceConfirmRequest:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: boolean }
+    NvidiaInstallRequest:
+      type: object
+      required: [licenceSha256, accept]
+      properties:
+        licenceSha256: { type: string, description: SHA-256 of the licence text shown }
+        accept: { type: boolean, description: Must be true }
+    NvidiaConsent:
+      type: object
+      required: [by, at, licenceSha256, version, packages, installed]
+      properties:
+        by: { type: string }
+        at: { type: string, format: date-time }
+        licenceSha256: { type: string }
+        version: { type: string }
+        packages: { type: array, items: { type: string } }
+        installed: { type: boolean }
+    NvidiaLicence:
+      type: object
+      required: [sha256, version, packages, prepared, source]
+      properties:
+        sha256: { type: string }
+        version: { type: string }
+        packages: { type: array, items: { type: string } }
+        prepared: { type: string, format: date-time }
+        source: { type: string }
+    NvidiaLicenceText:
+      type: object
+      required: [text, licence]
+      properties:
+        text: { type: string }
+        licence: { $ref: "#/components/schemas/NvidiaLicence" }
+    VGPUDriverRecord:
+      type: object
+      required: [file, sha256, version, by, at, installed]
+      properties:
+        file: { type: string }
+        sha256: { type: string }
+        version: { type: string }
+        by: { type: string }
+        at: { type: string, format: date-time }
+        installed: { type: boolean }
+    GPUTask:
+      type: object
+      required: [id, kind, state, step, progress, log, started]
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [nvidia.prepare, nvidia.install, nvidia.remove, vgpu.install, vgpu.remove] }
+        state: { type: string, enum: [running, succeeded, failed] }
+        step: { type: string }
+        progress: { type: integer }
+        log: { type: string }
+        error: { type: string }
+        result: { type: object, additionalProperties: true }
+        started: { type: string, format: date-time }
+        finished: { type: string, format: date-time }
+    GPUTaskResult:
+      type: object
+      required: [task]
+      properties:
+        task:
+          allOf: [{ $ref: "#/components/schemas/GPUTask" }]
+          nullable: true
+    NvidiaStatus:
+      type: object
+      required: [nvidiaGpus, installed, loaded, version, toolkit, nouveau, restartNeeded, packages, consent, licence, vgpu, vgpuHostDriver, task]
+      properties:
+        nvidiaGpus: { type: integer }
+        installed: { type: boolean }
+        loaded: { type: boolean }
+        version: { type: string }
+        toolkit: { type: boolean }
+        nouveau: { type: boolean }
+        restartNeeded: { type: boolean }
+        packages: { type: array, items: { type: string } }
+        consent:
+          allOf: [{ $ref: "#/components/schemas/NvidiaConsent" }]
+          nullable: true
+        licence:
+          allOf: [{ $ref: "#/components/schemas/NvidiaLicence" }]
+          nullable: true
+        vgpu:
+          allOf: [{ $ref: "#/components/schemas/VGPUDriverRecord" }]
+          nullable: true
+        vgpuHostDriver: { type: boolean }
+        task:
+          allOf: [{ $ref: "#/components/schemas/GPUTask" }]
+          nullable: true
+    VGPUUpload:
+      type: object
+      required: [upload, sha256, size, fileName, version]
+      properties:
+        upload: { type: string }
+        sha256: { type: string }
+        size: { type: integer, format: int64 }
+        fileName: { type: string }
+        version: { type: string }
+    VGPUInstallRequest:
+      type: object
+      required: [upload, sha256, fileName, accept]
+      properties:
+        upload: { type: string }
+        sha256: { type: string }
+        fileName: { type: string }
+        accept: { type: boolean, description: "You have NVIDIA's vGPU licence and agree to the licence in NVIDIA's installer" }
+        replaceDriver: { type: boolean, description: Remove Debian's NVIDIA driver first }
+    # ---- end of devices API schemas (part D) ----
     # ---- virtual machines API schemas (phase 5 part C) ----
     VMCPU:
       type: object
@@ -5262,16 +5775,6 @@ components:
         enabled: { type: boolean }
         order: { type: integer, minimum: 0, maximum: 999, description: Lower starts first }
         delaySec: { type: integer, minimum: 0, maximum: 600, description: Wait after starting this VM before the next }
-    VMDevice:
-      type: object
-      required: [kind, id]
-      description: A passed-through device (see the devices API); checked and prepared by the devices code when the VM starts
-      properties:
-        kind: { type: string, enum: [pci, usb, gpu, vgpu] }
-        id: { type: string, description: "PCI address (0000:01:00.0) or USB vendor:product / bus-port" }
-        vgpuType: { type: string }
-        romFile: { type: string }
-        primary: { type: boolean, description: The GPU is the VM's main display }
     VMSpec:
       type: object
       required: [id, name, template, os, pool, cpu, memory, firmware, disks, media, nics, video, guestAgent, boot, autostart, devices]

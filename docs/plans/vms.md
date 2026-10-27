@@ -16,11 +16,11 @@ Cade's decisions (2026-10-26):
   GPU **goes back to Docker apps** automatically (and is taken back when the VM
   starts; refused while an app uses it). Docker apps share a GPU that stays with
   the host (NVIDIA container toolkit, `/dev/dri`).
-- **vGPU slices "like Proxmox"**: officially supported vGPU cards, plus an opt-in
-  **community vGPU mode** for consumer/workstation cards (Cade's Quadro RTX 4000,
-  Turing) using the community patches + `vgpu_unlock-rs` on an NVIDIA vGPU host
-  driver **the user supplies** (never shipped or downloaded by HardyOS). No guest
-  licence workarounds (no fake licence servers). Kernel updates rebuild the driver
+- **vGPU slices "like Proxmox"**: officially supported vGPU cards with NVIDIA's own
+  vGPU host driver, which **the user supplies** (never shipped or downloaded by
+  HardyOS). *(Update 2026-10-27: the community vGPU mode for consumer/workstation
+  cards first planned here was dropped from this phase; see section 2.)* No
+  licence workarounds of any kind. Kernel updates rebuild the driver
   inside the new boot environment before switching; if the build fails, the
   update isn't activated.
 - Built before the cluster; the cluster (decision 54) later adds live migration.
@@ -84,15 +84,11 @@ Cade's decisions (2026-10-26):
   - vGPU (mdev / SR-IOV): list types (`mdev_supported_types` or NVIDIA's vGPU
     SR-IOV types on Ampere+), create/remove instances, assign to VMs, show
     capacity. Works with NVIDIA's official vGPU host driver on supported cards.
-  - **Community vGPU mode** (opt-in, clearly labelled): admin uploads the NVIDIA
-    vGPU host driver `.run`; HardyOS checks its version against the supported
-    list, applies the matching community patch for the running kernel, builds and
-    installs it with DKMS, installs `vgpu_unlock-rs` (built from a pinned source,
-    with checksums) and the per-card profile overrides (`/etc/vgpu_unlock/
-    profile_override.toml`), then exposes the slice types like above. Read and
-    follow the current community guide (polloloco `vgpu-proxmox`, `vgpu_unlock-rs`)
-    for the exact steps and supported driver/kernel combinations; encode them as
-    data so new versions are an update, not code.
+  - ~~Community vGPU mode~~: **dropped from this phase** (2026-10-27). HardyOS
+    supports vGPU only with NVIDIA's official vGPU host driver on cards NVIDIA
+    supports for vGPU; the admin uploads that driver, HardyOS checks its hash and
+    version, builds it with DKMS and manages the slices. Cards without official
+    vGPU support (GeForce, Quadro RTX 4000) go to VMs as whole cards.
   - Updates: the update installer builds the vGPU (and NVIDIA) DKMS modules in the
     new boot environment; failure keeps the current version active and says why.
   - Never ship NVIDIA's driver; never build licence workarounds.
@@ -111,8 +107,9 @@ Cade's decisions (2026-10-26):
   devices; changes needing a stop are marked), snapshots, settings (autostart,
   boot order, firmware), logs.
 - **Devices** view (Control Panel or in the VMs app): GPUs with their owner
-  (Docker apps / VM name / vGPU slices), IOMMU groups, USB; the community vGPU
-  setup flow with its warnings.
+  (Docker apps / VM name / vGPU slices), IOMMU groups, USB; the NVIDIA driver
+  setup flow with NVIDIA's licence, and the official vGPU host driver upload
+  (the community vGPU flow was dropped from this phase).
 - Follows CLAUDE.md UI rules; component tests; screenshots in `docs/images/vms/`.
 
 ## 4. Ownership and decisions

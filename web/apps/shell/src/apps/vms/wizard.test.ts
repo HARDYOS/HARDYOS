@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { keysymsFor, consoleURL } from "./Console";
-import { parseDevices } from "./DevicesStep";
 import { caps, linux, opnsense, win11 } from "./testFixtures";
 import { applyPreset, fileFromURL, idFromName, idProblem, initialState, stepProblems, toRequest } from "./wizard";
 
@@ -103,19 +102,5 @@ describe("console helpers", () => {
       { keysym: 0xff0d, code: "Enter" },
     ]);
     expect(keysymsFor("€")[0]!.keysym).toBe(0x01000000 + 0x20ac);
-  });
-});
-
-describe("device list from part D", () => {
-  it("reads what it can and skips what it can't", () => {
-    const d = parseDevices({
-      gpus: [{ address: "0000:01:00.0", name: "Quadro RTX 4000", owner: "Docker apps" }, { name: "no id" }],
-      pci: [{ id: "0000:05:00.0", group: 14 }],
-      usb: [{ id: "10c4:ea60", name: "Zigbee stick", blocked: "In use by the host" }],
-    });
-    expect(d.map((x) => `${x.kind}:${x.id}`)).toEqual(["gpu:0000:01:00.0", "pci:0000:05:00.0", "usb:10c4:ea60"]);
-    expect(d[0]!.detail).toBe("Now with Docker apps");
-    expect(d[1]!.detail).toBe("IOMMU group 14");
-    expect(d[2]!.blocked).toBe("In use by the host");
   });
 });

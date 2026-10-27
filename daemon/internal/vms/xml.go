@@ -549,7 +549,12 @@ func DomainXML(s *Spec, a ArchInfo, p Paths, devs []devices.Prepared) ([]byte, e
 	// The console: VNC on a socket only libvirt and root can reach;
 	// hardyd-priv hands a connection to hardyd (vms.console.open).
 	dv.Graphics = &graphicsXML{Type: "vnc", Listen: listenXML{Type: "socket"}}
-	if s.Video != "none" {
+	// A GPU that is the main display replaces the emulated one.
+	primaryGPU := false
+	for _, d := range s.Devices {
+		primaryGPU = primaryGPU || d.Primary
+	}
+	if s.Video != "none" && !primaryGPU {
 		dv.Video = &videoXML{Model: videoModelXML{Type: s.Video, Heads: 1, Primary: "yes"}}
 	} else {
 		dv.Video = &videoXML{Model: videoModelXML{Type: "none"}}
@@ -591,9 +596,14 @@ func DomainXML(s *Spec, a ArchInfo, p Paths, devs []devices.Prepared) ([]byte, e
 // fragmentRoots are the elements a device fragment may be.
 var fragmentRoots = map[string]bool{"hostdev": true}
 
-// checkFragment accepts a device's XML only when it's exactly one
-// <hostdev> element (with whatever inside it), so a fragment can't add
-// emulators, command lines or other devices to the domain.
+// MaxHostdevs bounds the <hostdev> elements one device brings (a GPU's
+// functions).
+const MaxHostdevs = 8
+
+// checkFragment accepts a device's XML only when it's one or more
+// <hostdev> elements (with whatever inside them; a GPU brings one per
+// function), so a fragment can't add emulators, command lines or other
+// devices to the domain. It's re-indented to sit inside <devices>.
 func checkFragment(frag string) (string, error) {
 	dec := xml.NewDecoder(strings.NewReader(frag))
 	depth := 0
@@ -633,10 +643,16 @@ func checkFragment(frag string) (string, error) {
 			return "", errors.New("its XML may not have processing instructions or directives")
 		}
 	}
-	if roots != 1 || depth != 0 {
-		return "", errors.New("its XML must be exactly one element")
+	if roots < 1 || roots > MaxHostdevs || depth != 0 {
+		return "", fmt.Errorf("its XML must be 1 to %d <hostdev> elements", MaxHostdevs)
 	}
-	return "\n    " + strings.TrimSpace(frag), nil
+	var b strings.Builder
+	for _, line := range strings.Split(strings.Trim(frag, "\n"), "\n") {
+		if strings.TrimSpace(line) != "" {
+			b.WriteString("\n  " + strings.TrimRight(line, " \t\r"))
+		}
+	}
+	return b.String(), nil
 }
 
 func wellFormed(b []byte, root string) error {

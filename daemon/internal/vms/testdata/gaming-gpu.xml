@@ -102,6 +102,15 @@
     <rng model="virtio">
       <backend model="random">/dev/urandom</backend>
     </rng>
-    <hostdev mode="subsystem" type="pci" managed="no"><source><address domain="0x0000" bus="0x01" slot="0x00" function="0x0"/></source></hostdev>
+    <hostdev mode='subsystem' type='pci' managed='no'>
+      <source>
+        <address domain='0x0000' bus='0x01' slot='0x00' function='0x0'/>
+      </source>
+    </hostdev>
+    <hostdev mode='subsystem' type='pci' managed='no'>
+      <source>
+        <address domain='0x0000' bus='0x01' slot='0x00' function='0x1'/>
+      </source>
+    </hostdev>
   </devices>
 </domain>

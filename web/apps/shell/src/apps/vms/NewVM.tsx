@@ -135,7 +135,7 @@ export function NewVM({ onCancel, onCreated, openFiles }: { onCancel: () => void
         {state && t && step === "disks" && <DisksStep s={state} t={t} caps={c} set={set} />}
         {state && t && step === "media" && <MediaStep s={state} t={t} arch={c.arch.arch} files={library.data?.files ?? []} set={set} openFiles={openFiles} />}
         {state && t && step === "network" && <NetworkStep s={state} caps={c} set={set} />}
-        {state && t && step === "devices" && <DevicesStep template={t} devices={state.devices} onChange={(devices: VMDevice[]) => set({ devices })} />}
+        {state && t && step === "devices" && <DevicesStep vm={state.id} gpu={t.gpu} devices={state.devices} onChange={(devices: VMDevice[]) => set({ devices })} />}
         {state && t && step === "review" && <ReviewStep s={state} t={t} caps={c} set={set} />}
         {error && (
           <Alert tone="bad" title="The VM couldn't be created">

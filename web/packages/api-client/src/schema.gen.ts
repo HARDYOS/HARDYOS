@@ -2606,6 +2606,264 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/devices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** IOMMU state and groups, PCI and USB devices, GPUs with their owner and vGPU slices */
+        get: operations["getDevices"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/devices/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Check devices for a VM without changing anything (every problem in plain words) */
+        post: operations["checkDevices"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/devices/iommu/enable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Add the IOMMU kernel flags for this CPU to every boot disk (takes effect after a restart) */
+        post: operations["enableIOMMU"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/devices/reconcile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Give back devices held for VMs that aren't running */
+        post: operations["reconcileDevices"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/devices/gpus/{address}/sriov": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Turn a GPU's SR-IOV virtual functions (vGPU slices) on or off */
+        post: operations["setGPUVirtualFunctions"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/devices/slices/{id}/remove": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Remove a leftover vGPU slice no running VM uses */
+        post: operations["removeVGPUSlice"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/devices/nvidia": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The NVIDIA driver, container toolkit and vGPU host driver on this server */
+        get: operations["getNvidiaStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/devices/nvidia/licence": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** NVIDIA's licence text, read from the downloaded driver packages */
+        get: operations["getNvidiaLicence"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/devices/nvidia/prepare": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Download the NVIDIA driver packages and read their licence (nothing is installed) */
+        post: operations["prepareNvidiaDriver"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/devices/nvidia/install": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Agree to NVIDIA's licence and install the driver and container toolkit */
+        post: operations["installNvidiaDriver"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/devices/nvidia/remove": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Remove the NVIDIA driver and container toolkit */
+        post: operations["removeNvidiaDriver"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/devices/gpu-task": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The running or last GPU driver task, with its log */
+        get: operations["getGPUTask"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/devices/vgpu-driver/upload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload NVIDIA's vGPU host driver (.run) you got from NVIDIA; returns its SHA-256
+         * @description The request body is the raw file; its name (NVIDIA-Linux-x86_64-<version>-vgpu-kvm.run) goes in X-HardyOS-Filename. Nothing is installed yet.
+         */
+        post: operations["uploadVGPUDriver"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/devices/vgpu-driver/install": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Install an uploaded vGPU host driver (checksum checked again, DKMS build) */
+        post: operations["installVGPUDriver"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/devices/vgpu-driver/remove": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Uninstall NVIDIA's vGPU host driver */
+        post: operations["removeVGPUDriver"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/vms": {
         parameters: {
             query?: never;
@@ -4614,6 +4872,260 @@ export interface components {
              */
             modified?: number;
         };
+        /** @description One device in a VM's spec (devices.Device) */
+        VMDevice: {
+            /** @enum {string} */
+            kind: "pci" | "usb" | "gpu" | "vgpu";
+            /** @description PCI address (0000:01:00.0; the parent card for vgpu), USB vendor:product (046d:c52b) or port (1-4.2) */
+            id: string;
+            /** @description The slice type for vgpu (a VGPUType id) */
+            vgpuType?: string;
+            /** @description A GPU ROM file from the ROM library */
+            romFile?: string;
+            /** @description The GPU is the VM's main display */
+            primary?: boolean;
+        };
+        DevicesCheckRequest: {
+            vm: string;
+            devices: components["schemas"]["VMDevice"][];
+        };
+        DeviceProblem: {
+            /** @description The device id it's about (empty for the VM as a whole) */
+            device: string;
+            message: string;
+        };
+        DevicesCheckResult: {
+            ok: boolean;
+            problems: components["schemas"]["DeviceProblem"][];
+        };
+        DeviceInventory: {
+            iommu: components["schemas"]["IOMMUState"];
+            groups: components["schemas"]["IOMMUGroup"][];
+            pci: components["schemas"]["PCIDeviceInfo"][];
+            usb: components["schemas"]["USBDeviceInfo"][];
+            gpus: components["schemas"]["GPUInfo"][];
+            stuck: components["schemas"]["StuckDevice"][];
+        };
+        IOMMUState: {
+            enabled: boolean;
+            groups: number;
+            /** @description intel, amd or other */
+            cpuVendor: string;
+            /** @description The firmware describes an IOMMU (it's on in the BIOS) */
+            firmwareTable: boolean;
+            /** @description The kernel flags this CPU needs */
+            flags: string[];
+            configured: boolean;
+            active: boolean;
+            restartNeeded: boolean;
+            canTurnOn: boolean;
+            /** @description All extra kernel arguments configured */
+            kernelArgs: string[];
+            message: string;
+        };
+        IOMMUGroup: {
+            id: number;
+            devices: string[];
+            explanation: string;
+        };
+        PCIDeviceInfo: {
+            address: string;
+            vendorId: string;
+            deviceId: string;
+            vendor: string;
+            name: string;
+            class: string;
+            /** @description Plain words: Graphics card, SATA controller... */
+            kind: string;
+            driver: string;
+            iommuGroup: number | null;
+            resetMethods: string[];
+            resettable: boolean;
+            bridge: boolean;
+            bootVga: boolean;
+            physFn?: string;
+            /** @description Why the server needs it (empty if it can go to a VM) */
+            critical: string;
+            /** @description The VM using it now (empty for the server) */
+            owner: string;
+            assigned: string[];
+        };
+        USBDeviceInfo: {
+            port: string;
+            bus: number;
+            dev: number;
+            vendorId: string;
+            productId: string;
+            manufacturer: string;
+            product: string;
+            speed: string;
+            hub: boolean;
+            critical: string;
+            owner: string;
+            assigned: string[];
+        };
+        GPUInfo: {
+            address: string;
+            /** @enum {string} */
+            vendor: "nvidia" | "amd" | "intel" | "other";
+            vendorName: string;
+            model: string;
+            /**
+             * Format: int64
+             * @description 0 when unknown
+             */
+            vramBytes: number;
+            sharedMemory: boolean;
+            functions: {
+                address: string;
+                kind: string;
+                driver: string;
+            }[];
+            driver: string;
+            bootVga: boolean;
+            iommuGroup: number | null;
+            owner: components["schemas"]["GPUOwner"];
+            users: components["schemas"]["DeviceUser"][];
+            assigned: string[];
+            /** @description Why it can't go to a VM (empty if it can) */
+            problem: string;
+            hints: string[];
+            vgpu: components["schemas"]["VGPUInfo"] | null;
+        };
+        GPUOwner: {
+            /** @enum {string} */
+            kind: "apps" | "vm" | "vgpu" | "none" | "stuck";
+            vm?: string;
+            label: string;
+        };
+        DeviceUser: {
+            pid: number;
+            process: string;
+            app?: string;
+            container: boolean;
+        };
+        StuckDevice: {
+            address: string;
+            vm: string;
+            driver: string;
+            message: string;
+        };
+        VGPUInfo: {
+            /** @enum {string} */
+            mode: "mdev" | "nvidia-vf" | "sriov-vf";
+            hostDriver: boolean;
+            types: components["schemas"]["VGPUType"][];
+            instances: components["schemas"]["VGPUInstance"][];
+            vfs: number;
+            maxVfs: number;
+            note?: string;
+        };
+        VGPUType: {
+            id: string;
+            name: string;
+            description: string;
+            available: number;
+            framebufferMb: number;
+            maxInstances: number;
+        };
+        VGPUInstance: {
+            id: string;
+            type: string;
+            parent: string;
+            vm: string;
+        };
+        DeviceConfirmRequest: {
+            confirm: boolean;
+        };
+        NvidiaInstallRequest: {
+            /** @description SHA-256 of the licence text shown */
+            licenceSha256: string;
+            /** @description Must be true */
+            accept: boolean;
+        };
+        NvidiaConsent: {
+            by: string;
+            /** Format: date-time */
+            at: string;
+            licenceSha256: string;
+            version: string;
+            packages: string[];
+            installed: boolean;
+        };
+        NvidiaLicence: {
+            sha256: string;
+            version: string;
+            packages: string[];
+            /** Format: date-time */
+            prepared: string;
+            source: string;
+        };
+        NvidiaLicenceText: {
+            text: string;
+            licence: components["schemas"]["NvidiaLicence"];
+        };
+        VGPUDriverRecord: {
+            file: string;
+            sha256: string;
+            version: string;
+            by: string;
+            /** Format: date-time */
+            at: string;
+            installed: boolean;
+        };
+        GPUTask: {
+            id: string;
+            /** @enum {string} */
+            kind: "nvidia.prepare" | "nvidia.install" | "nvidia.remove" | "vgpu.install" | "vgpu.remove";
+            /** @enum {string} */
+            state: "running" | "succeeded" | "failed";
+            step: string;
+            progress: number;
+            log: string;
+            error?: string;
+            result?: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            started: string;
+            /** Format: date-time */
+            finished?: string;
+        };
+        GPUTaskResult: {
+            task: components["schemas"]["GPUTask"] | null;
+        };
+        NvidiaStatus: {
+            nvidiaGpus: number;
+            installed: boolean;
+            loaded: boolean;
+            version: string;
+            toolkit: boolean;
+            nouveau: boolean;
+            restartNeeded: boolean;
+            packages: string[];
+            consent: components["schemas"]["NvidiaConsent"] | null;
+            licence: components["schemas"]["NvidiaLicence"] | null;
+            vgpu: components["schemas"]["VGPUDriverRecord"] | null;
+            vgpuHostDriver: boolean;
+            task: components["schemas"]["GPUTask"] | null;
+        };
+        VGPUUpload: {
+            upload: string;
+            sha256: string;
+            /** Format: int64 */
+            size: number;
+            fileName: string;
+            version: string;
+        };
+        VGPUInstallRequest: {
+            upload: string;
+            sha256: string;
+            fileName: string;
+            /** @description You have NVIDIA's vGPU licence and agree to the licence in NVIDIA's installer */
+            accept: boolean;
+            /** @description Remove Debian's NVIDIA driver first */
+            replaceDriver?: boolean;
+        };
         VMCPU: {
             cores: number;
             /**
@@ -4679,17 +5191,6 @@ export interface components {
             order: number;
             /** @description Wait after starting this VM before the next */
             delaySec: number;
-        };
-        /** @description A passed-through device (see the devices API); checked and prepared by the devices code when the VM starts */
-        VMDevice: {
-            /** @enum {string} */
-            kind: "pci" | "usb" | "gpu" | "vgpu";
-            /** @description PCI address (0000:01:00.0) or USB vendor:product / bus-port */
-            id: string;
-            vgpuType?: string;
-            romFile?: string;
-            /** @description The GPU is the VM's main display */
-            primary?: boolean;
         };
         VMSpec: {
             /** @description Short name: 2-32 lowercase letters, digits and dashes */
@@ -9204,6 +9705,322 @@ export interface operations {
                 content?: never;
             };
             401: components["responses"]["Unauthorized"];
+        };
+    };
+    getDevices: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Device inventory */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceInventory"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    checkDevices: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DevicesCheckRequest"];
+            };
+        };
+        responses: {
+            /** @description Whether the devices can go to the VM */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DevicesCheckResult"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    enableIOMMU: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    reconcileDevices: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    setGPUVirtualFunctions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description PCI address, 0000:01:00.0 */
+                address: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description 0 turns them off */
+                    vfs: number;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    removeVGPUSlice: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description mdev UUID or virtual function address */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    getNvidiaStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description NVIDIA status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NvidiaStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    getNvidiaLicence: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Licence */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NvidiaLicenceText"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    prepareNvidiaDriver: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    installNvidiaDriver: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NvidiaInstallRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    removeNvidiaDriver: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeviceConfirmRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    getGPUTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Task */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GPUTaskResult"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    uploadVGPUDriver: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-HardyOS-Filename": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/octet-stream": string;
+            };
+        };
+        responses: {
+            /** @description Saved */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VGPUUpload"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description The file is too large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    installVGPUDriver: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VGPUInstallRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    removeVGPUDriver: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeviceConfirmRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     listVMs: {
