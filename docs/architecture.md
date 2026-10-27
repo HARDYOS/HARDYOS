@@ -410,13 +410,33 @@ developer notes in [shares.md](shares.md)).
   `access`, `apps`, `recycle`, `guest`) and its quota is the ZFS `quota`,
   so they move with the pool. Datasets get `acltype=posixacl`, `xattr=sa`,
   `devices=off` and `setuid=off`.
+- **What a pool says isn't trusted.** A pool can come from anywhere, so
+  `shares.Manager.List` reads it defensively (decision 105): `zfs list -Hp`
+  rows are accepted only when they line up exactly with `zfs list -H -o
+  name` (one row per dataset, one field per property, each dataset once),
+  which a tab or line break in a user property breaks; otherwise each
+  `<pool>/shares/<id>` is read alone with `zfs get -Hp -o property,value`
+  (exactly one line per property). Every value is checked again like
+  input (`CleanName`, the description rules, `CleanRules`, app grants,
+  `CheckServices`; invalid ones are logged once and replaced by the id, no
+  description, administrators only, no apps, the default services). The
+  folder's path is used for root work only when `/proc/self/mountinfo`
+  says the visible mount there is a ZFS mount of that very dataset's root;
+  its device is kept in `Share.RootDev` (never sent to hardyd), and every
+  root-side user opens the folder with `shares.OpenRoot` (`openat2` from
+  `/` with `RESOLVE_NO_SYMLINKS`, must be on that device): the ACL walkers,
+  the people root, app, NFS and hardyos-files grants (checked right before
+  `setfacl`), smb.conf, the recycle bin and its cleaner, and the file
+  workers' roots. NFS exports go by `Mounted`, which is false for an
+  unverified folder.
 - **Root side.** `internal/shares` (in hardyd-priv) behind the ops
   `shares.list/create/update/delete/starter/folders`. The apps engine uses
   the same Manager in-process through `apps.ShareResolver`: `Resolve` gives
   the real path of a share or a subfolder (never outside it), `GrantApp` and
   `RevokeApp` add or remove the app user's ACL entries (the share root at
   once with setfacl, everything below in a background walk that never
-  follows links) and record them in `org.hardyos:apps`.
+  follows links and never enters `.recycle` or `.zfs` at the top) and
+  record them in `org.hardyos:apps`.
 - **API.** `GET /shares` and `GET /shares/{id}` for everyone signed in
   (family members don't see access rules, apps or pools); admins create,
   change and delete through jobs (`shares.create`, `shares.update`,
@@ -428,6 +448,202 @@ developer notes in [shares.md](shares.md)).
 - **Later.** File sharing (SMB, NFS, Time Machine, SFTP/WebDAV) publishes
   these same datasets and enforces the access rules; home folders arrive
   with it.
+
+## Shared folder snapshots and NFS
+
+File sharing part B ([plans/file-sharing.md](plans/file-sharing.md)
+section 2; user notes in [shares.md](shares.md)).
+
+- **Automatic snapshots.** `internal/snapshots` runs inside hardyd-priv
+  (`Manager.Run`, wired in `cmd/hardyd-priv/main.go`): a tick at start and a
+  couple of seconds after every minute, in UTC. For every mounted shared
+  folder and every kind kept by `services.snapshots` it takes the snapshot
+  of the kind's current slot (hourly at :00, daily 00:00, weekly Monday
+  00:00, monthly the 1st 00:00) if it's missing, named
+  `<dataset>@hardyos-auto-<kind>_<YYYY-MM-DD-HHMM>` after the slot, all kinds
+  due together in one `zfs snapshot` (one transaction group). Then each
+  kind is pruned to its count by slot time, oldest first. Only labels that
+  parse exactly as an automatic snapshot of a real slot are ever pruned:
+  manual snapshots, app snapshots and anything else are never touched.
+  Missed slots are not back-filled; a server that was off gets one
+  snapshot per kind for the newest slot. A per-dataset memory of the plan
+  last carried out (slots and counts) makes an idle minute one `zfs list`
+  of the shares; folders that are unmounted (locked or exported pools) are
+  skipped, a folder deleted mid-tick only logs, failures are retried next
+  minute.
+- **Manual snapshots.** Root ops `snapshots.list {share}`,
+  `snapshots.create {share, name}` (name checked, `hardyos-auto-` refused,
+  marked `org.hardyos:snapshot=manual`), `snapshots.delete {share,
+  snapshot, confirm}` (confirm = the name; `zfs destroy` of that one
+  snapshot, never `-r`). API `GET /shares/{id}/snapshots` for admins and
+  anyone the folder's rules let in (a matching `none` rule wins; 404
+  otherwise); `POST /shares/{id}/snapshots` and
+  `DELETE /shares/{id}/snapshots/{snapshot}` are admin jobs
+  (`snapshots.create`, `snapshots.delete`, on the shares lock), audited as
+  `shares.snapshot.create` / `shares.snapshot.delete`. Restoring files is
+  the File Manager's (part C), read-only from `.zfs/snapshot/<name>`.
+- **NFS.** `internal/nfs` (hardyd-priv) renders
+  `/etc/exports.d/hardyos.exports` from every mounted folder with NFS on:
+  one line per folder, clients most specific first (addresses, then
+  networks by prefix length), `rw`/`ro` per client plus
+  `sync,no_subtree_check,all_squash,anonuid=<uid>,anongid=<uid>,sec=sys,insecure`.
+  The uid is the folder's own NFS identity from 31000-31999 in
+  `org.hardyos:nfs-uid` (allocated lowest free when NFS is first turned on,
+  kept while the dataset exists, clashes from imported pools resolved in
+  favour of folders with NFS on). It gets `r-X` or `rwX` (write if any
+  client writes) as access and default ACL entries through the shares
+  walker (`shares.GrantNFS` / `RevokeNFS`, root at once, below in the
+  background), before the folder is exported. Clients are re-validated with
+  `shares.CheckServices`, paths must be plain absolute names, and the whole
+  file is checked again (`nfs.Validate`) before an atomic write; then
+  `exportfs -ra`, and if that fails the previous file is put back.
+  `nfs-server.service` is enabled and started (`--no-block`) while
+  anything is exported and disabled and stopped when nothing is.
+- **Staying in sync.** `priv.RegisterShares` takes `ShareHook`s:
+  `RegisterNFS` returns one whose `BeforeDelete` withdraws the folder's
+  export (a file system nfsd holds can't be unmounted) and whose `Changed`
+  re-syncs after every create, update, delete and starter set. `Watch`
+  also syncs at start and every 2 minutes (pools imported or unlocked
+  later). Ops `nfs.status` and `nfs.apply`; API `GET /shares/{id}/nfs`
+  (admin: path, uid, server running, last problem).
+- **Web.** The shared folder dialog's `ShareSnapshotsSection.tsx`
+  (retention counts, list, take now, delete with confirmation) and
+  `ShareNFSSection.tsx` (on/off, clients with read/write, the mount
+  commands for Linux, fstab and macOS). Each saves only its part of
+  `services`, re-reading the folder first (`shareServices.ts`).
+- **Tests.** Unit tests with `sysexec.Fake` (slots across hour, day, week,
+  month and year boundaries, UTC only; pruning; idempotent ticks;
+  catch-up; exports rendering including IPv6; uid allocation).
+  `TestZFSIntegrationSnapshots` runs the scheduler on a file-backed pool in
+  CI's ZFS job; `TestNFSIntegration` (CI's "NFS (loopback)" job,
+  `HARDYOS_NFS_INTEGRATION=1`) mounts real exports over 127.0.0.1 with
+  NFSv3 and v4.
+
+## SMB file server
+
+File sharing part A ([plans/file-sharing.md](plans/file-sharing.md)
+section 1; user guide in [file-sharing.md](file-sharing.md)).
+
+```
+   Windows / Mac ──SMB 445──► smbd (host) ──► /mnt/<pool>/shares/<id>   POSIX ACLs per rule
+                                 │ winbindd (host): HOME\alice → uid 101103 (rid)
+                                 ▼
+                     hdc-shim ──► DC (netns hardyos-dc, its own Samba)
+```
+
+- **Two Samba instances.** The DC's Samba stays in its namespace with its
+  own config and `/run/samba` (Domain controller). The host runs Debian's
+  `smbd.service` and `winbind.service` as a **member server** of the
+  domain; they're unmasked in the image but stay disabled until the join,
+  nmbd is masked (no NetBIOS). `internal/smb` (in hardyd-priv) owns
+  `/etc/samba/smb.conf`, `/etc/krb5.conf` (the realm, its DCs as KDCs) and
+  the winbind entries in `/etc/nsswitch.conf`. Samba's own databases
+  (machine account, ID map) and the keytab live in `/var/lib/hardyos-files`,
+  the dataset `rpool/hardyos-files` shared by every boot environment, with
+  `settings.json` (SMB on/off, home folders) and `state.json` (membership,
+  which shares' trees have their permissions).
+- **Joining.** `files.join` writes the config, then runs `net ads join`
+  with `PASSWD_FD=0` and the password on stdin (sysexec's `RunEnv`), never
+  on argv. For this server's own domain it uses the DC's details
+  (`domain.Manager.Load`: NetBIOS name, DCs with this one first as
+  `password server`, the HardyOS Admins SID); for another domain it asks a
+  DC found through DNS for the short name (`net ads lookup`). The
+  server registers its LAN addresses in the domain's DNS. The provision
+  and DC-join jobs in hardyd call `files.join` with the same password at
+  their end (a failure only leaves a note in the job), and deleting the
+  domain calls `files.leave` without a password. `files.leave {confirm}`
+  deletes the computer account when given the password, then disables the
+  units and wipes the machine secrets and ID map here.
+- **ID mapping.** `* : tdb 3000-7999`, `<NETBIOS> : rid 100000-999999`, so
+  `HOME\alice` (RID 1103) is uid 101103 on every HardyOS server, clear of
+  local users, app UIDs (30000-30999), NFS (31000-31999) and hardyos-files
+  (29999). `winbind use default domain = no`; template shell nologin.
+- **Shares.** One `[<Name>]` per shared folder with SMB on, mounted:
+  `vfs objects = catia fruit streams_xattr [shadow_copy2] acl_xattr
+  [recycle]`, `read only = yes` plus `valid users` / `read list` /
+  `write list` / `invalid users` from the rules (Everyone =
+  `@HOME\Domain Users`; `@HOME\Domain Admins` and the HardyOS Admins SID
+  always in the write list), `inherit acls`, `map acl inherit`,
+  `access based share enum`, guest (`guest ok`, `nobody` read-only) when
+  the folder's guest flag is on, `.recycle` hidden, `.hardyos*` vetoed.
+  Generated configs are checked with `testparm` before they replace the
+  old one; a changed `[global]` restarts winbind and smbd, a changed share
+  list reloads smbd.
+- **Permissions on disk.** The same rules become POSIX ACL entries
+  (`shares.PeopleACL`: users and groups resolved through winbind with
+  `getent`; write rwX, read r-X, a user with no access ---, `u:nobody:r-X`
+  for guests, Domain Admins rwX) on the share root at once
+  (`shares.SetPeopleRoot`, "other" cleared) and everything below in a
+  background walk (`shares.ApplyPeopleTree`, the app grants' no-follow fd
+  walker). Only entries in the domain and Samba ID ranges and the guest's
+  are file sharing's; app, NFS and file-manager entries are kept. A walk
+  runs again only when the entries changed (hash in `state.json`) or the
+  root's ACL differs. If Domain Admins can't be looked up (winbind down),
+  nothing is changed.
+- **Previous Versions.** `shadow_copy2` with `shadow:snapdir =
+  .zfs/snapshot`, `shadow:mountpoint` = the folder,
+  `shadow:snapprefix = ^hardyos-auto-\(hourly\|daily\|weekly\|monthly\)$`
+  (a basic regex, as Samba compiles it), `shadow:delimiter = _`,
+  `shadow:format = _%Y-%m-%d-%H%M`, UTC: part B's automatic snapshots.
+- **Recycle bin.** `vfs_recycle` into `.recycle/<netbios>.%U` (the same
+  bin names as the File Manager's, decision 106; folders and versions
+  kept, access time set on delete, bins and their folders made 0700); off
+  on Time Machine folders. Every apply makes sure `.recycle` is root's,
+  1777 and without ACL entries (fixed through an `O_NOFOLLOW` descriptor; a
+  link, a file or another file system there is refused) and looks at every
+  bin named after an account: one that isn't a folder owned by that
+  account (anyone can make folders in `.recycle`) is renamed to
+  `.hardyos-quarantine-<time>-<name>` and locked (root's, 0700), one that
+  is the owner's but open to others is closed up (0700, no ACLs). Once a
+  day hardyd-priv removes what has been there 30 days, through fds opened
+  with `O_NOFOLLOW` and `unlinkat`, staying on the folder's file system;
+  a folder is only entered when the descriptor opened is the inode it
+  looked at, with its times read again from the descriptor. The people
+  walker never enters `.recycle` or `.zfs` at the top.
+- **Name lookups** go through `rangeChecked`: an ID winbind (or anything
+  else in NSS) gives outside the idmap ranges (3000-7999, 100000-999999)
+  makes the name unknown, so it never reaches an ACL entry or a chown.
+  The homes dataset's mount is verified like a shared folder's before its
+  mode is set.
+- **Time Machine and Avahi.** Folders with Time Machine get
+  `fruit:time machine` (+ `max size`); `fruit:metadata = stream`,
+  `fruit:model = MacSamba` are global. hardyd-priv writes
+  `/etc/avahi/services/hardyos-smb.service` (`_smb._tcp`, `_device-info`,
+  `_adisk._tcp` with one `dkN` record per Time Machine folder) while smbd
+  serves; Samba's own mDNS registration is off.
+- **Home folders.** With File Services › Home folders on, hardyd-priv
+  makes `<pool>/homes` (posixacl, devices/setuid off, mode 0711) and one
+  dataset `<pool>/homes/<netbios>.<user>` (lower case, owner the user and
+  Domain Users, 0700, the default quota) for every turned-on account (an
+  LDAP search with the machine account), when turned on and every 10
+  minutes; it never removes one. `[homes]` has no path: winbind's
+  `template homedir = <mount>/<netbios>.%U` gives it, so no script runs
+  as root on connect.
+- **Staying in step.** `priv.RegisterFiles` returns a `ShareHook`:
+  `Changed` runs `files.apply` after every shared folder change (even a
+  failed one), `BeforeDelete` takes the folder out of smb.conf, stops its
+  walk and has smbd close it (`smbcontrol close-share`) so its dataset
+  isn't busy. `smb.Manager.Watch` applies again every 10 minutes (new
+  accounts' homes, a DC that moved) and empties old recycle-bin files
+  daily.
+- **Ops and API.** Root ops `files.status`, `files.join`, `files.leave`,
+  `files.settings`, `files.apply` (`priv/files_ops.go`). API
+  `GET /files` (everyone signed in; settings and problems for admins),
+  `POST /files/join`, `POST /files/leave` (`confirm: true`),
+  `PATCH /files/settings`, all three jobs (lock `files`), audited, with
+  passwords only in the job secret box.
+- **Web.** Control Panel › File Services (`FileServices.tsx`: join,
+  status, SMB on/off, home folders, leave, how to connect from Windows,
+  Mac, Linux and Time Machine) and the shared folder dialog's SMB section
+  (`ShareSMBSection.tsx`: SMB, Previous Versions, Time Machine and its
+  size, the folder's addresses).
+- **Tests.** Unit tests with `sysexec.Fake` (golden `smb.conf` with
+  tricky names, rule mapping, the password never on argv, homes, recycle
+  cleanup that never follows links); `TestPeopleACL` runs the walker on
+  the machine's file system; `TestSMBMemberIntegration` (CI's Samba job,
+  `HARDYOS_DC_INTEGRATION=1`, root) creates a DC, joins the host's Samba
+  to it from a temporary folder on port 4455 and checks read, write, no
+  access, guest, the recycle bin and Previous Versions with smbclient.
 
 ## Apps
 
@@ -552,6 +768,421 @@ section 3; decisions 65-69, security review 80-82):
   details view (overview, settings, access, snapshots, logs), Catalogs,
   Create an app, and `AppFrame` (an installed app as a desktop window, id
   `os.hardy.appwindow:<app id>`).
+
+## File access as the person
+
+The File Manager, share links and (later) WebDAV read and write files in
+shared folders through one interface, `files.Access` (plus `files.Extended`
+for chunked uploads, copies with progress and permanent deletes;
+`files.Service` is both). hardyd's implementation, `files.Client`, calls the
+`files.*` operations of hardyd-priv; neither daemon ever touches a person's
+files as itself (decisions 92-95).
+
+```
+browser ── /api/v1/files/* ──▶ hardyd (files.Client) ── files.open … ──▶ hardyd-priv
+                                   ▲  fd (SCM_RIGHTS)                        │ fork+exec, already the person
+                                   └─────────────── fd ◀── worker: "hardyd-priv fileworker"
+                                                           openat2 beneath the share root
+```
+
+- **Who.** hardyd looks the person up again on every call (`files.UserLookup`:
+  disabled or deleted accounts stop working, domain groups as of the last
+  refresh, the current role). Domain accounts act as their own Linux user:
+  hardyd-priv asks NSS (winbind) through `/usr/lib/hardyos/hardyos-nss`, a
+  tiny cgo helper that only calls `getpwnam_r` and `getgrouplist` (the
+  rest of hardyd-priv is built without cgo, and Go's pure lookup never
+  reaches winbind). Only IDs in winbind's ranges (3000-7999,
+  100000-999999) are accepted; other groups (root, disk, ...) are dropped.
+  HardyOS administrators (local accounts) act as the `hardyos-files` system
+  user (UID 29999, made by the package's postinst), which hardyd-priv gives
+  `rwX` on every shared folder with the same no-follow ACL walker as app
+  grants (at start-up, every 10 minutes and before an administrator's
+  folders are listed). Family members with HardyOS accounts get no files.
+  Root is never acted as. A person's home folder is only looked for on the
+  pool File Services keeps homes on, as `<pool>/homes/<netbios>.<user>`
+  whose `org.hardyos:home` (set when hardyd-priv made it) names that very
+  account, mounted (verified in the mount table) where it says.
+- **Accountability.** hardyd-priv logs every `files.*` operation with the
+  principal, Local and Admin as hardyd sent them, the uid/gid it ran as,
+  the folder and path(s), and the outcome (`file operation`), and every
+  refusal before an identity was found (`file operation refused`). See
+  "Trusting hardyd" below for what this does and doesn't protect.
+- **How many at once.** At most 32 workers run at once and 8 for one
+  principal (`MaxWorkers`, `MaxWorkersPerPerson`); more wait for a slot
+  until their request's context ends, so a flood of requests can't fork the
+  server to death or starve everyone else.
+- **The folder's rules** are checked first (`fileworker.Level`: a `none`
+  rule beats everything, otherwise the highest matching level; no match =
+  no access; administrators may use every folder). Read-only folders refuse
+  every change before a worker starts. Then the disk's permissions decide,
+  because the worker *is* the person.
+- **Workers.** For each operation hardyd-priv opens the share root
+  (`O_PATH`, with `shares.OpenRoot`: only a folder whose mount was
+  verified, reached without following any link and on that mount's
+  device), and starts `hardyd-priv fileworker` with the person's
+  credentials set between fork and exec (`setgroups`, `setgid`, `setuid`),
+  so not one instruction runs as root. The worker refuses to run as root or
+  with any capability, sets `PR_SET_NO_NEW_PRIVS` (all threads) and
+  `PR_SET_DUMPABLE 0`, reads one JSON request on stdin (fd 3: a socket back,
+  fd 4+: the roots) and writes one JSON answer. Every path is resolved with
+  `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS)`
+  from the root's descriptor; changes use the `*at` calls on the parent's
+  descriptor (`renameat2(RENAME_NOREPLACE)`, `mkdirat`, `unlinkat`), and
+  recursive deletes walk by descriptor. Links, devices, pipes and sockets
+  are never listed or opened; `..`, `.recycle`, `.zfs` and `.hardyos*` are
+  refused in paths. An upload's own temporary name (`.hardyos-upload-<hex>`)
+  may only end the path of create and openwrite, a rename's source and a
+  permanent delete (`fileworker.OpPath`), never a rename's destination. A
+  worker costs about 10 ms.
+- **Files, not bytes.** `files.open`, `files.create` and `files.openwrite`
+  hand the open file to hardyd over SCM_RIGHTS (worker → hardyd-priv →
+  hardyd); hardyd streams it (`http.ServeContent`: Range, If-Range), writes
+  upload chunks into it, or copies between two of them (`copy_file_range`,
+  so ZFS can clone blocks). No file content goes through JSON. Before
+  passing it on, hardyd-priv checks the descriptor: a regular file, opened
+  read only for open and write only for create/openwrite (`F_GETFL`, never
+  `O_PATH`), on the folder's own device unless it's an older version.
+- **Recycle bin.** Deleting in a folder with the recycle bin on moves the
+  item to `.recycle/<bin>/<its folders>/`; a name already there gets
+  " (deleted <date time>)". Bins are named so a name can only be one
+  account's (decision 106): `<netbios>.<user>` in lower case for domain
+  accounts (as in SMB's `recycle:repository`), `hardyos-files` for
+  administrators (a domain bin always has a dot, so it can never be that).
+  Before a recycled delete hardyd-priv makes sure `.recycle` is root's,
+  1777 and without ACL entries (`shares.EnsureRecycle`, through an
+  `O_NOFOLLOW` descriptor; a link or file there is refused). The worker
+  then makes or opens the person's bin and checks it on the descriptor: a
+  folder owned by the person (someone else's is refused with a clear
+  error: "delete permanently instead") with no group, other or ACL access
+  (its own, if too open, is closed up first). The ACL walkers (people,
+  apps, NFS, hardyos-files) never enter `.recycle` or `.zfs` at the top,
+  so bins stay owner-only: administrators don't get into other people's
+  bins (a root shell can).
+- **Older versions** come from `.zfs/snapshot/hardyos-auto-<kind>_<UTC
+  time>/…` (contract section 2), read only. A file's versions leave out
+  copies equal to the current file or to the next newer version. Restore
+  copies the version back to its path, or to "name (restored
+  2026-10-24).ext" when the name is taken.
+- **Uploads** go to `.hardyos-upload-<id>` next to the target, chunk by
+  chunk at the offset the server has, and are renamed into place (never
+  over a folder; over a file only with `overwrite`). Abandoned ones are
+  dropped after a day by hardyd and removed after two days when their
+  folder is listed.
+- **API** (`handlers_files.go`, `/api/v1/files/*`): shares, list, stat,
+  download (file with Range, or a streamed zip for folders and several
+  items; previews only for safe types, under `sandbox` CSP), upload
+  (start / chunk / status / cancel), mkdir, rename, move, copy, delete,
+  snapshots, restore. Small copies, moves and deletes answer at once;
+  more than five items, folders and big files run as jobs with progress
+  (`files.copy`, `files.move`, `files.delete`, `files.restore`). Deletes,
+  restores, uploads, renames, moves and job-run copies are audited.
+- **Code.** Root side `internal/fileworker` (`server.go`: identity, rules,
+  roots; `spawn_linux.go`: starting workers, receiving descriptors;
+  `worker_linux.go`: the operations), operations in
+  `priv/fileworker_ops.go`, the NSS helper in `cmd/hardyos-nss`, the
+  hardyos-files grant in `shares/filesuser_linux.go`; hardyd side
+  `internal/files` (`client.go`, `copy.go`). Tests run real workers (the
+  test binary re-runs itself as the worker): as root they create files owned
+  by made-up users and check each can do exactly what its user can; without
+  root they run as the test's own user.
+
+### Trusting hardyd (and what comes next)
+
+hardyd is unprivileged and treated as possibly compromised, yet today the
+`Who` of a `files.*` call (principal, Local, Admin, groups) is hardyd's
+word: hardyd-priv works out the Linux identity from it and never runs as
+root for the person, but a compromised hardyd could still claim to be any
+domain account, or a HardyOS administrator (and so hardyos-files). What
+holds today: no operation ever runs as root or outside a verified shared
+folder or home, the folder rules and disk permissions still apply to the
+identity claimed, workers are capped, and every operation is logged with
+the principal and resulting uid by hardyd-priv, which hardyd can't edit.
+
+The planned fix is a **root-issued session attestation** (not built yet):
+
+- Sign-in is checked on the root side: hardyd-priv (not hardyd) verifies
+  the password or the SSO/Kerberos assertion and the account's state
+  (enabled, role, domain groups from winbind), so hardyd never decides who
+  someone is.
+- hardyd-priv then issues a short-lived token binding the session id, the
+  principal, Local/Admin, the groups and an expiry, MACed with a key only
+  hardyd-priv holds (`/run/hardyos/priv`, root 0700, new at every boot);
+  hardyd keeps it with the session and sends it with each `files.*` call
+  instead of a bare `Who`.
+- hardyd-priv verifies the MAC and the expiry, re-checks that the account
+  is still enabled (cached for a minute), and acts only as the attested
+  identity; sign-out and expiry revoke it (a revocation list in
+  hardyd-priv). Share links would carry a creator attestation renewed while
+  the creator still signs in, so a link can't outlive its creator's
+  access even if hardyd's database is changed.
+
+Without the root-side sign-in check an attestation would only launder
+hardyd's claim, so both parts come together.
+
+## File Manager and share links
+
+The web desktop's File Manager and web share links (part D of
+[plans/file-sharing.md](plans/file-sharing.md); user notes in
+[file-sharing.md](file-sharing.md#file-manager)).
+
+- **File Manager** (`web/apps/shell/src/apps/files/`). A desktop app over
+  the files API (`/files/shares`, `/files/list`, `/files/download`,
+  `/files/upload`, `/files/mkdir|rename|move|copy|delete`,
+  `/files/snapshots`, `/files/restore`; part C), so every read and write
+  happens as the signed-in person. Uploads are chunked (8 MiB PUTs at an
+  offset after `POST /files/upload`, three files at a time, a failed chunk
+  retried three times from what the server has, cancel = `DELETE`); they
+  never overwrite (a taken name gets " (2)"). Downloads, previews
+  (`inline=1`) and older versions (`snapshot=`) are plain links to
+  `/files/download`, so the browser streams them and seeks with Range.
+  Moves, copies and deletes accept an immediate answer or a job and follow
+  the job. The layout switches on container queries (the window's width,
+  not the screen's).
+- **Share links** (`internal/sharelinks`, API in
+  `api/handlers_sharelinks.go`). Table `share_links` (migration 0007):
+  SHA-256 of a 32-byte random token (the token is returned once), share,
+  path, folder or file, creator's user id and principal, created and
+  expires (default 7 days, 1-90), argon2id password hash (the account
+  hasher), uploads (folders only), download limit and count, revoked.
+  Making one needs `files.Access.Stat(...).Writable` as the person, or an
+  admin; revoking needs the creator or an admin; `GET /sharelinks?scope=all`
+  is admin only. Audited: `sharelink.create`, `.revoke`, `.download`,
+  `.upload` and `.password` (wrong passwords).
+- **Public pages** (`sharelinks.Public`, mounted at `/s/` by hardyd,
+  outside `/api` and the desktop session). Server-rendered `html/template`
+  pages, one stylesheet and the mark (`/s/-/static/`), no scripts:
+  `Content-Security-Policy: default-src 'none'; style-src 'self';
+  img-src 'self'; form-action 'self'; frame-ancestors 'none'`,
+  `Referrer-Policy: no-referrer`, noindex. Every request: per-IP (240/min)
+  and per-token (600/min) limits; look the link up by hash; check it is not
+  revoked, expired or used up; load the creator now (disabled, deleted or
+  gone from the domain stops it); check the password cookie (an HMAC over
+  link id, password hash and expiry, keyed per process, path `/s/<token>`);
+  and `Stat` the target as the creator. Then `List`, `Open` or `Create` as
+  the creator through `files.Access`. Sub paths are cleaned (no `..`, no
+  hidden `.recycle`, `.zfs`, `.hardyos*`) and joined below the link's path;
+  listings and zips leave hidden names out and never touch snapshots.
+  Downloads are `attachment` with `Content-Security-Policy: sandbox`, Range
+  via `http.ServeContent`, counted and audited once per download (decision
+  103): every GET of a file is counted unless it asks for exactly one range
+  that doesn't include byte 0 (parsed as ServeContent does, whitespace and
+  all; an If-Range that would send the whole file counts too) **and**
+  carries the download ticket the counted response set (cookie
+  `hardyos_dl_<id>_<path hash>`, path `/s/<token>`, HMAC over link id,
+  file path and expiry, 6 hours). A used-up link still lets a ticketed
+  resume finish; nothing else. HEAD is never counted or audited and reads
+  no folder. Folder downloads stream a zip, always counted whatever Range
+  says, at most one at a time per link and two per address (429), at most
+  20 000 entries, 32 levels and the link's zip cap (`max_zip_bytes`,
+  default 20 GB, 1 MB-1 TB); a bound ends the zip with a "Not included.txt"
+  note, any other failure aborts the connection. Zip entry names have `\`,
+  `:` and control characters replaced by `_` (the File Manager's zips too).
+  Uploads are multipart, same-origin only, never replacing a file, names
+  starting with `.` or with control characters refused; each link has an
+  upload budget (`max_upload_bytes`, default 10 GB, 1 MB-1 TB) reserved in
+  8 MiB steps as bytes arrive (`Store.ReserveUpload`, atomic in SQL) and a
+  per-file cap (5 GB, `Public.MaxFileBytes`); a failed or refused file is
+  deleted permanently (`DeleteItem(..., permanent=true)`), never recycled,
+  and its reservation given back. Wrong passwords lock one address out of
+  one link for 15 minutes after five tries, and the link for everyone only
+  after 200 from all addresses in 15 minutes (`auth.LoginLimiter`).
+- **Client address.** One helper, `internal/clientip`, gives the address
+  for audit, sign-in limits and link limits: the peer, or the right-most
+  untrusted `X-Forwarded-For` entry when the peer is one of
+  `-trusted-proxies` (`api.Config.TrustedProxies`, empty by default, so the
+  header is ignored until the reverse proxy sets it). The debug request
+  log writes link paths as `/s/…`, never the token.
+- **Wiring.** `api.Config.Files` is the `files.Access` from part C; while
+  it's nil, links can't be made and existing ones say they don't work any
+  more. The dev server proxies `/s/` to hardyd too.
+
+## SFTP and WebDAV
+
+File sharing part E ([plans/file-sharing.md](plans/file-sharing.md)
+section 5; user guide in [file-sharing.md](file-sharing.md#sftp-and-webdav-from-anywhere)).
+Both are for domain accounts only; both off until File Services turns
+them on (`settings.json`: `sftpEnabled`, `webdavEnabled`) and per folder
+(`services.sftp`, `services.webdav`, off for new folders).
+
+```
+ SFTP client ──22──► sshd (host) ── PAM: pam_winbind for uid 100000-999999 only
+                       │ Match Group *\* / User *\*,*@*: internal-sftp, chroot /srv/hardyos/sftp/%U
+                       ▼
+               /srv/hardyos/sftp/101103/{Home,Media,...}   root's 0755, bind mounts (ro for read access)
+                                                           → the person's own uid on disk (ACLs decide)
+ WebDAV client ─443 /dav/─► hardyd (Basic, Kerberos like sign-in) ── internal/dav ── files.Client ── fileworker (the person)
+```
+
+- **SFTP is OpenSSH's.** hardyd-priv (`internal/sftp`, driven by
+  `smb.Manager.applySFTP` on every apply: shared folder changes, settings,
+  the 10-minute watch) writes `/etc/ssh/sshd_config.d/hardyos-sftp.conf`,
+  checks the whole config with `sshd -t` (the previous file is put back if
+  sshd refuses it) and reloads `ssh.service` only if it runs (HardyOS
+  never starts or stops sshd). Domain accounts are matched two ways, by
+  their groups (`Match Group *\*`: winbind names every domain group
+  `HOME\...`, local groups never contain a backslash) and by the name typed
+  (`Match User *\*,*@*`), with unquoted patterns that every sshd parses
+  the same; both blocks set `AllowGroups hardyos-sftp`,
+  `ChrootDirectory /srv/hardyos/sftp/%U`, `ForceCommand internal-sftp -d /`,
+  `DisableForwarding yes` (and each forwarding switch), `PermitTTY no`,
+  `PermitUserRC no`, `PubkeyAuthentication no`, `AuthorizedKeysFile none`,
+  `AuthenticationMethods password`; the file ends with `Match all`. With
+  SFTP off (or the server out of the domain) the file says `DenyGroups *`
+  for the same matches. Local accounts' SSH is untouched. Order on
+  every apply (decision 109): views, group, drop-in (`sshd -t`, reload),
+  then `sshd -T -C user=<first planned account's NSS name>,host=x,addr=127.0.0.1`
+  must show `forcecommand internal-sftp -d /`, `chrootdirectory <root>/%U`,
+  `disableforwarding yes`, `allowgroups hardyos-sftp` (only),
+  `authenticationmethods password`, `pubkeyauthentication no`,
+  `permittty no` and the forwarding switches off (`sftp.CheckEffective`);
+  only then does the PAM block go in. Any failure (no Include, another
+  file setting something first, `sshd -T` failing, the session check
+  below) takes the PAM block out and File Services shows *SFTP sign-in
+  for domain accounts is off until this is fixed*. With nobody to let in
+  the PAM block stays out.
+- **PAM, sshd only.** A marked block goes in front of `@include
+  common-auth` and `@include common-account` in `/etc/pam.d/sshd`:
+  `pam_succeed_if uid >= 100000 uid <= 999999` selects domain accounts
+  (anything else skips to the usual stack), `pam_succeed_if user ingroup
+  hardyos-sftp` refuses non-members before winbind is asked (sshd hands
+  PAM a deliberately wrong password for accounts AllowGroups refuses;
+  that must not count towards their lockout in AD), then
+  `pam_faillock preauth/authfail/authsucc deny=10 unlock_time=900` around
+  `pam_winbind`, which decides alone (wrong password, turned off,
+  expired, must-change all refused); the account block has the same
+  membership check. A third block before `@include common-session` gives
+  domain accounts `pam_limits` and ends their session stack
+  (`pam_permit`, `done`), so common-session's `pam_systemd` (a
+  `systemd --user` outside the chroot running `~/.config/systemd/user`)
+  never runs for them; `sftp.CheckPAMSession` refuses the edit if a
+  `pam_systemd` session line comes before that block (directly or via an
+  include). Jumps never cross an `@include`. winbind stays out of the system-wide stacks:
+  the image diverts libpam-winbind's pam-auth-update profile, and File
+  Services warns if `common-auth` has winbind anyway. Debian's file
+  without its includes is refused (`ErrPAMLayout`). Passwords go to the
+  domain through winbind's machine-account secure channel, so this works
+  on member servers too.
+- **Views.** One per domain account (from the domain's turned-on accounts,
+  IDs through the NSS helper) that has something to see:
+  `/srv/hardyos/sftp/<uid>/`, root's 0755 (`/srv/hardyos/sftp` is a
+  private mount, so binds don't spread into other mount namespaces).
+  `sftp.Plan` uses the File Manager's rule (`fileworker.Level`: none beats
+  all, highest match, admins by Domain Admins / HardyOS Admins gid all
+  folders; group rules matched by gid): write → a read-write bind, read →
+  read-only bind, none → nothing; Home is a bind of the home dataset. Only
+  folders whose mount was verified get a view (decision 105), and a home
+  only when the mount table says it's that home dataset's mount; the bind's
+  source is opened with `shares.OpenRoot` on that mount's device. Binds
+  (decision 108) are `open_tree(OPEN_TREE_CLONE|OPEN_TREE_CLOEXEC)` of
+  that descriptor (no `AT_RECURSIVE`), `mount_setattr` to
+  `nosuid,nodev,noexec` (+`rdonly`) and `MS_PRIVATE` while still
+  detached, then `move_mount` onto the target's O_PATH descriptor; the
+  fallback is a non-recursive `MS_BIND`, `MS_PRIVATE` at once, the
+  restricting remount, and the bind is dropped if anything appeared
+  inside it meanwhile. A view is thus in no peer group: nothing the host
+  mounts later shows up in it (no rw or suid copies inside read-only
+  views), and nothing unmounted in it reaches the host. Not recursive on
+  purpose: a dataset mounted inside a shared folder is an empty folder in
+  views (accepted: ZFS makes mountpoint folders root's 0755, writes there
+  would land hidden under the child mount on the host; SMB, WebDAV and
+  the File Manager see the child). Every sync and release first makes
+  the root private and then everything below it (`MS_PRIVATE`, then
+  `MS_PRIVATE|MS_REC`), which also detaches binds made by earlier
+  versions from the shared folders' peer groups before anything is
+  unmounted. The sync manages only mounts exactly at
+  `<root>/<uid>/<name>`: one is kept only if it's alone there, has
+  nothing mounted inside, has the planned read-only flag, is restricted
+  and private, shows the dataset's root (mountinfo field 4 `/`), the
+  dataset as source and the verified device; anything else there is
+  unmounted (detached with what's inside, if busy) and bound again;
+  nothing deeper is ever unmounted by itself. Existing folders in the
+  views are never chowned or chmodded (one could be a shared folder's top
+  mounted there): only ones just made; a target on another device than
+  its folder (something mounted) or still holding a mount that couldn't
+  go is skipped. Folders are only ever `rmdir`ed when empty, never one
+  something is mounted on. The
+  `hardyos-sftp` system group (`gpasswd -M`) lists exactly the accounts
+  with a view, as NSS names them. Before a folder is deleted
+  (`ShareHook.BeforeDelete`) and before a pool is exported or destroyed or
+  a dataset destroyed (`priv.Server.OnRelease`, called by the storage ops)
+  its binds are unmounted, and the dataset (with everything below it)
+  is held out of the views until the operation is over
+  (`ShareHook.AfterDelete`, the done function `priv.Server.OnRelease`
+  takes; at most 30 minutes), so the watch can't bind it again in
+  between. Domain administrators get no view unless
+  `settings.json` `sftpAdmins` (File Services › *Domain administrators
+  too*) is on. Views are rebuilt after a reboot by the watch.
+- **WebDAV is hardyd's.** `/dav/` (and `/dav`, plus `OPTIONS /` for
+  Windows) in `api/handlers_dav.go`: HTTPS only (403 on plain HTTP unless
+  the dev `Insecure` flag), WebDAV and the folders' switches from
+  `files.status` (cached 15 s), Basic sign-in with
+  `auth.SignIn.AuthenticateDomain` (a local HardyOS account's name is
+  refused without its password being checked, answered 401 like a wrong
+  password and counted against the address and `dav-local:<key>`, never
+  the account's own key), the desktop's limiter keys
+  (`ip:<addr>` via the trusted-proxy aware client address, and the
+  account's key for every spelling), 503 without counting when the DC
+  can't be asked. A password that worked is remembered for 2 minutes
+  under HMAC-SHA256(per-process random key, account key + password); the
+  account row is read again on every request (turned off here = out), and
+  domain groups refresh like a session's. Successful sign-ins are audited
+  at most hourly per account, failures always, rate-limited ones once per
+  key per 15 minutes (with the count refused since); uploads, deletes,
+  `MKCOL` (`files.mkdir`), modification times set by PROPPATCH
+  (`files.settime`), moves (source and destination) and COPY
+  (`files.copy`, from where) are audited with detail `webdav`. Request
+  limits (decision 110): bodies other than PUT's at most 1 MiB;
+  `PROPFIND` with `Depth: infinity` (or none) 403 with
+  `<D:propfind-finite-depth/>`; `POST` 405; COPY/MOVE `Destination` is
+  cleaned and must stay below `/dav`, the same file or folder as the
+  source (after cleaning and resolving) or a folder into itself is 403
+  before x/net/webdav (which would delete the destination first) sees
+  it, and it gets the cleaned, escaped paths; LOCK timeouts are capped
+  at an hour (the `Timeout` header is rewritten so the answer matches),
+  256 locks per person, 8192 in all, owner notes over 1 KiB dropped.
+- **The FileSystem** (`internal/dav`, `golang.org/x/net/webdav` with a
+  memory lock table per person) maps `/<Folder>/<path>` to `files.Service`
+  calls as the person; the top is virtual (nothing can be made, moved or
+  deleted there); hidden names never listed or reachable; files open
+  lazily (a listing doesn't start a worker per file; content types come
+  from names); uploads stream into `.hardyos-upload-<id>` and are
+  `Replace`d into place on Close only if the body, writes and (for COPY)
+  the source read all succeeded, else deleted; replacing an existing file
+  (PUT, or COPY/MOVE with Overwrite) first opens it for writing as the
+  person (`OpenWrite`; refused = 403, nothing changed), and in a folder
+  with a recycle bin its old version is recycled just before the rename
+  (without a bin the rename replaces it in one step; if the rename then
+  fails the old version is in the bin, not lost); deletes use the recycle
+  bin; PROPPATCH stores nothing (answered 200; `Win32LastModifiedTime`
+  sets the modification time). Every response has `Content-Security-Policy:
+  default-src 'none'; sandbox`, nosniff, no-store, and GET/HEAD
+  `Content-Disposition: attachment`.
+- **Tests.** `internal/sftp` (drop-in rendering, PAM edits on Debian's
+  file incl. faillock, the membership check and jump targets, the session
+  check, planning, view sync with a fake mounter that models propagation
+  (migration of shared binds, every keep condition, never chmod an
+  existing target, never mount over a mount that stayed), held datasets,
+  `sshd -T` parsing and PAM only after it, rollback of a refused config;
+  `TestRealSSHD` checks the drop-in and `CheckEffective` with a real sshd
+  when `HARDYOS_SSHD` is set; `TestRealBindNamespace` makes real binds
+  both ways in a private mount namespace of its own when
+  `HARDYOS_MOUNT_NS=1` as root: private, read-only, child mounts not
+  propagated, an old shared view replaced without unmounting anything on
+  the host), `smb` `TestApplySFTP` (views from rules and accounts,
+  administrators only with the switch, release, leave), `api` `TestDAV*`
+  (browse, hidden names, read/write/move/copy/delete/lock, a broken
+  upload, PUT/COPY/MOVE over a read-only file, the old version in the
+  bin, depth, POST, body and lock limits, Destination spelled as the
+  source, audit rows, dead properties, sign in, local names, cache,
+  lockout shared with the desktop, DC down, switches, HTTPS),
+  and `TestSFTPMemberIntegration` (CI's Samba job, `HARDYOS_DC_INTEGRATION=1`):
+  a real DC, the host's Samba joined, a private sshd on port 2222 (in a
+  fresh private mount namespace per (re)start, with a copy of `/etc/pam.d`
+  whose common-* stacks have no winbind, as on the image), SFTP as
+  domain users by rule, no TTY, no tunnels, refused passwords and
+  accounts, the domain administrator refused by default, a faillock
+  lockout after ten wrong passwords, and an overriding drop-in caught by
+  the effective-config check (PAM off, problem shown) and recovered.
 
 ## Data and state
 

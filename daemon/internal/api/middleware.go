@@ -126,7 +126,7 @@ func (s *Server) clearCookie(w http.ResponseWriter, r *http.Request) {
 
 // record writes an audit entry, logging (not failing) if the write fails.
 func (s *Server) record(r *http.Request, u *auth.User, action, target string, outcome audit.Outcome, detail string) {
-	e := audit.Entry{Action: action, Target: target, Outcome: outcome, Detail: detail, IP: clientIP(r), Actor: "anonymous"}
+	e := audit.Entry{Action: action, Target: target, Outcome: outcome, Detail: detail, IP: s.clientIP(r), Actor: "anonymous"}
 	if u != nil {
 		id := u.ID
 		e.ActorID, e.Actor = &id, u.Username

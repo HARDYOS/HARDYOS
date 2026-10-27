@@ -8,6 +8,10 @@ import { EditIcon, FolderIcon, PlusIcon, TrashIcon } from "../../icons";
 import { Alert, Badge, Button, Card, EmptyState, ErrorBox, Field, IconButton, Loading, PageHeader, Progress, Select, TextInput, Toggle } from "../../ui";
 import { ConfirmDialog, Dialog } from "../../ui/Dialog";
 import { toast } from "../../ui/toasts";
+import { ShareNFSSection } from "./ShareNFSSection";
+import { ShareRemoteSection } from "./ShareRemoteSection";
+import { ShareSMBSection } from "./ShareSMBSection";
+import { ShareSnapshotsSection } from "./ShareSnapshotsSection";
 import { cleanName, deriveId, idProblem, nameProblem, type QuotaUnit, quotaBytes, quotaFields } from "./sharesRules";
 
 export const useShares = () => useQuery({ queryKey: ["shares"], queryFn: () => unwrap(api.GET("/shares")).then((r) => r.shares), refetchInterval: 30_000 });
@@ -53,9 +57,9 @@ export function SharedFolders({ admin }: { admin: boolean }) {
           ) : undefined
         }
       />
-      <Alert tone="info" title="Opening them from computers comes with file sharing">
-        Shared folders are ready for apps now. Reaching them from Windows, Macs and phones (SMB, NFS, Time Machine) arrives with file sharing, and the
-        access rules you set here apply then.
+      <Alert tone="info" title="Open them from your computers">
+        Windows PCs and Macs open shared folders with their domain account once this server has joined the domain; see Control Panel › File Services
+        for how to connect. The access rules you set here apply there and on disk.
       </Alert>
 
       {admin && pools.isSuccess && poolNames.length === 0 && (
@@ -367,8 +371,8 @@ function ShareDialog({ share, pools, onClose, onDone }: { share?: Share; pools: 
             </div>
           )}
         </Field>
-        <Toggle label="Recycle bin" description="Files deleted over the network go to a recycle bin first (with file sharing)." checked={recycle} onChange={setRecycle} />
-        <Toggle label="Guest access" description="People on your network can read it without signing in (with file sharing)." checked={guest} onChange={setGuest} />
+        <Toggle label="Recycle bin" description="Files deleted from computers go to a recycle bin first and are kept there for 30 days." checked={recycle} onChange={setRecycle} />
+        <Toggle label="Guest access" description="People on your network can read it from their computers without signing in." checked={guest} onChange={setGuest} />
 
         <div className="stack" style={{ gap: 8 }}>
           <strong className="small">Who can use it</strong>
@@ -420,6 +424,10 @@ function ShareDialog({ share, pools, onClose, onDone }: { share?: Share; pools: 
             </div>
           )}
         </div>
+        <ShareSMBSection share={share} />
+        <ShareSnapshotsSection share={share} />
+        <ShareNFSSection share={share} />
+        <ShareRemoteSection share={share} />
         {save.isError && <Alert tone="bad">{errorMessage(save.error)}</Alert>}
       </div>
     </Dialog>

@@ -61,7 +61,20 @@ type Share struct {
 	Access      []Rule     `json:"access"`
 	Apps        []AppGrant `json:"apps"`
 	CreatedAt   time.Time  `json:"createdAt"`
+	// Services: how the folder is shared on the network, and snapshots.
+	Services Services `json:"services"`
+	// RootDev is the device number of the dataset's own ZFS mount at Path,
+	// set by Manager.List only after checking /proc/self/mountinfo (see
+	// mounts.go); 0 means unverified. Nothing is done to a folder as root
+	// without it. Never sent over the wire: a Share decoded from JSON is
+	// unverified.
+	RootDev uint64 `json:"-"`
 }
+
+// Usable reports whether the folder is mounted where it says and verified,
+// so root-side work (ACLs, the recycle bin, SMB, file workers) may use
+// Path, opening it with OpenRoot(Path, RootDev, ...).
+func (sh *Share) Usable() bool { return sh.Mounted && sh.Path != "" && sh.RootDev != 0 }
 
 // NewShare creates a shared folder.
 type NewShare struct {
@@ -74,17 +87,20 @@ type NewShare struct {
 	Guest       bool     `json:"guest"`
 	Access      []Rule   `json:"access,omitempty"`
 	Subfolders  []string `json:"subfolders,omitempty"`
+	// Services; nil = DefaultServices.
+	Services *Services `json:"services,omitempty"`
 }
 
 // ShareUpdate changes a shared folder; nil fields keep their values.
 type ShareUpdate struct {
-	ID          string  `json:"id"`
-	Name        *string `json:"name,omitempty"`
-	Description *string `json:"description,omitempty"`
-	QuotaBytes  *uint64 `json:"quotaBytes,omitempty"`
-	Recycle     *bool   `json:"recycle,omitempty"`
-	Guest       *bool   `json:"guest,omitempty"`
-	Access      *[]Rule `json:"access,omitempty"`
+	ID          string    `json:"id"`
+	Name        *string   `json:"name,omitempty"`
+	Description *string   `json:"description,omitempty"`
+	QuotaBytes  *uint64   `json:"quotaBytes,omitempty"`
+	Recycle     *bool     `json:"recycle,omitempty"`
+	Guest       *bool     `json:"guest,omitempty"`
+	Access      *[]Rule   `json:"access,omitempty"`
+	Services    *Services `json:"services,omitempty"`
 }
 
 // StarterArgs creates the starter set on a pool.

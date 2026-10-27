@@ -64,6 +64,39 @@ jobs:
       - name: settings backups on a pool
         run: sudo HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/backup.test" -test.run TestZFSBackupIntegration -test.v
 
+  nfs:
+    name: NFS (loopback)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache: false
+      - name: install ZFS and the NFS server
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zfsutils-linux acl nfs-kernel-server
+          sudo modprobe zfs
+          sudo systemctl disable --now nfs-server.service || true
+          # As in the HardyOS image (os/live/config/hooks): no generated
+          # mount requirements for exported paths.
+          sudo mkdir -p /etc/systemd/system-generators
+          sudo ln -sf /dev/null /etc/systemd/system-generators/nfs-server-generator
+          sudo systemctl daemon-reload
+      - name: build test binary
+        working-directory: daemon
+        run: go test -c -o "$RUNNER_TEMP/priv.test" ./internal/priv
+      - name: shared folders over NFS, mounted over loopback
+        run: sudo HARDYOS_ZFS_INTEGRATION=1 HARDYOS_NFS_INTEGRATION=1 "$RUNNER_TEMP/priv.test" -test.run TestNFSIntegration -test.v
+      - name: NFS server logs
+        if: failure()
+        run: |
+          sudo journalctl -u nfs-server -u nfs-mountd -u rpcbind --no-pager -n 80 || true
+          systemctl --failed --no-pager || true
+          sudo journalctl --no-pager -n 200 | grep -iE "nfs|mount|depend" || true
+          sudo cat /etc/exports.d/hardyos.exports || true
+
   domain:
     name: Domain controller (Samba)
     runs-on: ubuntu-24.04
@@ -76,8 +109,10 @@ jobs:
       - name: install Samba
         run: |
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq samba samba-ad-dc samba-ad-provision samba-dsdb-modules winbind smbclient iputils-arping bind9-dnsutils
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq samba samba-ad-dc samba-ad-provision samba-dsdb-modules samba-vfs-modules winbind libnss-winbind smbclient iputils-arping bind9-dnsutils
           sudo systemctl stop smbd nmbd winbind samba-ad-dc 2>/dev/null || true
+          # The file server test looks domain accounts up through winbind.
+          sudo sed -i -E '/^(passwd|group):/{/winbind/!s/$/ winbind/}' /etc/nsswitch.conf
           sudo install -D -m 0755 packaging/domain/hardyos-dc-admin /usr/lib/hardyos/hardyos-dc-admin
           # A private LAN for the DC: cloud networks answer ARP for every address.
           sudo ip link add lan0 type dummy
@@ -90,6 +125,16 @@ jobs:
         run: |
           sudo HARDYOS_DC_INTEGRATION=1 HARDYOS_DC_TEST_ADDRESS=10.123.0.20/24 HARDYOS_DC_TEST_ADDRESS2=10.123.0.21/24 \
             HARDYOS_DC_TEST_GATEWAY=10.123.0.1 "$RUNNER_TEMP/domain.test" -test.run TestDCIntegration -test.v -test.timeout 30m
+      - name: file server - join as a member, SMB access by rule, guest, recycle bin, Previous Versions
+        run: |
+          sudo HARDYOS_DC_INTEGRATION=1 HARDYOS_DC_TEST_ADDRESS=10.123.0.20/24 HARDYOS_DC_TEST_GATEWAY=10.123.0.1 \
+            "$RUNNER_TEMP/domain.test" -test.run TestSMBMemberIntegration -test.v -test.timeout 20m
+      - name: SFTP - domain accounts in their own views, by rule, no shell or tunnels
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server
+          sudo mkdir -p /run/sshd
+          sudo HARDYOS_DC_INTEGRATION=1 HARDYOS_DC_TEST_ADDRESS=10.123.0.20/24 HARDYOS_DC_TEST_GATEWAY=10.123.0.1 \
+            "$RUNNER_TEMP/domain.test" -test.run TestSFTPMemberIntegration -test.v -test.timeout 20m
       - name: domain controller logs
         if: failure()
         run: |

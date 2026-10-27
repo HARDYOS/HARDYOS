@@ -12,6 +12,6 @@ type treeStats struct {
 	First                          error
 }
 
-func applyTree(context.Context, string, int, bool, bool) (treeStats, error) {
+func applyTree(context.Context, string, uint64, int, bool, bool) (treeStats, error) {
 	return treeStats{}, errors.New("POSIX ACLs are only supported on Linux")
 }

@@ -32,6 +32,8 @@ tags:
   - name: domain
   - name: shares
   - name: apps
+  - name: sharelinks
+  - name: files
 paths:
   /health:
     get:
@@ -1603,6 +1605,588 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
   # ---- end of shared folders ---------------------------------------------
+  # ---- Share links (part D; docs/file-sharing.md, decisions 96-98) --------
+  # The public pages a link opens (/s/<token>, /s/<token>/download,
+  # /s/<token>/upload, /s/<token>/unlock) are HTML served by hardyd outside
+  # /api/v1 and the desktop session; they aren't part of this API.
+  /sharelinks:
+    get:
+      operationId: listShareLinks
+      summary: Links I've shared, or everyone's (administrators, scope=all)
+      tags: [sharelinks]
+      parameters:
+        - { name: scope, in: query, schema: { type: string, enum: [mine, all], default: mine } }
+      responses:
+        "200":
+          description: Links, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [links]
+                properties:
+                  links: { type: array, items: { $ref: "#/components/schemas/ShareLink" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: createShareLink
+      summary: Make a link to a file or folder
+      description: |
+        Allowed for administrators and for anyone who may change the file or
+        folder. The token is in the answer once; only its hash is stored.
+      tags: [sharelinks]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ShareLinkRequest" }
+      responses:
+        "201":
+          description: The new link
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ShareLinkCreated" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /sharelinks/{id}/revoke:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+    post:
+      operationId: revokeShareLink
+      summary: Turn a link off for good (its creator or an administrator)
+      tags: [sharelinks]
+      responses:
+        "200":
+          description: The link, now revoked
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ShareLink" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  # ---- end of share links ------------------------------------------------
+  # ---- files API (consumed by File Manager; owned by part C) -------------
+  # docs/plans/file-sharing.md section 3.
+  # Files are read and written as the signed-in person (domain accounts as
+  # themselves, HardyOS administrators as hardyos-files). HardyOS accounts
+  # that aren't administrators get 403 no_access. Paths are inside the
+  # share, "/" separated, no leading slash; "" is its top. The share id
+  # "~home" is the person's home folder. Errors: 404 not_found, 403
+  # no_access, 409 exists / not_allowed (links, "..", reserved names such
+  # as .recycle, .zfs, .hardyos*), 507 full.
+  /files/shares:
+    get:
+      operationId: listFileShares
+      summary: The shared folders (and Home) the person can open
+      tags: [files]
+      responses:
+        "200":
+          description: Home first, then by name
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [shares]
+                properties:
+                  shares: { type: array, items: { $ref: "#/components/schemas/FileShare" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /files/list:
+    get:
+      operationId: listFiles
+      summary: A folder's files and folders (links, devices and hidden names aren't listed)
+      tags: [files]
+      parameters:
+        - { name: share, in: query, required: true, schema: { type: string } }
+        - { name: path, in: query, schema: { type: string } }
+        - { name: snapshot, in: query, description: "List the folder as it was in this automatic snapshot (from /files/versions)", schema: { type: string } }
+      responses:
+        "200":
+          description: The folder and its entries, folders first
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileListing" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /files/stat:
+    get:
+      operationId: statFile
+      summary: One file or folder
+      tags: [files]
+      parameters:
+        - { name: share, in: query, required: true, schema: { type: string } }
+        - { name: path, in: query, schema: { type: string } }
+        - { name: snapshot, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: The entry
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileEntry" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /files/download:
+    get:
+      operationId: downloadFiles
+      summary: Download a file (with Range support), or folders and several items as a zip
+      description: |
+        One file is sent as is: Range / If-Range requests give 206 partial
+        content (video seeking, resumed downloads). With `inline=1` images,
+        video, audio, PDFs and text are shown in the browser (text, HTML and
+        SVG as plain text); everything else is always an attachment.
+        A folder, or several `path`s from the same share, is streamed as a
+        zip (stored, not compressed; a folder's contents are at the top of
+        the zip, several items each under its own name). Files that can't
+        be read are listed in "Files not included.txt" inside the zip.
+      tags: [files]
+      parameters:
+        - { name: share, in: query, required: true, schema: { type: string } }
+        - { name: path, in: query, description: Repeat for several items, schema: { type: array, items: { type: string } }, style: form, explode: true }
+        - { name: snapshot, in: query, description: Download an older version, schema: { type: string } }
+        - { name: inline, in: query, description: "1: show in the browser when the type is safe to", schema: { type: string, enum: ["1"] } }
+      responses:
+        "200":
+          description: The file, or a zip
+          content:
+            application/octet-stream: { schema: { type: string, format: binary } }
+            application/zip: { schema: { type: string, format: binary } }
+        "206": { description: Part of the file (Range) }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /files/upload:
+    post:
+      operationId: startFileUpload
+      summary: Start a resumable upload of one file
+      description: |
+        Makes an empty hidden temporary file next to `path`; send the bytes
+        with `PUT /files/upload/{id}`. The file only shows under its name
+        once complete, so a half-uploaded file never does. Uploads nobody
+        continues for a day are removed (as are all of them when hardyd
+        restarts: start again).
+      tags: [files]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FileUploadRequest" }
+      responses:
+        "201":
+          description: The upload, to send chunks to
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileUpload" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /files/upload/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    put:
+      operationId: sendFileChunk
+      summary: Send the next chunk (raw bytes) at offset; the chunk that completes the file puts it in place
+      description: |
+        `offset` must be the upload's `received`; otherwise 409 with
+        `received` (carry on from there). Bytes past `size` are refused
+        (400). The completing chunk (for an empty file: one empty PUT)
+        renames the file into place and answers with its `entry`.
+      tags: [files]
+      parameters:
+        - { name: offset, in: query, required: true, schema: { type: integer, format: int64 } }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: How much has arrived (and the file once complete)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileUpload" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Out of step (wrong_offset), another chunk is being written (busy), or the name was taken meanwhile (exists)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, message]
+                properties:
+                  code: { type: string }
+                  message: { type: string }
+                  received: { type: integer, format: int64 }
+                  upload: { $ref: "#/components/schemas/FileUpload" }
+        "507": { description: The shared folder is full }
+    get:
+      operationId: getFileUpload
+      summary: How far an upload has got
+      tags: [files]
+      responses:
+        "200":
+          description: The upload
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileUpload" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: cancelFileUpload
+      summary: Cancel an upload and throw away what arrived
+      tags: [files]
+      responses:
+        "204": { description: Cancelled }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /files/mkdir:
+    post:
+      operationId: makeFolder
+      summary: Make a folder
+      tags: [files]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FilePathRequest" }
+      responses:
+        "201":
+          description: The new folder
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileEntry" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /files/rename:
+    post:
+      operationId: renameFile
+      summary: Rename one file or folder in place
+      tags: [files]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [share, path, name]
+              properties:
+                share: { type: string }
+                path: { type: string }
+                name: { type: string, description: The new name (no slashes); it must be free }
+      responses:
+        "200":
+          description: The renamed entry
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileEntry" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /files/move:
+    post:
+      operationId: moveFiles
+      summary: Move items into a folder (within or across shares)
+      description: |
+        Within a share moves are renames, answered at once (200). Into
+        another share they're a copy and a delete: up to 5 files (none
+        over 256 MB) at once, anything more as a job (202) whose result is
+        the same `FileBulkResult`. A single item that fails answers with
+        its error.
+      tags: [files]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FileTransferRequest" }
+      responses:
+        "200":
+          description: Done
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileBulkResult" }
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /files/copy:
+    post:
+      operationId: copyFiles
+      summary: Copy items into a folder (within or across shares)
+      description: |
+        Up to 5 files (none over 256 MB) are copied at once (200);
+        folders and anything more run as a job (202) with progress, its
+        result the same `FileBulkResult`. Copies keep modification times.
+        A single item that fails answers with its error.
+      tags: [files]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FileTransferRequest" }
+      responses:
+        "200":
+          description: Done
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileBulkResult" }
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /files/delete:
+    post:
+      operationId: deleteFiles
+      summary: Delete items (to the folder's recycle bin when it has one)
+      description: "Up to 5 items at once (200), more as a job (202) whose result is the same `FileBulkResult`. `recycled`: everything deleted went to the recycle bin. Audited."
+      tags: [files]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [share, paths]
+              properties:
+                share: { type: string }
+                paths: { type: array, items: { type: string }, maxItems: 1000 }
+                permanent: { type: boolean, description: Skip the recycle bin }
+      responses:
+        "200":
+          description: Done
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileBulkResult" }
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /files/snapshots:
+    get:
+      operationId: listFileVersions
+      summary: Older versions of a file or folder, from the automatic snapshots, newest first
+      description: A file's versions that are the same as the current file or the next newer version are left out.
+      tags: [files]
+      parameters:
+        - { name: share, in: query, required: true, schema: { type: string } }
+        - { name: path, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: The versions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [versions]
+                properties:
+                  versions: { type: array, items: { $ref: "#/components/schemas/FileVersion" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /files/restore:
+    post:
+      operationId: restoreFileVersion
+      summary: Copy an older version back next to the current one
+      description: |
+        Copied back to its path if nothing is there now, otherwise to
+        "name (restored 2026-10-24).ext". Answers when done (200), or with
+        `background: true` runs as a job (202 JobAccepted, its result
+        this same object) with progress, for big folders. Audited.
+      tags: [files]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [share, path, snapshot]
+              properties:
+                share: { type: string }
+                path: { type: string }
+                snapshot: { type: string }
+                background: { type: boolean }
+      responses:
+        "200":
+          description: Where it was written
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FilePathResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  # ---- end of files API (part C) -----------------------------------------
+  # ---- Shared folder snapshots and NFS (file sharing part B) --------------
+  /shares/{id}/snapshots:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: listShareSnapshots
+      summary: A shared folder's snapshots, newest first
+      description: >-
+        For administrators and anyone the folder's access rules let use it
+        (404 for others). Automatic snapshots are named
+        hardyos-auto-<kind>_<YYYY-MM-DD-HHMM> (UTC, the slot they stand for).
+      tags: [shares]
+      responses:
+        "200":
+          description: Snapshots
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [snapshots]
+                properties:
+                  snapshots: { type: array, items: { $ref: "#/components/schemas/ShareSnapshot" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      operationId: createShareSnapshot
+      summary: Take a snapshot now (runs as a job)
+      description: Manual snapshots are never deleted by the automatic pruning.
+      tags: [shares]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: "Letters, digits and . _ : - (up to 64); empty for manual-<YYYY-MM-DD-HHMM>. Names starting with hardyos-auto- are refused."
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /shares/{id}/snapshots/{snapshot}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: snapshot, in: path, required: true, schema: { type: string } }
+    delete:
+      operationId: deleteShareSnapshot
+      summary: Delete one snapshot (runs as a job)
+      tags: [shares]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { type: string, description: "The snapshot's name, to confirm" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /shares/{id}/nfs:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getShareNFS
+      summary: How a shared folder is reached over NFS (for the mount command)
+      description: NFS is turned on and its clients chosen in the folder's services (PATCH /shares/{id}).
+      tags: [shares]
+      responses:
+        "200":
+          description: NFS details
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ShareNFS" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  # ---- end of shared folder snapshots and NFS -----------------------------
+  # ---- File Services: SMB file server (file sharing part A) ---------------
+  /files:
+    get:
+      operationId: getFileServices
+      summary: The SMB file server's status, settings and how to connect
+      description: Everyone signed in may read it (to see how to connect); settings, problems and per-folder notes are for administrators.
+      tags: [files]
+      responses:
+        "200":
+          description: The file server
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileServicesStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /files/join:
+    post:
+      operationId: joinFileServices
+      summary: Make this server a member of the domain so its accounts can use the shared folders (runs as a job)
+      description: The password goes to the job through a one-time in-memory reference and to Samba on stdin; it's never stored. Leave domain out to join this server's own DC's domain.
+      tags: [files]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FileServicesJoinRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /files/leave:
+    post:
+      operationId: leaveFileServices
+      summary: Take this server out of the domain (runs as a job)
+      description: Needs confirm true. With the Administrator password the computer account is deleted from the domain too; without it this server only forgets the domain.
+      tags: [files]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FileServicesLeaveRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /files/settings:
+    patch:
+      operationId: updateFileServicesSettings
+      summary: Turn SMB sharing on or off and set up home folders (runs as a job)
+      description: Fields left out keep their values.
+      tags: [files]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FileServicesSettingsRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  # ---- end of File Services ------------------------------------------------
   /domain:
     get:
       operationId: getDomain
@@ -3406,7 +3990,7 @@ components:
         level: { type: string, enum: [read, write] }
     Share:
       type: object
-      required: [id, name, description, pool, dataset, path, mounted, quotaBytes, usedBytes, recycle, guest, access, apps, createdAt]
+      required: [id, name, description, pool, dataset, path, mounted, quotaBytes, usedBytes, recycle, guest, access, apps, createdAt, services]
       properties:
         id: { type: string }
         name: { type: string }
@@ -3425,6 +4009,44 @@ components:
           items: { $ref: "#/components/schemas/ShareRule" }
         apps: { type: array, items: { $ref: "#/components/schemas/ShareAppGrant" } }
         createdAt: { type: string, format: date-time }
+        services: { $ref: "#/components/schemas/ShareServices" }
+    ShareServices:
+      type: object
+      description: How the folder is shared on the network, and its automatic snapshots
+      required: [smb, nfs, snapshots, sftp, webdav]
+      properties:
+        smb:
+          type: object
+          required: [enabled, timeMachine, timeMachineMaxBytes, previousVersions]
+          properties:
+            enabled: { type: boolean, description: Windows and Mac file sharing (SMB) }
+            timeMachine: { type: boolean, description: Macs can back up here with Time Machine }
+            timeMachineMaxBytes: { type: integer, format: int64, description: Most each Mac's backups may use; 0 = the folder's quota }
+            previousVersions: { type: boolean, description: Snapshots show in Windows' Previous Versions }
+        nfs:
+          type: object
+          required: [enabled, clients]
+          properties:
+            enabled: { type: boolean }
+            clients:
+              type: array
+              items:
+                type: object
+                required: [client, access]
+                properties:
+                  client: { type: string, description: "An address or network, like 192.168.1.50 or 192.168.1.0/24" }
+                  access: { type: string, enum: [read, write] }
+        snapshots:
+          type: object
+          description: How many automatic snapshots to keep; 0 turns that kind off
+          required: [hourly, daily, weekly, monthly]
+          properties:
+            hourly: { type: integer }
+            daily: { type: integer }
+            weekly: { type: integer }
+            monthly: { type: integer }
+        sftp: { type: boolean, description: "Offered to domain accounts over SFTP (with File Services' SFTP on). Off for new folders" }
+        webdav: { type: boolean, description: "Offered to domain accounts at https://<server>/dav/ (with File Services' WebDAV on). Off for new folders" }
     ShareCreateRequest:
       type: object
       required: [pool, name]
@@ -3438,6 +4060,7 @@ components:
         guest: { type: boolean }
         access: { type: array, items: { $ref: "#/components/schemas/ShareRule" } }
         subfolders: { type: array, items: { type: string } }
+        services: { $ref: "#/components/schemas/ShareServices" }
     ShareUpdateRequest:
       type: object
       properties:
@@ -3447,6 +4070,7 @@ components:
         recycle: { type: boolean }
         guest: { type: boolean }
         access: { type: array, items: { $ref: "#/components/schemas/ShareRule" } }
+        services: { $ref: "#/components/schemas/ShareServices" }
     ShareStarterRequest:
       type: object
       required: [pool, media, backups]
@@ -3455,6 +4079,129 @@ components:
         media: { type: boolean, description: Media with Movies, TV, Music and Photos }
         backups: { type: boolean }
     # ---- end of shared folders ---------------------------------------------
+    # ---- Shared folder snapshots and NFS (file sharing part B) --------------
+    ShareSnapshot:
+      type: object
+      required: [name, kind, createdAt, usedBytes, referBytes]
+      properties:
+        name: { type: string, example: hardyos-auto-daily_2026-10-26-0000 }
+        kind:
+          type: string
+          enum: [hourly, daily, weekly, monthly, manual, other]
+          description: Automatic kind, manual (taken from HardyOS) or other (made outside HardyOS)
+        createdAt: { type: string, format: date-time }
+        usedBytes: { type: integer, format: int64, description: Space only this snapshot holds (freed by deleting it) }
+        referBytes: { type: integer, format: int64, description: Size of the folder as it was }
+    ShareNFS:
+      type: object
+      required: [enabled, path, uid, running]
+      properties:
+        enabled: { type: boolean }
+        path: { type: string, description: The path to mount, like /mnt/tank/shares/media }
+        uid: { type: integer, description: "The folder's NFS identity (31000-31999); every client acts as it. 0 until NFS is first turned on" }
+        running: { type: boolean, description: The NFS server runs }
+        problem: { type: string, description: The last NFS sync's error, if any }
+    # ---- end of shared folder snapshots and NFS -----------------------------
+    # ---- File Services: SMB file server (file sharing part A) -------------
+    FileServicesDomain:
+      type: object
+      required: [domain, realm, netbios]
+      properties:
+        domain: { type: string, example: home.hardynetworks.net }
+        realm: { type: string }
+        netbios: { type: string, example: HOME }
+        dcs: { type: array, items: { type: string }, description: "Domain controllers used first (this server's own)" }
+        adminsGroupSid: { type: string }
+    FileServicesHomes:
+      type: object
+      required: [enabled, pool, quotaBytes]
+      properties:
+        enabled: { type: boolean, description: A home folder for every domain account }
+        pool: { type: string, description: "Where they're kept (<pool>/homes)" }
+        quotaBytes: { type: integer, format: int64, description: "Each home folder's quota; 0 for none" }
+    FileServicesSettings:
+      type: object
+      required: [smbEnabled, homes, sftpEnabled, webdavEnabled]
+      properties:
+        smbEnabled: { type: boolean }
+        homes: { $ref: "#/components/schemas/FileServicesHomes" }
+        sftpEnabled: { type: boolean, description: SFTP for domain accounts (folders with SFTP on, and Home) }
+        sftpAdmins: { type: boolean, description: "Domain administrators (Domain Admins, HardyOS Admins) may use SFTP too; off by default, so they get no view and their passwords are never tried over SSH" }
+        webdavEnabled: { type: boolean, description: "WebDAV at https://<server>/dav/ for domain accounts (folders with WebDAV on, and Home)" }
+    FileServicesShare:
+      type: object
+      required: [id, name, smb, timeMachine, previousVersions, recycle, guest, sftp, webdav, available, skipped]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        smb: { type: boolean }
+        timeMachine: { type: boolean }
+        previousVersions: { type: boolean }
+        recycle: { type: boolean }
+        guest: { type: boolean }
+        sftp: { type: boolean }
+        webdav: { type: boolean }
+        available: { type: boolean, description: Offered over SMB right now }
+        skipped: { type: array, items: { type: string }, description: "Access rules that can't apply here (a HardyOS account, another domain's name)" }
+    FileServicesStatus:
+      type: object
+      required: [available, joined, domain, localDomain, serverName, hostName, running, winbind, problem, settings, shares, addresses]
+      properties:
+        available: { type: boolean, description: This build has the SMB file server }
+        joined: { type: boolean, description: This server is a member of the domain }
+        domain:
+          nullable: true
+          allOf: [{ $ref: "#/components/schemas/FileServicesDomain" }]
+        localDomain: { type: string, description: "The domain this server's own DC runs (empty: none)" }
+        serverName: { type: string, example: HARDYOS, description: "Its name on the network" }
+        hostName: { type: string, example: hardyos.home.hardynetworks.net }
+        running: { type: boolean, description: The SMB server is running }
+        winbind: { type: boolean, description: "The domain answers (accounts can sign in)" }
+        problem: { type: string }
+        settings: { $ref: "#/components/schemas/FileServicesSettings" }
+        shares: { type: array, items: { $ref: "#/components/schemas/FileServicesShare" } }
+        addresses: { type: array, items: { type: string }, description: "This server's LAN addresses" }
+        joinedAt: { type: string, format: date-time }
+        sftp: { $ref: "#/components/schemas/FileServicesSFTP" }
+    FileServicesJoinRequest:
+      type: object
+      required: [adminPassword]
+      properties:
+        domain: { type: string, description: "The domain's DNS name; leave out for this server's own domain" }
+        adminUser: { type: string, description: Defaults to Administrator }
+        adminPassword: { type: string, format: password }
+    FileServicesLeaveRequest:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: boolean, description: Must be true }
+        adminUser: { type: string }
+        adminPassword: { type: string, format: password, description: "With it, the computer account is deleted from the domain too" }
+    FileServicesSettingsRequest:
+      type: object
+      properties:
+        smbEnabled: { type: boolean }
+        homes: { $ref: "#/components/schemas/FileServicesHomes" }
+        sftpEnabled: { type: boolean }
+        sftpAdmins: { type: boolean }
+        webdavEnabled: { type: boolean }
+    # ---- end of File Services ------------------------------------------------
+    # ---- SFTP and WebDAV (file sharing part E) ------------------------------
+    # WebDAV itself is served at /dav/ (outside /api/v1, HTTP Basic sign-in
+    # with a domain account over HTTPS; see docs/file-sharing.md), so it has
+    # no paths here: File Services' settings and each folder's services turn
+    # it and SFTP on.
+    FileServicesSFTP:
+      type: object
+      required: [enabled, running, users, folders, port, problem]
+      properties:
+        enabled: { type: boolean }
+        running: { type: boolean, description: "The SSH server runs (HardyOS doesn't start or stop it)" }
+        users: { type: integer, description: Domain accounts that have something to see over SFTP }
+        folders: { type: integer, description: Folders offered in all their views together }
+        port: { type: integer, example: 22 }
+        problem: { type: string }
+    # ---- end of SFTP and WebDAV ----------------------------------------------
     DomainConfig:
       type: object
       required: [domain, realm, netbios, dcName, address, gateway, parent, mac, forwarders, enabled, createdAt]
@@ -3983,3 +4730,154 @@ components:
         webPath: { type: string }
         folders: { type: array, items: { $ref: "#/components/schemas/CustomAppFolder" } }
     # ---- end of App Store v2 schemas ----
+    # ---- Share links (part D) ----
+    ShareLink:
+      type: object
+      required: [id, share, path, name, dir, createdById, createdBy, createdAt, expiresAt, hasPassword, allowUpload, maxDownloads, downloadCount, lastUsedAt, revoked, status, maxUploadBytes, uploadedBytes, maxZipBytes]
+      properties:
+        id: { type: integer, format: int64 }
+        share: { type: string, description: 'Shared folder id, or "~home"' }
+        path: { type: string, description: Inside the share; empty for all of it }
+        name: { type: string, description: The file or folder's name; empty for a whole share }
+        dir: { type: boolean }
+        createdById: { type: integer, format: int64 }
+        createdBy: { type: string, description: "Who made it: alice or HOME\\alice" }
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        hasPassword: { type: boolean }
+        allowUpload: { type: boolean }
+        maxDownloads: { type: integer, description: 0 for no limit }
+        downloadCount: { type: integer }
+        lastUsedAt: { type: [string, "null"], format: date-time }
+        revoked: { type: boolean }
+        status: { type: string, enum: [active, expired, revoked, used-up] }
+        maxUploadBytes: { type: integer, format: int64, description: "What an upload link may take in, in all (bytes); 0 for links without uploads" }
+        uploadedBytes: { type: integer, format: int64, description: What it has taken in so far }
+        maxZipBytes: { type: integer, format: int64, description: "The most one \"download all\" zip of a folder link holds (bytes)" }
+    ShareLinkRequest:
+      type: object
+      required: [share, path]
+      properties:
+        share: { type: string }
+        path: { type: string }
+        expiresInDays: { type: integer, minimum: 1, maximum: 90, description: Default 7 }
+        password: { type: string, description: "At least 6 characters; leave out for none" }
+        allowUpload: { type: boolean, description: Visitors may add files (folders only) }
+        maxDownloads: { type: integer, minimum: 0, description: 0 for no limit }
+        maxUploadBytes:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 1000000000000
+          description: "Upload links: what the link may take in, in all, 1 MB to 1 TB; 0 or left out for 10 GB. One file is at most 5 GB."
+        maxZipBytes:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 1000000000000
+          description: "Folder links: the most one \"download all\" zip holds, 1 MB to 1 TB; 0 or left out for 20 GB"
+    ShareLinkCreated:
+      type: object
+      required: [link, url, token]
+      properties:
+        link: { $ref: "#/components/schemas/ShareLink" }
+        url: { type: string, description: '"/s/<token>" on this server; shown once' }
+        token: { type: string }
+    # ---- end of share link schemas ----
+    # ---- files API schemas (consumed by File Manager; owned by part C) ----
+    FileShare:
+      type: object
+      required: [id, name, writable, recycle]
+      properties:
+        id: { type: string, description: 'The shared folder''s id, or "~home"' }
+        name: { type: string }
+        writable: { type: boolean, description: The person may change things at its top }
+        recycle: { type: boolean, description: Deleted items go to its recycle bin }
+    FileEntry:
+      type: object
+      required: [name, path, dir, size, modified, writable]
+      properties:
+        name: { type: string }
+        path: { type: string, description: Inside the share, no leading slash }
+        dir: { type: boolean }
+        size: { type: integer, format: int64, description: 0 for folders }
+        modified: { type: string, format: date-time }
+        writable: { type: boolean, description: The person may change or delete it }
+    FileListing:
+      type: object
+      required: [folder, entries, truncated]
+      properties:
+        folder: { $ref: "#/components/schemas/FileEntry" }
+        entries: { type: array, items: { $ref: "#/components/schemas/FileEntry" } }
+        truncated: { type: boolean, description: The folder holds more than 50000 entries; not all are listed }
+    FileVersion:
+      type: object
+      required: [snapshot, taken, size, modified, dir]
+      properties:
+        snapshot: { type: string, examples: ["hardyos-auto-daily_2026-10-24-0000"] }
+        taken: { type: string, format: date-time }
+        size: { type: integer, format: int64 }
+        modified: { type: string, format: date-time }
+        dir: { type: boolean }
+    FileUpload:
+      type: object
+      required: [id, share, path, size, received]
+      properties:
+        id: { type: string }
+        share: { type: string }
+        path: { type: string }
+        size: { type: integer, format: int64 }
+        received: { type: integer, format: int64, description: Bytes stored so far (the next chunk's offset) }
+        entry: { $ref: "#/components/schemas/FileEntry" }
+    FilePathRequest:
+      type: object
+      required: [share, path]
+      properties:
+        share: { type: string }
+        path: { type: string }
+    FilePathResult:
+      type: object
+      required: [share, path]
+      properties:
+        share: { type: string }
+        path: { type: string }
+    FileItemResult:
+      type: object
+      required: [path, ok]
+      properties:
+        path: { type: string }
+        ok: { type: boolean }
+        error: { type: string }
+        code: { type: string, enum: [not_found, no_access, exists, not_allowed, full, failed] }
+        to: { type: string, description: "Copies and moves: where it went" }
+        skipped: { type: boolean, description: "conflict skip: the name was taken" }
+        recycled: { type: boolean, description: "Deletes: it went to the recycle bin" }
+    FileBulkResult:
+      type: object
+      required: [done, results, recycled]
+      properties:
+        done: { type: boolean }
+        results: { type: array, items: { $ref: "#/components/schemas/FileItemResult" } }
+        recycled: { type: boolean, description: "Deletes: everything deleted went to the recycle bin" }
+    FileTransferRequest:
+      type: object
+      required: [share, paths, toShare, toDir]
+      properties:
+        share: { type: string }
+        paths: { type: array, items: { type: string }, maxItems: 1000 }
+        toShare: { type: string, description: Empty for the same share }
+        toDir: { type: string, description: The folder they go into; empty for the share's top }
+        conflict:
+          type: string
+          enum: [rename, skip, replace, fail]
+          description: "When a name is taken: rename (default: copies \"photo (copy).jpg\", moves \"photo (2).jpg\"), skip, replace (files replaced, folders merged) or fail"
+    FileUploadRequest:
+      type: object
+      required: [share, path, size]
+      properties:
+        share: { type: string }
+        path: { type: string, description: Where the file goes, name included }
+        size: { type: integer, format: int64 }
+        overwrite: { type: boolean, description: Replace a file that's already there (never a folder) }
+        modified: { type: integer, format: int64, description: The file's modification time in ms since 1970 (File.lastModified) }
+    # ---- end of files API schemas (part C) ----

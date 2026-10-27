@@ -32,6 +32,66 @@ Control Panel › **Shared Folders**.
 Family members see the list (names, descriptions, usage) but not who may
 use each folder or which apps have it.
 
+## Snapshots
+
+Every shared folder keeps automatic snapshots: read-only copies of the
+folder as it was, which cost only the space of what changed since. New
+folders keep **24 hourly, 14 daily, 8 weekly and 6 monthly** snapshots;
+change the counts in the folder's dialog (0 turns a kind off; at most 168
+hourly, 90 daily, 104 weekly, 120 monthly). Lowering a count deletes the
+oldest snapshots of that kind beyond it within a minute.
+
+- **When.** Hourly on the hour, daily at midnight, weekly on Mondays at
+  midnight, monthly on the 1st at midnight, all in **UTC**. A snapshot is
+  named after the time it stands for, like
+  `hardyos-auto-daily_2026-10-26-0000`. If the server was off, it takes one
+  snapshot of each kind when it's back (named for the newest time it
+  missed), not one for every hour it was off.
+- **Take one now.** "Take snapshot" in the dialog, with an optional name
+  (`before-cleanup`; letters, digits and `. _ : -`). Snapshots you take are
+  never deleted automatically.
+- **Delete.** The bin next to a snapshot deletes that one snapshot and frees
+  the space only it holds. Nothing in the folder itself changes.
+- **Getting files back.** In the File Manager's "Previous versions" panel,
+  and from Windows' Previous Versions tab over SMB (with Previous Versions
+  on). Whole folders are never rolled back from the desktop.
+- Snapshots made outside HardyOS (by hand, by apps, by replication tools)
+  are listed as "Other" and never deleted automatically.
+- Family members who may use a folder see its snapshots; only
+  administrators take and delete them.
+
+## NFS
+
+For Linux and Unix computers (and Macs that prefer NFS). Off for every
+folder until you turn it on in the folder's dialog and list who may mount
+it:
+
+- **Computers and networks**: an address (`192.168.1.50`, `fd00::50`) or a
+  network (`192.168.1.0/24`, `2001:db8:1::/64`), each **Read only** or
+  **Read and write**. Names, `*` and "everyone" (`0.0.0.0/0`) aren't
+  accepted; up to 32 entries. When a computer is in more than one entry, its
+  own address wins, then the smallest network.
+- **Who they are.** Every computer listed acts as the folder's own NFS user
+  (a number from 31000-31999 shown in the dialog), whatever user it says it
+  is, root included. That user can read the folder, and write it if any
+  entry may write; read-only computers can't change anything. Files created
+  over NFS belong to that user.
+- **Mounting.** The dialog shows the commands with this server's name, for
+  example:
+
+  ```sh
+  sudo mkdir -p /mnt/media
+  sudo mount -t nfs nas.home:/mnt/tank/shares/media /mnt/media
+  # /etc/fstab
+  nas.home:/mnt/tank/shares/media  /mnt/media  nfs  defaults,_netdev  0  0
+  # macOS
+  sudo mount -t nfs -o resvport,rw nas.home:/mnt/tank/shares/media ~/media
+  ```
+
+  NFSv3 and v4 both work. NFS doesn't encrypt or check passwords: list only
+  computers on your own network (or reach it over the NetBird VPN).
+- The NFS server only runs while at least one folder is shared over NFS.
+
 ## How it works
 
 Each shared folder is a ZFS dataset `<pool>/shares/<id>` mounted at
@@ -48,10 +108,47 @@ reinstalled server brings everything back:
 | `org.hardyos:apps` | `[{"app":"jellyfin","uid":30001,"level":"read"}]` |
 | `org.hardyos:recycle`, `org.hardyos:guest` | `on` / `off` |
 | `quota` | the quota, `none` for no limit |
+| `org.hardyos:nfs-uid` | the folder's NFS identity (31000-31999), set when NFS is first turned on |
+| `org.hardyos:snapshot` (on snapshots) | `manual` for snapshots taken from HardyOS |
 
 Datasets are created with `acltype=posixacl`, `xattr=sa`,
 `aclinherit=passthrough`, `devices=off`, `setuid=off`, and `compression=lz4`
 unless the pool sets its own.
+
+### Pools from elsewhere
+
+Because the settings travel with the pool, a pool imported from another
+machine (or a disk someone prepared) can say anything, so HardyOS checks
+what it reads as if a person had typed it:
+
+- A value with a tab or a line break can't pose as another shared folder:
+  if `zfs list` doesn't line up with the list of datasets, each shared
+  folder is read on its own.
+- A name, description, access rule, app grant or sharing setting that
+  wouldn't be accepted in the dialog is replaced by a safe one (the id as
+  the name, no description, **administrators only**, no app, the default
+  sharing settings with NFS off) and logged. Fix it in Shared Folders ›
+  Edit.
+- A folder is only used when the kernel's mount table says its path is that
+  dataset's own ZFS mount. Anything else (a mountpoint pointing at a system
+  folder, another file system mounted on top, a bind mount) makes it show
+  as not mounted: no permissions are set, nothing is shared over SMB or
+  NFS, the File Manager doesn't open it, and the journal says why
+  (`shared folder isn't mounted where its settings say`).
+
+### Recycle bins
+
+With the recycle bin on, the folder has a hidden `.recycle` at its top:
+root's, mode 1777, without ACL entries (HardyOS puts it back that way if
+it changes; a link or a file there is refused). Inside it every person has
+their own bin, owned by them, mode 0700, named `<domain>.<name>` in lower
+case (`home.alice`), or `hardyos-files` for HardyOS administrators using
+the File Manager. Samba and the File Manager use the same bins. A bin
+someone else made under another person's name is moved aside
+(`.hardyos-quarantine-...`) and locked; the File Manager refuses to use it
+in the meantime. The permission walks never go into `.recycle` (or
+`.zfs`), so nobody else, administrators included, can open another
+person's bin.
 
 ### Apps
 
@@ -86,8 +183,20 @@ inside the share, and `..` is refused.
   `api/openapi.yaml`.
 - Web: `web/apps/shell/src/apps/control-panel/SharedFolders.tsx`, form rules
   mirroring the server in `sharesRules.ts`.
+- Snapshots: `daemon/internal/snapshots` (schedule maths in `schedule.go`,
+  the scheduler and manual operations in `manager.go`), ops in
+  `daemon/internal/priv/snapshots_ops.go`, API in
+  `daemon/internal/api/handlers_snapshots.go`, web
+  `control-panel/ShareSnapshotsSection.tsx`.
+- NFS: `daemon/internal/nfs` (identities, exports file, server), the NFS
+  identity's ACLs in `daemon/internal/shares/nfs_grant.go`, ops and the
+  shares hook in `daemon/internal/priv/nfs_ops.go` and `share_hooks.go`, web
+  `control-panel/ShareNFSSection.tsx` and `nfsRules.ts`.
 - Tests: unit tests use `sysexec.Fake` and a temporary directory as `Root`;
   `TestApplyTree` runs the walker on the test machine's file system (skipped
   without ACL support); `TestZFSIntegrationShares` in `internal/priv` runs
   against real ZFS on a file-backed pool in CI's ZFS job
-  (`HARDYOS_ZFS_INTEGRATION=1`, root).
+  (`HARDYOS_ZFS_INTEGRATION=1`, root), and `TestZFSIntegrationSnapshots`
+  there runs the snapshot scheduler with a test clock. `TestNFSIntegration`
+  (CI's "NFS (loopback)" job, also `HARDYOS_NFS_INTEGRATION=1`) exports
+  folders with the real NFS server and mounts them over 127.0.0.1.

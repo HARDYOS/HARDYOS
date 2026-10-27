@@ -79,7 +79,7 @@ func (s *Server) handleInstallerUnlock(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	token, err := s.cfg.Installer.Unlock(clientIP(r), req.Code)
+	token, err := s.cfg.Installer.Unlock(s.clientIP(r), req.Code)
 	switch {
 	case errors.Is(err, installer.ErrRateLimited):
 		writeError(w, http.StatusTooManyRequests, "rate_limited", err.Error())
@@ -98,7 +98,7 @@ func (s *Server) handleInstallerUnlock(w http.ResponseWriter, r *http.Request) {
 		Name: InstallerCookie, Value: token, Path: "/", MaxAge: int(installer.SessionLifetime.Seconds()),
 		HttpOnly: true, Secure: r.TLS != nil || !s.cfg.Insecure, SameSite: http.SameSiteStrictMode,
 	})
-	s.log.Info("installer unlocked", "ip", clientIP(r))
+	s.log.Info("installer unlocked", "ip", s.clientIP(r))
 	writeJSON(w, http.StatusOK, InstallerStatus{Active: true, Unlocked: true, Version: version.Version})
 }
 
@@ -177,7 +177,7 @@ func (s *Server) handleInstallerInstall(w http.ResponseWriter, r *http.Request) 
 	var pe *priv.Error
 	switch {
 	case err == nil:
-		s.log.Info("install started", "ip", clientIP(r), "disks", strings.Join(req.Plan.Disks, ","), "job", j.ID)
+		s.log.Info("install started", "ip", s.clientIP(r), "disks", strings.Join(req.Plan.Disks, ","), "job", j.ID)
 		writeJSON(w, http.StatusAccepted, j)
 	case errors.As(err, &pe):
 		s.writePrivError(w, err)

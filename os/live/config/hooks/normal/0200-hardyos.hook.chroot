@@ -12,9 +12,44 @@ systemctl enable zfs-zed.service || true
 systemctl disable samba-ad-dc.service smbd.service nmbd.service winbind.service >/dev/null 2>&1 || true
 systemctl mask samba-ad-dc.service >/dev/null 2>&1 || true
 
+# The file server's smbd and winbind (the host's own Samba) are unmasked but
+# stay disabled until the server joins a domain; hardyd-priv enables them
+# then. nmbd isn't used (no NetBIOS). Domain accounts can't sign in to the
+# console or SSH: winbind isn't in the PAM stack (SFTP adds it with care).
+systemctl unmask smbd.service winbind.service >/dev/null 2>&1 || true
+systemctl disable smbd.service winbind.service >/dev/null 2>&1 || true
+systemctl mask nmbd.service >/dev/null 2>&1 || true
+pam-auth-update --package --remove winbind >/dev/null 2>&1 || true
+# Keep it that way: divert libpam-winbind's pam-auth-update profile, so no
+# later pam-auth-update run (a package upgrade) can put winbind back into
+# every PAM service. SFTP (hardyd-priv) adds pam_winbind to /etc/pam.d/sshd
+# only, for domain user IDs only.
+dpkg-divert --local --rename --divert /usr/share/pam-configs/winbind.hardyos-disabled --add /usr/share/pam-configs/winbind >/dev/null
+pam-auth-update --package >/dev/null 2>&1 || true
+
+# SFTP lets domain accounts run processes (internal-sftp) on this server:
+# only a process's parent may ptrace it (a file worker briefly runs as the
+# person before it hardens itself).
+mkdir -p /etc/sysctl.d
+cat > /etc/sysctl.d/60-hardyos-ptrace.conf <<'SYSCTL'
+# HardyOS: only a parent process may ptrace its children.
+kernel.yama.ptrace_scope = 1
+SYSCTL
+
 # Docker stays off at boot: its data lives on a pool (not the boot
 # environment), so hardyd-priv starts it once that pool is mounted.
 systemctl disable docker.service docker.socket containerd.service >/dev/null 2>&1 || true
+
+# The NFS server (and rpcbind, which it starts when needed) stays off until
+# a shared folder is shared over NFS; hardyd-priv enables it then.
+systemctl disable nfs-server.service rpcbind.service rpcbind.socket >/dev/null 2>&1 || true
+# nfs-utils' generator makes nfs-server require a mount unit for every
+# exported path under an fstab mount. Shared folders are ZFS datasets that
+# ZFS mounts (not systemd), and hardyd-priv only exports them once they're
+# mounted, so the generated requirement can only get in the way (a folder
+# deleted since the last daemon-reload stops the server from starting).
+mkdir -p /etc/systemd/system-generators
+ln -sf /dev/null /etc/systemd/system-generators/nfs-server-generator
 
 # Load the zfs module at boot so pools can be imported right away.
 echo zfs > /etc/modules-load.d/zfs.conf

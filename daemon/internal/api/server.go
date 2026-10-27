@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"os"
 	"path"
 	"strings"
@@ -15,12 +16,15 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/backups"
+	"github.com/hardyos/hardyos/daemon/internal/clientip"
 	"github.com/hardyos/hardyos/daemon/internal/events"
+	"github.com/hardyos/hardyos/daemon/internal/files"
 	"github.com/hardyos/hardyos/daemon/internal/installer"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/metrics"
 	"github.com/hardyos/hardyos/daemon/internal/notify"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
+	"github.com/hardyos/hardyos/daemon/internal/sharelinks"
 	"github.com/hardyos/hardyos/daemon/internal/storage"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 	"github.com/hardyos/hardyos/daemon/internal/updates"
@@ -60,6 +64,17 @@ type Config struct {
 	// DomainInfoTTL is how long the domain's realm and DCs are cached for
 	// sign-in (default 30 s; tests use less).
 	DomainInfoTTL time.Duration
+
+	// Files reads and writes files as a person (internal/files); share
+	// links use it. nil: links can't be made and existing ones don't open.
+	// When it's also a files.Service (files.Client is), the File Manager's
+	// /files endpoints are served.
+	Files files.Access
+
+	// TrustedProxies are the reverse proxies whose X-Forwarded-For is
+	// believed for the client's address (sign-in limits, audit, share link
+	// limits). Empty (the default): the header is never read.
+	TrustedProxies []netip.Prefix
 }
 
 // Server is hardyd's HTTP handler.
@@ -72,8 +87,12 @@ type Server struct {
 	mux      *http.ServeMux
 	tickets  terminalTickets
 	proxy    *appProxy
+	links    *sharelinks.Store
+	uploads  uploads
+	dav      davState
 	started  time.Time
 	log      *slog.Logger
+	ips      *clientip.Resolver
 }
 
 // New builds the API server and registers its routes.
@@ -90,7 +109,8 @@ func New(cfg Config) *Server {
 	if cfg.Root == nil {
 		cfg.Root = os.DirFS("/")
 	}
-	s := &Server{cfg: cfg, mux: http.NewServeMux(), started: time.Now(), log: cfg.Logger}
+	s := &Server{cfg: cfg, mux: http.NewServeMux(), started: time.Now(), log: cfg.Logger,
+		ips: &clientip.Resolver{Trusted: cfg.TrustedProxies}}
 	s.proxy = &appProxy{s: s}
 	if cfg.DB != nil {
 		s.users = &auth.Users{DB: cfg.DB}
@@ -129,6 +149,7 @@ func (s *Server) routes() {
 		m.Handle("GET /api/v1/events", s.authed(s.handleEvents))
 		m.Handle("GET /api/v1/system/info", s.authed(s.handleSystemInfo))
 		m.Handle("GET /api/v1/system/metrics", s.authed(s.handleMetrics))
+		s.shareLinkRoutes() // includes the public /s/<token> pages
 
 		// Admin
 		m.Handle("GET /api/v1/users", s.admin(s.handleListUsers))
@@ -150,9 +171,15 @@ func (s *Server) routes() {
 			s.domainRoutes()
 			s.appRoutes()
 			s.shareRoutes()
+			s.fileServiceRoutes()
+			s.snapshotRoutes()
 		}
 		if s.cfg.Backups != nil {
 			s.backupRoutes()
+		}
+		if _, ok := s.cfg.Files.(files.Service); ok {
+			s.fileRoutes()
+			s.davRoutes() // WebDAV at /dav/, outside /api and the desktop session
 		}
 	}
 
@@ -181,8 +208,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.mux.ServeHTTP(rw, r)
 	}
 	s.log.Debug("http request",
-		"method", r.Method, "path", r.URL.Path, "status", rw.status,
+		"method", r.Method, "path", logPath(r.URL.Path), "status", rw.status,
 		"duration", time.Since(start).String())
+}
+
+// logPath is a request path as it may be logged: a share link's token is
+// as good as the link, so "/s/<token>/download" is logged as "/s/…/download".
+func logPath(p string) string {
+	rest, ok := strings.CutPrefix(p, "/s/")
+	if !ok || strings.HasPrefix(rest, "-/") {
+		return p
+	}
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		return "/s/…" + rest[i:]
+	}
+	return "/s/…"
 }
 
 // csrfSafe allows safe methods, and requires state-changing requests to carry

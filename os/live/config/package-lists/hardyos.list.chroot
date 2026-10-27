@@ -63,6 +63,19 @@ smbclient
 krb5-user
 ldb-tools
 
+# File sharing: the host's own Samba (smbd + winbind, separate from the
+# DC's) serves the shared folders over SMB as a domain member; winbind gives
+# domain accounts Linux IDs (NSS) and, later, SFTP sign-in (PAM); Avahi
+# advertises the server and Time Machine folders to Macs.
+libnss-winbind
+libpam-winbind
+avahi-daemon
+
+# File sharing: NFS server for shared folders shared over NFS. Kept off until
+# a folder turns NFS on; hardyd-priv enables it then and writes
+# /etc/exports.d/hardyos.exports.
+nfs-kernel-server
+
 # Apps: Docker Engine and Compose v2 for one-click apps (.hardyapp). The
 # engine is started by hardyd-priv once the apps pool is mounted, with its
 # data on that pool.

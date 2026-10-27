@@ -239,3 +239,48 @@ func TestTypedRejectsUnknownFields(t *testing.T) {
 		t.Fatalf("got %v %v", v, err)
 	}
 }
+
+// A pool from elsewhere that wants to mount over /etc is imported without
+// mounting, put back under /mnt/<pool>, and only then mounted.
+func TestImportPoolKeepsMountsInsideThePool(t *testing.T) {
+	st, f := storageEnv(t)
+	f.On("zpool import -N -d /dev/disk/by-id evil", "")
+	f.On(strings.Join(append([]string{"zpool"}, zfs.PoolListArgs...), " "), "evil\t100\t1\t99\t0\t1\tONLINE\t123\n")
+	f.On("zfs list -Hp -r -t filesystem -o name,mountpoint evil",
+		"evil\t/etc\nevil/shares\t/etc/shares\nevil/ok\t/mnt/evil/ok\nevil/usr\t/usr\nevil/raw\tlegacy\n")
+	f.OnPrefix("zfs set ", sysexec.Result{})
+	f.OnPrefix("zfs inherit ", sysexec.Result{})
+	f.On("zfs mount -a", "")
+	if _, err := st.importPool(context.Background(), PoolImportArgs{Pool: "evil"}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"zpool import -N -d /dev/disk/by-id evil",
+		"zfs set mountpoint=/mnt/evil evil",
+		"zfs inherit mountpoint evil/shares",
+		"zfs inherit mountpoint evil/usr",
+		"zfs mount -a",
+	}
+	var got []string
+	for _, l := range f.Lines() {
+		if strings.HasPrefix(l, "zpool import") || strings.HasPrefix(l, "zfs set") || strings.HasPrefix(l, "zfs inherit") || l == "zfs mount -a" {
+			got = append(got, l)
+		}
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	// A garbled listing mounts nothing.
+	st2, f2 := storageEnv(t)
+	f2.On("zpool import -N -d /dev/disk/by-id evil", "")
+	f2.On(strings.Join(append([]string{"zpool"}, zfs.PoolListArgs...), " "), "evil\t100\t1\t99\t0\t1\tONLINE\t123\n")
+	f2.On("zfs list -Hp -r -t filesystem -o name,mountpoint evil", "evil\t/mnt/evil\nother/x\t/etc\n")
+	if _, err := st2.importPool(context.Background(), PoolImportArgs{Pool: "evil"}); err == nil {
+		t.Error("a listing naming another pool was accepted")
+	}
+	for _, l := range f2.Lines() {
+		if l == "zfs mount -a" {
+			t.Error("mounted after a bad listing")
+		}
+	}
+}

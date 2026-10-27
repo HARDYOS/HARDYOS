@@ -22,6 +22,8 @@ build: build-daemon build-web build-apps ## Build Go binaries, the web desktop a
 build-daemon: ## Build hardyd, hardyd-priv and hardyctl into dist/bin
 	@mkdir -p $(DIST)/bin
 	cd daemon && CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -trimpath -ldflags "$(LDFLAGS)" -o $(DIST)/bin/ ./cmd/...
+	@# hardyos-nss asks NSS (winbind) for domain users' IDs, so it needs cgo (decision 93).
+	cd daemon && CGO_ENABLED=1 GOOS=linux GOARCH=$(GOARCH) go build -trimpath -ldflags "$(LDFLAGS)" -o $(DIST)/bin/hardyos-nss ./cmd/hardyos-nss
 
 .PHONY: build-apps
 build-apps: ## Pack every app in apps/catalog into dist/apps/<id>.hardyapp

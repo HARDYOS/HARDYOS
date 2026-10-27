@@ -40,26 +40,33 @@ type ShareFoldersResult struct {
 	Folders []string `json:"folders"`
 }
 
-// RegisterShares adds the shared folder operations.
-func RegisterShares(s *Server, m *shares.Manager) {
+// RegisterShares adds the shared folder operations. hooks follow every
+// change (share_hooks.go).
+func RegisterShares(s *Server, m *shares.Manager, hooks ...ShareHook) {
 	s.Handle(OpSharesList, func(ctx context.Context, _ json.RawMessage) (any, error) {
 		l, err := m.List(ctx)
 		return SharesResult{Shares: l}, sharesErr(err)
 	})
 	s.Handle(OpSharesCreate, typed(func(ctx context.Context, a shares.NewShare) (any, error) {
 		sh, err := m.Create(ctx, a)
+		runChanged(ctx, hooks)
 		return sh, sharesErr(err)
 	}))
 	s.Handle(OpSharesUpdate, typed(func(ctx context.Context, a shares.ShareUpdate) (any, error) {
 		sh, err := m.Update(ctx, a)
+		runChanged(ctx, hooks)
 		return sh, sharesErr(err)
 	}))
 	s.Handle(OpSharesDelete, typed(func(ctx context.Context, a ShareDeleteArgs) (any, error) {
+		runBeforeDelete(ctx, hooks, a.ID)
 		err := m.Delete(ctx, a.ID, a.Confirm)
+		runAfterDelete(ctx, hooks, a.ID)
+		runChanged(ctx, hooks)
 		return map[string]bool{"deleted": err == nil}, sharesErr(err)
 	}))
 	s.Handle(OpSharesStarter, typed(func(ctx context.Context, a shares.StarterArgs) (any, error) {
 		l, err := m.CreateStarter(ctx, a)
+		runChanged(ctx, hooks)
 		return SharesResult{Shares: l}, sharesErr(err)
 	}))
 	s.Handle(OpSharesFolders, typed(func(ctx context.Context, a ShareFoldersArgs) (any, error) {

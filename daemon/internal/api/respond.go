@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"strconv"
 )
@@ -50,12 +49,11 @@ func pathID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 	return id, true
 }
 
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
+// clientIP is the address a request is from: the connection's peer, or
+// the address a trusted reverse proxy (Config.TrustedProxies) forwarded.
+// Everything that records or limits by address goes through it.
+func (s *Server) clientIP(r *http.Request) string {
+	return s.ips.IP(r)
 }
 
 func internalError(s *Server, w http.ResponseWriter, err error) {

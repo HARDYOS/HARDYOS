@@ -50,6 +50,10 @@ contents:
   - src: ./domain/hardyos-dc-admin
     dst: /usr/lib/hardyos/hardyos-dc-admin
     file_info: { mode: 0755 }
+  # Looks up domain users' Linux IDs through NSS (winbind) for file access; built with cgo.
+  - src: ../dist/bin/hardyos-nss
+    dst: /usr/lib/hardyos/hardyos-nss
+    file_info: { mode: 0755 }
   # Console login screen: the server's web address, kept current by hardyos-issue.service.
   - src: ./console/hardyos-issue
     dst: /usr/lib/hardyos/hardyos-issue

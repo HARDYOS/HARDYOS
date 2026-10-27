@@ -7,11 +7,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 	"github.com/hardyos/hardyos/daemon/internal/zfs"
@@ -26,6 +28,9 @@ const (
 	PropApps        = "org.hardyos:apps"
 	PropRecycle     = "org.hardyos:recycle"
 	PropGuest       = "org.hardyos:guest"
+	// PropServices holds how the folder is shared on the network (SMB, Time
+	// Machine, NFS) and its snapshot schedule, as JSON (see services.go).
+	PropServices = "org.hardyos:services"
 )
 
 // SharesDataset is the parent of every shared folder on a pool.
@@ -35,7 +40,7 @@ func SharesDataset(pool string) string { return pool + "/shares" }
 func Dataset(pool, id string) string { return SharesDataset(pool) + "/" + id }
 
 var listProps = []string{"name", PropShare, PropName, PropDescription, PropAccess, PropApps,
-	PropRecycle, PropGuest, "quota", "used", "mountpoint", "mounted", "creation"}
+	PropRecycle, PropGuest, "quota", "used", "mountpoint", "mounted", "creation", PropServices}
 
 // bgTimeout bounds one background ACL walk (a huge photo library on slow
 // disks still finishes well within it).
@@ -47,13 +52,19 @@ type Manager struct {
 	Log    *slog.Logger
 	// Root prefixes system paths; "/" in production.
 	Root string
+	// Mounts says where datasets are really mounted; nil reads
+	// /proc/self/mountinfo. Tests replace it.
+	Mounts func() (MountVerifier, error)
 
 	mu   sync.Mutex // serializes changes (the apps property is read-modify-write)
 	bgMu sync.Mutex
 	bg   map[string]*bgJob // background ACL walks by share id + uid
 	wg   sync.WaitGroup
 	// tree applies ACLs below a share's root; applyTree unless a test sets it.
-	tree func(ctx context.Context, root string, uid int, write, revoke bool) (treeStats, error)
+	tree func(ctx context.Context, root string, dev uint64, uid int, write, revoke bool) (treeStats, error)
+
+	warnMu sync.Mutex
+	warned map[string]string // warn: what was last logged per key
 }
 
 type bgJob struct {
@@ -97,6 +108,17 @@ func onOff(b bool) string {
 }
 
 // ---- reading ---------------------------------------------------------------
+//
+// Everything about a shared folder comes from its pool, and a pool can come
+// from anywhere (an imported disk), so none of it is trusted: user
+// properties can hold tabs and line breaks, which would let one dataset's
+// value pose as another row of `zfs list` output. Rows are therefore only
+// accepted when they line up exactly with the list of dataset names (which
+// can't hold either); otherwise each shared folder is read on its own with
+// `zfs get`, one line per property. Every value is then checked again as if
+// it came from a person (name, description, rules, apps, services), and the
+// folder's path is only used once /proc/self/mountinfo says it is that
+// dataset's own ZFS mount (verifyMounts).
 
 func (m *Manager) listArgs(target string) []string {
 	args := []string{"list", "-Hp", "-t", "filesystem", "-o", strings.Join(listProps, ",")}
@@ -106,18 +128,170 @@ func (m *Manager) listArgs(target string) []string {
 	return args
 }
 
-// parseShare reads one `zfs list` row; ok is false for datasets that
-// aren't shared folders.
-func (m *Manager) parseShare(line string) (Share, bool) {
-	f := strings.Split(line, "\t")
+func namesArgs(target string) []string {
+	args := []string{"list", "-H", "-o", "name", "-t", "filesystem"}
+	if target != "" {
+		args = append(args, target)
+	}
+	return args
+}
+
+// getArgs reads one dataset's properties (all of listProps but its name).
+func getArgs(ds string) []string {
+	return []string{"get", "-Hp", "-o", "property,value", strings.Join(listProps[1:], ","), ds}
+}
+
+// shareDatasetRE: datasets that can be shared folders (<pool>/shares/<id>).
+var shareDatasetRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]*/shares/[a-z0-9][a-z0-9-]{0,31}$`)
+
+func splitLines(b []byte) []string {
+	s := strings.TrimSuffix(string(b), "\n")
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, "\n")
+}
+
+// matchRows splits `zfs list` lines into fields, but only if they line up
+// with names: as many lines as datasets, each with exactly one field per
+// property and naming a different one of them. Any tab or line break in a
+// value breaks that.
+func matchRows(lines, names []string) ([][]string, bool) {
+	if len(lines) != len(names) {
+		return nil, false
+	}
+	want := make(map[string]int, len(names))
+	for _, n := range names {
+		if n == "" || strings.ContainsAny(n, "\t") {
+			return nil, false
+		}
+		want[n]++
+	}
+	rows := make([][]string, 0, len(lines))
+	for _, l := range lines {
+		f := strings.Split(l, "\t")
+		if len(f) != len(listProps) || want[f[0]] != 1 {
+			return nil, false
+		}
+		want[f[0]] = 0
+		rows = append(rows, f)
+	}
+	return rows, true
+}
+
+// ParseGetOutput parses `zfs get -Hp -o property,value P1,P2,... DATASET`
+// for one dataset: exactly one "property<TAB>value" line per property in
+// props, each property once. A value holding a tab or a line break (which
+// adds a field or a line) makes the whole answer invalid. The values come
+// back in props' order.
+func ParseGetOutput(out []byte, props []string) ([]string, error) {
+	lines := splitLines(out)
+	if len(lines) != len(props) {
+		return nil, fmt.Errorf("zfs get: %d lines for %d properties", len(lines), len(props))
+	}
+	idx := make(map[string]int, len(props))
+	for i, p := range props {
+		idx[p] = i
+	}
+	vals := make([]string, len(props))
+	seen := make([]bool, len(props))
+	for _, l := range lines {
+		p, v, ok := strings.Cut(l, "\t")
+		i, known := idx[p]
+		if !ok || !known || seen[i] || strings.Contains(v, "\t") {
+			return nil, fmt.Errorf("zfs get: unexpected line %.60q", l)
+		}
+		seen[i], vals[i] = true, v
+	}
+	return vals, nil
+}
+
+// rows reads listProps for every filesystem (or target), robustly.
+func (m *Manager) rows(ctx context.Context, target string) ([][]string, error) {
+	out, err := m.zfs(ctx, m.listArgs(target)...)
+	if err != nil {
+		return nil, err
+	}
+	lines := splitLines(out)
+	if len(lines) == 0 && target == "" {
+		return nil, nil
+	}
+	nout, err := m.zfs(ctx, namesArgs(target)...)
+	if err != nil {
+		return nil, err
+	}
+	names := splitLines(nout)
+	if rows, ok := matchRows(lines, names); ok {
+		m.clearWarn("zfs list")
+		return rows, nil
+	}
+	m.warn("zfs list", "zfs list's answer doesn't line up with the datasets (a property holds a tab or a line break?); reading the shared folders one by one",
+		"lines", len(lines), "datasets", len(names))
+	var rows [][]string
+	for _, ds := range names {
+		if !shareDatasetRE.MatchString(ds) {
+			continue
+		}
+		gout, err := m.zfs(ctx, getArgs(ds)...)
+		if err != nil {
+			m.warn(ds+"\x00get", "reading a shared folder's settings", "dataset", ds, "err", err)
+			continue
+		}
+		vals, err := ParseGetOutput(gout, listProps[1:])
+		if err != nil {
+			m.warn(ds+"\x00get", "a shared folder's settings hold tabs or line breaks; it's left out", "dataset", ds, "err", err)
+			continue
+		}
+		m.clearWarn(ds + "\x00get")
+		rows = append(rows, append([]string{ds}, vals...))
+	}
+	return rows, nil
+}
+
+// warn logs msg for key once, until clearWarn (List runs every few
+// seconds; a hostile pool shouldn't flood the journal).
+func (m *Manager) warn(key, msg string, args ...any) {
+	m.warnMu.Lock()
+	seen := m.warned[key] == msg
+	if m.warned == nil {
+		m.warned = map[string]string{}
+	}
+	m.warned[key] = msg
+	m.warnMu.Unlock()
+	if !seen {
+		m.log().Warn(msg, args...)
+	}
+}
+
+func (m *Manager) clearWarn(key string) {
+	m.warnMu.Lock()
+	delete(m.warned, key)
+	m.warnMu.Unlock()
+}
+
+// cleanPath is a mountpoint as zfs reports it, or "" when it can't be one.
+func cleanMountpoint(p string) string {
+	if !filepath.IsAbs(p) || filepath.Clean(p) != p || strings.ContainsFunc(p, unicode.IsControl) || len(p) > 1024 {
+		return ""
+	}
+	return p
+}
+
+// parseShare reads one row (fields in listProps order); ok is false for
+// datasets that aren't shared folders. Every user property is checked
+// again the way a person's input is; an invalid one is logged and replaced
+// by a safe value (the id for the name, no description, administrators
+// only, no apps, the default services with NFS off).
+func (m *Manager) parseShare(f []string) (Share, bool) {
 	if len(f) != len(listProps) || f[1] != "1" {
 		return Share{}, false
 	}
 	pool, rest, _ := strings.Cut(f[0], "/")
 	id, ok := strings.CutPrefix(rest, "shares/")
-	if !ok || ValidID(id) != nil {
+	if !ok || ValidID(id) != nil || zfs.ValidPoolName(pool) != nil {
 		return Share{}, false
 	}
+	ds := f[0]
 	val := func(s string) string {
 		if s == "-" {
 			return ""
@@ -129,49 +303,131 @@ func (m *Manager) parseShare(line string) (Share, bool) {
 		return n
 	}
 	sh := Share{
-		ID: id, Pool: pool, Dataset: f[0],
-		Name: val(f[2]), Description: val(f[3]),
+		ID: id, Pool: pool, Dataset: ds, Name: id,
 		Access: []Rule{}, Apps: []AppGrant{},
 		Recycle: f[6] == "on", Guest: f[7] == "on",
 		QuotaBytes: num(f[8]), UsedBytes: num(f[9]),
-		Path: val(f[10]), Mounted: f[11] == "yes",
+		Path: cleanMountpoint(val(f[10])), Mounted: f[11] == "yes",
 	}
-	if sh.Name == "" {
-		sh.Name = id
+	if sh.Path == "" {
+		sh.Mounted = false
 	}
-	if !filepath.IsAbs(sh.Path) || strings.Contains(sh.Path, "..") {
-		sh.Path, sh.Mounted = "", false
+	bad := func(what string, err error) {
+		m.warn(ds+"\x00"+what, "shared folder has an invalid "+what+"; using a safe default", "dataset", ds, "err", err)
+	}
+	if s := val(f[2]); s != "" {
+		if n, err := CleanName(s); err != nil {
+			bad("name", err)
+		} else {
+			sh.Name = n
+		}
+	}
+	if d, err := cleanDescription(val(f[3])); err != nil {
+		bad("description", err)
+	} else {
+		sh.Description = d
 	}
 	if s := val(f[4]); s != "" {
-		if err := json.Unmarshal([]byte(s), &sh.Access); err != nil {
-			m.log().Warn("shared folder has unreadable access rules", "dataset", f[0], "err", err)
-			sh.Access = []Rule{}
+		var rules []Rule
+		err := json.Unmarshal([]byte(s), &rules)
+		if err == nil {
+			rules, err = CleanRules(rules)
+		}
+		if err != nil {
+			bad("access rules", err) // administrators only
+		} else {
+			sh.Access = rules
 		}
 	}
 	if s := val(f[5]); s != "" {
-		if err := json.Unmarshal([]byte(s), &sh.Apps); err != nil {
-			m.log().Warn("shared folder has an unreadable app list", "dataset", f[0], "err", err)
-			sh.Apps = []AppGrant{}
+		var grants []AppGrant
+		if err := json.Unmarshal([]byte(s), &grants); err != nil {
+			bad("app list", err)
+		}
+		for _, g := range grants {
+			if err := ValidAppGrant(g.App, g.UID); err != nil || (g.Level != LevelRead && g.Level != LevelWrite) {
+				bad("app grant", fmt.Errorf("%q (user %d, %q) dropped", g.App, g.UID, g.Level))
+				continue
+			}
+			sh.Apps = append(sh.Apps, g)
 		}
 	}
-	if secs := num(f[12]); secs > 0 {
+	if secs := num(f[12]); secs > 0 && secs < 1<<40 {
 		sh.CreatedAt = time.Unix(int64(secs), 0).UTC()
 	}
+	sh.Services = DefaultServices()
+	if s := val(f[13]); s != "" {
+		var sv Services
+		err := json.Unmarshal([]byte(s), &sv)
+		if err == nil {
+			sv, err = CheckServices(sv)
+		}
+		if err != nil {
+			bad("sharing settings", err)
+		} else {
+			sh.Services = sv
+		}
+	}
+	sh.Services.normalize()
 	return sh, true
+}
+
+// verifyMounts sets RootDev on the folders that are mounted where they say:
+// the visible mount at Path is a ZFS mount of the folder's own dataset (its
+// root, not a bind mount). Any other folder is treated as not mounted, so
+// nothing is done to its path as root.
+func (m *Manager) verifyMounts(l []Share) {
+	var mv MountVerifier
+	var err error
+	if m.Mounts != nil {
+		mv, err = m.Mounts()
+	} else {
+		var t MountTable
+		t, err = ReadMountTable()
+		mv = t
+	}
+	if err != nil {
+		m.warn("mountinfo", "reading the mount table; no shared folder can be used", "err", err)
+	} else {
+		m.clearWarn("mountinfo")
+	}
+	for i := range l {
+		sh := &l[i]
+		sh.RootDev = 0
+		if !sh.Mounted || sh.Path == "" {
+			continue
+		}
+		if err != nil {
+			sh.Mounted = false
+			continue
+		}
+		dev, verr := mv.VerifyMount(sh.Path, sh.Dataset)
+		if verr != nil {
+			m.warn(sh.Dataset+"\x00mount", "shared folder isn't mounted where its settings say; nothing is done to it",
+				"dataset", sh.Dataset, "path", sh.Path, "err", verr)
+			sh.Mounted, sh.Path = false, ""
+			continue
+		}
+		m.clearWarn(sh.Dataset + "\x00mount")
+		sh.RootDev = dev
+	}
 }
 
 // List returns every shared folder on every imported pool.
 func (m *Manager) List(ctx context.Context) ([]Share, error) {
-	out, err := m.zfs(ctx, m.listArgs("")...)
+	rows, err := m.rows(ctx, "")
 	if err != nil {
 		return nil, err
 	}
 	l := []Share{}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if sh, ok := m.parseShare(line); ok {
+	seen := map[string]bool{}
+	for _, f := range rows {
+		if sh, ok := m.parseShare(f); ok && !seen[sh.Dataset] {
+			seen[sh.Dataset] = true
 			l = append(l, sh)
 		}
 	}
+	m.verifyMounts(l)
 	sort.Slice(l, func(i, j int) bool {
 		if a, b := strings.ToLower(l[i].Name), strings.ToLower(l[j].Name); a != b {
 			return a < b
@@ -199,15 +455,30 @@ func (m *Manager) Get(ctx context.Context, id string) (*Share, error) {
 }
 
 func (m *Manager) reread(ctx context.Context, ds string) (*Share, error) {
-	out, err := m.zfs(ctx, m.listArgs(ds)...)
+	rows, err := m.rows(ctx, ds)
 	if err != nil {
 		return nil, err
 	}
-	sh, ok := m.parseShare(strings.TrimSpace(string(out)))
+	var sh Share
+	ok := len(rows) == 1 && rows[0][0] == ds
+	if ok {
+		sh, ok = m.parseShare(rows[0])
+	}
 	if !ok {
 		return nil, fmt.Errorf("%s doesn't look like a shared folder any more", ds)
 	}
-	return &sh, nil
+	l := []Share{sh}
+	m.verifyMounts(l)
+	return &l[0], nil
+}
+
+// checkRoot makes sure sh is still its verified mount before something is
+// done to its root by path (setfacl).
+func (m *Manager) checkRoot(sh *Share) error {
+	if !sh.Usable() {
+		return fmt.Errorf("the shared folder %s isn't available right now (is its pool imported and unlocked?)", sh.Name)
+	}
+	return checkRoot(m.sys(sh.Path), sh.RootDev)
 }
 
 func nameTaken(l []Share, name, exceptID string) *Share {
@@ -281,6 +552,7 @@ func (m *Manager) create(ctx context.Context, a NewShare, existing []Share) (*Sh
 		"-o", PropApps+"=[]",
 		"-o", PropRecycle+"="+onOff(a.Recycle),
 		"-o", PropGuest+"="+onOff(a.Guest),
+		"-o", PropServices+"="+mustJSON(*a.Services),
 		ds)
 	if _, err := m.zfs(ctx, args...); err != nil {
 		return nil, fmt.Errorf("creating the shared folder: %w", err)
@@ -290,7 +562,7 @@ func (m *Manager) create(ctx context.Context, a NewShare, existing []Share) (*Sh
 		return nil, err
 	}
 	if len(a.Subfolders) > 0 {
-		if !sh.Mounted {
+		if m.checkRoot(sh) != nil {
 			return sh, fmt.Errorf("%s was created but isn't mounted, so its subfolders weren't made", sh.Name)
 		}
 		for _, sub := range a.Subfolders {
@@ -439,6 +711,16 @@ func (m *Manager) Update(ctx context.Context, a ShareUpdate) (*Share, error) {
 		}
 		set = append(set, PropAccess+"="+mustJSON(rules))
 	}
+	if a.Services != nil {
+		sv, err := CheckServices(*a.Services)
+		if err != nil {
+			return nil, err
+		}
+		if len(mustJSON(sv)) > maxPropLen {
+			return nil, invalid("the sharing settings are too long")
+		}
+		set = append(set, PropServices+"="+mustJSON(sv))
+	}
 	if len(set) > 0 {
 		if _, err := m.zfs(ctx, append(append([]string{"set"}, set...), sh.Dataset)...); err != nil {
 			return nil, fmt.Errorf("changing %s: %w", sh.Name, err)
@@ -546,7 +828,7 @@ func (m *Manager) Resolve(ctx context.Context, id, sub string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !sh.Mounted {
+	if !sh.Usable() {
 		return "", fmt.Errorf("the shared folder %s isn't available right now (is its pool imported and unlocked?)", sh.Name)
 	}
 	base, err := filepath.EvalSymlinks(m.sys(sh.Path))
@@ -614,8 +896,8 @@ func (m *Manager) GrantApp(ctx context.Context, id, app string, uid int, write b
 	if err != nil {
 		return err
 	}
-	if !sh.Mounted {
-		return fmt.Errorf("the shared folder %s isn't available right now (is its pool imported and unlocked?)", sh.Name)
+	if err := m.checkRoot(sh); err != nil {
+		return err
 	}
 	level := LevelRead
 	if write {
@@ -638,7 +920,7 @@ func (m *Manager) GrantApp(ctx context.Context, id, app string, uid int, write b
 			if err := m.setfacl(ctx, "-x", fmt.Sprintf("u:%d,d:u:%d", g.UID, g.UID), path); err != nil {
 				return err
 			}
-			m.background(sh.ID, path, g.UID, false, true)
+			m.background(sh.ID, path, sh.RootDev, g.UID, false, true)
 		}
 	}
 	grants = append(grants, AppGrant{App: app, UID: uid, Level: level})
@@ -650,7 +932,7 @@ func (m *Manager) GrantApp(ctx context.Context, id, app string, uid int, write b
 	if _, err := m.zfs(ctx, "set", PropApps+"="+mustJSON(grants), sh.Dataset); err != nil {
 		return fmt.Errorf("recording %s's access to %s: %w", app, sh.Name, err)
 	}
-	m.background(sh.ID, path, uid, write, false)
+	m.background(sh.ID, path, sh.RootDev, uid, write, false)
 	m.log().Info("app given a shared folder", "app", app, "share", sh.ID, "uid", uid, "level", level)
 	return nil
 }
@@ -667,7 +949,7 @@ func (m *Manager) RevokeApp(ctx context.Context, app string) error {
 		return err
 	}
 	for _, sh := range l {
-		if !sh.Mounted {
+		if !sh.Usable() || m.checkRoot(&sh) != nil {
 			// Keep the record: the ACL entries are still on disk and are
 			// removed when that user ID is next given to an app (GrantApp).
 			for _, g := range sh.Apps {
@@ -698,7 +980,7 @@ func (m *Manager) RevokeApp(ctx context.Context, app string) error {
 			if err := m.setfacl(ctx, "-x", fmt.Sprintf("u:%d,d:u:%d", g.UID, g.UID), path); err != nil {
 				return err
 			}
-			m.background(sh.ID, path, g.UID, false, true)
+			m.background(sh.ID, path, sh.RootDev, g.UID, false, true)
 		}
 		if _, err := m.zfs(ctx, "set", PropApps+"="+mustJSON(keep), sh.Dataset); err != nil {
 			return fmt.Errorf("removing %s from %s: %w", app, sh.Name, err)
@@ -728,7 +1010,7 @@ func (m *Manager) setfacl(ctx context.Context, op, spec, path string) error {
 // background applies (or removes) uid's ACL entries below root without
 // blocking the caller. A newer walk for the same share and uid replaces a
 // running one.
-func (m *Manager) background(share, root string, uid int, write, revoke bool) {
+func (m *Manager) background(share, root string, dev uint64, uid int, write, revoke bool) {
 	key := share + "\x00" + strconv.Itoa(uid)
 	ctx, cancel := context.WithTimeout(context.Background(), bgTimeout)
 	job := &bgJob{cancel: cancel, done: make(chan struct{})}
@@ -753,7 +1035,7 @@ func (m *Manager) background(share, root string, uid int, write, revoke bool) {
 			<-prev.done
 		}
 		start := time.Now()
-		st, err := tree(ctx, root, uid, write, revoke)
+		st, err := tree(ctx, root, dev, uid, write, revoke)
 		m.bgMu.Lock()
 		if m.bg[key] == job {
 			delete(m.bg, key)

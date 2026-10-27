@@ -106,7 +106,7 @@ describe("SharedFolders", () => {
     serve({ shares: [] }, calls);
     renderShares();
     expect(await screen.findByText("Start with the usual folders")).toBeTruthy();
-    expect(screen.getByText(/arrives with file sharing/)).toBeTruthy();
+    expect(screen.getByText(/Control Panel › File Services/)).toBeTruthy();
     fireEvent.click(await screen.findByRole("button", { name: "Create both" }));
     await waitFor(() => expect(calls.some((c) => c.path === "/shares/starter")).toBe(true));
     expect(calls.find((c) => c.path === "/shares/starter")!.body).toEqual({ pool: "tank", media: true, backups: true });

@@ -1,0 +1,74 @@
+{{define "page"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{{.Title}} · HardyOS</title>
+<link rel="stylesheet" href="/s/-/static/style.css">
+<link rel="icon" href="/s/-/static/mark.svg">
+</head>
+<body>
+<main class="card">
+<header class="head">
+<img class="mark" src="/s/-/static/mark.svg" width="22" height="25" alt="">
+<span class="brand">HARDY<span>OS</span></span>
+</header>
+{{if eq .Kind "error"}}{{template "error" .}}{{end}}
+{{if eq .Kind "password"}}{{template "password" .}}{{end}}
+{{if eq .Kind "file"}}{{template "file" .}}{{end}}
+{{if eq .Kind "folder"}}{{template "folder" .}}{{end}}
+<footer class="foot">Shared by {{.SharedBy}}{{if .Expires}} · works until {{.Expires}}{{end}}</footer>
+</main>
+</body>
+</html>{{end}}
+
+{{define "error"}}
+<h1>{{.Title}}</h1>
+<p class="muted">{{.Message}}</p>
+{{end}}
+
+{{define "password"}}
+<h1>{{.Title}}</h1>
+<p class="muted">This link is protected with a password.</p>
+<form method="post" action="{{.UnlockURL}}" class="stack">
+<label for="pw">Password</label>
+<input id="pw" name="password" type="password" autocomplete="current-password" required autofocus>
+{{if .Message}}<p class="error" role="alert">{{.Message}}</p>{{end}}
+<button class="btn" type="submit">Open</button>
+</form>
+{{end}}
+
+{{define "file"}}
+<h1 class="name">{{.Title}}</h1>
+<p class="muted"><span class="num">{{.Size}}</span> · changed {{.Modified}}</p>
+<a class="btn" href="{{.DownloadURL}}" download>Download</a>
+{{end}}
+
+{{define "folder"}}
+<nav class="crumbs" aria-label="Folders">{{range $i, $c := .Crumbs}}{{if $i}}<span aria-hidden="true">/</span>{{end}}{{if $c.URL}}<a href="{{$c.URL}}">{{$c.Name}}</a>{{else}}<strong>{{$c.Name}}</strong>{{end}}{{end}}</nav>
+{{if .Message}}<p class="notice" role="status">{{.Message}}</p>{{end}}
+<div class="actions"><a class="btn btn--ghost" href="{{.DownloadURL}}">Download all (.zip)</a></div>
+{{if .Entries}}
+<table>
+<thead><tr><th>Name</th><th class="num">Size</th><th class="hide-sm">Changed</th></tr></thead>
+<tbody>
+{{range .Entries}}<tr>
+<td>{{if .Dir}}<a class="dir" href="{{.URL}}">{{.Name}}/</a>{{else}}<a href="{{.URL}}" download>{{.Name}}</a>{{end}}</td>
+<td class="num">{{if not .Dir}}{{.Size}}{{end}}</td>
+<td class="hide-sm muted">{{.Modified}}</td>
+</tr>{{end}}
+</tbody>
+</table>
+{{else}}
+<p class="muted empty">This folder is empty.</p>
+{{end}}
+{{if .UploadURL}}
+<form class="upload" method="post" action="{{.UploadURL}}" enctype="multipart/form-data">
+<label for="files">Add files to this folder</label>
+<input id="files" name="file" type="file" multiple required>
+{{if .UploadNote}}<p class="muted">{{.UploadNote}}</p>{{end}}
+<button class="btn" type="submit">Upload</button>
+</form>
+{{end}}
+{{end}}

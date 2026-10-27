@@ -20,17 +20,27 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/backup"
 	"github.com/hardyos/hardyos/daemon/internal/boot"
 	"github.com/hardyos/hardyos/daemon/internal/domain"
+	"github.com/hardyos/hardyos/daemon/internal/fileworker"
 	"github.com/hardyos/hardyos/daemon/internal/hw"
 	"github.com/hardyos/hardyos/daemon/internal/install"
 	"github.com/hardyos/hardyos/daemon/internal/network"
+	"github.com/hardyos/hardyos/daemon/internal/nfs"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
+	"github.com/hardyos/hardyos/daemon/internal/sftp"
 	"github.com/hardyos/hardyos/daemon/internal/shares"
+	"github.com/hardyos/hardyos/daemon/internal/smb"
+	"github.com/hardyos/hardyos/daemon/internal/snapshots"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 	"github.com/hardyos/hardyos/daemon/internal/update"
 	"github.com/hardyos/hardyos/daemon/internal/version"
 )
 
 func main() {
+	// A file worker: the same binary, re-run as the person whose files it
+	// reads or writes (internal/fileworker). Never returns.
+	if len(os.Args) == 2 && os.Args[1] == fileworker.Subcommand {
+		fileworker.ChildMain()
+	}
 	var (
 		socket      = flag.String("socket", priv.DefaultSocket, "unix socket path")
 		allowUser   = flag.String("allow-user", "hardyd", "user allowed to connect besides root")
@@ -112,9 +122,25 @@ func main() {
 		// Docker apps: Docker stays off at boot until hardyd-priv has pointed
 		// it at its dataset on the pool, then the apps come back by themselves.
 		shm := &shares.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log}
-		priv.RegisterShares(s, shm)
+		// NFS follows every shared folder change; automatic snapshots tick each minute.
+		nfsm := &nfs.Manager{Runner: sysexec.Exec{}, Shares: shm, Root: "/", Log: log}
+		// SMB file server: the host's Samba as a member of the domain.
+		fsm := &smb.Manager{Runner: sysexec.Exec{}, Log: log, Shares: shm, LocalDomain: localSMBDomain(dc),
+			Addresses: func(ctx context.Context) []string { return smb.LANAddresses(ctx, sysexec.Exec{}) }}
+		// SFTP for domain accounts: sshd's settings and each person's view of the folders.
+		fsm.SFTP = &sftp.Manager{Runner: sysexec.Exec{}, Log: log}
+		priv.RegisterShares(s, shm, priv.RegisterNFS(s, nfsm), priv.RegisterFiles(s, fsm))
+		go nfsm.Watch(ctx)
+		go fsm.Watch(ctx)
+		snaps := &snapshots.Manager{Runner: sysexec.Exec{}, Shares: shm, Log: log}
+		priv.RegisterSnapshots(s, snaps)
+		go snaps.Run(ctx)
 		am := &apps.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log, Shares: shm}
 		priv.RegisterApps(s, am)
+		// File Manager and share links: files read and written as the person.
+		if err := priv.StartFiles(ctx, s, shm, fsm.HomesPool, log); err != nil {
+			log.Error("file access isn't available", "err", err)
+		}
 		go am.OnStart(ctx)
 		priv.RegisterBootRepair(s, priv.StorageEnv{Runner: sysexec.Exec{}, Root: os.DirFS("/")}, "/", boot.ConfigPath)
 		if len(updater.Keys()) == 0 {
@@ -152,5 +178,17 @@ func main() {
 	if err := s.ListenAndServe(ctx, *socket, 0o660, gid); err != nil {
 		log.Error("serve failed", "err", err)
 		os.Exit(1)
+	}
+}
+
+// localSMBDomain tells the file server about the domain this server's own
+// DC runs (its DCs, this one first, and the HardyOS Admins group).
+func localSMBDomain(dc *domain.Manager) func() *smb.Domain {
+	return func() *smb.Domain {
+		c, err := dc.Load()
+		if err != nil || c == nil || c.NetBIOS == "" {
+			return nil
+		}
+		return &smb.Domain{Domain: c.Domain, Realm: c.Realm, NetBIOS: c.NetBIOS, DCs: c.DNSServers(), AdminsGroupSID: c.AdminsGroupSID}
 	}
 }

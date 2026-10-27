@@ -40,6 +40,8 @@ func RegisterJobKinds(m *jobs.Manager, pc *priv.Client) {
 	registerDomainMoreJobs(m, pc)
 	registerDomainAdminsJob(m, pc)
 	registerShareJobs(m, pc)
+	registerFileServiceJobs(m, pc)
+	registerSnapshotJobs(m, pc)
 	m.Register(jobs.Kind{
 		Name:      JobKindSelfTest,
 		AdminOnly: true,
