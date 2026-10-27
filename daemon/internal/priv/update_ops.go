@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"regexp"
 
+	"github.com/hardyos/hardyos/daemon/internal/syslock"
 	"github.com/hardyos/hardyos/daemon/internal/update"
 )
 
@@ -37,6 +38,12 @@ func RegisterUpdates(s *Server, u *update.Updater) {
 		return u.Status(ctx)
 	})
 	s.Handle(OpUpdateStage, typed(func(ctx context.Context, a UpdateStageArgs) (any, error) {
+		// Never alongside a GPU driver task or another boot menu change.
+		release, err := syslock.TryAcquire("Installing an update")
+		if err != nil {
+			return nil, Errorf(CodeFailed, "%v", err)
+		}
+		defer release()
 		res, err := u.Stage(ctx, a.Path)
 		if err != nil {
 			return nil, Errorf(CodeFailed, "%v", err)
@@ -44,12 +51,22 @@ func RegisterUpdates(s *Server, u *update.Updater) {
 		return res, nil
 	}))
 	s.Handle(OpUpdateConfirm, func(ctx context.Context, _ json.RawMessage) (any, error) {
+		release, err := syslock.Acquire(ctx, "Confirming the update")
+		if err != nil {
+			return nil, Errorf(CodeFailed, "%v", err)
+		}
+		defer release()
 		return u.Confirm(ctx)
 	})
 	s.Handle(OpUpdateActivate, typed(func(ctx context.Context, a VersionArgs) (any, error) {
 		if !versionNameRE.MatchString(a.Name) {
 			return nil, Errorf(CodeBadArgs, "invalid version name")
 		}
+		release, err := syslock.Acquire(ctx, "Switching versions")
+		if err != nil {
+			return nil, Errorf(CodeFailed, "%v", err)
+		}
+		defer release()
 		if err := u.Activate(ctx, a.Name, a.RestoreSettings); err != nil {
 			return nil, Errorf(CodeFailed, "%v", err)
 		}
@@ -62,6 +79,11 @@ func RegisterUpdates(s *Server, u *update.Updater) {
 		if a.ConfirmName != a.Name {
 			return nil, Errorf(CodeBadArgs, "confirmName must repeat the version name exactly")
 		}
+		release, err := syslock.Acquire(ctx, "Removing a version")
+		if err != nil {
+			return nil, Errorf(CodeFailed, "%v", err)
+		}
+		defer release()
 		if err := u.Delete(ctx, a.Name); err != nil {
 			return nil, Errorf(CodeFailed, "%v", err)
 		}

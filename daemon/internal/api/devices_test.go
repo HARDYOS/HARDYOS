@@ -107,7 +107,7 @@ func newDevicesEnv(t *testing.T) (*testEnv, string) {
 	r.hooks["dpkg-deb -x "] = func(args []string) {
 		put(t, root, filepath.Join(args[2], "usr/share/doc/nvidia-kernel-support/copyright"), testLicence)
 	}
-	r.hooks["apt-get -y --no-install-recommends -o"] = func([]string) {
+	r.hooks["apt-get --no-download -y --no-install-recommends -o"] = func([]string) {
 		put(t, root, "/lib/modules/6.12.48+deb13-amd64/updates/dkms/nvidia.ko", "ko")
 	}
 	r.On("zfs list -H -p -o name,creation,org.hardyos:version -d 1 -r rpool/ROOT", "rpool/ROOT\t1\t-\nrpool/ROOT/hardyos-0.1.0\t2\t0.1.0\n")
@@ -240,16 +240,33 @@ func TestDevicesAPI(t *testing.T) {
 	if !strings.Contains(string(body), hex.EncodeToString(vsum[:])) || !strings.Contains(string(body), `"version":"550.90.05"`) {
 		t.Fatalf("upload result %s", body)
 	}
-	if code := admin.do("POST", "/api/v1/devices/vgpu-driver/install", map[string]any{"upload": "../x", "sha256": sha, "accept": true}, nil); code != 400 {
+	if code := admin.do("POST", "/api/v1/devices/vgpu-driver/install", map[string]any{"upload": "../x", "confirmVersion": "550.90.05", "accept": true}, nil); code != 400 {
 		t.Fatalf("bad upload id = %d", code)
 	}
 	var up VGPUUpload
 	_ = jsonUnmarshal(body, &up)
-	inst := map[string]any{"upload": up.Upload, "sha256": up.SHA256, "fileName": up.FileName}
+	if up.Known || !strings.Contains(up.Warning, "can't confirm this file is NVIDIA's") || up.By != "cade" {
+		t.Fatalf("upload = %+v", up)
+	}
+	// The browser can't name a checksum or file name: hardyd's own record
+	// of the upload is used.
+	forged := map[string]any{"upload": up.Upload, "confirmVersion": "550.90.05", "accept": true, "sha256": strings.Repeat("0", 64)}
+	if code := admin.do("POST", "/api/v1/devices/vgpu-driver/install", forged, nil); code != 400 {
+		t.Fatalf("install with a browser checksum = %d", code)
+	}
+	inst := map[string]any{"upload": up.Upload, "confirmVersion": "550.90.05"}
 	if code := admin.do("POST", "/api/v1/devices/vgpu-driver/install", inst, nil); code != 400 {
 		t.Fatalf("install without accept = %d", code)
 	}
 	inst["accept"] = true
+	inst["confirmVersion"] = "550.90"
+	var e struct {
+		Message string `json:"message"`
+	}
+	if code := admin.do("POST", "/api/v1/devices/vgpu-driver/install", inst, &e); code != 400 || !strings.Contains(e.Message, "type the driver's version (550.90.05)") {
+		t.Fatalf("wrong typed version = %d %s", code, e.Message)
+	}
+	inst["confirmVersion"] = "550.90.05"
 	if code := admin.do("POST", "/api/v1/devices/vgpu-driver/install", inst, &acc); code != 202 {
 		t.Fatalf("vgpu install = %d", code)
 	}
@@ -267,5 +284,33 @@ func TestDevicesAPI(t *testing.T) {
 	}
 	if code := kid.do("POST", "/api/v1/devices/nvidia/prepare", nil, nil); code != 403 {
 		t.Fatalf("non-admin prepare = %d", code)
+	}
+	var vst gpu.Status
+	admin.do("GET", "/api/v1/devices/nvidia", nil, &vst)
+	if vst.VGPU == nil || vst.VGPU.SHA256 != up.SHA256 || vst.VGPU.File != "NVIDIA-Linux-x86_64-550.90.05-vgpu-kvm.run" {
+		t.Fatalf("installed %+v", vst.VGPU)
+	}
+
+	// Update without the NVIDIA drivers this time: confirmed, a job, audited.
+	if code := admin.do("POST", "/api/v1/devices/nvidia/skip-next-update", map[string]any{"skip": true}, nil); code != 400 {
+		t.Fatalf("skip without confirm = %d", code)
+	}
+	if code := admin.do("POST", "/api/v1/devices/nvidia/skip-next-update", map[string]any{"skip": true, "confirm": true}, &acc); code != 202 {
+		t.Fatalf("skip = %d", code)
+	}
+	if j := waitJobDone(t, admin, acc.Job["id"].(string)); j["state"] != "succeeded" {
+		t.Fatalf("skip job %v", j)
+	}
+	admin.do("GET", "/api/v1/devices/nvidia", nil, &vst)
+	if vst.SkipNextUpdate == nil || vst.SkipNextUpdate.By != "cade" {
+		t.Fatalf("skip status %+v", vst.SkipNextUpdate)
+	}
+	admin.do("GET", "/api/v1/audit", nil, &audit)
+	found = map[string]bool{}
+	for _, e := range audit {
+		found[e["action"].(string)] = true
+	}
+	if !found["devices.nvidia.skip-next-update"] {
+		t.Errorf("skip not audited: %v", found)
 	}
 }

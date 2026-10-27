@@ -239,6 +239,8 @@ func (f *fakeSys) WriteSysfs(path, value string) error {
 		_ = os.WriteFile(filepath.Join(typeDir, "available_instances"), []byte(strconv.Itoa(n+1)+"\n"), 0o644)
 		_ = os.Remove(f.p("/sys/bus/mdev/devices/" + uuid))
 		return os.RemoveAll(real)
+	case strings.HasSuffix(path, "/sriov_drivers_autoprobe"):
+		return os.WriteFile(f.p(path), []byte(strings.TrimSpace(value)+"\n"), 0o644)
 	case strings.HasSuffix(path, "/nvidia/current_vgpu_type"), strings.HasSuffix(path, "/sriov_numvfs"):
 		if strings.HasSuffix(path, "/sriov_numvfs") {
 			f.setVFs(filepath.Base(filepath.Dir(path)), strings.TrimSpace(value))
@@ -254,12 +256,21 @@ func (f *fakeSys) setVFs(pf, count string) {
 	if n == 0 {
 		return
 	}
+	// Like the kernel: new virtual functions get a driver only while
+	// sriov_drivers_autoprobe is on.
+	drv := "i915"
+	if b, err := os.ReadFile(f.p("/sys/bus/pci/devices/" + pf + "/sriov_drivers_autoprobe")); err == nil && strings.TrimSpace(string(b)) == "0" {
+		drv = ""
+	}
 	for i := 0; i < n; i++ {
 		addr := fmt.Sprintf("0000:00:02.%d", i+1)
 		if _, err := os.Lstat(f.p("/sys/bus/pci/devices/" + addr)); err == nil {
 			continue
 		}
-		f.pci(addr, "8086", "a7a0", "0x030000", "i915", pciOpt{group: 30 + i, physfn: pf, reset: "flr"})
+		f.pci(addr, "8086", "a7a0", "0x030000", drv, pciOpt{group: 30 + i, physfn: pf, reset: "flr"})
+		if drv == "" {
+			f.native[addr] = "i915"
+		}
 	}
 }
 

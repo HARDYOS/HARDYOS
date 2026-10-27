@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hardyos/hardyos/daemon/internal/rootfile"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 )
 
@@ -69,6 +70,27 @@ type Record struct {
 	Licence *Licence `json:"licence,omitempty"`
 	// VGPU: NVIDIA's vGPU host driver from the admin.
 	VGPU *VGPUDriver `json:"vgpu,omitempty"`
+	// SkipNextUpdate: the admin chose to install the next update without
+	// the NVIDIA drivers (used up by that update).
+	SkipNextUpdate *Skip `json:"skipNextUpdate,omitempty"`
+	// ReinstallNeeded: this version was installed without the NVIDIA
+	// drivers HardyOS had installed before; install them again.
+	ReinstallNeeded *Reinstall `json:"reinstallNeeded,omitempty"`
+}
+
+// Skip records who chose to update without the NVIDIA drivers, and when.
+type Skip struct {
+	By string    `json:"by"`
+	At time.Time `json:"at"`
+}
+
+// Reinstall says which drivers an update left out and why.
+type Reinstall struct {
+	Driver bool      `json:"driver"` // Debian's NVIDIA driver for Docker apps
+	VGPU   bool      `json:"vgpu"`   // NVIDIA's vGPU host driver
+	By     string    `json:"by"`
+	At     time.Time `json:"at"`
+	Reason string    `json:"reason"`
 }
 
 // Consent records who agreed to NVIDIA's licence, and what was installed.
@@ -76,8 +98,12 @@ type Consent struct {
 	By            string    `json:"by"`
 	At            time.Time `json:"at"`
 	LicenceSHA256 string    `json:"licenceSha256"`
-	Version       string    `json:"version"`
-	Packages      []string  `json:"packages"`
+	// Version is the driver version the licence came with: the agreement
+	// covers that version only (an update offering another one asks again).
+	Version  string   `json:"version"`
+	Packages []string `json:"packages"`
+	// Versions are the exact package versions installed (pkg=version).
+	Versions map[string]string `json:"versions,omitempty"`
 	// Installed is set once the packages are in.
 	Installed bool `json:"installed"`
 }
@@ -85,11 +111,14 @@ type Consent struct {
 // Licence is NVIDIA's licence text as shipped in the packages about to be
 // installed (from the downloaded package itself).
 type Licence struct {
-	SHA256   string    `json:"sha256"`
-	Version  string    `json:"version"`
-	Packages []string  `json:"packages"`
-	Prepared time.Time `json:"prepared"`
-	Source   string    `json:"source"` // the file it came from
+	SHA256   string   `json:"sha256"`
+	Version  string   `json:"version"`
+	Packages []string `json:"packages"`
+	// Versions: the exact version of each package downloaded, the ones
+	// installed after the agreement (from the download, never fetched again).
+	Versions map[string]string `json:"versions,omitempty"`
+	Prepared time.Time         `json:"prepared"`
+	Source   string            `json:"source"` // the file it came from
 }
 
 // VGPUDriver is the admin's NVIDIA vGPU host driver.
@@ -151,11 +180,7 @@ func (m *Manager) save(r *Record) error {
 	if err != nil {
 		return err
 	}
-	tmp := m.stateFile() + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, m.stateFile())
+	return rootfile.WriteAtomic(m.stateFile(), append(b, '\n'), 0o600)
 }
 
 // Status is what the NVIDIA setup card shows.
@@ -181,6 +206,9 @@ type Status struct {
 	// VGPUHostDriver: NVIDIA's vGPU host driver is loaded.
 	VGPUHostDriver bool  `json:"vgpuHostDriver"`
 	Task           *Task `json:"task"`
+	// SkipNextUpdate and ReinstallNeeded: see Record.
+	SkipNextUpdate  *Skip      `json:"skipNextUpdate"`
+	ReinstallNeeded *Reinstall `json:"reinstallNeeded"`
 }
 
 // Status reports the drivers.
@@ -189,7 +217,7 @@ func (m *Manager) Status(ctx context.Context) (*Status, error) {
 	if err != nil {
 		return nil, err
 	}
-	st := &Status{Packages: DriverPackages, Consent: r.Driver, Licence: r.Licence, VGPU: r.VGPU}
+	st := &Status{Packages: DriverPackages, Consent: r.Driver, Licence: r.Licence, VGPU: r.VGPU, SkipNextUpdate: r.SkipNextUpdate, ReinstallNeeded: r.ReinstallNeeded}
 	st.NVIDIAGPUs = m.nvidiaGPUs()
 	st.Installed = m.packageInstalled(ctx, "nvidia-kernel-dkms")
 	st.Version = readTrim(m.path("/sys/module/nvidia/version"))

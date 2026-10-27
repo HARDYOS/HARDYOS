@@ -22,7 +22,22 @@ import (
 // admin's agreement, the vGPU driver file) is copied over. newRoot is
 // where the new system is mounted (a path on the server). Any failure
 // stops the update; the current version stays active.
+//
+// The NVIDIA driver goes in only at the version whose licence the admin
+// agreed to: when the new system's packages offer another version, the
+// update stops with a ConsentError. And when the admin chose to update
+// without the NVIDIA drivers this time (SetSkipNextUpdate), nothing is
+// built: the new version records that its drivers need installing again,
+// and the choice is used up.
 func (m *Manager) PrepareNewRoot(ctx context.Context, newRoot string) error {
+	err := m.prepareNewRoot(ctx, newRoot)
+	if err != nil && !errors.Is(err, ErrConsent) {
+		return fmt.Errorf("%w. To install the update anyway, choose \"Update without the NVIDIA driver this time\" in Devices & GPUs (the driver is then installed again afterwards)", err)
+	}
+	return err
+}
+
+func (m *Manager) prepareNewRoot(ctx context.Context, newRoot string) error {
 	if !filepath.IsAbs(newRoot) || newRoot == "/" {
 		return fmt.Errorf("invalid new system path %q", newRoot)
 	}
@@ -39,6 +54,9 @@ func (m *Manager) PrepareNewRoot(ctx context.Context, newRoot string) error {
 	}
 	if !driver && !vgpu {
 		return nil
+	}
+	if rec.SkipNextUpdate != nil {
+		return m.skipNewRoot(newRoot, rec, driver, vgpu)
 	}
 	kernels := newKernels(m.path(newRoot))
 	if len(kernels) == 0 {
@@ -60,7 +78,28 @@ func (m *Manager) PrepareNewRoot(ctx context.Context, newRoot string) error {
 			if err := chroot("env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "update"); err != nil {
 				return fmt.Errorf("the NVIDIA driver can't be downloaded for the new version (is the server online?): %w", err)
 			}
-			if err := chroot(append([]string{"env", "DEBIAN_FRONTEND=noninteractive", "apt-get"}, aptInstallArgs(rec.Driver.Packages...)...)...); err != nil {
+			// Which driver version the new system would get.
+			out, err := sysexec.Output(ctx, m.Runner, "chroot", append([]string{newRoot, "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "-s", "--no-install-recommends", "install"}, rec.Driver.Packages...)...)
+			if err != nil {
+				return fmt.Errorf("listing the NVIDIA driver packages for the new version: %w", err)
+			}
+			offered := parseSimulation(string(out))
+			if _, v := licenceVersion(offered); v != "" {
+				same, err := compareVersions(ctx, m.Runner, v, "eq", rec.Driver.Version)
+				if err != nil {
+					return err
+				}
+				if !same {
+					return &ConsentError{Agreed: rec.Driver.Version, Offered: v}
+				}
+			} else if rec.Driver.Version != "" {
+				// Not offered at all: install exactly the agreed version (or fail).
+				offered = map[string]string{}
+				for p, v := range rec.Driver.Versions {
+					offered[p] = v
+				}
+			}
+			if err := chroot(append([]string{"env", "DEBIAN_FRONTEND=noninteractive", "apt-get"}, aptInstallArgs(pinned(rec.Driver.Packages, offered)...)...)...); err != nil {
 				return fmt.Errorf("installing the NVIDIA driver into the new version: %w", err)
 			}
 			for _, k := range kernels {
@@ -93,6 +132,36 @@ func (m *Manager) PrepareNewRoot(ctx context.Context, newRoot string) error {
 		}
 		return nil
 	})
+}
+
+// skipNewRoot leaves the drivers out of the new system, as the admin
+// chose: the new system's record says which ones to install again, and
+// the choice is used up here.
+func (m *Manager) skipNewRoot(newRoot string, rec *Record, driver, vgpu bool) error {
+	skip := rec.SkipNextUpdate
+	nm := &Manager{Runner: m.Runner, Root: m.path(newRoot), Log: m.Log, Arch: m.Arch}
+	nrec, err := nm.load()
+	if err != nil {
+		return err
+	}
+	nrec.SkipNextUpdate = nil
+	nrec.ReinstallNeeded = &Reinstall{Driver: driver, VGPU: vgpu, By: skip.By, At: skip.At,
+		Reason: "This version was installed without the NVIDIA drivers, as chosen by " + skip.By + ". Install them again in Devices & GPUs."}
+	if nrec.Driver != nil {
+		nrec.Driver.Installed = false
+	}
+	if nrec.VGPU != nil {
+		nrec.VGPU.Installed = false
+	}
+	if err := nm.save(nrec); err != nil {
+		return fmt.Errorf("record the drivers the new version needs: %w", err)
+	}
+	rec.SkipNextUpdate = nil
+	if err := m.save(rec); err != nil {
+		return err
+	}
+	m.log().Warn("update installed without the NVIDIA drivers", "by", skip.By, "chosenAt", skip.At, "driver", driver, "vgpu", vgpu)
+	return nil
 }
 
 // newKernels lists the kernel versions in a system (with an image).

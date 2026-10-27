@@ -530,16 +530,8 @@ func (r *Root) chown(p string) {
 	}
 }
 
+// writeAtomic writes into hardyd's directory as root without following a
+// link hardyd planted (rootfile.WriteAtomic).
 func writeAtomic(path string, b []byte, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	tmp := path + ".hardyos-tmp"
-	if err := os.WriteFile(tmp, b, mode); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp, mode); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return rootfile.WriteAtomic(path, b, mode)
 }

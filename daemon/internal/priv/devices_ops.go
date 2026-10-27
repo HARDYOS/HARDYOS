@@ -7,6 +7,7 @@ import (
 
 	"github.com/hardyos/hardyos/daemon/internal/devices"
 	"github.com/hardyos/hardyos/daemon/internal/gpu"
+	"github.com/hardyos/hardyos/daemon/internal/syslock"
 )
 
 // Device and GPU driver operations. Each takes named, validated arguments;
@@ -29,7 +30,16 @@ const (
 	OpGPUNvidiaRemove  = "gpu.nvidia.remove"
 	OpGPUVGPUInstall   = "gpu.vgpu.install"
 	OpGPUVGPURemove    = "gpu.vgpu.remove"
+	// OpGPUSkipNextUpdate: install the next update without the NVIDIA
+	// drivers (or withdraw that choice).
+	OpGPUSkipNextUpdate = "gpu.nvidia.skip-next-update"
 )
+
+// SkipNextUpdateArgs records the admin's choice for the next update.
+type SkipNextUpdateArgs struct {
+	Skip bool   `json:"skip"`
+	By   string `json:"by"`
+}
 
 // DevicesCheckArgs asks whether devices can go to a VM.
 type DevicesCheckArgs struct {
@@ -91,6 +101,11 @@ func RegisterDevices(s *Server, h *devices.Host, g *gpu.Manager) {
 		return DevicesCheckResult{OK: true, Problems: devices.Problems{}}, nil
 	}))
 	s.Handle(OpDevicesIOMMUEnable, func(ctx context.Context, _ json.RawMessage) (any, error) {
+		release, err := syslock.Acquire(ctx, "Turning on IOMMU")
+		if err != nil {
+			return nil, Errorf(CodeFailed, "%v", err)
+		}
+		defer release()
 		r, err := h.EnableIOMMU(ctx)
 		return r, failed(err)
 	})
@@ -145,6 +160,13 @@ func RegisterDevices(s *Server, h *devices.Host, g *gpu.Manager) {
 	s.Handle(OpGPUVGPUInstall, typed(func(ctx context.Context, a gpu.VGPUArgs) (any, error) {
 		return taskStarted(g.InstallVGPU(a))
 	}))
+	s.Handle(OpGPUSkipNextUpdate, typed(func(ctx context.Context, a SkipNextUpdateArgs) (any, error) {
+		rec, err := g.SetSkipNextUpdate(a.Skip, a.By)
+		if err != nil {
+			return nil, Errorf(CodeBadArgs, "%v", err)
+		}
+		return map[string]any{"skipNextUpdate": rec.SkipNextUpdate}, nil
+	}))
 	s.Handle(OpGPUVGPURemove, typed(func(ctx context.Context, a ConfirmArgs) (any, error) {
 		if !a.Confirm {
 			return nil, Errorf(CodeBadArgs, "confirm must be true")
@@ -154,7 +176,7 @@ func RegisterDevices(s *Server, h *devices.Host, g *gpu.Manager) {
 }
 
 func taskStarted(t *gpu.Task, err error) (any, error) {
-	if errors.Is(err, gpu.ErrBusy) {
+	if errors.Is(err, gpu.ErrBusy) || errors.Is(err, syslock.ErrBusy) {
 		return nil, Errorf(CodeFailed, "%v", err)
 	}
 	if err != nil {

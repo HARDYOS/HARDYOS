@@ -2,8 +2,8 @@ package devices
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -151,11 +151,15 @@ func (h *Host) plan(ctx context.Context, vm string, ds []Device, st *state, inv 
 					add(d.ID, "ROM file names end in .rom or .bin and use letters, digits and ._- only.")
 					continue
 				}
-				it.rom = filepath.Join(h.romDir(), d.ROMFile)
-				if !h.exists(it.rom) {
-					add(d.ID, "The ROM file %s isn't in the ROM library (%s).", d.ROMFile, h.romDir())
+				if _, err := h.readROM(d.ROMFile); err != nil {
+					if isNotExist(err) {
+						add(d.ID, "The ROM file %s isn't in the ROM library (%s).", d.ROMFile, h.romDir())
+					} else {
+						add(d.ID, "The ROM file %s can't be used: %v", d.ROMFile, err)
+					}
 					continue
 				}
+				it.rom = d.ROMFile
 			}
 			for _, a := range it.addrs {
 				taken[a] = true
@@ -163,8 +167,31 @@ func (h *Host) plan(ctx context.Context, vm string, ds []Device, st *state, inv 
 		case KindUSB:
 			switch {
 			case usbIDRE.MatchString(d.ID):
-				if u := usbByID(inv.USB, d.ID); u != nil {
-					it.usb = u
+				// By vendor:product the VM gets whichever device has the ID,
+				// now or plugged in later: every match must be lendable,
+				// and two at once is ambiguous.
+				matches := usbAllByID(inv.USB, d.ID)
+				bad := ""
+				for _, u := range matches {
+					if u.Critical != "" {
+						bad = fmt.Sprintf("The USB device %s (in port %s) can't go to a VM: %s", d.ID, u.Port, u.Critical)
+						break
+					}
+				}
+				if bad != "" {
+					add(d.ID, "%s", bad)
+					continue
+				}
+				if len(matches) > 1 {
+					ports := make([]string, len(matches))
+					for i, u := range matches {
+						ports[i] = u.Port
+					}
+					add(d.ID, "%d USB devices have the ID %s (ports %s). Choose the device by its port instead.", len(matches), d.ID, strings.Join(ports, ", "))
+					continue
+				}
+				if len(matches) == 1 {
+					it.usb = matches[0]
 				}
 			case usbPortRE.MatchString(d.ID):
 				u := usbByID(inv.USB, d.ID)
@@ -300,6 +327,17 @@ func (h *Host) plan(ctx context.Context, vm string, ds []Device, st *state, inv 
 	return pl, nil
 }
 
+// usbAllByID lists every USB device with the vendor:product ID.
+func usbAllByID(usb []USBDevice, id string) []*USBDevice {
+	var out []*USBDevice
+	for i := range usb {
+		if usb[i].VendorID+":"+usb[i].ProductID == id {
+			out = append(out, &usb[i])
+		}
+	}
+	return out
+}
+
 func gpuAt(gpus []GPU, addr string) *GPU {
 	for i := range gpus {
 		for _, f := range gpus[i].Functions {
@@ -327,8 +365,13 @@ func (h *Host) Prepare(ctx context.Context, vm string, ds []Device) ([]Prepared,
 	st := h.loadState()
 	if st.VMs[vm] != nil {
 		// Left over from a start that never got its Release. Never pull
-		// devices from under a VM that's still running.
-		if running, err := h.running(ctx); err == nil && contains(running, vm) {
+		// devices from under a VM that may still be running (or whose
+		// state libvirt can't tell).
+		active, err := h.mightRun(ctx, vm, 1)
+		if err != nil {
+			return nil, fmt.Errorf("can't tell whether the VM %s is still running (%v), so its devices from the last run stay with it", vm, err)
+		}
+		if active {
 			return nil, fmt.Errorf("the VM %s is already running with its devices", vm)
 		}
 		if err := h.release(ctx, vm, st); err != nil {
@@ -361,7 +404,6 @@ func (h *Host) Prepare(ctx context.Context, vm string, ds []Device) ([]Prepared,
 }
 
 func (h *Host) apply(ctx context.Context, vm string, pl *plan, vs *vmState, st *state) ([]Prepared, error) {
-	k := h.kernel()
 	// NVIDIA's persistence daemon keeps every NVIDIA card open.
 	for _, b := range pl.bind {
 		if h.driverOf(b.Address) == "nvidia" {
@@ -392,15 +434,20 @@ func (h *Host) apply(ctx context.Context, vm string, pl *plan, vs *vmState, st *
 		if b.Driver == "vfio-pci" {
 			return nil
 		}
-		if err := k.WriteSysfs(pciDev(b.Address)+"/driver_override", "vfio-pci"); err != nil {
+		if err := h.write(b.Address, pciDev(b.Address)+"/driver_override", "vfio-pci"); err != nil {
 			return err
 		}
 		if b.Driver != "" {
-			if err := k.WriteSysfs("/sys/bus/pci/drivers/"+b.Driver+"/unbind", b.Address); err != nil {
+			if !driverRE.MatchString(b.Driver) {
+				return fmt.Errorf("%s: invalid driver name %q", b.Address, b.Driver)
+			}
+			if err := h.write(b.Address, "/sys/bus/pci/drivers/"+b.Driver+"/unbind", b.Address); err != nil {
 				return fmt.Errorf("take %s from its driver %s: %w", b.Address, b.Driver, err)
 			}
 		}
-		_ = k.WriteSysfs("/sys/bus/pci/drivers_probe", b.Address)
+		if err := h.write(b.Address, "/sys/bus/pci/drivers_probe", b.Address); errors.Is(err, ErrSysfsHung) {
+			return err
+		}
 		if d := h.driverOf(b.Address); d != "vfio-pci" {
 			return fmt.Errorf("%s didn't move to vfio-pci (driver now %q)", b.Address, d)
 		}
@@ -426,8 +473,12 @@ func (h *Host) apply(ctx context.Context, vm string, pl *plan, vs *vmState, st *
 		case KindPCI, KindGPU:
 			for i, a := range it.addrs {
 				rom := ""
-				if i == 0 {
-					rom = it.rom
+				if i == 0 && it.rom != "" {
+					// The VM gets a copy of the checked file, not the library's.
+					var err error
+					if rom, err = h.stageROM(it.rom); err != nil {
+						return nil, fmt.Errorf("the ROM file %s: %w", it.rom, err)
+					}
 				}
 				x, err := HostdevPCI(a, rom)
 				if err != nil {
@@ -463,13 +514,13 @@ func (h *Host) apply(ctx context.Context, vm string, pl *plan, vs *vmState, st *
 				mdevN[parent+it.dev.VGPUType]++
 				id := stableUUID(vm, parent, it.dev.VGPUType, n)
 				if h.exists("/sys/bus/mdev/devices/" + id) {
-					_ = k.WriteSysfs("/sys/bus/mdev/devices/"+id+"/remove", "1")
+					_ = h.write(id, "/sys/bus/mdev/devices/"+id+"/remove", "1")
 				}
 				vs.Mdevs = append(vs.Mdevs, mdevInst{UUID: id, Parent: parent, Type: it.dev.VGPUType})
 				if err := h.saveState(st); err != nil {
 					return nil, err
 				}
-				if err := k.WriteSysfs(pciDev(parent)+"/mdev_supported_types/"+it.dev.VGPUType+"/create", id); err != nil {
+				if err := h.write(id, pciDev(parent)+"/mdev_supported_types/"+it.dev.VGPUType+"/create", id); err != nil {
 					return nil, fmt.Errorf("create the vGPU slice: %w", err)
 				}
 				if !h.exists("/sys/bus/mdev/devices/" + id) {
@@ -490,7 +541,7 @@ func (h *Host) apply(ctx context.Context, vm string, pl *plan, vs *vmState, st *
 				if err := h.saveState(st); err != nil {
 					return nil, err
 				}
-				if err := k.WriteSysfs(pciDev(vf)+"/nvidia/current_vgpu_type", it.dev.VGPUType); err != nil {
+				if err := h.write(vf, pciDev(vf)+"/nvidia/current_vgpu_type", it.dev.VGPUType); err != nil {
 					return nil, fmt.Errorf("set the vGPU type: %w", err)
 				}
 				if got := h.readTrim(pciDev(vf) + "/nvidia/current_vgpu_type"); got != it.dev.VGPUType {
@@ -612,7 +663,11 @@ func (h *Host) Release(ctx context.Context, vm string) error {
 	if st.VMs[vm] == nil {
 		return nil
 	}
-	if running, err := h.running(ctx); err == nil && contains(running, vm) {
+	active, err := h.mightRun(ctx, vm, 3)
+	if err != nil {
+		return fmt.Errorf("can't tell whether the VM %s has stopped (%v), so its devices stay with it for now", vm, err)
+	}
+	if active {
 		return fmt.Errorf("the VM %s is still running; its devices are given back once it stops", vm)
 	}
 	return h.release(ctx, vm, st)
@@ -625,18 +680,17 @@ func (h *Host) release(ctx context.Context, vm string, st *state) error {
 	if vs == nil {
 		return nil
 	}
-	k := h.kernel()
 	var errs []string
 	for i := len(vs.Mdevs) - 1; i >= 0; i-- {
 		m := vs.Mdevs[i]
 		if h.exists("/sys/bus/mdev/devices/" + m.UUID) {
-			if err := k.WriteSysfs("/sys/bus/mdev/devices/"+m.UUID+"/remove", "1"); err != nil {
+			if err := h.write(m.UUID, "/sys/bus/mdev/devices/"+m.UUID+"/remove", "1"); err != nil {
 				errs = append(errs, fmt.Sprintf("vGPU slice %s: %v", m.UUID, err))
 			}
 		}
 	}
 	for _, vf := range vs.VFTypes {
-		if err := k.WriteSysfs(pciDev(vf)+"/nvidia/current_vgpu_type", "0"); err != nil {
+		if err := h.write(vf, pciDev(vf)+"/nvidia/current_vgpu_type", "0"); err != nil {
 			errs = append(errs, fmt.Sprintf("vGPU slice %s: %v", vf, err))
 		}
 	}
@@ -670,12 +724,11 @@ func (h *Host) restore(b boundDev) error {
 	if b.Driver == "vfio-pci" || !h.exists(pciDev(b.Address)) {
 		return nil
 	}
-	k := h.kernel()
-	if err := k.WriteSysfs(pciDev(b.Address)+"/driver_override", "\n"); err != nil {
+	if err := h.write(b.Address, pciDev(b.Address)+"/driver_override", "\n"); err != nil {
 		return err
 	}
 	if h.driverOf(b.Address) == "vfio-pci" {
-		if err := k.WriteSysfs("/sys/bus/pci/drivers/vfio-pci/unbind", b.Address); err != nil {
+		if err := h.write(b.Address, "/sys/bus/pci/drivers/vfio-pci/unbind", b.Address); err != nil {
 			return fmt.Errorf("take %s from vfio-pci: %w", b.Address, err)
 		}
 	}
@@ -685,9 +738,13 @@ func (h *Host) restore(b boundDev) error {
 	if !driverRE.MatchString(b.Driver) {
 		return fmt.Errorf("%s: invalid driver name %q", b.Address, b.Driver)
 	}
-	_ = k.WriteSysfs("/sys/bus/pci/drivers_probe", b.Address)
+	if err := h.write(b.Address, "/sys/bus/pci/drivers_probe", b.Address); errors.Is(err, ErrSysfsHung) {
+		return err
+	}
 	if h.driverOf(b.Address) != b.Driver && h.exists("/sys/bus/pci/drivers/"+b.Driver) {
-		_ = k.WriteSysfs("/sys/bus/pci/drivers/"+b.Driver+"/bind", b.Address)
+		if err := h.write(b.Address, "/sys/bus/pci/drivers/"+b.Driver+"/bind", b.Address); errors.Is(err, ErrSysfsHung) {
+			return err
+		}
 	}
 	if d := h.driverOf(b.Address); d != b.Driver {
 		return fmt.Errorf("%s didn't go back to its driver %s", b.Address, b.Driver)

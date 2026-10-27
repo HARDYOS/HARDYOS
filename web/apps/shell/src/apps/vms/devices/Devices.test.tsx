@@ -78,6 +78,38 @@ describe("Devices view", () => {
     expect(await screen.findByText("Installing the NVIDIA driver and building it")).toBeTruthy();
   });
 
+  it("updates without the NVIDIA driver once, after asking, and says when it must go back in", async () => {
+    const calls: Call[] = [];
+    const consent = { by: "cade", at: "2026-10-27T00:00:00Z", licenceSha256: "a".repeat(64), version: "550.163.01-2", packages: [], installed: true };
+    serve(
+      {
+        "/devices": inventory(),
+        "/devices/nvidia": nvidiaStatus({ installed: true, loaded: true, version: "550.163.01", consent }),
+        "POST /devices/nvidia/skip-next-update": { job: { id: "s1" }, warnings: [] },
+        "/jobs/s1": done("s1", "Install the next update without the NVIDIA drivers"),
+      },
+      calls,
+    );
+    wrap(<DevicesView />);
+    fireEvent.click(await screen.findByRole("button", { name: "Update without the NVIDIA driver this time" }));
+    expect(calls.some((c) => c.path === "/devices/nvidia/skip-next-update")).toBe(false);
+    fireEvent.click(await screen.findByRole("button", { name: "Update without it" }));
+    await waitFor(() => expect(calls.find((c) => c.path === "/devices/nvidia/skip-next-update")?.body).toEqual({ skip: true, confirm: true }));
+    cleanup();
+
+    serve(
+      {
+        "/devices": inventory(),
+        "/devices/nvidia": nvidiaStatus({
+          reinstallNeeded: { driver: true, vgpu: false, by: "cade", at: "2026-10-27T00:00:00Z", reason: "This version was installed without the NVIDIA drivers, as chosen by cade." },
+        }),
+      },
+      [],
+    );
+    wrap(<DevicesView />);
+    expect(await screen.findByText("Install the NVIDIA driver again")).toBeTruthy();
+  });
+
   it("explains a device that didn't come back", async () => {
     const calls: Call[] = [];
     serve(

@@ -3248,6 +3248,25 @@ paths:
         "400": { $ref: "#/components/responses/Invalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /devices/nvidia/skip-next-update:
+    post:
+      operationId: skipNvidiaForNextUpdate
+      summary: Install the next update without the NVIDIA drivers (or withdraw that choice)
+      description: >-
+        For when a driver can't be built for a new version: the update then goes ahead, and the new
+        version shows that its NVIDIA drivers need installing again. Used up by the next update.
+        Skipping needs confirm; the choice is audited.
+      tags: [devices]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NvidiaSkipRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /devices/gpu-task:
     get:
       operationId: getGPUTask
@@ -3265,7 +3284,12 @@ paths:
     post:
       operationId: uploadVGPUDriver
       summary: Upload NVIDIA's vGPU host driver (.run) you got from NVIDIA; returns its SHA-256
-      description: The request body is the raw file; its name (NVIDIA-Linux-x86_64-<version>-vgpu-kvm.run) goes in X-HardyOS-Filename. Nothing is installed yet.
+      description: >-
+        The request body is the raw file; its name (NVIDIA-Linux-x86_64-<version>-vgpu-kvm.run) goes in
+        X-HardyOS-Filename. The server computes the SHA-256 while receiving it and keeps it with the
+        upload ID; installing names only that ID. Nothing is installed yet. `known` says whether the
+        checksum is in HardyOS's list of checked NVIDIA installers (empty by default); `warning`
+        explains when it isn't.
       tags: [devices]
       parameters:
         - { name: X-HardyOS-Filename, in: header, required: true, schema: { type: string } }
@@ -3292,6 +3316,9 @@ paths:
     post:
       operationId: installVGPUDriver
       summary: Install an uploaded vGPU host driver (checksum checked again, DKMS build)
+      description: >-
+        The file's name and checksum come from the server's record of the upload, never from the
+        request. The admin types the driver's version (confirmVersion) to confirm.
       tags: [devices]
       requestBody:
         required: true
@@ -5620,8 +5647,9 @@ components:
         by: { type: string }
         at: { type: string, format: date-time }
         licenceSha256: { type: string }
-        version: { type: string }
+        version: { type: string, description: The driver version the agreement covers }
         packages: { type: array, items: { type: string } }
+        versions: { type: object, additionalProperties: { type: string }, description: Exact package versions installed }
         installed: { type: boolean }
     NvidiaLicence:
       type: object
@@ -5630,6 +5658,7 @@ components:
         sha256: { type: string }
         version: { type: string }
         packages: { type: array, items: { type: string } }
+        versions: { type: object, additionalProperties: { type: string }, description: Exact versions downloaded (the ones installed) }
         prepared: { type: string, format: date-time }
         source: { type: string }
     NvidiaLicenceText:
@@ -5671,7 +5700,7 @@ components:
           nullable: true
     NvidiaStatus:
       type: object
-      required: [nvidiaGpus, installed, loaded, version, toolkit, nouveau, restartNeeded, packages, consent, licence, vgpu, vgpuHostDriver, task]
+      required: [nvidiaGpus, installed, loaded, version, toolkit, nouveau, restartNeeded, packages, consent, licence, vgpu, vgpuHostDriver, task, skipNextUpdate, reinstallNeeded]
       properties:
         nvidiaGpus: { type: integer }
         installed: { type: boolean }
@@ -5694,22 +5723,52 @@ components:
         task:
           allOf: [{ $ref: "#/components/schemas/GPUTask" }]
           nullable: true
+        skipNextUpdate:
+          allOf: [{ $ref: "#/components/schemas/NvidiaSkip" }]
+          nullable: true
+        reinstallNeeded:
+          allOf: [{ $ref: "#/components/schemas/NvidiaReinstall" }]
+          nullable: true
     VGPUUpload:
       type: object
-      required: [upload, sha256, size, fileName, version]
+      required: [upload, sha256, size, fileName, version, known, by]
       properties:
         upload: { type: string }
-        sha256: { type: string }
+        sha256: { type: string, description: Computed by the server while receiving the file }
         size: { type: integer, format: int64 }
         fileName: { type: string }
         version: { type: string }
+        known: { type: boolean, description: "The checksum is in HardyOS's list of checked NVIDIA vGPU installers" }
+        warning: { type: string, description: Shown when the checksum isn't in that list }
+        by: { type: string }
+    NvidiaSkipRequest:
+      type: object
+      required: [skip]
+      properties:
+        skip: { type: boolean, description: "true: the next update leaves the NVIDIA drivers out; false: withdraw" }
+        confirm: { type: boolean, description: Must be true to skip }
+    NvidiaSkip:
+      type: object
+      required: [by, at]
+      properties:
+        by: { type: string }
+        at: { type: string, format: date-time }
+    NvidiaReinstall:
+      type: object
+      required: [driver, vgpu, by, at, reason]
+      properties:
+        driver: { type: boolean, description: "Debian's NVIDIA driver for Docker apps needs installing again" }
+        vgpu: { type: boolean, description: "NVIDIA's vGPU host driver needs installing again" }
+        by: { type: string }
+        at: { type: string, format: date-time }
+        reason: { type: string }
     VGPUInstallRequest:
       type: object
-      required: [upload, sha256, fileName, accept]
+      required: [upload, confirmVersion, accept]
+      additionalProperties: false
       properties:
-        upload: { type: string }
-        sha256: { type: string }
-        fileName: { type: string }
+        upload: { type: string, description: The upload ID the upload returned }
+        confirmVersion: { type: string, description: "The driver's version, typed by the admin to confirm" }
         accept: { type: boolean, description: "You have NVIDIA's vGPU licence and agree to the licence in NVIDIA's installer" }
         replaceDriver: { type: boolean, description: Remove Debian's NVIDIA driver first }
     # ---- end of devices API schemas (part D) ----

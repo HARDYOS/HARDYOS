@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
@@ -30,6 +31,7 @@ const (
 	JobKindNvidiaRemove  = "devices.nvidia.remove"
 	JobKindVGPUInstall   = "devices.vgpu.install"
 	JobKindVGPURemove    = "devices.vgpu.remove"
+	JobKindNvidiaSkip    = "devices.nvidia.skip-next-update"
 )
 
 var (
@@ -77,6 +79,15 @@ func registerGPUJobs(m *jobs.Manager, pc *priv.Client) {
 	m.Register(jobs.Kind{Name: JobKindVGPURemove, AdminOnly: true, LockKey: lock, Run: follow(priv.OpGPUVGPURemove, func(*jobs.Context) (any, error) {
 		return priv.ConfirmArgs{Confirm: true}, nil
 	})})
+	m.Register(jobs.Kind{Name: JobKindNvidiaSkip, AdminOnly: true, LockKey: lock, Run: func(jc *jobs.Context) (any, error) {
+		var a priv.SkipNextUpdateArgs
+		if err := jc.Params(&a); err != nil {
+			return nil, err
+		}
+		var out map[string]any
+		err := pc.Call(jc, priv.OpGPUSkipNextUpdate, a, &out)
+		return out, err
+	}})
 }
 
 // followTask reports a hardyd-priv task's steps as job progress until it
@@ -121,6 +132,7 @@ func (s *Server) gpuRoutes() {
 	m.Handle("POST /api/v1/devices/nvidia/prepare", s.admin(s.handleNvidiaPrepare))
 	m.Handle("POST /api/v1/devices/nvidia/install", s.admin(s.handleNvidiaInstall))
 	m.Handle("POST /api/v1/devices/nvidia/remove", s.admin(s.handleNvidiaRemove))
+	m.Handle("POST /api/v1/devices/nvidia/skip-next-update", s.admin(s.handleNvidiaSkipNextUpdate))
 	m.Handle("GET /api/v1/devices/gpu-task", s.admin(s.handleGPUTask))
 	m.Handle("POST /api/v1/devices/vgpu-driver/upload", s.admin(s.handleVGPUUpload))
 	m.Handle("POST /api/v1/devices/vgpu-driver/install", s.admin(s.handleVGPUInstall))
@@ -203,13 +215,67 @@ func (s *Server) handleNvidiaRemove(w http.ResponseWriter, r *http.Request, u *a
 	s.submit(w, r, u, JobKindNvidiaRemove, "Remove the NVIDIA driver", map[string]any{}, "devices.nvidia.remove", "", nil)
 }
 
-// VGPUUpload is a saved vGPU driver file waiting to be installed.
+// NvidiaSkipRequest chooses (or withdraws) installing the next update
+// without the NVIDIA drivers.
+type NvidiaSkipRequest struct {
+	Skip bool `json:"skip"`
+	// Confirm must be true to skip: the update then leaves the drivers out.
+	Confirm bool `json:"confirm"`
+}
+
+func (s *Server) handleNvidiaSkipNextUpdate(w http.ResponseWriter, r *http.Request, u *auth.User) {
+	var req NvidiaSkipRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Skip && !req.Confirm {
+		writeError(w, http.StatusBadRequest, "invalid", "confirm must be true: the next update is installed without the NVIDIA drivers, which then need installing again")
+		return
+	}
+	title, target := "Install the next update with the NVIDIA drivers", "with drivers"
+	if req.Skip {
+		title, target = "Install the next update without the NVIDIA drivers", "without drivers"
+	}
+	s.submit(w, r, u, JobKindNvidiaSkip, title, priv.SkipNextUpdateArgs{Skip: req.Skip, By: u.Username}, "devices.nvidia.skip-next-update", target, nil)
+}
+
+// VGPUUpload is a saved vGPU driver file waiting to be installed. hardyd
+// computed the SHA-256 while receiving the file and keeps it with the
+// upload ID: an install names only the ID, never a checksum.
 type VGPUUpload struct {
 	Upload   string `json:"upload"` // upload-<hex>.run
 	SHA256   string `json:"sha256"`
 	Size     int64  `json:"size"`
 	FileName string `json:"fileName"`
 	Version  string `json:"version"`
+	// Known: the checksum is in HardyOS's list of checked NVIDIA
+	// installers. Warning explains when it isn't.
+	Known   bool   `json:"known"`
+	Warning string `json:"warning,omitempty"`
+	By      string `json:"by"`
+}
+
+// uploadMeta is the record kept next to an upload (upload-<hex>.json).
+func (s *Server) uploadMeta(id string) string {
+	return filepath.Join(s.gpuUploadDir(), strings.TrimSuffix(id, ".run")+".json")
+}
+
+func (s *Server) loadUpload(id string) (*VGPUUpload, error) {
+	if !uploadIDRE.MatchString(id) {
+		return nil, errors.New("invalid upload id")
+	}
+	b, err := os.ReadFile(s.uploadMeta(id))
+	if err != nil {
+		return nil, err
+	}
+	var up VGPUUpload
+	if err := json.Unmarshal(b, &up); err != nil || up.Upload != id || !sha256HexRE.MatchString(up.SHA256) {
+		return nil, errors.New("the upload's record is damaged")
+	}
+	if _, err := os.Stat(filepath.Join(s.gpuUploadDir(), id)); err != nil {
+		return nil, err
+	}
+	return &up, nil
 }
 
 func (s *Server) gpuUploadDir() string {
@@ -258,16 +324,28 @@ func (s *Server) handleVGPUUpload(w http.ResponseWriter, r *http.Request, u *aut
 		writeError(w, http.StatusBadRequest, "upload_failed", "the upload didn't finish: "+err.Error())
 		return
 	}
-	res := VGPUUpload{Upload: id, SHA256: hex.EncodeToString(h.Sum(nil)), Size: n, FileName: name, Version: version}
-	s.record(r, u, "devices.vgpu.upload", name, audit.Success, "sha256 "+res.SHA256)
+	res := VGPUUpload{Upload: id, SHA256: hex.EncodeToString(h.Sum(nil)), Size: n, FileName: name, Version: version, By: u.Username}
+	if _, ok := gpu.KnownVGPU(res.SHA256); ok {
+		res.Known = true
+	} else {
+		res.Warning = gpu.UnknownVGPUWarning
+	}
+	meta, _ := json.Marshal(res)
+	if err := os.WriteFile(s.uploadMeta(id), meta, 0o640); err != nil {
+		_ = os.Remove(path)
+		internalError(s, w, err)
+		return
+	}
+	s.record(r, u, "devices.vgpu.upload", name, audit.Success, fmt.Sprintf("sha256 %s known %v", res.SHA256, res.Known))
 	writeJSON(w, http.StatusOK, res)
 }
 
-// VGPUInstallRequest installs an uploaded vGPU host driver.
+// VGPUInstallRequest installs an uploaded vGPU host driver. The file's
+// name and checksum come from hardyd's own record of the upload.
 type VGPUInstallRequest struct {
-	Upload   string `json:"upload"`
-	SHA256   string `json:"sha256"`
-	FileName string `json:"fileName"`
+	Upload string `json:"upload"`
+	// ConfirmVersion: the admin types the driver's version to confirm.
+	ConfirmVersion string `json:"confirmVersion"`
 	// Accept: the admin has NVIDIA's vGPU licence and agrees to the
 	// licence in NVIDIA's installer.
 	Accept bool `json:"accept"`
@@ -284,17 +362,24 @@ func (s *Server) handleVGPUInstall(w http.ResponseWriter, r *http.Request, u *au
 		writeError(w, http.StatusBadRequest, "invalid", "accept must be true: NVIDIA's vGPU software needs your own licence from NVIDIA")
 		return
 	}
-	if !uploadIDRE.MatchString(req.Upload) || !sha256HexRE.MatchString(req.SHA256) {
-		writeError(w, http.StatusBadRequest, "invalid", "upload and sha256 come from the upload")
+	if !uploadIDRE.MatchString(req.Upload) {
+		writeError(w, http.StatusBadRequest, "invalid", "upload is the ID the upload returned")
 		return
 	}
-	if _, err := os.Stat(filepath.Join(s.gpuUploadDir(), req.Upload)); err != nil {
+	up, err := s.loadUpload(req.Upload)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid", "that upload isn't there any more; upload the file again")
 		return
 	}
-	args := gpu.VGPUArgs{Upload: gpu.UploadDir + "/" + req.Upload, SHA256: req.SHA256, FileName: req.FileName, By: u.Username, ReplaceDriver: req.ReplaceDriver}
-	s.record(r, u, "devices.vgpu.licence.accept", req.FileName, audit.Success, "sha256 "+req.SHA256)
-	s.submit(w, r, u, JobKindVGPUInstall, "Install NVIDIA's vGPU host driver", args, "devices.vgpu.install", fmt.Sprintf("%s sha256 %s", req.FileName, req.SHA256), nil)
+	if req.ConfirmVersion != up.Version {
+		writeError(w, http.StatusBadRequest, "invalid", fmt.Sprintf("type the driver's version (%s) to confirm", up.Version))
+		return
+	}
+	args := gpu.VGPUArgs{Upload: gpu.UploadDir + "/" + req.Upload, SHA256: up.SHA256, FileName: up.FileName, ConfirmVersion: req.ConfirmVersion, By: u.Username, ReplaceDriver: req.ReplaceDriver}
+	_ = os.Remove(s.uploadMeta(req.Upload))
+	detail := fmt.Sprintf("%s version %s sha256 %s known %v", up.FileName, up.Version, up.SHA256, up.Known)
+	s.record(r, u, "devices.vgpu.licence.accept", up.FileName, audit.Success, detail)
+	s.submit(w, r, u, JobKindVGPUInstall, "Install NVIDIA's vGPU host driver", args, "devices.vgpu.install", detail, nil)
 }
 
 func (s *Server) handleVGPURemove(w http.ResponseWriter, r *http.Request, u *auth.User) {

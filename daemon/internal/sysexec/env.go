@@ -49,6 +49,7 @@ func OutputEnv(ctx context.Context, r Runner, env []string, stdin []byte, name s
 func (Exec) RunEnv(ctx context.Context, env []string, stdin []byte, name string, args ...string) (Result, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = append([]string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C"}, env...)
+	own(cmd)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if stdin != nil {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 )
@@ -77,27 +78,55 @@ func installedLivePackages(ctx context.Context, r sysexec.Runner, target string)
 	return out
 }
 
+// systemDirs are mounted inside a target for chroot work. /dev is a
+// recursive bind of the server's own /dev (with /dev/pts, /dev/shm,
+// /dev/hugepages, /dev/mqueue under it); the others are fresh mounts.
+var systemDirs = [][]string{
+	{"--rbind", "/dev", "dev"},
+	{"-t", "proc", "proc", "proc"},
+	{"-t", "sysfs", "sysfs", "sys"},
+	{"-t", "tmpfs", "tmpfs", "run"},
+}
+
+// bindSystemDirs mounts /dev, /proc, /sys and /run inside target.
+//
+// The server's mounts are shared (systemd makes / shared), so a bind of
+// /dev joins /dev's peer group: unmounting target/dev/pts would unmount
+// the server's own /dev/pts, /dev/shm and the rest too. Every mount is made
+// a recursive slave right after it's made, so nothing done inside the
+// target ever propagates back to the server, while the server's own
+// changes still show inside.
 func bindSystemDirs(ctx context.Context, r sysexec.Runner, root, target string) error {
-	mounts := [][]string{
-		{"--rbind", "/dev", filepath.Join(target, "dev")},
-		{"-t", "proc", "proc", filepath.Join(target, "proc")},
-		{"-t", "sysfs", "sysfs", filepath.Join(target, "sys")},
-		{"-t", "tmpfs", "tmpfs", filepath.Join(target, "run")},
-	}
-	for _, m := range mounts {
-		if err := os.MkdirAll(filepath.Join(root, m[len(m)-1]), 0o755); err != nil {
+	for _, m := range systemDirs {
+		dst := filepath.Join(target, m[len(m)-1])
+		args := append(append([]string{}, m[:len(m)-1]...), dst)
+		if err := os.MkdirAll(filepath.Join(root, dst), 0o755); err != nil {
 			return err
 		}
-		if _, err := sysexec.Output(ctx, r, "mount", m...); err != nil {
-			unbindSystemDirs(ctx, r, target)
-			var ce *sysexec.CommandError
-			if errors.As(err, &ce) {
-				return errors.New(ce.Error())
+		err := mountCmd(ctx, r, args...)
+		if err == nil {
+			if err = mountCmd(ctx, r, "--make-rslave", dst); err != nil {
+				// Mounted but not cut off from the server: take it down at
+				// once, without -R (a plain umount of the top fails rather
+				// than reaching into shared submounts).
+				_, _ = r.Run(context.WithoutCancel(ctx), nil, "umount", dst)
 			}
+		}
+		if err != nil {
+			unbindSystemDirs(context.WithoutCancel(ctx), r, target)
 			return err
 		}
 	}
 	return nil
+}
+
+func mountCmd(ctx context.Context, r sysexec.Runner, args ...string) error {
+	_, err := sysexec.Output(ctx, r, "mount", args...)
+	var ce *sysexec.CommandError
+	if errors.As(err, &ce) {
+		return errors.New(ce.Error())
+	}
+	return err
 }
 
 // WithSystemDirs runs fn with /dev, /proc, /sys and /run mounted inside
@@ -111,8 +140,24 @@ func WithSystemDirs(ctx context.Context, r sysexec.Runner, root, target string, 
 	return fn()
 }
 
+// unbindSystemDirs unmounts what bindSystemDirs mounted, recursively and
+// never lazily: a lazy unmount detaches whatever is still busy and can't
+// be checked. Something still busy (a process left in the chroot) is
+// retried briefly and then left mounted; that only keeps the new system's
+// directory busy, never touches the server's own /dev.
 func unbindSystemDirs(ctx context.Context, r sysexec.Runner, target string) {
 	for _, m := range []string{"run", "sys", "proc", "dev"} {
-		_, _ = r.Run(ctx, nil, "umount", "-R", "-l", filepath.Join(target, m))
+		dir := filepath.Join(target, m)
+		for attempt := 0; attempt < 3; attempt++ {
+			res, err := r.Run(ctx, nil, "umount", "-R", dir)
+			if err == nil && (res.ExitCode == 0 || !strings.Contains(string(res.Stderr), "busy")) {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Duration(attempt+1) * 500 * time.Millisecond):
+			}
+		}
 	}
 }

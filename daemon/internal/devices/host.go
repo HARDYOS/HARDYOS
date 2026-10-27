@@ -2,6 +2,8 @@ package devices
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/boot"
+	"github.com/hardyos/hardyos/daemon/internal/rootfile"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 )
 
@@ -38,8 +41,15 @@ type Host struct {
 	Log         *slog.Logger
 	// Arch overrides runtime.GOARCH (tests).
 	Arch string
+	// SysfsTimeout bounds one sysfs control write (default 30 seconds).
+	// An unbind can hang in a driver; the device is then reported stuck
+	// and left alone while the write is still pending.
+	SysfsTimeout time.Duration
 
 	mu sync.Mutex
+
+	pendMu  sync.Mutex
+	pending map[string]string // device -> the sysfs write still hanging
 }
 
 var _ Manager = (*Host)(nil)
@@ -48,7 +58,17 @@ var _ Reconciler = (*Host)(nil)
 // Defaults.
 const (
 	DefaultStateDir = "/run/hardyos/devices"
-	DefaultRomDir   = "/var/lib/hardyos/vm-roms"
+	// DefaultRomDir is the GPU ROM library: in root's own directory on the
+	// shared state dataset (root's, 0755), so hardyd can't put a file there
+	// or swap one.
+	DefaultRomDir = rootfile.RootStateDir + "/vm-roms"
+	// LegacyRomDir is where early builds looked (hardyd's directory).
+	LegacyRomDir = "/var/lib/hardyos/vm-roms"
+	// RomRunDir holds the copy of a ROM a running VM is given (root's,
+	// 0755, readable by QEMU): checked once, then never changed under it.
+	RomRunDir = "/run/hardyos-roms"
+	// MaxROMBytes bounds a ROM file (real ones are well under 1 MiB).
+	MaxROMBytes = 8 << 20
 )
 
 func (h *Host) path(p string) string { return filepath.Join(h.Root, p) }
@@ -83,11 +103,15 @@ func (h *Host) kernel() Kernel {
 
 func (h *Host) bootEnv() boot.Env { return boot.Env{Runner: h.Runner, Root: h.Root} }
 
+// running lists every active domain: running, paused, suspended (pmsuspended),
+// shutting down, blocked. Any of them may still use its devices. An error
+// means "can't tell", and callers then treat every VM as possibly running.
 func (h *Host) running(ctx context.Context) ([]string, error) {
 	if h.Running != nil {
 		return h.Running(ctx)
 	}
-	out, err := sysexec.Output(ctx, h.Runner, "virsh", "-c", "qemu:///system", "list", "--name", "--state-running")
+	// Without a state filter virsh lists all active domains (not shut off).
+	out, err := sysexec.Output(ctx, h.Runner, "virsh", "-c", "qemu:///system", "list", "--name")
 	if err != nil {
 		return nil, err
 	}
@@ -98,6 +122,80 @@ func (h *Host) running(ctx context.Context) ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// mightRun reports whether vm may be active. Only a successful list that
+// doesn't name it says no; a failure is asked again a few times (libvirt
+// restarting), then counts as "it may be running".
+func (h *Host) mightRun(ctx context.Context, vm string, tries int) (bool, error) {
+	var err error
+	for i := 0; i < tries; i++ {
+		var names []string
+		if names, err = h.running(ctx); err == nil {
+			return contains(names, vm), nil
+		}
+		if i+1 < tries {
+			select {
+			case <-ctx.Done():
+				return true, err
+			case <-time.After(time.Second):
+			}
+		}
+	}
+	return true, err
+}
+
+func (h *Host) sysfsTimeout() time.Duration {
+	if h.SysfsTimeout > 0 {
+		return h.SysfsTimeout
+	}
+	return 30 * time.Second
+}
+
+// ErrSysfsHung means a sysfs write didn't return in time (a driver hanging
+// in unbind or reset). The device is left alone until the write returns.
+var ErrSysfsHung = errors.New("the kernel didn't finish")
+
+// write is Kernel.WriteSysfs with a deadline. dev names the device the
+// write is about; while an earlier write for it still hangs, nothing else
+// is written for it.
+func (h *Host) write(dev, path, value string) error {
+	h.pendMu.Lock()
+	if p, busy := h.pending[dev]; busy {
+		h.pendMu.Unlock()
+		return fmt.Errorf("%s: an earlier change (%s) is still hanging in the kernel; restart the server to get it back", dev, p)
+	}
+	if h.pending == nil {
+		h.pending = map[string]string{}
+	}
+	h.pending[dev] = path
+	h.pendMu.Unlock()
+	done := make(chan error, 1)
+	k := h.kernel()
+	go func() {
+		err := k.WriteSysfs(path, value)
+		h.pendMu.Lock()
+		delete(h.pending, dev)
+		h.pendMu.Unlock()
+		done <- err
+	}()
+	t := time.NewTimer(h.sysfsTimeout())
+	defer t.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-t.C:
+		h.log().Error("sysfs write hangs", "device", dev, "path", path, "after", h.sysfsTimeout())
+		return fmt.Errorf("%s: writing %s: %w within %s", dev, path, ErrSysfsHung, h.sysfsTimeout())
+	}
+}
+
+// hanging reports whether a write for dev is still pending.
+func (h *Host) hanging(dev string) bool {
+	h.pendMu.Lock()
+	defer h.pendMu.Unlock()
+	_, ok := h.pending[dev]
+	return ok
 }
 
 // Kernel writes sysfs control files (driver_override, unbind, bind,
@@ -194,3 +292,76 @@ func slotOf(addr string) string {
 func isNotExist(err error) bool { return errors.Is(err, os.ErrNotExist) }
 
 func now() time.Time { return time.Now().UTC() }
+
+// readROM reads a ROM file from the library: a regular file of root's
+// (when enforced) in root's directory, never through a link, at most
+// MaxROMBytes.
+func (h *Host) readROM(name string) ([]byte, error) {
+	if !romFileRE.MatchString(name) {
+		return nil, fmt.Errorf("invalid ROM file name %q", name)
+	}
+	b, err := rootfile.ReadFileInRootDir(h.path(filepath.Join(h.romDir(), name)))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) == 0 || len(b) > MaxROMBytes {
+		return nil, fmt.Errorf("the ROM file %s is empty or larger than %d MB", name, MaxROMBytes>>20)
+	}
+	return b, nil
+}
+
+// stageROM copies a checked ROM to RomRunDir and returns the path the VM
+// gets.
+func (h *Host) stageROM(name string) (string, error) {
+	b, err := h.readROM(name)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(b)
+	p := filepath.Join(RomRunDir, hex.EncodeToString(sum[:16])+filepath.Ext(name))
+	if err := rootfile.WriteInRootDir(h.path(p), b, 0o644, 0o755); err != nil {
+		return "", err
+	}
+	return p, nil
+}
+
+// MigrateRoms moves ROM files root owns from the old library in hardyd's
+// directory into DefaultRomDir under root (a path prefix, "/" on a
+// server). Files root didn't put there are left where they are, unused.
+func MigrateRoms(root string) error {
+	old := filepath.Join(root, LegacyRomDir)
+	entries, err := os.ReadDir(old)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := rootfile.EnsureRootDir(filepath.Join(root, DefaultRomDir), 0o755); err != nil {
+		return err
+	}
+	var skipped []string
+	for _, e := range entries {
+		if !romFileRE.MatchString(e.Name()) {
+			continue
+		}
+		src := filepath.Join(old, e.Name())
+		dst := filepath.Join(root, DefaultRomDir, e.Name())
+		b, err := rootfile.ReadFile(src)
+		if err != nil || len(b) > MaxROMBytes {
+			skipped = append(skipped, e.Name())
+			continue
+		}
+		if _, err := os.Lstat(dst); err == nil {
+			continue
+		}
+		if err := rootfile.WriteInRootDir(dst, b, 0o644, 0o755); err != nil {
+			return err
+		}
+		_ = os.Remove(src)
+	}
+	if len(skipped) > 0 {
+		return fmt.Errorf("ROM files not moved (not root's, or too large): %s; copy them into %s as root", strings.Join(skipped, ", "), DefaultRomDir)
+	}
+	return nil
+}

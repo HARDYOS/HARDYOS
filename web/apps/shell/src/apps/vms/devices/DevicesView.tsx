@@ -4,7 +4,7 @@ import { type ChangeEvent, useState } from "react";
 import { api, errorMessage, unwrap } from "../../../api";
 import { dateTime } from "../../../format";
 import { CheckIcon, CpuIcon, RestartIcon, TrashIcon, UploadIcon } from "../../../icons";
-import { Alert, Badge, Button, Card, EmptyState, ErrorBox, Loading, PageHeader, Progress } from "../../../ui";
+import { Alert, Badge, Button, Card, EmptyState, ErrorBox, Field, Loading, PageHeader, Progress, TextInput } from "../../../ui";
 import { ConfirmDialog, Dialog } from "../../../ui/Dialog";
 import { RestartOverlay } from "../../../ui/RestartOverlay";
 import { JobProgress } from "../../shared";
@@ -256,6 +256,11 @@ export function NvidiaSetup({ onRestart, onChanged }: { onRestart: () => void; o
   const lastFailed = !job && task && task.state === "failed" && task.kind.startsWith("nvidia");
   return (
     <Card title="NVIDIA driver for Docker apps" actions={<NvidiaBadge s={s} />}>
+      {s.reinstallNeeded && (
+        <Alert tone="warn" title="Install the NVIDIA driver again">
+          {s.reinstallNeeded.reason}
+        </Alert>
+      )}
       {s.installed ? (
         <>
           <p className="small" style={{ margin: 0 }}>
@@ -278,6 +283,7 @@ export function NvidiaSetup({ onRestart, onChanged }: { onRestart: () => void; o
               <TrashIcon size={14} /> Remove the driver
             </Button>
           </div>
+          <SkipNextUpdate s={s} onStarted={setJob} />
         </>
       ) : s.vgpu?.installed ? (
         <p className="small muted" style={{ margin: 0 }}>
@@ -327,6 +333,51 @@ export function NvidiaSetup({ onRestart, onChanged }: { onRestart: () => void; o
         </ConfirmDialog>
       )}
     </Card>
+  );
+}
+
+/**
+ * "Update without the NVIDIA driver this time": for when a driver can't be
+ * built for a new version. Confirmed, audited, used up by the next update.
+ */
+export function SkipNextUpdate({ s, onStarted }: { s: NvidiaStatus; onStarted: (job: string) => void }) {
+  const [asking, setAsking] = useState(false);
+  const set = async (skip: boolean) => {
+    const r = await unwrap(api.POST("/devices/nvidia/skip-next-update", { body: { skip, confirm: skip } }));
+    onStarted((r as Accepted).job.id);
+  };
+  if (s.skipNextUpdate) {
+    return (
+      <Alert
+        tone="warn"
+        title="The next update leaves the NVIDIA driver out"
+        action={
+          <Button variant="ghost" onClick={() => void set(false)}>
+            Keep the driver
+          </Button>
+        }
+      >
+        Chosen by {s.skipNextUpdate.by} on {dateTime(s.skipNextUpdate.at)}. After that update, install the driver again here.
+      </Alert>
+    );
+  }
+  return (
+    <>
+      <Button variant="ghost" onClick={() => setAsking(true)}>
+        Update without the NVIDIA driver this time
+      </Button>
+      {asking && (
+        <ConfirmDialog
+          title="Install the next update without the NVIDIA driver?"
+          confirmLabel="Update without it"
+          onClose={() => setAsking(false)}
+          onConfirm={() => set(true)}
+        >
+          Use this when an update stops because the NVIDIA driver can't be built for the new version. The update then goes ahead without the driver: Docker apps
+          can't use NVIDIA cards (and vGPU slices don't work) until you install the driver again on the new version. Only the next update is affected.
+        </ConfirmDialog>
+      )}
+    </>
   );
 }
 
@@ -406,14 +457,16 @@ export function VGPUDriverCard({ onChanged }: { onChanged: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [accept, setAccept] = useState(false);
   const [replace, setReplace] = useState(false);
+  const [typed, setTyped] = useState("");
   const [job, setJob] = useState<string | null>(null);
   const [removing, setRemoving] = useState(false);
   const install = useMutation({
     mutationFn: () =>
-      unwrap(api.POST("/devices/vgpu-driver/install", { body: { upload: up!.upload, sha256: up!.sha256, fileName: up!.fileName, accept: true, replaceDriver: replace } })),
+      unwrap(api.POST("/devices/vgpu-driver/install", { body: { upload: up!.upload, confirmVersion: typed.trim(), accept: true, replaceDriver: replace } })),
     onSuccess: (r) => {
       setJob((r as Accepted).job.id);
       setUp(null);
+      setTyped("");
     },
   });
   if (st.isPending || st.isError) return null;
@@ -434,6 +487,11 @@ export function VGPUDriverCard({ onChanged }: { onChanged: () => void }) {
   };
   return (
     <Card title="vGPU slices with NVIDIA's vGPU software" actions={s.vgpu?.installed ? <Badge tone="good">Installed</Badge> : undefined}>
+      {s.reinstallNeeded?.vgpu && !s.vgpu?.installed && (
+        <Alert tone="warn" title="Install the vGPU host driver again">
+          {s.reinstallNeeded.reason}
+        </Alert>
+      )}
       {s.vgpu?.installed ? (
         <>
           <p className="small" style={{ margin: 0 }}>
@@ -463,9 +521,19 @@ export function VGPUDriverCard({ onChanged }: { onChanged: () => void }) {
                 <CheckIcon size={14} /> {up.fileName} (version {up.version})
                 <br />
                 <span className="muted">
-                  SHA-256 <span className="mono">{up.sha256}</span>: compare it with NVIDIA's checksum.
+                  SHA-256 <span className="mono">{up.sha256}</span> (worked out by the server): compare it with NVIDIA's checksum.
                 </span>
               </p>
+              {up.known ? (
+                <Alert tone="good">This checksum is in HardyOS's list of NVIDIA vGPU drivers checked against NVIDIA's.</Alert>
+              ) : (
+                <Alert tone="warn" title="Not a driver HardyOS knows">
+                  {up.warning}
+                </Alert>
+              )}
+              <Field label={`Type the driver's version (${up.version}) to confirm`}>
+                {(id) => <TextInput id={id} className="input mono" value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" spellCheck={false} />}
+              </Field>
               <label className="row" style={{ flexWrap: "nowrap" }}>
                 <input type="checkbox" checked={accept} onChange={(e) => setAccept(e.target.checked)} />
                 <span className="small">I have a licence for NVIDIA vGPU software and agree to the licence in NVIDIA's installer.</span>
@@ -477,7 +545,7 @@ export function VGPUDriverCard({ onChanged }: { onChanged: () => void }) {
                 </label>
               )}
               <div className="row">
-                <Button variant="primary" disabled={!accept || (s.installed && !replace)} busy={install.isPending} onClick={() => install.mutate()}>
+                <Button variant="primary" disabled={!accept || (s.installed && !replace) || typed.trim() !== up.version} busy={install.isPending} onClick={() => install.mutate()}>
                   Install
                 </Button>
                 <Button variant="ghost" onClick={() => setUp(null)}>

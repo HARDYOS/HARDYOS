@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,10 +22,22 @@ import (
 
 // NVIDIA's vGPU host driver ("vgpu-kvm") comes from the admin, who gets it
 // from NVIDIA with a vGPU licence. HardyOS never downloads, ships, patches
-// or unlocks it: hardyd saves the uploaded file, hardyd-priv copies it into
-// root's directory checking the SHA-256 hardyd computed while receiving it,
-// checks it's NVIDIA's host driver installer for this architecture and a
-// supported branch, and runs NVIDIA's installer with DKMS as a task.
+// or unlocks it: hardyd saves the uploaded file under an upload ID and
+// computes its SHA-256 itself while receiving it (never a checksum from
+// the browser), hardyd-priv copies it into root's directory checking that
+// SHA-256 on the copy it will run, checks it's NVIDIA's host driver
+// installer for this architecture and a supported branch, that the admin
+// typed its version to confirm and accepted NVIDIA's terms, logs who
+// installed what (the journal and an append-only install log), and runs
+// NVIDIA's installer with DKMS as a task.
+//
+// The file is root code that runs again on every update (rebuilt into
+// each new version). hardyd is treated as possibly compromised, and it is
+// what receives the upload: everything above makes a swap visible and
+// traceable, but only a check root does on its own can prove the file is
+// NVIDIA's. That root-side attestation (designed earlier: the admin
+// confirms the checksum on the server's console or with a key hardyd
+// never sees) isn't built yet; AttestVGPU is where it plugs in.
 
 // MinVGPUBranch is the oldest vGPU host driver branch accepted (vGPU 16,
 // R535); older ones don't build on HardyOS's kernel. Whether a given
@@ -34,15 +48,61 @@ var vgpuFileRE = regexp.MustCompile(`^NVIDIA-Linux-(x86_64|aarch64)-([0-9]{3})\.
 var uploadNameRE = regexp.MustCompile(`^upload-[0-9a-f]{16}\.run$`)
 var labelRE = regexp.MustCompile(`label="([^"\n]{1,200})"`)
 
+// AttestVGPU, when set, must approve a vGPU host driver file root is about
+// to install (path is root's copy, sha256 its checksum). Nil: no root-side
+// attestation (see the package comment).
+//
+// TODO(vgpu-attestation): root-side attestation of the admin's driver file,
+// so a compromised hardyd can't get its own installer run as root.
+var AttestVGPU func(ctx context.Context, path, sha256 string) error
+
+// KnownDriver is an NVIDIA vGPU host driver installer whose checksum the
+// maintainers checked against NVIDIA's published list.
+type KnownDriver struct {
+	SHA256  string `json:"sha256"`
+	File    string `json:"file"`
+	Version string `json:"version"`
+}
+
+//go:embed vgpu_known.json
+var knownJSON []byte
+
+var known = func() map[string]KnownDriver {
+	var f struct {
+		Drivers []KnownDriver `json:"drivers"`
+	}
+	out := map[string]KnownDriver{}
+	if json.Unmarshal(knownJSON, &f) == nil {
+		for _, d := range f.Drivers {
+			if sha256RE.MatchString(d.SHA256) {
+				out[d.SHA256] = d
+			}
+		}
+	}
+	return out
+}()
+
+// KnownVGPU looks a driver file's SHA-256 up in the list of checked NVIDIA
+// installers (empty unless the maintainers added some).
+func KnownVGPU(sha string) (KnownDriver, bool) {
+	d, ok := known[sha]
+	return d, ok
+}
+
+// UnknownVGPUWarning is shown when a driver file isn't in that list.
+const UnknownVGPUWarning = "HardyOS can't confirm this file is NVIDIA's: its checksum isn't in HardyOS's list of checked NVIDIA vGPU drivers. Compare the SHA-256 with the one on NVIDIA's licensing portal before installing; this file will run as root now and on every update."
+
 // VGPUArgs installs an uploaded vGPU host driver.
 type VGPUArgs struct {
 	// Upload is the file hardyd saved (in UploadDir).
 	Upload string `json:"upload"`
-	// SHA256 is what hardyd computed while receiving it.
+	// SHA256 is what hardyd computed while receiving it (server side).
 	SHA256 string `json:"sha256"`
 	// FileName is NVIDIA's original name for it.
 	FileName string `json:"fileName"`
-	By       string `json:"by"`
+	// ConfirmVersion is the driver version the admin typed to confirm.
+	ConfirmVersion string `json:"confirmVersion"`
+	By             string `json:"by"`
 	// ReplaceDriver confirms removing Debian's NVIDIA driver first (the
 	// two can't be installed together).
 	ReplaceDriver bool `json:"replaceDriver"`
@@ -84,6 +144,9 @@ func (m *Manager) InstallVGPU(a VGPUArgs) (*Task, error) {
 	if !sha256RE.MatchString(a.SHA256) {
 		return nil, errors.New("the file's checksum is missing")
 	}
+	if a.ConfirmVersion != version {
+		return nil, fmt.Errorf("type the driver's version (%s) to confirm", version)
+	}
 	if a.By == "" || len(a.By) > 200 {
 		return nil, errors.New("who installs the driver is missing")
 	}
@@ -96,8 +159,23 @@ func (m *Manager) InstallVGPU(a VGPUArgs) (*Task, error) {
 	if m.packageInstalled(context.Background(), "nvidia-kernel-dkms") && !a.ReplaceDriver {
 		return nil, errors.New("Debian's NVIDIA driver is installed. The vGPU host driver replaces it (Docker apps then can't use NVIDIA cards); confirm to go ahead")
 	}
-	return m.start(TaskVGPUInstall, func(ctx context.Context, c *tc) (any, error) {
+	return m.start(TaskVGPUInstall, func(ctx context.Context, c *tc) (res any, err error) {
+		_, isKnown := KnownVGPU(a.SHA256)
+		// Who installs what, in the journal before anything runs, and in
+		// root's install log (appended to, never rewritten).
+		m.log().Warn("installing an NVIDIA vGPU host driver as root", "by", a.By, "file", a.FileName, "sha256", a.SHA256, "version", version, "knownChecksum", isKnown)
+		m.appendInstallLog(installLogEntry{Event: "start", By: a.By, File: a.FileName, SHA256: a.SHA256, Version: version, Known: isKnown})
+		defer func() {
+			e := installLogEntry{Event: "finished", By: a.By, File: a.FileName, SHA256: a.SHA256, Version: version, Known: isKnown}
+			if err != nil {
+				e.Event, e.Error = "failed", err.Error()
+			}
+			m.appendInstallLog(e)
+		}()
 		c.step(5, "Checking the driver file")
+		if !isKnown {
+			c.logf("Warning: %s", UnknownVGPUWarning)
+		}
 		d, err := m.ensureDir("vgpu")
 		if err != nil {
 			return nil, err
@@ -111,7 +189,13 @@ func (m *Manager) InstallVGPU(a VGPUArgs) (*Task, error) {
 			_ = os.Remove(dst)
 			return nil, err
 		}
-		c.logf("%s: SHA-256 %s, version %s", a.FileName, a.SHA256, version)
+		if AttestVGPU != nil {
+			if err := AttestVGPU(ctx, dst, a.SHA256); err != nil {
+				_ = os.Remove(dst)
+				return nil, fmt.Errorf("the driver file wasn't approved: %w", err)
+			}
+		}
+		c.logf("%s: SHA-256 %s, version %s, installed by %s", a.FileName, a.SHA256, version, a.By)
 		kernel := readTrim(m.path("/proc/sys/kernel/osrelease"))
 		if !exists(m.path("/lib/modules/"+kernel+"/build")) && kernel != "" {
 			return nil, fmt.Errorf("the kernel headers for %s are missing, so the driver can't be built", kernel)
@@ -151,6 +235,9 @@ func (m *Manager) InstallVGPU(a VGPUArgs) (*Task, error) {
 			return nil, err
 		}
 		rec.VGPU = &VGPUDriver{File: a.FileName, SHA256: a.SHA256, Version: version, By: a.By, At: time.Now().UTC(), Installed: true}
+		if rec.ReinstallNeeded != nil && !(rec.ReinstallNeeded.Driver && (rec.Driver == nil || !rec.Driver.Installed)) {
+			rec.ReinstallNeeded = nil
+		}
 		if err := m.save(rec); err != nil {
 			return nil, err
 		}
@@ -190,6 +277,41 @@ func (m *Manager) RemoveVGPU() (*Task, error) {
 		}
 		return map[string]bool{"restartNeeded": true}, nil
 	})
+}
+
+// InstallLog is root's append-only record of vGPU driver installs (one
+// JSON object per line) in Dir.
+const InstallLog = "vgpu-install.log"
+
+type installLogEntry struct {
+	At      time.Time `json:"at"`
+	Event   string    `json:"event"` // start, finished, failed
+	By      string    `json:"by"`
+	File    string    `json:"file"`
+	SHA256  string    `json:"sha256"`
+	Version string    `json:"version"`
+	Known   bool      `json:"knownChecksum"`
+	Error   string    `json:"error,omitempty"`
+}
+
+// appendInstallLog adds one line to the install log. The file is only
+// ever opened for appending (O_APPEND, never through a link).
+func (m *Manager) appendInstallLog(e installLogEntry) {
+	d, err := m.ensureDir("")
+	if err != nil {
+		m.log().Warn("vGPU install log", "err", err)
+		return
+	}
+	e.At = time.Now().UTC()
+	b, _ := json.Marshal(e)
+	f, err := os.OpenFile(filepath.Join(d, InstallLog), os.O_WRONLY|os.O_APPEND|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		m.log().Warn("vGPU install log", "err", err)
+		return
+	}
+	_, _ = f.Write(append(b, '\n'))
+	_ = f.Sync()
+	_ = f.Close()
 }
 
 // copyVerified copies src (never through a symlink, a regular file at most
