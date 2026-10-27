@@ -1,6 +1,6 @@
 package api
 
-// Security review of remote access (decisions 140-152): what the app
+// Security review of remote access (decisions 144-156): what the app
 // gateway serves on sso.<base>, per-service secrets, forwarded addresses,
 // the desktop cookie, public sign-in, gateway sessions and bounds.
 

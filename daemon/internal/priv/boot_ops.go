@@ -69,9 +69,9 @@ type bootOps struct {
 func RegisterBootRepair(s *Server, env StorageEnv, root, configPath string) {
 	b := &bootOps{st: &storageOps{env: env}, root: root, configPath: configPath, settle: 30 * time.Second, sync: boot.Sync}
 	s.Handle(OpBootDisks, func(ctx context.Context, _ json.RawMessage) (any, error) { return b.disks(ctx) })
-	s.Handle(OpBootReplace, typed(b.replace))
-	s.Handle(OpBootAttach, typed(b.attach))
-	s.Handle(OpBootDetach, typed(b.detach))
+	s.Handle(OpBootReplace, typed(withSystemLock("Replacing a boot disk", b.replace)))
+	s.Handle(OpBootAttach, typed(withSystemLock("Adding a boot disk", b.attach)))
+	s.Handle(OpBootDetach, typed(withSystemLock("Removing a boot disk", b.detach)))
 }
 
 func (b *bootOps) env() boot.Env {

@@ -46,7 +46,7 @@ const (
 	cookieSession = "hardyos_sso"
 	// desktopCookie is the desktop's session cookie over HTTPS
 	// (api.SessionCookie); desktopCookieLegacy its name over plain HTTP and
-	// before decision 142 (api.LegacySessionCookie).
+	// before decision 155 (api.LegacySessionCookie).
 	desktopCookie       = "__Host-hardyos_session"
 	desktopCookieLegacy = "hardyos_session"
 )

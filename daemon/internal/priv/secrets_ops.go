@@ -10,10 +10,10 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"regexp"
-	"syscall"
+
+	"github.com/hardyos/hardyos/daemon/internal/rootfile"
 )
 
 // OpSecretsKey hands hardyd a key for encrypting one kind of its own data
@@ -65,27 +65,21 @@ func DeriveSecretsKey(master []byte, purpose string) []byte {
 	return m.Sum(nil)
 }
 
-// loadMasterKey reads the master key, creating it on first use. It's a
-// regular file of exactly 32 bytes, opened without following links.
+// loadMasterKey reads the master key, creating it on first use. The keys
+// folder sits in hardyd's directory, so it goes through rootfile like the
+// pool keys (decision 131): the folder must be root's own (a planted one is
+// moved aside), and the key is root's regular file of exactly 32 bytes with
+// one name, read and created without following links.
 func loadMasterKey(dir string) ([]byte, error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := rootfile.EnsureRootDir(dir, 0o700); err != nil {
 		return nil, err
 	}
 	p := filepath.Join(dir, MasterKeyFile)
 	for range 2 {
-		f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+		b, err := rootfile.ReadFileInRootDir(p)
 		if err == nil {
-			defer f.Close()
-			fi, err := f.Stat()
-			if err != nil {
-				return nil, err
-			}
-			if !fi.Mode().IsRegular() || fi.Size() != 32 {
+			if len(b) != 32 {
 				return nil, fmt.Errorf("%s isn't a 32-byte key file", p)
-			}
-			b := make([]byte, 32)
-			if _, err := io.ReadFull(f, b); err != nil {
-				return nil, err
 			}
 			return b, nil
 		}
@@ -96,18 +90,11 @@ func loadMasterKey(dir string) ([]byte, error) {
 		if _, err := rand.Read(key); err != nil {
 			return nil, err
 		}
-		nf, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+		err = rootfile.CreateExclusive(p, key, 0o600, 0o700)
 		if errors.Is(err, fs.ErrExist) {
 			continue // someone else made it: read theirs
 		}
 		if err != nil {
-			return nil, err
-		}
-		_, werr := nf.Write(key)
-		serr := nf.Sync()
-		cerr := nf.Close()
-		if err := errors.Join(werr, serr, cerr); err != nil {
-			_ = os.Remove(p)
 			return nil, err
 		}
 		return key, nil

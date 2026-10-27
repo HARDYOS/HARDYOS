@@ -191,6 +191,11 @@ bootpool=$(api GET /storage/boot) || fail "boot disks"
 api GET /network > /dev/null || fail "network settings"
 # The App Store needs the docker command (docker-cli in Debian 13).
 api GET /apps | jq -e '.available == true' > /dev/null || fail "apps aren't available: the image has no docker command"
+# VMs run confined by AppArmor, with the anti-spoofing filter there (the
+# smoke VM may lack nested KVM, so "supported" itself isn't checked).
+caps=$(api GET /vms/capabilities) || fail "VM capabilities"
+jq -e '.security == "apparmor"' > /dev/null <<<"$caps" || fail "libvirt doesn't confine VMs with AppArmor: $caps"
+jq -e '.spoofingFilter == true' > /dev/null <<<"$caps" || fail "libvirt has no clean-traffic filter: $caps"
 
 # --- 3. storage and backups ---------------------------------------------------------
 

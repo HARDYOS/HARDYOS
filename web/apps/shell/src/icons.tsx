@@ -86,6 +86,14 @@ export const CpuIcon = svg(
     <path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" />
   </>,
 );
+/** A graphics card: board, fan and bracket. */
+export const GpuIcon = svg(
+  <>
+    <rect x="2" y="6" width="17" height="11" rx="2" />
+    <circle cx="9" cy="11.5" r="3" />
+    <path d="M19 9h3M19 14h3M5 17v3M14 17v3" />
+  </>,
+);
 export const DomainIcon = svg(
   <>
     <rect x="9" y="3" width="6" height="5" rx="1" />
@@ -160,3 +168,63 @@ export const GlobeIcon = svg(
   </>,
 );
 export const ShareIcon = svg(<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v3M3 7v10a2 2 0 0 0 2 2h6M15 19h6M18 16l3 3-3 3" />);
+// Virtual machines
+export const VMIcon = svg(
+  <>
+    <rect x="3" y="4" width="18" height="12" rx="2" />
+    <path d="M8 20h8M12 16v4M7 8h4M7 11h7" />
+  </>,
+);
+export const ScreenIcon = svg(
+  <>
+    <rect x="3" y="4" width="18" height="13" rx="2" />
+    <path d="M9 21h6M12 17v4" />
+  </>,
+);
+export const DiscIcon = svg(
+  <>
+    <circle cx="12" cy="12" r="9" />
+    <circle cx="12" cy="12" r="2.5" />
+  </>,
+);
+export const MemoryIcon = svg(
+  <>
+    <rect x="3" y="7" width="18" height="10" rx="1.5" />
+    <path d="M7 10v4M11 10v4M15 10v4M6 17v3M18 17v3" />
+  </>,
+);
+export const WindowsIcon = svg(<path d="M4 5.5l7-1v7H4zM13 4.2l7-1.2v8.5h-7zM4 12.5h7v7l-7-1zM13 12.5h7V21l-7-1.2z" />);
+export const PenguinIcon = svg(
+  <>
+    <path d="M12 3c-2.5 0-4 2-4 5v3c-1.5 1.5-3 4-3 6.5 0 1.5 1 2.5 3 2.5h8c2 0 3-1 3-2.5 0-2.5-1.5-5-3-6.5V8c0-3-1.5-5-4-5z" />
+    <path d="M10 8h.01M14 8h.01M11 10.5h2" />
+  </>,
+);
+export const GamepadIcon = svg(
+  <>
+    <path d="M6 8h12a4 4 0 0 1 3.9 4.9l-1 4.2a2.5 2.5 0 0 1-4.3 1L15 16H9l-1.6 2.1a2.5 2.5 0 0 1-4.3-1l-1-4.2A4 4 0 0 1 6 8z" />
+    <path d="M8 11v3M6.5 12.5h3M15 12h.01M17 13.5h.01" />
+  </>,
+);
+export const HomeIcon = svg(<path d="M3 11l9-7 9 7M5 9.5V20h5v-6h4v6h5V9.5" />);
+export const RouterIcon = svg(
+  <>
+    <rect x="3" y="13" width="18" height="7" rx="2" />
+    <path d="M7 16.5h.01M11 16.5h.01M8 13l-2-6M16 13l2-6M9 7a4 4 0 0 1 6 0" />
+  </>,
+);
+export const BoxIcon = svg(<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9zM12 12l8-4.5M12 12v9M12 12L4 7.5" />);
+export const KeyboardIcon = svg(
+  <>
+    <rect x="2" y="6" width="20" height="12" rx="2" />
+    <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10" />
+  </>,
+);
+export const ExpandIcon = svg(<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />);
+export const ClipboardIcon = svg(
+  <>
+    <rect x="6" y="4" width="12" height="17" rx="2" />
+    <path d="M9 4V3h6v1M9 9h6M9 13h6" />
+  </>,
+);
+export const DownloadIcon = svg(<path d="M12 3v12M7 10l5 5 5-5M4 19h16" />);

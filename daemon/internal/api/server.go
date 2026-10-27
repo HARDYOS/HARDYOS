@@ -98,6 +98,9 @@ type Config struct {
 	// PublicHost is the desktop's own HTTPS name (the issuer without a base
 	// domain); nil uses the hostname.
 	PublicHost func() string
+	// GPUUploadDir is where uploaded vGPU driver files are saved for
+	// hardyd-priv (default gpu.UploadDir; tests use a temp dir).
+	GPUUploadDir string
 }
 
 // Server is hardyd's HTTP handler.
@@ -119,7 +122,7 @@ type Server struct {
 	ips      *clientip.Resolver
 	oidc     *oidc.Provider
 	// pubLimiter slows down failed sign-ins from the internet (through the
-	// app gateway) in buckets of their own: decision 143.
+	// app gateway) in buckets of their own: decision 156.
 	pubLimiter *auth.DelayLimiter
 	// waits hands a job's in-memory outcome (a new client secret) back to
 	// the request that started it.
@@ -232,6 +235,8 @@ func (s *Server) routes() {
 			s.shareRoutes()
 			s.fileServiceRoutes()
 			s.snapshotRoutes()
+			s.vmRoutes()
+			s.deviceRoutes()
 		}
 		if s.cfg.Backups != nil {
 			s.backupRoutes()

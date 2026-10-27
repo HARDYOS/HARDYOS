@@ -243,6 +243,11 @@ func (m *Manager) run(ctx context.Context, name string, args ...string) error {
 // macvlan with the DC's address and default route, and the NAS's shim route
 // to it. Safe to call repeatedly.
 func (m *Manager) SetupNetwork(ctx context.Context, c *Config) error {
+	m.netMu.Lock()
+	defer m.netMu.Unlock()
+	if m.held {
+		return errors.New("the network is changing; the domain controller reconnects when it's done")
+	}
 	dcAddr, err := netip.ParsePrefix(c.Address)
 	if err != nil {
 		return fmt.Errorf("the domain controller's address %q isn't valid", c.Address)
@@ -443,8 +448,36 @@ func (m *Manager) writeResolv(c *Config) error {
 	return nil
 }
 
+// HoldNetwork takes the DC off the LAN while a bridge is added or removed
+// (decision 121): a port with a macvlan on it can't join a bridge, so the
+// DC's macvlan and the NAS's shim are deleted, and nothing puts them back
+// until ReleaseNetwork. The DC keeps running in its namespace.
+func (m *Manager) HoldNetwork(ctx context.Context) {
+	m.netMu.Lock()
+	defer m.netMu.Unlock()
+	m.held = true
+	if m.nsExists() {
+		_, _ = m.Runner.Run(ctx, nil, "ip", "-n", m.ns(), "link", "del", DCLink)
+	}
+	_, _ = m.Runner.Run(ctx, nil, "ip", "link", "del", m.shim())
+	m.lastParent = ""
+}
+
+// ReleaseNetwork lets the DC back on the LAN and attaches it at once, on
+// whatever now carries the NAS's address (the bridge, or the port again).
+func (m *Manager) ReleaseNetwork(ctx context.Context) {
+	m.netMu.Lock()
+	m.held = false
+	m.netMu.Unlock()
+	if err := m.Ensure(ctx); err != nil {
+		m.log().Warn("domain: reconnecting the domain controller after a network change", "err", err)
+	}
+}
+
 // TeardownNetwork removes the DC's namespace and the NAS's shim.
 func (m *Manager) TeardownNetwork(ctx context.Context) {
+	m.netMu.Lock()
+	defer m.netMu.Unlock()
 	if m.nsExists() {
 		// Delete the macvlan first: a namespace lingers while any process is
 		// still inside it, and its macvlan would keep holding the DC's MAC

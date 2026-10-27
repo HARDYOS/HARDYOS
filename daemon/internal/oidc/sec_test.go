@@ -1,6 +1,6 @@
 package oidc
 
-// Security review of remote access (decisions 140-152): the issuer on its
+// Security review of remote access (decisions 144-156): the issuer on its
 // own host, public sign-in, account anchors, code exchange and bounds.
 
 import (

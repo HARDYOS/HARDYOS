@@ -22,6 +22,9 @@ importers:
       '@hardy/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
+      '@novnc/novnc':
+        specifier: 1.7.0
+        version: 1.7.0
       '@tanstack/react-query':
         specifier: ^5
         version: 5.104.5(@types/react@18.3.31)(react@18.3.1)
@@ -379,6 +382,9 @@ packages:
     engines: {node: ^22.20 || ^24.12 || >=25}
     cpu: [x64]
     os: [linux]
+
+  '@novnc/novnc@1.7.0':
+    resolution: {integrity: sha512-ucEJOx4T2avIRCleodk7YobZj5O2Ga2AeLfQ69A/yjG9HHba2+PDgwSkN3FttrmG+70ZGx21sElNFouK13RzyA==}
 
   '@redocly/ajv@8.11.2':
     resolution: {integrity: sha512-io1JpnwtIcvojV7QKDUSIuMN/ikdOUd1ReEnUnMKGfDVridQZ31J0MmIuqwuRjWDZfmvr+Q0MqCcfHM2gTivOg==}
@@ -1471,6 +1477,8 @@ snapshots:
 
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true
+
+  '@novnc/novnc@1.7.0': {}
 
   '@redocly/ajv@8.11.2':
     dependencies:

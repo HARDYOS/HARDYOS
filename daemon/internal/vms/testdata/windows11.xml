@@ -1,0 +1,118 @@
+<domain type="kvm">
+  <name>win11</name>
+  <uuid>6f1c2a9e-3b4d-4c5e-8f90-a1b2c3d4e5f6</uuid>
+  <title>Windows 11</title>
+  <metadata>
+    <hardyos:vm xmlns:hardyos="https://hardyos.dev/xmlns/vm/1" id="win11" template="windows11" pool="tank"></hardyos:vm>
+  </metadata>
+  <memory unit="MiB">8192</memory>
+  <currentMemory unit="MiB">8192</currentMemory>
+  <vcpu placement="static">4</vcpu>
+  <os firmware="efi">
+    <type arch="x86_64" machine="q35">hvm</type>
+    <firmware>
+      <feature enabled="yes" name="enrolled-keys"></feature>
+      <feature enabled="yes" name="secure-boot"></feature>
+    </firmware>
+    <loader secure="yes"></loader>
+    <nvram>/mnt/tank/vms/win11/nvram.fd</nvram>
+    <bootmenu enable="yes" timeout="3000"></bootmenu>
+  </os>
+  <features>
+    <acpi></acpi>
+    <apic></apic>
+    <hyperv mode="custom">
+      <relaxed state="on"></relaxed>
+      <vapic state="on"></vapic>
+      <spinlocks state="on" retries="8191"></spinlocks>
+      <vpindex state="on"></vpindex>
+      <runtime state="on"></runtime>
+      <synic state="on"></synic>
+      <stimer state="on"></stimer>
+      <frequencies state="on"></frequencies>
+      <tlbflush state="on"></tlbflush>
+      <ipi state="on"></ipi>
+    </hyperv>
+    <vmport state="off"></vmport>
+    <smm state="on"></smm>
+  </features>
+  <cpu mode="host-passthrough" check="none" migratable="on">
+    <topology sockets="1" dies="1" cores="4" threads="1"></topology>
+  </cpu>
+  <clock offset="localtime">
+    <timer name="rtc" tickpolicy="catchup"></timer>
+    <timer name="pit" tickpolicy="delay"></timer>
+    <timer name="hpet" present="no"></timer>
+    <timer name="hypervclock" present="yes"></timer>
+  </clock>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <pm>
+    <suspend-to-mem enabled="no"></suspend-to-mem>
+    <suspend-to-disk enabled="no"></suspend-to-disk>
+  </pm>
+  <devices>
+    <controller type="scsi" index="0" model="virtio-scsi"></controller>
+    <controller type="usb" index="0" model="qemu-xhci" ports="15"></controller>
+    <disk type="block" device="disk">
+      <driver name="qemu" type="raw" cache="none" io="native" discard="unmap"></driver>
+      <source dev="/dev/zvol/tank/vms/win11/disk0"></source>
+      <target dev="sda" bus="scsi"></target>
+      <serial>win11-disk0</serial>
+      <boot order="1"></boot>
+    </disk>
+    <disk type="file" device="cdrom">
+      <driver name="qemu" type="raw"></driver>
+      <source file="/mnt/tank/shares/isos/Win11_24H2_English_x64.iso">
+        <seclabel model="dac" relabel="no"></seclabel>
+      </source>
+      <target dev="sdb" bus="sata"></target>
+      <readonly></readonly>
+      <boot order="2"></boot>
+      <alias name="ua-cd0"></alias>
+    </disk>
+    <disk type="file" device="cdrom">
+      <driver name="qemu" type="raw"></driver>
+      <source file="/mnt/tank/shares/isos/virtio-win-0.1.302.iso">
+        <seclabel model="dac" relabel="no"></seclabel>
+      </source>
+      <target dev="sdc" bus="sata"></target>
+      <readonly></readonly>
+      <alias name="ua-cd1"></alias>
+    </disk>
+    <interface type="bridge">
+      <mac address="52:54:00:12:34:56"></mac>
+      <source bridge="br0"></source>
+      <target dev="hv6f1c2a0"></target>
+      <model type="virtio"></model>
+      <filterref filter="clean-traffic"></filterref>
+    </interface>
+    <channel type="unix">
+      <target type="virtio" name="org.qemu.guest_agent.0"></target>
+    </channel>
+    <input type="tablet" bus="usb"></input>
+    <input type="keyboard" bus="usb"></input>
+    <graphics type="vnc">
+      <listen type="socket"></listen>
+    </graphics>
+    <video>
+      <model type="vga" heads="1" primary="yes"></model>
+    </video>
+    <tpm model="tpm-crb">
+      <backend type="emulator" version="2.0"></backend>
+    </tpm>
+    <serial type="pty">
+      <target port="0"></target>
+    </serial>
+    <console type="pty">
+      <target type="serial" port="0"></target>
+    </console>
+    <memballoon model="virtio" freePageReporting="on">
+      <stats period="5"></stats>
+    </memballoon>
+    <rng model="virtio">
+      <backend model="random">/dev/urandom</backend>
+    </rng>
+  </devices>
+</domain>

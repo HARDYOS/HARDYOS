@@ -48,4 +48,22 @@ func TestSecretsKey(t *testing.T) {
 	if _, err := loadMasterKey(dir2); err == nil {
 		t.Fatal("followed a link")
 	}
+	// So is a link in place of the keys folder (hardyd owns its parent):
+	// the key is never made in a folder someone else controls. As root
+	// the link is moved aside and a folder of root's made; otherwise the
+	// folder is refused.
+	elsewhere := t.TempDir()
+	dir3 := filepath.Join(t.TempDir(), "keys")
+	_ = os.Symlink(elsewhere, dir3)
+	_, err = loadMasterKey(dir3)
+	if os.Geteuid() == 0 {
+		if fi, lerr := os.Lstat(dir3); err != nil || lerr != nil || !fi.IsDir() {
+			t.Fatalf("as root: %v, keys folder %v %v", err, fi, lerr)
+		}
+	} else if err == nil {
+		t.Fatal("used a linked keys folder")
+	}
+	if _, err := os.Stat(filepath.Join(elsewhere, MasterKeyFile)); err == nil {
+		t.Fatal("made the master key through a linked keys folder")
+	}
 }

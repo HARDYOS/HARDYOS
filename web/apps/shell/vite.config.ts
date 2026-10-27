@@ -17,6 +17,11 @@ export default defineConfig({
   build: {
     outDir: "dist",
     sourcemap: true,
+    // noVNC (the VM console) uses top-level await.
+    target: "es2022",
+  },
+  optimizeDeps: {
+    esbuildOptions: { target: "es2022" },
   },
   test: {
     environment: "jsdom",

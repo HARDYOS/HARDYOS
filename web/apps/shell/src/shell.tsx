@@ -1,7 +1,7 @@
 import type { AppManifest, ShellBridge } from "@hardy/sdk";
 import type { User } from "@hardy/api-client";
 import { type ComponentType, type LazyExoticComponent, type ReactNode, createContext, lazy, useContext } from "react";
-import { ActivityIcon, BagIcon, FolderIcon, ListIcon, SlidersIcon, StorageIcon, TerminalIcon } from "./icons";
+import { ActivityIcon, BagIcon, FolderIcon, ListIcon, ScreenIcon, SlidersIcon, StorageIcon, TerminalIcon, VMIcon } from "./icons";
 
 /** Props every app window receives. */
 export interface AppProps {
@@ -63,6 +63,16 @@ export const APPS: AppDef[] = [
     defaultSize: { width: 1040, height: 700 },
   },
   {
+    id: "os.hardy.vms",
+    name: "Virtual Machines",
+    icon: "vm",
+    color: "#0B7285",
+    glyph: (s) => <VMIcon size={s} />,
+    component: lazy(() => import("./apps/vms/VirtualMachines")),
+    defaultSize: { width: 1140, height: 760 },
+    adminOnly: true,
+  },
+  {
     id: "os.hardy.terminal",
     name: "Terminal",
     icon: "terminal",
@@ -104,8 +114,24 @@ const appWindow: AppDef = {
   hidden: true,
 };
 
+/** A VM's screen opens in a window with this id prefix plus ":" and the VM's id. */
+export const VM_CONSOLE = "os.hardy.vmconsole";
+
+const vmConsole: AppDef = {
+  id: VM_CONSOLE,
+  name: "VM screen",
+  icon: "screen",
+  color: "#0B7285",
+  glyph: (s) => <ScreenIcon size={s} />,
+  component: lazy(() => import("./apps/vms/Console")),
+  defaultSize: { width: 1060, height: 700 },
+  hidden: true,
+  adminOnly: true,
+};
+
 export function appById(id: string): AppDef | undefined {
   if (id === APP_WINDOW || id.startsWith(`${APP_WINDOW}:`)) return appWindow;
+  if (id === VM_CONSOLE || id.startsWith(`${VM_CONSOLE}:`)) return vmConsole;
   return APPS.find((a) => a.id === id);
 }
 

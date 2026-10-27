@@ -59,6 +59,17 @@ type Updater struct {
 	Reboot func()
 	// ConfirmTimeout overrides the default (tests).
 	ConfirmTimeout time.Duration
+	// Hooks run on a new version's system after it's unpacked and
+	// finished, before it's added to the boot menu (see Stage).
+	Hooks []Hook
+}
+
+// Hook adds something to a new version's system. Run gets the path (under
+// Root) where the new system is mounted; it may chroot into it.
+type Hook struct {
+	// Name says what failed ("Rebuilding the NVIDIA driver").
+	Name string
+	Run  func(ctx context.Context, newRoot string) error
 }
 
 // Pending is the marker for an update waiting for, or in, its first boot.
@@ -176,11 +187,8 @@ func writeJSON(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o640); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	// hardyd's directory: never through a link it planted.
+	return rootfile.WriteAtomic(path, append(b, '\n'), 0o640)
 }
 
 // PendingUpdate returns the pending update, if any.
@@ -343,6 +351,15 @@ func (u *Updater) Stage(ctx context.Context, bundlePath string) (*StageResult, e
 	}
 	if err := install.FinishRoot(ctx, u.Runner, u.Root, mnt); err != nil {
 		return nil, err
+	}
+	// Hooks put back what this server added to its system (the NVIDIA
+	// driver, built for the new kernel). If one fails, the new version is
+	// removed and this one stays: better no update than a server whose
+	// GPUs stop working.
+	for _, h := range u.Hooks {
+		if err := h.Run(ctx, mnt); err != nil {
+			return nil, fmt.Errorf("%s: %w; HardyOS stays on the current version", h.Name, err)
+		}
 	}
 	if _, err := boot.Sync(ctx, u.env(), cfg, boot.SyncOptions{Mounted: map[string]string{ds: mnt}}); err != nil && !isPartial(err) {
 		return nil, fmt.Errorf("add the new version to the boot menu: %w", err)
