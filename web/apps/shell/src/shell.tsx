@@ -1,7 +1,7 @@
 import type { AppManifest, ShellBridge } from "@hardy/sdk";
 import type { User } from "@hardy/api-client";
 import { type ComponentType, type LazyExoticComponent, type ReactNode, createContext, lazy, useContext } from "react";
-import { ActivityIcon, BagIcon, FolderIcon, ListIcon, ScreenIcon, SlidersIcon, StorageIcon, TerminalIcon, VMIcon } from "./icons";
+import { ActivityIcon, BagIcon, FolderIcon, ListIcon, MailIcon, ScreenIcon, SlidersIcon, StorageIcon, TerminalIcon, VMIcon } from "./icons";
 
 /** Props every app window receives. */
 export interface AppProps {
@@ -52,6 +52,15 @@ export const APPS: AppDef[] = [
     component: lazy(() => import("./apps/control-panel/ControlPanel")),
     defaultSize: { width: 960, height: 660 },
     adminOnly: true,
+  },
+  {
+    id: "os.hardy.mail",
+    name: "Mail",
+    icon: "mail",
+    color: "#0EA5C6",
+    glyph: (s) => <MailIcon size={s} />,
+    component: lazy(() => import("./apps/mail/MailApp")),
+    defaultSize: { width: 860, height: 640 },
   },
   {
     id: "os.hardy.store",

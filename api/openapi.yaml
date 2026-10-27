@@ -43,6 +43,7 @@ tags:
   - name: alerts
   - name: monitor
   - name: ups
+  - name: mail
 paths:
   /health:
     get:
@@ -4732,6 +4733,381 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
   # ---- end of replication API ----
+  /mail:
+    get:
+      operationId: getMail
+      summary: The mail server's settings, state, domains and environment (admin)
+      description: |
+        Control Panel › Mail. Secrets (the SES secret access key, the
+        Cloudflare token) are never returned, only whether they're set.
+        Outside this API, hardyd also serves mail app settings without a
+        sign-in (`/.well-known/autoconfig/mail/config-v1.1.xml`,
+        `/mail/config-v1.1.xml`, `/autodiscover/autodiscover.xml`),
+        `/.well-known/caldav` and `/.well-known/carddav` (redirects), and
+        calendars and contacts at `/dav-mail/` (HTTP Basic with the
+        person's mail address and password, then Radicale).
+      tags: [mail]
+      responses:
+        "200":
+          description: Overview
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MailOverview" }
+  /mail/settings:
+    put:
+      operationId: saveMailSettings
+      summary: Save the settings (and secrets); applies them when on, stops the server when turned off (admin, job)
+      tags: [mail]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MailSettingsRequest" }
+      responses:
+        "200":
+          description: Saved while the mail server stays off
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MailSettings" }
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+  /mail/apply:
+    post:
+      operationId: applyMail
+      summary: Render and restart the mail server from the current settings (admin, job)
+      tags: [mail]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+  /mail/domains:
+    get:
+      operationId: listMailDomains
+      summary: Mail domains (admin)
+      tags: [mail]
+      responses:
+        "200":
+          description: Domains
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/MailDomain" }
+    post:
+      operationId: addMailDomain
+      summary: Add a mail domain (admin; a job when the server is on)
+      tags: [mail]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MailDomainRequest" }
+      responses:
+        "200":
+          description: Added (the mail server is off)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MailDomain" }
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+  /mail/domains/{name}:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+    patch:
+      operationId: updateMailDomain
+      summary: Change DMARC, MTA-STS, Cloudflare publishing, or rotate the DKIM key (admin)
+      tags: [mail]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MailDomainUpdate" }
+      responses:
+        "200":
+          description: Changed (the mail server is off)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MailDomain" }
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: deleteMailDomain
+      summary: Remove a domain no mailbox, alias or group uses; confirm = its name (admin)
+      tags: [mail]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ConfirmRequest" }
+      responses:
+        "200":
+          description: Removed (the mail server is off)
+          content:
+            application/json:
+              schema: { type: object, properties: { deleted: { type: boolean } } }
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+  /mail/domains/{name}/dns:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getMailDNS
+      summary: The DNS records a domain needs, with the last check (admin)
+      tags: [mail]
+      responses:
+        "200":
+          description: Records
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MailDNS" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /mail/domains/{name}/check:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: checkMailDNS
+      summary: Look the domain's records up in public DNS now (admin)
+      tags: [mail]
+      responses:
+        "200":
+          description: Result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MailDNSState" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /mail/domains/{name}/publish:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: publishMailDNS
+      summary: Write the domain's records into Cloudflare (admin, job)
+      tags: [mail]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /mail/domains/{name}/ses:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: verifyMailSES
+      summary: Add the domain to Amazon SES (Easy DKIM, custom MAIL FROM) and store its records (admin, job)
+      tags: [mail]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /mail/ses:
+    get:
+      operationId: getMailSES
+      summary: The SES account (sandbox, quota) and each domain's identity (admin)
+      tags: [mail]
+      responses:
+        "200":
+          description: SES
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MailSESStatus" }
+        "400": { $ref: "#/components/responses/Invalid" }
+  /mail/vps:
+    get:
+      operationId: getMailVPS
+      summary: The script to run on the VPS, made from the current settings (admin)
+      tags: [mail]
+      responses:
+        "200":
+          description: VPS setup
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MailVPS" }
+  /mail/vps/check:
+    post:
+      operationId: checkMailVPS
+      summary: Test the VPS from here (port 25 relays home; 993 and 465 reach this server) (admin)
+      tags: [mail]
+      responses:
+        "200":
+          description: Checks
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/MailVPSCheck" }
+        "400": { $ref: "#/components/responses/Invalid" }
+  /mail/mailboxes:
+    get:
+      operationId: listMailboxes
+      summary: Every mailbox with its use (admin)
+      tags: [mail]
+      responses:
+        "200":
+          description: Mailboxes
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Mailbox" }
+  /mail/mailboxes/sync:
+    post:
+      operationId: syncMailboxes
+      summary: Give every domain account a mailbox now (admin, job)
+      tags: [mail]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+  /mail/mailboxes/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer } }
+    patch:
+      operationId: updateMailbox
+      summary: Change a mailbox's address, aliases, quota or sign-in (admin)
+      tags: [mail]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MailboxUpdate" }
+      responses:
+        "200":
+          description: Changed (the mail server is off)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Mailbox" }
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: deleteMailbox
+      summary: Delete a mailbox and every message in it; confirm = its address; only for turned-off or deleted accounts (admin, job)
+      tags: [mail]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ConfirmRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /mail/groups:
+    get:
+      operationId: listMailGroups
+      summary: Group addresses (admin)
+      tags: [mail]
+      responses:
+        "200":
+          description: Groups
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/MailGroup" }
+  /mail/groups/{address}:
+    parameters:
+      - { name: address, in: path, required: true, schema: { type: string } }
+    put:
+      operationId: setMailGroup
+      summary: Create or change a group address (admin)
+      tags: [mail]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [targets]
+              properties:
+                targets: { type: array, items: { type: string } }
+      responses:
+        "200":
+          description: Saved (the mail server is off)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MailGroup" }
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+    delete:
+      operationId: deleteMailGroup
+      summary: Remove a group address (admin)
+      tags: [mail]
+      responses:
+        "200":
+          description: Removed (the mail server is off)
+          content:
+            application/json:
+              schema: { type: object, properties: { deleted: { type: boolean } } }
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /mail/queue:
+    get:
+      operationId: getMailQueue
+      summary: Messages waiting to be delivered (admin)
+      tags: [mail]
+      responses:
+        "200":
+          description: Queue
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/MailQueueItem" }
+  /mail/queue/flush:
+    post:
+      operationId: flushMailQueue
+      summary: Retry every waiting message now (admin, job)
+      tags: [mail]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+  /mail/certificate:
+    post:
+      operationId: renewMailCertificate
+      summary: Get a Let's Encrypt certificate (DNS-01 through Cloudflare); force renews a valid one (admin, job)
+      tags: [mail]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                force: { type: boolean }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+    put:
+      operationId: uploadMailCertificate
+      summary: Install an uploaded certificate chain and key (PEM; the key reaches the job in memory only) (admin, job)
+      tags: [mail]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [chain, key]
+              properties:
+                chain: { type: string }
+                key: { type: string }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+  /mail/me:
+    get:
+      operationId: getMyMail
+      summary: The signed-in person's mailbox and how to set up their devices
+      tags: [mail]
+      responses:
+        "200":
+          description: Mailbox
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MailMe" }
+  /mail/me/profile:
+    get:
+      operationId: getMyMailProfile
+      summary: An Apple configuration profile (.mobileconfig) for mail, calendars and contacts (no password in it)
+      tags: [mail]
+      responses:
+        "200":
+          description: Profile
+          content:
+            application/x-apple-aspen-config:
+              schema: { type: string, format: binary }
+        "404": { $ref: "#/components/responses/NotFound" }
 components:
   securitySchemes:
     session:
@@ -7993,3 +8369,253 @@ components:
         addresses: { type: array, items: { $ref: "#/components/schemas/ReplicationAddress" }, description: Where other servers can reach this one }
         problem: { type: string }
     # ---- end of replication API schemas ----
+    # ---- mail server (phase 7 part A, docs/mail.md) ----
+    ConfirmRequest:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: string, description: The name or address typed again }
+    MailSettings:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        pool: { type: string, description: Pool holding <pool>/mail }
+        hostname: { type: string, description: The mail server's public name (MX target, mail apps, certificate) }
+        defaultDomain: { type: string, description: Domain of new mailboxes }
+        addressStyle: { type: string, enum: [firstname, username] }
+        defaultQuotaMb: { type: integer, description: "New mailboxes' size limit (0: none)" }
+        vpsPeer: { type: string, description: The VPS's NetBird address (relayed mail and forwarded mail apps come from it) }
+        vpsIpv4: { type: string }
+        vpsIpv6: { type: string }
+        sesRegion: { type: string }
+        sesAccessKeyId: { type: string }
+        sesMailFrom: { type: boolean, description: Use bounce.<domain> as SES's MAIL FROM }
+        clamav: { type: boolean }
+        junkScore: { type: number }
+        maxMessageMb: { type: integer }
+        sendPerHour: { type: integer }
+        postmaster: { type: string }
+        sharedCalendar: { type: boolean }
+        tlsMode: { type: string, enum: [self, manual, acme] }
+        acmeEmail: { type: string }
+        acmeStaging: { type: boolean }
+        notifyFrom: { type: string, description: Sender of HardyOS's notifications through this server ("" for none) }
+    MailSettingsRequest:
+      type: object
+      required: [settings]
+      properties:
+        settings: { $ref: "#/components/schemas/MailSettings" }
+        sesSecretKey: { type: string, description: "Write-only; omit to keep, empty to remove" }
+        cloudflareToken: { type: string, description: "Write-only (Zone › DNS › Edit); omit to keep, empty to remove" }
+    MailCert:
+      type: object
+      properties:
+        names: { type: array, items: { type: string } }
+        issuer: { type: string }
+        notAfter: { type: string, format: date-time }
+        selfSigned: { type: boolean }
+        fingerprint: { type: string }
+        pem: { type: string }
+    MailQueueItem:
+      type: object
+      required: [id, queue, arrivedAt, size, sender, recipients, reason]
+      properties:
+        id: { type: string }
+        queue: { type: string }
+        arrivedAt: { type: string, format: date-time }
+        size: { type: integer }
+        sender: { type: string }
+        recipients: { type: array, items: { type: string } }
+        reason: { type: string }
+    MailStatus:
+      type: object
+      required: [services, queue, usedMb, running]
+      properties:
+        services: { type: object, additionalProperties: { type: string } }
+        queue: { type: array, items: { $ref: "#/components/schemas/MailQueueItem" } }
+        cert: { $ref: "#/components/schemas/MailCert" }
+        usedMb: { type: integer }
+        running: { type: boolean }
+    MailRecord:
+      type: object
+      required: [type, name, value, priority, purpose, required]
+      properties:
+        type: { type: string, enum: [MX, TXT, CNAME, A, AAAA, SRV] }
+        name: { type: string }
+        value: { type: string }
+        priority: { type: integer }
+        purpose: { type: string }
+        required: { type: boolean }
+        note: { type: string }
+    MailCheck:
+      allOf:
+        - { $ref: "#/components/schemas/MailRecord" }
+        - type: object
+          required: [status, found]
+          properties:
+            status: { type: string, enum: [ok, missing, wrong, error] }
+            found: { type: array, items: { type: string } }
+            detail: { type: string }
+    MailDNSState:
+      type: object
+      required: [at, summary, checks]
+      properties:
+        at: { type: string, format: date-time }
+        summary:
+          type: object
+          required: [ok, problems, optional, ready]
+          properties:
+            ok: { type: integer }
+            problems: { type: integer }
+            optional: { type: integer }
+            ready: { type: boolean }
+        checks: { type: array, items: { $ref: "#/components/schemas/MailCheck" } }
+    MailDomain:
+      type: object
+      required: [name, selector, dkimPublicKey, dmarcPolicy, mtaSts, cloudflare, sesDkimTokens, sesStatus, createdAt]
+      properties:
+        name: { type: string }
+        selector: { type: string }
+        dkimPublicKey: { type: string }
+        dmarcPolicy: { type: string, enum: [none, quarantine, reject] }
+        mtaSts: { type: string, enum: ["off", testing, enforce] }
+        cloudflare: { type: boolean }
+        sesDkimTokens: { type: array, items: { type: string } }
+        sesStatus: { type: string }
+        lastCheck: { $ref: "#/components/schemas/MailDNSState" }
+        createdAt: { type: string, format: date-time }
+    MailDomainRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        dmarcPolicy: { type: string, enum: [none, quarantine, reject] }
+        cloudflare: { type: boolean }
+    MailDomainUpdate:
+      type: object
+      properties:
+        dmarcPolicy: { type: string, enum: [none, quarantine, reject] }
+        mtaSts: { type: string, enum: ["off", testing, enforce] }
+        cloudflare: { type: boolean }
+        rotateDkim: { type: boolean }
+    MailDNS:
+      type: object
+      required: [domain, records, missing]
+      properties:
+        domain: { type: string }
+        records: { type: array, items: { $ref: "#/components/schemas/MailRecord" } }
+        lastCheck: { $ref: "#/components/schemas/MailDNSState" }
+        mtaStsPolicy: { type: string }
+        missing: { type: object, additionalProperties: { type: string } }
+    MailOverview:
+      type: object
+      required: [settings, sesSecretSet, cloudflareTokenSet, domains, mailboxCount, netbirdAddress, webmailInstalled, pools, publishedUrl]
+      properties:
+        settings: { $ref: "#/components/schemas/MailSettings" }
+        sesSecretSet: { type: boolean }
+        cloudflareTokenSet: { type: boolean }
+        status: { $ref: "#/components/schemas/MailStatus" }
+        statusError: { type: string }
+        domains: { type: array, items: { $ref: "#/components/schemas/MailDomain" } }
+        mailboxCount: { type: integer }
+        netbirdAddress: { type: string }
+        webmailInstalled: { type: boolean }
+        pools: { type: array, items: { type: string } }
+        publishedUrl: { type: string, description: "https://mail.<base> when published through Remote Access" }
+    Mailbox:
+      type: object
+      required: [id, account, address, displayName, aliases, quotaMb, enabled, accountState, customAddress, createdAt, updatedAt]
+      properties:
+        id: { type: integer }
+        account: { type: string }
+        address: { type: string }
+        displayName: { type: string }
+        aliases: { type: array, items: { type: string } }
+        quotaMb: { type: integer }
+        enabled: { type: boolean }
+        accountState: { type: string, enum: [active, disabled, deleted] }
+        customAddress: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        usedKb: { type: integer }
+    MailboxUpdate:
+      type: object
+      properties:
+        address: { type: string }
+        aliases: { type: array, items: { type: string } }
+        quotaMb: { type: integer }
+        enabled: { type: boolean }
+    MailGroup:
+      type: object
+      required: [address, targets]
+      properties:
+        address: { type: string }
+        targets: { type: array, items: { type: string } }
+        createdAt: { type: string, format: date-time }
+    MailSESIdentity:
+      type: object
+      properties:
+        exists: { type: boolean }
+        verifiedForSending: { type: boolean }
+        dkimStatus: { type: string }
+        dkimTokens: { type: array, items: { type: string } }
+        mailFromDomain: { type: string }
+        mailFromStatus: { type: string }
+    MailSESStatus:
+      type: object
+      required: [identities]
+      properties:
+        account:
+          type: object
+          properties:
+            productionAccess: { type: boolean, description: "false: the SES sandbox (only verified recipients)" }
+            sendingEnabled: { type: boolean }
+            max24HourSend: { type: integer }
+            sentLast24Hours: { type: integer }
+            enforcementStatus: { type: string }
+        identities: { type: object, additionalProperties: { $ref: "#/components/schemas/MailSESIdentity" } }
+        error: { type: string }
+    MailVPS:
+      type: object
+      required: [script, homePeer, hostname, relayPort, proxyPorts]
+      properties:
+        script: { type: string, description: Bash for the VPS (run as root) }
+        problem: { type: string }
+        homePeer: { type: string }
+        hostname: { type: string }
+        relayPort: { type: integer }
+        proxyPorts: { type: array, items: { type: integer } }
+    MailVPSCheck:
+      type: object
+      required: [name, ok, detail]
+      properties:
+        name: { type: string }
+        ok: { type: boolean }
+        detail: { type: string }
+    MailManualSettings:
+      type: object
+      required: [address, username, imapHost, imapPort, imapTls, smtpHost, smtpPort, smtpTls, altSmtpPort, davUrl, familyCalendarUrl, familyContactsUrl]
+      properties:
+        address: { type: string }
+        username: { type: string }
+        imapHost: { type: string }
+        imapPort: { type: integer }
+        imapTls: { type: string }
+        smtpHost: { type: string }
+        smtpPort: { type: integer }
+        smtpTls: { type: string }
+        altSmtpPort: { type: integer }
+        davUrl: { type: string }
+        familyCalendarUrl: { type: string }
+        familyContactsUrl: { type: string }
+    MailMe:
+      type: object
+      required: [enabled, usedKb, webmailInstalled]
+      properties:
+        enabled: { type: boolean }
+        mailbox: { $ref: "#/components/schemas/Mailbox" }
+        usedKb: { type: integer }
+        settings: { $ref: "#/components/schemas/MailManualSettings" }
+        webmailInstalled: { type: boolean }
+        reason: { type: string }
+    # ---- end of mail API schemas ----

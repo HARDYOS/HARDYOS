@@ -1629,6 +1629,100 @@ Details: [monitoring.md](monitoring.md).
   (10 s/1 day, 1 min/7 days, 15 min/90 days, 1 h/2 years) fed by pluggable
   `monitor.Source`s.
 
+## Mail server
+
+User guide: [mail.md](mail.md); decisions 230-249.
+
+```
+ internet ─25─► VPS Postfix (relay, verify, queue 14 d) ─NetBird─► Postfix :2525 ─► Rspamd milter ─► Dovecot LMTP ─► <pool>/mail/vmail
+ apps ─993/465/587─► VPS HAProxy ─PROXY v2─► Dovecot :10993 / Postfix :10465 :10587       (nftables: VPS peer only)
+ LAN apps ─993/465/587──────────────────────► Dovecot / Postfix                          Postfix ─587 STARTTLS─► Amazon SES
+ Dovecot passdb oauth2 + auth policy ─127.0.0.1:44250─► hardyd (domain passwords: Kerberos with the local DC; webmail tokens; limits)
+ phones ─https://mail.<base>─► NetBird proxy ─► app gateway ─► hardyd /dav-mail/ (checks the password) ─► Radicale 127.0.0.1:5232
+ desktop ─► window proxy (Basic: address + session token) ─► Roundcube (catalog app, 127.0.0.1) ─► Dovecot / Postfix on the host
+```
+
+- **Programs.** Debian 13's Postfix 3.10, Dovecot 2.4, Rspamd 3.12 (with
+  its own Redis instance `redis-server@hardyos-mail` on a Unix socket),
+  Radicale 3.5 and optionally ClamAV, all from the signed archive and off at
+  boot. `internal/mail` is root's side and the shared pieces;
+  `internal/mail/manage` is hardyd's (settings, store, sign-in checks, DNS,
+  SES, Cloudflare, ACME, alerts).
+- **Configuration.** hardyd builds a `mail.RootConfig` (domains, DKIM
+  selectors, mailboxes with aliases and quotas, group addresses, the VPS's
+  NetBird address, SES endpoint and user, limits) plus secrets (derived SES
+  SMTP password, the Dovecot ↔ hardyd secret, per-mailbox Radicale
+  passwords) and sends it to `mail.apply`. hardyd-priv validates it again
+  (`Normalize`), renders every file itself (`render.go`: Postfix main.cf,
+  master.cf and texthash maps, dovecot.conf and its passwd-file userdb,
+  Sieve scripts, Rspamd local.d, Radicale's config, rights and users, the
+  Redis instance, an nftables table), checks them with `postfix check`,
+  `doveconf -n`, `rspamadm configtest`, `nft -c` and `sievec` (putting the
+  previous files back if any refuses), loads the firewall table and
+  (re)starts the units. It remembers the validated setup in
+  `/var/lib/hardyos/root/mail.json` (root-only) and applies it again after
+  every restart or update once the pool is mounted (`OnStart`), like Docker.
+- **Storage.** `<pool>/mail` (`org.hardyos:mail=1`, `exec`, `setuid` and
+  `devices` off): `vmail/<domain>/<local>/Maildir` (owner
+  `hardyos-vmail`, 0700), `radicale/collections`, `keys/dkim`
+  (`0750 root:_rspamd`, keys `0640`), `keys/tls` (`0700 root`). Postfix and
+  Dovecot read the certificate from root's copy in `/run/hardyos-mail/tls`.
+- **Sign-in.** Dovecot 2.4 has no checkpassword driver; every PLAIN/LOGIN
+  sign-in (IMAP, and SMTP through Dovecot SASL) is an OAuth2 password grant
+  to hardyd's listener on 127.0.0.1:44250 (`/token`, client secret = the
+  shared secret), and every attempt is first put to the auth policy
+  endpoint (`/policy`, bearer = the secret; fail closed) with the client's
+  real address. hardyd (`manage.Service.CheckLogin`) accepts the mailbox's
+  domain password (`auth.SignIn.Authenticate` with `NETBIOS\account`:
+  Kerberos with this server's own DC, decision 78), a webmail token, or the
+  notification sign-in's sealed password, and only for a mailbox that is on
+  and whose account is active. `mail.Throttle` keeps internet and inside
+  counters apart (decision 233).
+- **Accounts.** Every 2 minutes (and on demand) hardyd lists the domain's
+  accounts through `domain.users` and makes a mailbox for each new one,
+  marks turned-off and deleted ones and ends their sessions (`mail.kick`:
+  `doveadm auth cache flush` and `doveadm kick`).
+- **Webmail.** The catalog app `roundcube` (pinned image) is the Mail app.
+  Its window proxy listener knows it's the webmail (catalog source only) and
+  sends `Authorization: Basic <address>:<token>` on every request, which
+  Roundcube's `http_authentication` plugin signs in with; inbound
+  Authorization headers are dropped. The token is an HMAC of the window
+  session's key, good only while that session is (`sessionAlive`).
+- **Calendars and contacts.** `/dav-mail/` (hardyd's mux, and
+  `mail.<base>` through the gateway) checks Basic credentials like a mail
+  sign-in (throttled by the client's address) and proxies to Radicale on
+  127.0.0.1 with the mailbox's derived password and `X-Script-Name`.
+- **Publishing.** While the mail server is on and its name is
+  `<label>.<base>`, Remote Access publishes it (key `mail`, public, nothing
+  in front); the gateway serves only autoconfig, autodiscover and
+  `/dav-mail/` there.
+- **Certificates.** `mail.tls.csr` makes a P-256 key (kept by root as the
+  pending key) and a CSR; hardyd does ACME with Let's Encrypt (DNS-01 via
+  the Cloudflare token) and hands the chain to `mail.tls.install`, which
+  checks it matches the pending key and names the host, then reloads
+  Postfix and Dovecot. Uploaded certificates go the same way with their key
+  (in memory to the job). Until then a self-signed certificate is made.
+- **Alerts.** `manage.Service.CheckHealth` (5 min) and `CheckAllDNS`
+  (daily) raise `mail.service`, `mail.queue`, `mail.ses`,
+  `mail.certificate`, `mail.dns`; the sign-in listener raises `mail.signin`.
+- **Notifications through it.** With a sender set, hardyd keeps an SMTP
+  channel "HardyOS Mail" (127.0.0.1:587, user `hardyos-notify`, sealed
+  random password, may only send as that sender); notify's dispatcher pins
+  the server's own leaf certificate for loopback hosts (`LoopbackTLS`).
+- **API and jobs.** `/api/v1/mail/*` (admin) and `/api/v1/mail/me` (anyone
+  with a mailbox). Changes are audited; anything that changes the running
+  server is a job locked on `mail`: `mail.apply`, `mail.disable`,
+  `mail.sync`, `mail.mailbox.delete`, `mail.certificate`,
+  `mail.certificate.upload`, `mail.dns.publish`, `mail.ses.verify`,
+  `mail.queue.flush`. Migration `0040_mail.sql`; settings and sealed
+  secrets (purpose `mail`) in `settings` under `mail.*`.
+- **Tests.** Unit tests for validation, rendering (no-open-relay and secret
+  placement invariants), DNS records and checks (fake resolver), client
+  settings, the VPS script and check, throttling, the sign-in listener, the
+  store, account sync, SES and Cloudflare (httptest); an API test with a
+  root helper writing into a temp folder; and `scripts/mail-integration.sh`
+  (CI job `mail`): the real programs in a Debian 13 container.
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly

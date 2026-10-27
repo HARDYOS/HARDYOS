@@ -47,6 +47,7 @@ const (
 var itPasswords = map[string]string{
 	"alice@example.test": "alice-password-1",
 	"bob@example.test":   "bob-password-1",
+	NotifyLogin:          "notify-password-1",
 }
 
 type fakeChecker struct{}
@@ -166,6 +167,7 @@ func TestMailServerIntegration(t *testing.T) {
 		GroupAliases:   []RootGroupAlias{{Address: "family@example.test", Targets: []string{"alice@example.test", "bob@example.test"}}},
 		Postmaster:     "alice@example.test",
 		SharedCalendar: true,
+		NotifyFrom:     "hardyos@example.test",
 	}
 	ctx := context.Background()
 	res, err := r.Apply(ctx, ApplyArgs{Config: cfg, Secrets: RootSecrets{AuthSecret: secret,
@@ -212,6 +214,18 @@ func TestMailServerIntegration(t *testing.T) {
 		mustOK(t, c.Mail("mom@example.test")) // an alias of hers
 		mustOK(t, c.Rcpt("bob@example.test"))
 		writeMsg(t, c, "mom@example.test", "bob@example.test", "Dinner", "At six.")
+	})
+	t.Run("notifications sign in and send only as their sender", func(t *testing.T) {
+		c := smtpFrom(t, "127.0.0.1", PortSubmission, false)
+		defer c.Close()
+		mustOK(t, c.StartTLS(&tls.Config{InsecureSkipVerify: true}))
+		mustOK(t, c.Auth(smtp.PlainAuth("", NotifyLogin, "notify-password-1", itHost)))
+		mustOK(t, c.Mail("alice@example.test"))
+		mustCode(t, c.Rcpt("bob@example.test"), 553)
+		_ = c.Reset()
+		mustOK(t, c.Mail("hardyos@example.test"))
+		mustOK(t, c.Rcpt("bob@example.test"))
+		writeMsg(t, c, "hardyos@example.test", "bob@example.test", "A disk is failing", "Replace it.")
 	})
 	t.Run("wrong password refused", func(t *testing.T) {
 		c := smtpFrom(t, "127.0.0.1", PortSubmissions, true)
