@@ -1,0 +1,64 @@
+#!/bin/sh
+# Remote access: the NetBird client from NetBird's official Debian
+# repository, pinned to one version and checked against NetBird's signing
+# key, which ships in this repository at
+# includes.chroot/usr/share/keyrings/netbird-archive-keyring.asc
+# (fingerprint EFE37DF047DF7CCDF1FC54FA83F79AD029778355, "Wiretrustee
+# <dev@wiretrustee.com>", NetBird's former name).
+#
+# The service stays off: hardyd-priv starts it when the server joins a
+# NetBird network (Control Panel > Remote Access), and again after an update
+# if it had joined. HardyOS updates replace the whole system, so the
+# repository isn't kept: apt never upgrades NetBird behind HardyOS's back.
+#
+# To move to a newer NetBird: change NETBIRD_VERSION (and the sha256 below)
+# after checking its release notes and the reverse proxy API HardyOS uses
+# (daemon/internal/netbird).
+set -e
+
+NETBIRD_VERSION=0.81.5
+NETBIRD_SHA256=d4cdd97734055f810ff4b5af8eacac3b19a2a50e3ff594fb4353151725374800
+KEYRING=/usr/share/keyrings/netbird-archive-keyring.asc
+LIST=/etc/apt/sources.list.d/netbird.sources
+
+test -s "$KEYRING"
+cat > "$LIST" <<EOF
+Types: deb
+URIs: https://pkgs.netbird.io/debian
+Suites: stable
+Components: main
+Architectures: amd64
+Signed-By: $KEYRING
+EOF
+
+apt-get update -o Dir::Etc::sourcelist="$LIST" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0"
+apt-get download "netbird=$NETBIRD_VERSION"
+deb=$(ls netbird_"$NETBIRD_VERSION"*_amd64.deb)
+echo "$NETBIRD_SHA256  $deb" | sha256sum -c -
+
+# The package's postinst runs `netbird service install` and `netbird
+# service start`. In the build chroot NetBird would otherwise pick SysV init
+# and start its daemon inside the chroot; with /run/systemd/system present
+# it writes netbird.service, and systemctl ignores "start" in a chroot.
+made_run=
+if [ ! -d /run/systemd/system ]; then
+  mkdir -p /run/systemd/system
+  made_run=1
+fi
+apt-get install -y --no-install-recommends "./$deb"
+if [ -n "$made_run" ]; then
+  rmdir /run/systemd/system 2>/dev/null || true
+fi
+rm -f "$deb" "$LIST"
+rm -rf /var/lib/apt/lists/pkgs.netbird.io_*
+
+test -x /usr/bin/netbird
+if [ -e /etc/init.d/netbird ]; then
+  echo "ERROR: netbird installed a SysV service (it didn't see systemd); fix this hook" >&2
+  exit 1
+fi
+test -f /etc/systemd/system/netbird.service || test -f /lib/systemd/system/netbird.service
+systemctl disable netbird.service >/dev/null 2>&1 || true
+# No state from the build: a fresh install has no NetBird identity.
+rm -rf /var/lib/netbird /etc/netbird
+echo "netbird $NETBIRD_VERSION installed (service off until the server joins a NetBird network)"

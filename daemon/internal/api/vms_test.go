@@ -196,6 +196,13 @@ func (d *stubVMs) register(ps *priv.Server) {
 
 func newVMEnv(t *testing.T) (*testEnv, *stubVMs) {
 	t.Helper()
+	return newVMEnvTLS(t, false)
+}
+
+// newVMEnvTLS is newVMEnv served over HTTPS when tls is set (the desktop's
+// session cookie is then __Host-hardyos_session).
+func newVMEnvTLS(t *testing.T, tls bool) (*testEnv, *stubVMs) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
@@ -218,7 +225,12 @@ func newVMEnv(t *testing.T) (*testEnv, *stubVMs) {
 		t.Fatal(err)
 	}
 	upd := &updates.Service{Priv: pc, Jobs: m, DB: db, Dir: t.TempDir(), Notify: &notify.Center{DB: db, Events: broker}}
-	srv := httptest.NewServer(New(Config{DB: db, Jobs: m, Events: broker, Priv: pc, Updates: upd, Insecure: true}))
+	srv := httptest.NewUnstartedServer(New(Config{DB: db, Jobs: m, Events: broker, Priv: pc, Updates: upd, Insecure: true}))
+	if tls {
+		srv.StartTLS()
+	} else {
+		srv.Start()
+	}
 	t.Cleanup(func() {
 		srv.Close()
 		cancel()
@@ -462,13 +474,18 @@ func TestVMConsoleRelay(t *testing.T) {
 	}
 }
 
-// An open console closes when its session signs out (or stops being an
-// administrator's).
+// An open console stays open while its session is signed in, over plain
+// HTTP (hardyos_session) and HTTPS (__Host-hardyos_session), and closes
+// when the session signs out (or stops being an administrator's).
 func TestVMConsoleClosesOnSignOut(t *testing.T) {
-	old := vmConsoleRecheck
-	vmConsoleRecheck = 50 * time.Millisecond
-	defer func() { vmConsoleRecheck = old }()
-	env, stub := newVMEnv(t)
+	old := vmConsoleRecheck.Swap(int64(50 * time.Millisecond))
+	defer vmConsoleRecheck.Store(old)
+	t.Run("http", func(t *testing.T) { testVMConsoleSession(t, false) })
+	t.Run("https", func(t *testing.T) { testVMConsoleSession(t, true) })
+}
+
+func testVMConsoleSession(t *testing.T, tls bool) {
+	env, stub := newVMEnvTLS(t, tls)
 	sock := filepath.Join(t.TempDir(), "vnc.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
@@ -485,12 +502,15 @@ func TestVMConsoleClosesOnSignOut(t *testing.T) {
 			go func() {
 				defer c.Close()
 				_, _ = c.Write([]byte("RFB 003.008\n"))
-				_, _ = io.Copy(io.Discard, c)
+				_, _ = io.Copy(c, c) // echo, to show the relay is still up
 			}()
 		}
 	}()
 	stub.vms["web"] = &vms.VM{Spec: vms.Spec{ID: "web", Name: "Web"}, State: "running"}
 	admin := env.client(t)
+	if tls {
+		admin.http.Transport = env.srv.Client().Transport
+	}
 	admin.do("POST", "/api/v1/setup/admin", map[string]string{"username": "cade", "password": "supersecret1"}, nil)
 	var sess VMConsoleSession
 	if code := admin.do("POST", "/api/v1/vms/web/console", nil, &sess); code != 200 {
@@ -507,6 +527,14 @@ func TestVMConsoleClosesOnSignOut(t *testing.T) {
 	defer cancel()
 	if _, _, err := conn.Read(rctx); err != nil {
 		t.Fatal(err)
+	}
+	// Several rechecks later the signed-in console is still relaying.
+	time.Sleep(6 * time.Duration(vmConsoleRecheck.Load()))
+	if err := conn.Write(rctx, websocket.MessageBinary, []byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	if _, data, err := conn.Read(rctx); err != nil || string(data) != "ping" {
+		t.Fatalf("console closed while signed in: %q %v", data, err)
 	}
 	admin.do("POST", "/api/v1/auth/logout", nil, nil)
 	for {

@@ -188,6 +188,7 @@ function Installed({
                 key={a.id}
                 app={a}
                 update={o.updates[a.id]}
+                published={o.published?.[a.id]}
                 isAdmin={isAdmin}
                 onSelect={() => onSelect(a.id)}
                 onSettings={() => onSelect(a.id, "settings")}
@@ -205,6 +206,7 @@ function Installed({
 function AppCard({
   app,
   update,
+  published,
   isAdmin,
   onSelect,
   onSettings,
@@ -212,6 +214,8 @@ function AppCard({
 }: {
   app: InstalledApp;
   update?: string;
+  /** Its address through NetBird's reverse proxy, when published. */
+  published?: string;
   isAdmin: boolean;
   onSelect: () => void;
   onSettings: () => void;
@@ -281,6 +285,11 @@ function AppCard({
         <Badge tone={st.tone}>{st.label}</Badge>
       </header>
       {app.summary && <p className="app-card__summary">{app.summary}</p>}
+      {published && (
+        <a className="small mono" href={published} target="_blank" rel="noopener noreferrer" aria-label={`${app.name} published address`}>
+          {new URL(published).host}
+        </a>
+      )}
       {app.blocked && <BlockedAlert app={app} onSettings={isAdmin ? onSettings : undefined} />}
       {isAdmin && (
         <dl className="app-card__facts small">

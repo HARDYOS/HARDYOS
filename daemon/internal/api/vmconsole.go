@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -26,8 +27,11 @@ import (
 const VMConsoleMaxLife = 12 * time.Hour
 
 // vmConsoleRecheck is how often an open console checks that its desktop
-// session is still signed in and still an administrator's.
-var vmConsoleRecheck = 15 * time.Second
+// session is still signed in and still an administrator's (nanoseconds;
+// atomic because tests shorten it while earlier consoles wind down).
+var vmConsoleRecheck atomic.Int64
+
+func init() { vmConsoleRecheck.Store(int64(15 * time.Second)) }
 
 // VMConsoleSession is a console's one-time pass and where to use it.
 type VMConsoleSession struct {
@@ -77,10 +81,10 @@ func (s *Server) handleVMConsoleWS(w http.ResponseWriter, r *http.Request, u *au
 	conn.SetReadLimit(4 << 20)
 	started := time.Now()
 	s.record(r, u, "vms.console.open", id, audit.Success, "")
-	session := ""
-	if c, err := r.Cookie(SessionCookie); err == nil {
-		session = c.Value
-	}
+	// The token the session check let through: __Host-hardyos_session over
+	// HTTPS (the old name only where sessionToken still reads it),
+	// hardyos_session over plain HTTP.
+	session, _ := s.sessionToken(r)
 	// Signing out, being demoted or disabled closes the screen too.
 	still := func() bool {
 		info, err := s.peekSession(ctx, session)
@@ -101,7 +105,7 @@ func relayVNC(ctx context.Context, conn *websocket.Conn, vnc *os.File, still fun
 	defer cancel()
 	done := make(chan string, 3)
 	go func() {
-		t := time.NewTicker(vmConsoleRecheck)
+		t := time.NewTicker(time.Duration(vmConsoleRecheck.Load()))
 		defer t.Stop()
 		for {
 			select {

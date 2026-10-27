@@ -1,0 +1,32 @@
+[
+  {
+    "id": "chacbco6lnnbn6cg5s90",
+    "name": "nas",
+    "created_at": "2026-10-26T18:30:35.477782Z",
+    "ip": "100.83.40.2",
+    "connection_ip": "203.0.113.20",
+    "connected": true,
+    "last_seen": "2026-10-26T18:41:26.420578Z",
+    "os": "Debian GNU/Linux 13 (trixie)",
+    "kernel_version": "6.12.48+deb13-amd64",
+    "geoname_id": 2643743,
+    "version": "0.81.5",
+    "groups": [{"id": "ch8i4ug6lnn4g9hqv7m0", "name": "All", "peers_count": 3, "resources_count": 0, "issued": "api"}],
+    "ssh_enabled": false,
+    "user_id": "",
+    "hostname": "nas",
+    "ui_version": "",
+    "dns_label": "nas.netbird.selfhosted",
+    "login_expiration_enabled": false,
+    "login_expired": false,
+    "last_login": "2026-10-26T18:30:35.477782Z",
+    "inactivity_expiration_enabled": false,
+    "approval_required": false,
+    "country_code": "US",
+    "city_name": "Dallas",
+    "serial_number": "",
+    "extra_dns_labels": [],
+    "ephemeral": false,
+    "accessible_peers_count": 2
+  }
+]

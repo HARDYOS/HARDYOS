@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
@@ -84,13 +85,25 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	ip := s.clientIP(r)
 	userKey := s.signin.LimitKey(r.Context(), req.Username)
-	for _, key := range []string{"ip:" + ip, userKey} {
-		if ok, wait := s.cfg.Limiter.Allowed(key); !ok {
+	// From the internet (a public desktop through the app gateway): buckets
+	// of their own that slow guessing down, so they can't lock anyone out
+	// of signing in at home or over NetBird.
+	var lim limiter = s.cfg.Limiter
+	prefix := ""
+	if publicOrigin(r) {
+		lim, prefix = s.pubLimiter, "pub-"
+	}
+	ipKey, userKey := prefix+"ip:"+ip, prefix+userKey
+	for _, key := range []string{ipKey, userKey} {
+		if ok, wait := lim.Allowed(key); !ok {
 			secs := int(math.Ceil(wait.Seconds()))
 			w.Header().Set("Retry-After", fmt.Sprint(secs))
 			s.record(r, nil, "auth.login", req.Username, audit.Denied, "rate limited")
-			writeError(w, http.StatusTooManyRequests, "rate_limited",
-				fmt.Sprintf("too many failed sign-ins; try again in %d minutes", (secs+59)/60))
+			msg := fmt.Sprintf("too many failed sign-ins; try again in %d minutes", (secs+59)/60)
+			if prefix != "" {
+				msg = fmt.Sprintf("too many failed sign-ins; try again in %d seconds", secs)
+			}
+			writeError(w, http.StatusTooManyRequests, "rate_limited", msg)
 			return
 		}
 	}
@@ -103,15 +116,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if counts {
-			s.cfg.Limiter.Fail("ip:" + ip)
-			s.cfg.Limiter.Fail(userKey)
+			lim.Fail(ipKey)
+			lim.Fail(userKey)
 		}
 		detail := strings.ReplaceAll(code, "_", " ")
 		s.record(r, nil, "auth.login", req.Username, audit.Failure, detail)
 		return
 	}
-	s.cfg.Limiter.Succeed("ip:" + ip)
-	s.cfg.Limiter.Succeed(userKey)
+	lim.Succeed(ipKey)
+	lim.Succeed(userKey)
 	detail := ""
 	if u.Source == auth.SourceDomain {
 		detail = "domain account, role " + string(u.Role)
@@ -119,6 +132,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	s.record(r, u, "auth.login", u.Username, audit.Success, detail)
 	s.startSession(w, r, u)
 	writeJSON(w, http.StatusOK, u)
+}
+
+// limiter is auth.LoginLimiter or, from the internet, auth.DelayLimiter.
+type limiter interface {
+	Allowed(key string) (bool, time.Duration)
+	Fail(key string)
+	Succeed(key string)
 }
 
 func (s *Server) startSession(w http.ResponseWriter, r *http.Request, u *auth.User) {
@@ -131,14 +151,14 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, u *auth.Us
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(SessionCookie); err == nil {
-		if info, err := s.sessions.Validate(r.Context(), c.Value); err == nil {
+	if token, ok := s.sessionToken(r); ok {
+		if info, err := s.sessions.Validate(r.Context(), token); err == nil {
 			if u, err := s.users.Get(r.Context(), info.UserID); err == nil {
 				s.record(r, u, "auth.logout", u.Username, audit.Success, "")
 			}
 		}
-		_ = s.sessions.Revoke(r.Context(), c.Value)
-		s.proxy.endDesktopSession(c.Value) // app windows and their WebSockets too
+		_ = s.sessions.Revoke(r.Context(), token)
+		s.proxy.endDesktopSession(token) // app windows and their WebSockets too
 	}
 	s.clearCookie(w, r)
 	w.WriteHeader(http.StatusNoContent)
@@ -175,6 +195,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request, u 
 	// Sign out every other session; keep this browser signed in with a fresh one.
 	_ = s.sessions.RevokeUser(r.Context(), u.ID)
 	s.proxy.endUser(u.ID)
+	s.endOIDCUser(r.Context(), u.ID)
 	s.startSession(w, r, u)
 	s.record(r, u, "auth.password.change", u.Username, audit.Success, "")
 	w.WriteHeader(http.StatusNoContent)

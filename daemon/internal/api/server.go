@@ -23,7 +23,10 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/metrics"
 	"github.com/hardyos/hardyos/daemon/internal/notify"
+	"github.com/hardyos/hardyos/daemon/internal/oidc"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
+	"github.com/hardyos/hardyos/daemon/internal/publish"
+	"github.com/hardyos/hardyos/daemon/internal/secretbox"
 	"github.com/hardyos/hardyos/daemon/internal/sharelinks"
 	"github.com/hardyos/hardyos/daemon/internal/storage"
 	"github.com/hardyos/hardyos/daemon/internal/store"
@@ -71,11 +74,30 @@ type Config struct {
 	// /files endpoints are served.
 	Files files.Access
 
+	// Remote publishes the desktop and apps through NetBird's reverse
+	// proxy (Control Panel › Remote Access); nil leaves publishing out.
+	Remote *publish.Publisher
+	// SSOIssuer is HardyOS's own OIDC provider's issuer, for the setup
+	// check (part B, internal/oidc, plugs in here; nil: none yet).
+	SSOIssuer publish.SSOIssuer
+	// Resolver looks up the base domain's CNAME (nil: the system's DNS).
+	Resolver publish.Resolver
+
 	// TrustedProxies are the reverse proxies whose X-Forwarded-For is
 	// believed for the client's address (sign-in limits, audit, share link
 	// limits). Empty (the default): the header is never read.
 	TrustedProxies []netip.Prefix
 
+	// Secrets seals what hardyd keeps encrypted at rest (the sign-in
+	// provider's signing keys); nil: a key that lasts as long as the
+	// process (tests, development).
+	Secrets secretbox.Source
+	// OIDCNames are Remote Access's base domain and desktop name, for the
+	// sign-in provider's issuer; nil reads them from the settings table.
+	OIDCNames oidc.Names
+	// PublicHost is the desktop's own HTTPS name (the issuer without a base
+	// domain); nil uses the hostname.
+	PublicHost func() string
 	// GPUUploadDir is where uploaded vGPU driver files are saved for
 	// hardyd-priv (default gpu.UploadDir; tests use a temp dir).
 	GPUUploadDir string
@@ -91,12 +113,20 @@ type Server struct {
 	mux      *http.ServeMux
 	tickets  terminalTickets
 	proxy    *appProxy
+	remote   *remoteRuntime
 	links    *sharelinks.Store
 	uploads  uploads
 	dav      davState
 	started  time.Time
 	log      *slog.Logger
 	ips      *clientip.Resolver
+	oidc     *oidc.Provider
+	// pubLimiter slows down failed sign-ins from the internet (through the
+	// app gateway) in buckets of their own: decision 156.
+	pubLimiter *auth.DelayLimiter
+	// waits hands a job's in-memory outcome (a new client secret) back to
+	// the request that started it.
+	waits jobWaits
 }
 
 // New builds the API server and registers its routes.
@@ -114,8 +144,9 @@ func New(cfg Config) *Server {
 		cfg.Root = os.DirFS("/")
 	}
 	s := &Server{cfg: cfg, mux: http.NewServeMux(), started: time.Now(), log: cfg.Logger,
-		ips: &clientip.Resolver{Trusted: cfg.TrustedProxies}}
+		ips: &clientip.Resolver{Trusted: cfg.TrustedProxies}, pubLimiter: auth.NewDelayLimiter()}
 	s.proxy = &appProxy{s: s}
+	s.remote = &remoteRuntime{s: s}
 	if cfg.DB != nil {
 		s.users = &auth.Users{DB: cfg.DB}
 		s.sessions = &auth.Sessions{DB: cfg.DB}
@@ -123,6 +154,32 @@ func New(cfg Config) *Server {
 		s.signin = &auth.SignIn{Users: s.users, Kerberos: cfg.Kerberos, Log: cfg.Logger}
 		if cfg.Priv != nil && cfg.Installer == nil {
 			s.signin.Domain = &privDirectory{pc: cfg.Priv, ttl: cfg.DomainInfoTTL}
+		}
+		if cfg.Installer == nil {
+			if s.cfg.PublicHost == nil {
+				s.cfg.PublicHost = func() string { h, _ := os.Hostname(); return strings.ToLower(h) }
+			}
+			s.oidc = s.newOIDC()
+			if s.oidc != nil {
+				// A domain account row stays one directory object's (decision
+				// 144), and a password set in the domain ends what was signed
+				// in with the old one.
+				s.signin.Anchor = s.oidc
+				s.signin.PasswordSet = s.passwordSet
+				if cfg.Jobs != nil {
+					s.registerOIDCJobs(cfg.Jobs)
+				}
+			}
+		}
+	}
+	// Remote access and the sign-in provider see each other: the provider's
+	// issuer follows Remote Access's names (https://sso.<base>), and the
+	// setup check looks for that issuer among NetBird's identity providers.
+	if s.cfg.Remote != nil && s.oidc != nil {
+		s.cfg.Remote.OnNamesChanged = s.oidc.NamesChanged
+		s.cfg.Remote.Issuer = s.oidc.Issuer
+		if s.cfg.SSOIssuer == nil {
+			s.cfg.SSOIssuer = s.oidc.Issuer
 		}
 	}
 	s.routes()
@@ -174,6 +231,7 @@ func (s *Server) routes() {
 			s.terminalRoutes()
 			s.domainRoutes()
 			s.appRoutes()
+			s.remoteRoutes()
 			s.shareRoutes()
 			s.fileServiceRoutes()
 			s.snapshotRoutes()
@@ -183,6 +241,7 @@ func (s *Server) routes() {
 		if s.cfg.Backups != nil {
 			s.backupRoutes()
 		}
+		s.oidcRoutes() // Control Panel > Sign-in (OIDC); the provider itself is routed in ServeHTTP
 		if _, ok := s.cfg.Files.(files.Service); ok {
 			s.fileRoutes()
 			s.davRoutes() // WebDAV at /dav/, outside /api and the desktop session
@@ -201,11 +260,15 @@ func (s *Server) routes() {
 // headers and CSRF protection for state-changing API calls.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	if s.oidc != nil && s.oidc.Owns(r) {
+		s.serveProvider(w, r, start)
+		return
+	}
 	h := w.Header()
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Frame-Options", "SAMEORIGIN")
 	h.Set("Referrer-Policy", "same-origin")
-	h.Set("Content-Security-Policy", "default-src 'self'; font-src 'self' data:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; frame-src "+frameSrc(r)+"; frame-ancestors 'self'")
+	h.Set("Content-Security-Policy", "default-src 'self'; font-src 'self' data:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; frame-src "+frameSrc(r)+s.remote.frameSrc()+"; frame-ancestors 'self'")
 
 	rw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 	if strings.HasPrefix(r.URL.Path, "/api/") && !csrfSafe(r) {
@@ -215,6 +278,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Debug("http request",
 		"method", r.Method, "path", logPath(r.URL.Path), "status", rw.status,
+		"duration", time.Since(start).String())
+}
+
+// serveProvider hands a request to the sign-in provider: its own host
+// (sso.<base>) or /oidc on the desktop's, with its own headers and no
+// desktop routes.
+func (s *Server) serveProvider(w http.ResponseWriter, r *http.Request, start time.Time) {
+	rw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+	s.oidc.ServeHTTP(rw, r)
+	s.log.Debug("http request", "method", r.Method, "path", r.URL.Path, "status", rw.status,
 		"duration", time.Since(start).String())
 }
 

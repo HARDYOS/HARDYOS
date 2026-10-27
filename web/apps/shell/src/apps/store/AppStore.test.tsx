@@ -621,6 +621,14 @@ describe("App windows", () => {
     expect(screen.getByRole("button", { name: /Open in new tab/ })).toBeTruthy();
   });
 
+  it("frames a published app at its own address", async () => {
+    serve({ "POST /apps/jellyfin/open": () => ({ url: "https://jellyfin.home.example.net/", proxied: true, published: true }) }, []);
+    wrap(<AppFrameView id="jellyfin" name="Jellyfin" />);
+    const frame = (await screen.findByTitle("Jellyfin")) as HTMLIFrameElement;
+    expect(frame.src).toBe("https://jellyfin.home.example.net/");
+    expect(screen.getByText("jellyfin.home.example.net")).toBeTruthy();
+  });
+
   it("knows what a secure desktop can frame", () => {
     expect(frameable({ url: "http://nas:8095/", proxied: false }, "https:")).toBe(false);
     expect(frameable({ url: "http://nas:8095/", proxied: false }, "http:")).toBe(true);

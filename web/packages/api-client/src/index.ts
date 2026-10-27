@@ -144,6 +144,29 @@ export type FileListing = S["FileListing"];
 export type FileBulkResult = S["FileBulkResult"];
 export type FileItemResult = S["FileItemResult"];
 export type FileUploadRequest = S["FileUploadRequest"];
+// Remote access: NetBird client and publishing (part A)
+export type NetBirdClientStatus = S["NetBirdClientStatus"];
+export type RemoteStatus = S["RemoteStatus"];
+export type RemoteSettings = S["RemoteSettings"];
+export type RemoteJoinRequest = S["RemoteJoinRequest"];
+export type RemotePublishingRequest = S["RemotePublishingRequest"];
+export type PublishItem = S["PublishItem"];
+export type PublishConfig = S["PublishConfig"];
+export type PublishRequest = S["PublishRequest"];
+export type AppPublish = S["AppPublish"];
+export type RemoteCheck = S["RemoteCheck"];
+export type RemoteCheckStep = S["RemoteCheckStep"];
+export type DNSRecord = S["DNSRecord"];
+export type NetBirdGroup = S["NetBirdGroup"];
+export type NetBirdCluster = S["NetBirdCluster"];
+// Sign-in provider (OIDC), Control Panel > Sign-in (OIDC) (remote access part B)
+export type OidcStatus = S["OidcStatus"];
+export type OidcKey = S["OidcKey"];
+export type OidcClient = S["OidcClient"];
+export type OidcClientSpec = S["OidcClientSpec"];
+export type OidcClientResult = S["OidcClientResult"];
+export type OidcPreset = S["OidcPreset"];
+export type OidcPresetStep = S["OidcPresetStep"];
 // Devices, GPUs and vGPU (part D)
 export type VMDevice = S["VMDevice"];
 export type DeviceProblem = S["DeviceProblem"];

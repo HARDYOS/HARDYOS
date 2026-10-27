@@ -60,10 +60,18 @@ func (s *Server) appWho(ctx context.Context, token string, u *auth.User) appstor
 	return who
 }
 
-// sessionToken is the desktop session's token from the request's cookie.
-func sessionToken(r *http.Request) string {
-	if c, err := r.Cookie(SessionCookie); err == nil {
-		return c.Value
+// sessionToken is the desktop session's token from the request's cookie
+// (only for requests the desktop's session check already let through).
+func sessionToken(r *http.Request) string { return anySessionCookie(r) }
+
+// anySessionCookie is the desktop session cookie under either name (the
+// app gateway removes the old name from what it hands hardyd, and the app
+// window proxy ports are only on the desktop's own address).
+func anySessionCookie(r *http.Request) string {
+	for _, n := range []string{SessionCookie, LegacySessionCookie} {
+		if c, err := r.Cookie(n); err == nil {
+			return c.Value
+		}
 	}
 	return ""
 }
@@ -331,6 +339,9 @@ type AppOpen struct {
 	// (so the desktop can show it in a window); false is the app's own
 	// address, for a new tab.
 	Proxied bool `json:"proxied"`
+	// Published: URL is the app's own published address
+	// (https://<app>.<base>, through NetBird's reverse proxy).
+	Published bool `json:"published,omitempty"`
 }
 
 func (s *Server) handleAppOpen(w http.ResponseWriter, r *http.Request, u *auth.User) {
@@ -351,6 +362,12 @@ func (s *Server) handleAppOpen(w http.ResponseWriter, r *http.Request, u *auth.U
 	}
 	if a.Web == nil {
 		writeError(w, http.StatusBadRequest, "invalid", a.Name+" has no web page")
+		return
+	}
+	// Through the desktop's published address, published apps open at
+	// their own (the app gateway signs the person in there).
+	if u, ok := s.remote.publishedURL(r, a.ID); ok {
+		writeJSON(w, http.StatusOK, AppOpen{URL: u, Proxied: true, Published: true})
 		return
 	}
 	host := requestHost(r)

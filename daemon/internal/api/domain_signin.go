@@ -74,11 +74,15 @@ func (d *privDirectory) Account(ctx context.Context, username string) (*auth.Dom
 		}
 		return nil, err
 	}
-	return &auth.DomainAccount{
+	a := &auth.DomainAccount{
 		Exists: g.Exists, Username: g.Username, DisplayName: g.DisplayName, Email: g.Email,
 		Enabled: g.Enabled, LockedOut: g.LockedOut, Expired: g.Expired, Groups: g.Groups,
-		DomainSID: g.DomainSID, GroupSIDs: g.GroupSIDs,
-	}, nil
+		DomainSID: g.DomainSID, GroupSIDs: g.GroupSIDs, SID: g.SID, ObjectGUID: g.ObjectGUID,
+	}
+	if g.PwdLastSet > 0 {
+		a.PasswordSetAt = time.Unix(g.PwdLastSet, 0).UTC()
+	}
+	return a, nil
 }
 
 // domainSignInAvailable reports whether the sign-in page should mention
@@ -96,11 +100,25 @@ func (s *Server) domainSignInAvailable(ctx context.Context) bool {
 // loginError answers a failed sign-in. counts reports whether it is a
 // failed guess for the rate limiter (an unreachable domain isn't).
 func loginError(w http.ResponseWriter, err error) (detail string, counts bool) {
-	type answer struct {
-		status int
-		code   string
-		counts bool
+	a, msg, ok := classifyLoginError(err)
+	if !ok {
+		return "", false
 	}
+	writeError(w, a.status, a.code, msg)
+	return a.code, a.counts
+}
+
+// loginAnswer is how a failed sign-in is answered.
+type loginAnswer struct {
+	status int
+	code   string
+	counts bool
+}
+
+// classifyLoginError says how to answer a failed sign-in (the desktop's and
+// the sign-in provider's pages share it); ok is false for other errors.
+func classifyLoginError(err error) (loginAnswer, string, bool) {
+	type answer = loginAnswer
 	answers := []struct {
 		err error
 		answer
@@ -119,9 +137,8 @@ func loginError(w http.ResponseWriter, err error) (detail string, counts bool) {
 	}
 	for _, a := range answers {
 		if errors.Is(err, a.err) {
-			writeError(w, a.status, a.code, a.err.Error())
-			return a.code, a.counts
+			return a.answer, a.err.Error(), true
 		}
 	}
-	return "", false
+	return loginAnswer{}, "", false
 }

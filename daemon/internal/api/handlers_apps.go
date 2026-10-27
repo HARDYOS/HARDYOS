@@ -403,6 +403,9 @@ type AppsOverview struct {
 	// Updates maps an installed app's id to the newer version in the catalog
 	// it came from (HardyOS's own or an imported one).
 	Updates map[string]string `json:"updates"`
+	// Published maps apps published through NetBird's reverse proxy to
+	// their addresses (https://<app>.<base>/).
+	Published map[string]string `json:"published"`
 }
 
 func (s *Server) appsStatus(ctx context.Context) (*apps.Overview, error) {
@@ -477,7 +480,7 @@ func (s *Server) handleApps(w http.ResponseWriter, r *http.Request, u *auth.User
 		s.writePrivError(w, err)
 		return
 	}
-	resp := AppsOverview{Overview: *o, Updates: map[string]string{}}
+	resp := AppsOverview{Overview: *o, Updates: map[string]string{}, Published: s.remote.publishedApps()}
 	if u.IsAdmin() {
 		for _, a := range o.Apps {
 			if v, _ := s.newerVersion(r.Context(), a); v != "" {
@@ -509,6 +512,13 @@ func (s *Server) handleApps(w http.ResponseWriter, r *http.Request, u *auth.User
 		visible = append(visible, a)
 	}
 	resp.Apps = visible
+	shown := map[string]string{}
+	for _, a := range visible {
+		if u, ok := resp.Published[a.ID]; ok {
+			shown[a.ID] = u
+		}
+	}
+	resp.Published = shown
 	writeJSON(w, http.StatusOK, resp)
 }
 

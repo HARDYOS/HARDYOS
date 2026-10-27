@@ -8,6 +8,7 @@ import { Alert, Badge, Button, ErrorBox, Loading, PageHeader } from "../../ui";
 import { ConfirmDialog, Dialog } from "../../ui/Dialog";
 import { toast } from "../../ui/toasts";
 import { JobProgress } from "../shared";
+import { PublishEditor } from "../control-panel/RemoteAccessPublish";
 import { openInNewTab } from "./AppFrame";
 import { STATE, SourceBadge, appNotes, isRunning, jobRestored, jobSnapshot } from "./common";
 import { PortFields, SettingField, portProblem } from "./InstallDialog";
@@ -25,11 +26,12 @@ import {
   limitsValue,
 } from "./parts";
 
-export type Tab = "overview" | "settings" | "access" | "snapshots" | "logs";
+export type Tab = "overview" | "settings" | "access" | "remote" | "snapshots" | "logs";
 const TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "settings", label: "Settings" },
   { id: "access", label: "Who can use it" },
+  { id: "remote", label: "Remote access" },
   { id: "snapshots", label: "Snapshots" },
   { id: "logs", label: "Logs" },
 ];
@@ -81,6 +83,7 @@ export function AppDetails({
         )}
         {tab === "settings" && <SettingsTab app={app} />}
         {tab === "access" && <AccessTab app={app} />}
+        {tab === "remote" && <RemoteTab app={app} />}
         {tab === "snapshots" && <SnapshotsTab app={app} onSettings={() => setTab("settings")} />}
         {tab === "logs" && <LogsView app={app} />}
       </div>
@@ -472,6 +475,57 @@ function AccessForm({ app, initial }: { app: InstalledApp; initial: AccessDraft 
           Save
         </Button>
       </div>
+    </section>
+  );
+}
+
+/** How the app is published through NetBird's reverse proxy (Control Panel › Remote Access). */
+function RemoteTab({ app }: { app: InstalledApp }) {
+  const qc = useQueryClient();
+  const q = useQuery({
+    queryKey: ["apps", app.id, "publish"],
+    queryFn: () => unwrap(api.GET("/apps/{id}/publish", { params: { path: { id: app.id } } })),
+    enabled: !!app.web,
+    retry: false,
+  });
+  const check = useQuery({ queryKey: ["remote-check"], queryFn: () => unwrap(api.GET("/remote/check")), enabled: !!q.data?.enabled, staleTime: 30000 });
+  if (!app.web) {
+    return (
+      <section className="card">
+        <p className="small muted" style={{ margin: 0 }}>
+          {app.name} has no web page to publish.
+        </p>
+      </section>
+    );
+  }
+  if (q.isPending) return <Loading />;
+  if (q.isError) {
+    if (q.error instanceof ApiFailure && q.error.status === 503) {
+      return <Alert tone="info">Publishing apps isn't available on this server.</Alert>;
+    }
+    return <ErrorBox error={q.error} onRetry={() => q.refetch()} />;
+  }
+  if (!q.data.enabled) {
+    return (
+      <Alert tone="info" title="Publishing isn't set up">
+        Set it up in Control Panel › Remote Access: join NetBird, choose a base domain and paste a NetBird access token. Then {app.name} gets its own
+        address, like https://{app.id}.home.example.net.
+      </Alert>
+    );
+  }
+  return (
+    <section className="card stack">
+      <p className="small muted" style={{ margin: 0 }}>
+        Through NetBird's reverse proxy, {app.name} has its own address: NetBird devices only, or public with a sign-in in front. Changes reach NetBird
+        right away; a new address can take a minute to get its certificate.
+      </p>
+      <PublishEditor
+        key={JSON.stringify(q.data.config)}
+        item={q.data}
+        groups={check.data?.groups ?? []}
+        supportsPrivate={check.data ? check.data.supportsPrivate : undefined}
+        onSaved={() => void qc.invalidateQueries({ queryKey: ["apps", app.id, "publish"] })}
+      />
     </section>
   );
 }

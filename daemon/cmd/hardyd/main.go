@@ -32,6 +32,8 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/metrics"
 	"github.com/hardyos/hardyos/daemon/internal/notify"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
+	"github.com/hardyos/hardyos/daemon/internal/publish"
+	"github.com/hardyos/hardyos/daemon/internal/secretbox"
 	"github.com/hardyos/hardyos/daemon/internal/storage"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 	"github.com/hardyos/hardyos/daemon/internal/tlscert"
@@ -121,6 +123,21 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 	if !live {
 		api.RegisterAppJobs(manager, pc, appStore)
 	}
+	// Secrets hardyd keeps encrypted at rest (the sign-in provider's keys,
+	// the NetBird access token) are sealed with keys from hardyd-priv (the
+	// master key is root's).
+	var secrets secretbox.Source
+	if !live {
+		secrets = &secretbox.PrivSource{Priv: pc}
+	}
+	// Remote access: the NetBird client and publishing through NetBird's
+	// reverse proxy. api.New connects it to the sign-in provider (names,
+	// issuer).
+	var remote *publish.Publisher
+	if !live {
+		remote = &publish.Publisher{Store: &publish.Store{DB: db, Sealer: &publish.Sealer{Source: secrets}}}
+	}
+	api.RegisterRemoteJobs(manager, pc, remote)
 	// File Manager and share links: files read and written as the person.
 	var fileAccess files.Service
 	if !live {
@@ -143,7 +160,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		DB: db, Jobs: manager, Events: broker, Priv: pc, Logger: log,
 		Storage: stor, Notify: notifications, Metrics: collector,
 		WebRoot: webRoot, Insecure: httpsAddr == "", Installer: inst, Updates: upd, Backups: bk,
-		Apps: appStore, Files: fileAccess, TrustedProxies: trustedProxies,
+		Apps: appStore, Files: fileAccess, TrustedProxies: trustedProxies, Secrets: secrets, Remote: remote,
 	})
 
 	go housekeeping(ctx, log, &auth.Sessions{DB: db})
@@ -155,6 +172,9 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		go upd.ConfirmWhenHealthy(ctx, time.Minute)
 		go upd.RunChecks(ctx) // look for new versions on GitHub daily
 		go bk.Run(ctx)        // nightly settings backup
+		if p := handler.OIDC(); p != nil {
+			go p.Start(ctx) // sign-in provider: signing keys on schedule, expired sign-ins removed
+		}
 	}
 
 	var servers []*http.Server
@@ -191,6 +211,11 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 				TLS:         &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
 				DesktopPort: port,
 				ListenHost:  host,
+			})
+			// The app gateway on the NetBird address, for NetBird's reverse
+			// proxy, and the publishing sync.
+			go handler.RunRemote(ctx, api.RemoteOptions{
+				TLS: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
 			})
 		}
 		serve(&http.Server{

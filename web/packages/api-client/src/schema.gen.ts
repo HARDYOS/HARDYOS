@@ -2499,6 +2499,196 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/remote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Remote Access status
+         * @description The NetBird client on this server, the publishing settings (the
+         *     access token only as `hasToken`), every publishable thing (the
+         *     desktop and each app with a web page) with the last sync's state,
+         *     and the app gateway.
+         */
+        get: operations["getRemote"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/remote/join": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Join a NetBird network with a setup key (job remote.join)
+         * @description The setup key reaches the job only through hardyd's memory and goes
+         *     to `netbird up` in its environment; it is never in job parameters,
+         *     results, logs or answers.
+         */
+        post: operations["joinNetBird"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/remote/leave": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Leave the NetBird network (job remote.leave)
+         * @description Removes this server's services from NetBird first (when it can), then signs out and turns the client off.
+         */
+        post: operations["leaveNetBird"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/remote/publishing": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Save the publishing settings and update NetBird (job remote.settings) */
+        put: operations["setRemotePublishing"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/remote/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The publishing setup check
+         * @description Checks the token, this server's peer, the base domain in NetBird, the wildcard CNAME and the proxy cluster's capabilities; says what to add where.
+         */
+        get: operations["checkRemote"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/remote/domain": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Add the base domain to NetBird, or ask NetBird to verify it (job remote.domain) */
+        post: operations["remoteDomain"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/remote/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Update NetBird's services now (job remote.sync; it also runs every 10 minutes) */
+        post: operations["syncRemote"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/remote/gateway/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Replace the gateway secret and put the new per-service values in NetBird (job remote.gateway.rotate) */
+        post: operations["rotateRemoteGatewaySecret"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/remote/desktop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** How the desktop is published (job remote.service) */
+        put: operations["publishDesktop"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/apps/{id}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** How an app is published through NetBird */
+        get: operations["getAppPublish"];
+        /** Publish an app NetBird-only or publicly, or not at all (job remote.service) */
+        put: operations["publishApp"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/installer": {
         parameters: {
             query?: never;
@@ -2600,6 +2790,135 @@ export interface paths {
         put?: never;
         /** Restart the server (into the new system once installed) */
         post: operations["rebootInstaller"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/oidc": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The sign-in provider's issuer, settings and signing keys (admin) */
+        get: operations["getOidc"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Choose the issuer or who may sign in to apps (admin; job oidc.settings, answered when it finishes) */
+        patch: operations["updateOidc"];
+        trace?: never;
+    };
+    "/oidc/keys/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Sign with the next key now; the current one stays published for 2 days (admin) */
+        post: operations["rotateOidcKeys"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/oidc/presets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Ready-made clients (NetBird) with what to paste where (admin) */
+        get: operations["listOidcPresets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/oidc/clients": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Apps that sign people in through HardyOS (admin) */
+        get: operations["listOidcClients"];
+        put?: never;
+        /** Add a client; a confidential client's secret is in the answer, once (admin) */
+        post: operations["createOidcClient"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/oidc/clients/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** One client (admin) */
+        get: operations["getOidcClient"];
+        put?: never;
+        post?: never;
+        /** Remove a client, its sign-ins, tokens and consents (admin) */
+        delete: operations["deleteOidcClient"];
+        options?: never;
+        head?: never;
+        /** Change a client (all fields); a client made confidential gets a secret, returned once (admin) */
+        patch: operations["updateOidcClient"];
+        trace?: never;
+    };
+    "/oidc/clients/{id}/secret": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Replace a confidential client's secret; the new one is in the answer, once (admin) */
+        post: operations["newOidcClientSecret"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/oidc/clients/{id}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** End every sign-in at a client (its tokens stop working) (admin) */
+        post: operations["revokeOidcClient"];
         delete?: never;
         options?: never;
         head?: never;
@@ -4331,6 +4650,10 @@ export interface components {
             adopted: boolean;
         };
         AppsOverview: {
+            /** @description Apps published through NetBird's reverse proxy: id to https://<app>.<base>/ */
+            published: {
+                [key: string]: string;
+            };
             /** @description False when this build has no Docker */
             available: boolean;
             /** @description Docker has been set up on a pool */
@@ -4649,6 +4972,8 @@ export interface components {
             url: string;
             /** @description Through HardyOS's HTTPS window proxy (can be shown in a desktop window) */
             proxied: boolean;
+            /** @description The app's own published address (https://<app>.<base>, through NetBird's reverse proxy), given when the desktop is used at its published address */
+            published?: boolean;
         };
         AppCatalogApp: {
             id: string;
@@ -4786,6 +5111,8 @@ export interface components {
             /** @description "/s/<token>" on this server; shown once */
             url: string;
             token: string;
+            /** @description The link at https://files.<base>/s/<token> (through NetBird's reverse proxy, for people without NetBird) while publishing is on; it can take a minute to open the first time */
+            publicUrl?: string;
         };
         FileShare: {
             /** @description The shared folder's id, or "~home" */
@@ -4894,6 +5221,299 @@ export interface components {
              * @description The file's modification time in ms since 1970 (File.lastModified)
              */
             modified?: number;
+        };
+        NetBirdClientStatus: {
+            installed: boolean;
+            version?: string;
+            /** @description HardyOS joined this server to a NetBird network */
+            joined: boolean;
+            /** @description netbird.service is active */
+            running: boolean;
+            /** @enum {string} */
+            state: "not_installed" | "off" | "connecting" | "connected" | "needs_login" | "login_failed" | "session_expired" | "idle" | "unknown";
+            connected: boolean;
+            /** @description This server's NetBird address */
+            ip?: string;
+            /** @description The NetBird network (CIDR) */
+            network?: string;
+            fqdn?: string;
+            peersTotal: number;
+            peersConnected: number;
+            managementUrl?: string;
+            managementConnected: boolean;
+            /** @description This server's name in NetBird */
+            hostname?: string;
+            interface?: string;
+            problem?: string;
+        };
+        RemoteJoinRequest: {
+            /** @description The NetBird server, https://... (default https://vpn.hardynetworks.net) */
+            managementUrl: string;
+            /** @description A setup key from NetBird's dashboard; never stored or shown */
+            setupKey: string;
+            /** @description This server's name in NetBird (default nas) */
+            hostname?: string;
+        };
+        RemoteLeaveRequest: {
+            /** @description The NetBird server's host name */
+            confirm: string;
+        };
+        /**
+         * @description Empty: follow the default for apps; netbird: NetBird devices only; public: the internet, with sign-in in front
+         * @enum {string}
+         */
+        PublishMode: "" | "off" | "netbird" | "public";
+        /**
+         * @description Public only: sso (NetBird's sign-in, HardyOS's own provider once it's NetBird's identity provider), a shared password or PIN, or none
+         * @enum {string}
+         */
+        PublishAuth: "" | "sso" | "password" | "pin" | "none";
+        RemoteSettings: {
+            enabled: boolean;
+            /** @description Apps are https://<app>.<baseDomain> */
+            baseDomain: string;
+            /** @description NetBird's API address (empty for the management URL) */
+            apiUrl: string;
+            /** @description The proxy cluster the base domain is served by */
+            cluster: string;
+            desktopName: string;
+            /** @enum {string} */
+            defaultMode: "off" | "netbird" | "public";
+            /** @description files.<base> stays published even with no active share link */
+            publicShareLinks: boolean;
+            /** @description This server's tag in its NetBird service names (hardyos-<instance>-...) */
+            instance: string;
+            hasToken: boolean;
+            /** @description A saved token can't be read on this server (restored from another one) */
+            tokenUnreadable: boolean;
+        };
+        RemotePublishingRequest: {
+            enabled: boolean;
+            baseDomain: string;
+            apiUrl?: string;
+            cluster?: string;
+            desktopName?: string;
+            /** @enum {string} */
+            defaultMode?: "" | "off" | "netbird" | "public";
+            publicShareLinks?: boolean;
+            /** @description A NetBird access token (service user, Network Admin). Absent keeps the saved one; empty removes it */
+            token?: string;
+        };
+        PublishConfig: {
+            /** @enum {string} */
+            mode: "off" | "netbird" | "public";
+            /** @enum {string} */
+            auth: "sso" | "password" | "pin" | "none";
+            /** @description NetBird group IDs: who may reach it (NetBird-only) or sign in (SSO); empty: everyone (All) */
+            groups: string[];
+            /** @description Apps: the gateway asks for a HardyOS sign-in first */
+            hardyosSignIn: boolean;
+            /** @description A password or PIN is saved */
+            hasSecret: boolean;
+            /** @description The app follows the default mode */
+            default: boolean;
+        };
+        PublishItem: {
+            /** @description desktop (NetBird-only unless an admin confirms public), sso (HardyOS sign-in at sso.<base>, always public), files (share links at files.<base>) or app:<id> */
+            key: string;
+            /** @description Its name under the base domain */
+            label: string;
+            name: string;
+            domain: string;
+            url: string;
+            config: components["schemas"]["PublishConfig"];
+            /** @description NetBird has HardyOS's service for it */
+            published: boolean;
+            serviceId?: string;
+            /** @description NetBird's status: pending, certificate_pending, active, tunnel_not_created, certificate_failed, error */
+            status?: string;
+            error?: string;
+            syncedAt?: string;
+        };
+        PublishRequest: {
+            mode: components["schemas"]["PublishMode"];
+            auth?: components["schemas"]["PublishAuth"];
+            groups?: string[];
+            hardyosSignIn?: boolean;
+            /** @description Password (8+ characters) or PIN (4-12 digits). Absent keeps the saved one */
+            secret?: string;
+            /** @description Desktop only: must be true to publish it publicly (it includes administration) */
+            confirmPublic?: boolean;
+            /** @description Apps only: must be true to publish an app publicly with no sign-in in front (auth none) and HardyOS sign-in off; else 400 confirm_required */
+            confirmOpen?: boolean;
+        };
+        AppPublish: components["schemas"]["PublishItem"] & {
+            /** @description Publishing is set up */
+            enabled: boolean;
+            baseDomain: string;
+            defaultMode: string;
+        };
+        RemoteSyncInfo: {
+            /** Format: date-time */
+            at: string;
+            problem?: string;
+            created: number;
+            updated: number;
+            deleted: number;
+        };
+        RemoteGatewayInfo: {
+            listening: boolean;
+            address?: string;
+            problem?: string;
+        };
+        RemoteStatus: {
+            /** @description Publishing is available on this server */
+            available: boolean;
+            client: components["schemas"]["NetBirdClientStatus"];
+            defaultManagementUrl: string;
+            settings?: components["schemas"]["RemoteSettings"];
+            items: components["schemas"]["PublishItem"][];
+            lastSync?: components["schemas"]["RemoteSyncInfo"];
+            gateway: components["schemas"]["RemoteGatewayInfo"];
+        };
+        RemoteDomainRequest: {
+            /** @enum {string} */
+            action: "add" | "verify";
+            /** @description add: the proxy cluster (empty when NetBird has only one) */
+            cluster?: string;
+        };
+        NetBirdDomain: {
+            id: string;
+            domain: string;
+            validated: boolean;
+            /** @description free or custom */
+            type: string;
+            target_cluster?: string;
+            require_subdomain?: boolean;
+            supports_private?: boolean;
+        };
+        NetBirdCluster: {
+            id: string;
+            address: string;
+            type: string;
+            online: boolean;
+            connected_proxies: number;
+            private?: boolean;
+        };
+        NetBirdGroup: {
+            id: string;
+            name: string;
+            peers_count?: number;
+        };
+        RemoteCheckStep: {
+            /** @enum {string} */
+            id: "netbird" | "base" | "token" | "peer" | "domain" | "dns" | "private" | "sso";
+            title: string;
+            /** @enum {string} */
+            state: "ok" | "warn" | "bad" | "skipped";
+            detail?: string;
+        };
+        DNSRecord: {
+            /** @enum {string} */
+            type: "CNAME";
+            /** @description *.<base domain> */
+            name: string;
+            /** @description The proxy cluster's address */
+            target: string;
+            /** @description Cloudflare proxy status: DNS only (grey cloud) */
+            proxy: string;
+            ttl: string;
+        };
+        RemoteCheck: {
+            steps: components["schemas"]["RemoteCheckStep"][];
+            record?: components["schemas"]["DNSRecord"];
+            ready: boolean;
+            /** @description The proxy cluster can serve NetBird-only services */
+            supportsPrivate: boolean;
+            domain?: components["schemas"]["NetBirdDomain"];
+            domains: components["schemas"]["NetBirdDomain"][];
+            clusters: components["schemas"]["NetBirdCluster"][];
+            groups: components["schemas"]["NetBirdGroup"][];
+            /** @description HardyOS's own sign-in provider's issuer, when set up */
+            ssoIssuer?: string;
+        };
+        OidcStatus: {
+            /** @description The issuer apps are configured with */
+            issuer: string;
+            /** @description An administrator chose it (else it follows Remote Access) */
+            issuerChosen: boolean;
+            /** @description https://sso.<base>, or https://<desktop>/oidc without a base domain */
+            derivedIssuer: string;
+            discovery: string;
+            localAccounts: boolean;
+            /** @description Administrators may sign in through HardyOS sign-in from the internet (off by default) */
+            publicAdmins: boolean;
+            keys: components["schemas"]["OidcKey"][];
+        };
+        OidcKey: {
+            id: string;
+            algorithm: string;
+            /** @enum {string} */
+            state: "next" | "active" | "retired";
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            activatedAt?: string;
+            /** Format: date-time */
+            retiredAt?: string;
+            /** Format: date-time */
+            expiresAt?: string;
+        };
+        OidcClientSpec: {
+            name: string;
+            /**
+             * @description Public clients (browser apps, CLIs) have no secret and must use PKCE
+             * @enum {string}
+             */
+            kind: "confidential" | "public";
+            /** @description Matched exactly; https (http only to localhost, for public clients) */
+            redirectUris: string[];
+            postLogoutRedirectUris?: string[];
+            /** @description DOMAIN\group; empty lets every account in */
+            allowedGroups?: string[];
+            /** @description No consent screen */
+            firstParty?: boolean;
+            preset?: string;
+            disabled?: boolean;
+        };
+        OidcClient: {
+            /** @description The client ID */
+            id: string;
+            name: string;
+            /** @enum {string} */
+            kind: "confidential" | "public";
+            redirectUris: string[];
+            postLogoutRedirectUris: string[];
+            allowedGroups: string[];
+            firstParty: boolean;
+            preset: string;
+            /** @description Set when Remote Access keeps this client (read-only here) */
+            managedBy: string;
+            disabled: boolean;
+            hasSecret: boolean;
+            createdAt: string;
+            updatedAt: string;
+        };
+        OidcClientResult: {
+            client: components["schemas"]["OidcClient"];
+            /** @description Only when a secret was just made: shown once, only a hash is kept */
+            secret?: string;
+        };
+        OidcPresetStep: {
+            where: string;
+            field?: string;
+            /** @description May hold {clientId}, {clientSecret} and {issuer} */
+            value?: string;
+        };
+        OidcPreset: {
+            id: string;
+            name: string;
+            description: string;
+            client: components["schemas"]["OidcClientSpec"];
+            /** @description The app shows the exact redirect URL (starting with this) once it has the client ID: paste it into the client */
+            redirectFromApp?: string;
+            steps: components["schemas"]["OidcPresetStep"][];
+            notes: string[];
         };
         /** @description One device in a VM's spec (devices.Device) */
         VMDevice: {
@@ -9634,6 +10254,230 @@ export interface operations {
             503: components["responses"]["Unavailable"];
         };
     };
+    getRemote: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RemoteStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    joinNetBird: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RemoteJoinRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    leaveNetBird: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RemoteLeaveRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    setRemotePublishing: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RemotePublishingRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    checkRemote: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The check */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RemoteCheck"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    remoteDomain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RemoteDomainRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    syncRemote: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    rotateRemoteGatewaySecret: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    publishDesktop: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PublishRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getAppPublish: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The app's publishing */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppPublish"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    publishApp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PublishRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
     getInstallerStatus: {
         parameters: {
             query?: never;
@@ -9785,6 +10629,299 @@ export interface operations {
                 content?: never;
             };
             401: components["responses"]["Unauthorized"];
+        };
+    };
+    getOidc: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OidcStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    updateOidc: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description The issuer URL; empty goes back to the one HardyOS works out. On sso.<base> it has no path */
+                    issuer?: string;
+                    /** @description HardyOS (non-domain) accounts may sign in to apps (off by default) */
+                    localAccounts?: boolean;
+                    /** @description Administrators may sign in through HardyOS sign-in from the internet (off by default) */
+                    publicAdmins?: boolean;
+                };
+            };
+        };
+        responses: {
+            /** @description Status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OidcStatus"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    rotateOidcKeys: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OidcStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listOidcPresets: {
+        parameters: {
+            query?: {
+                /** @description NetBird's dashboard address (default https://vpn.hardynetworks.net) */
+                netbirdUrl?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Presets */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        presets: components["schemas"]["OidcPreset"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    listOidcClients: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Clients */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        clients: components["schemas"]["OidcClient"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    createOidcClient: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OidcClientSpec"];
+            };
+        };
+        responses: {
+            /** @description The client and its secret */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OidcClientResult"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    getOidcClient: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The client */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OidcClient"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteOidcClient: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    updateOidcClient: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OidcClientSpec"];
+            };
+        };
+        responses: {
+            /** @description The client */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OidcClientResult"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    newOidcClientSecret: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The new secret */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        secret: string;
+                    };
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    revokeOidcClient: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description How many sign-ins were ended */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        revoked: number;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
         };
     };
     getDevices: {

@@ -174,7 +174,7 @@ func TestAppProxyCookieIsolation(t *testing.T) {
 	b := browserOf(e.admin)
 	var desktopBefore string
 	for _, c := range e.admin.http.Jar.Cookies(mustURL(notes)) {
-		if c.Name == SessionCookie {
+		if c.Name == LegacySessionCookie { // plain HTTP test server
 			desktopBefore = c.Value
 		}
 	}
@@ -193,7 +193,7 @@ func TestAppProxyCookieIsolation(t *testing.T) {
 	if names["a_notes_sid"] != nport || names["a_notes_dom"] != "1" || names["sid"] != "" || names["a_notes_hardyos_session"] != "" {
 		t.Fatalf("cookies after notes set them: %v", names)
 	}
-	if names[SessionCookie] != desktopBefore || names["hardyos_app_board"] == "evil" {
+	if names[LegacySessionCookie] != desktopBefore || names["hardyos_app_board"] == "evil" {
 		t.Fatalf("an app overwrote a HardyOS cookie: %v", names)
 	}
 
@@ -426,7 +426,15 @@ func TestAppProxyWebSocketRevocation(t *testing.T) {
 	expectClosed(t, c, "reconfigured")
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		code, _ := get(t, browserOf(e.admin), adminApp+"/", nil)
+		// The job's end drops the listener and the reconcile right after
+		// starts it again: a refused connection in between is that gap,
+		// not an answer, so try again (an answer must be 401).
+		res, err := browserOf(e.admin).Get(adminApp + "/")
+		code := 0
+		if err == nil {
+			code = res.StatusCode
+			res.Body.Close()
+		}
 		if code == 401 {
 			break // the old window session is gone; the listener is back
 		}

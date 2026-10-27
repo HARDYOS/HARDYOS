@@ -1,0 +1,4 @@
+[
+  {"id": "chlfq4q5r8kc73b0qjpg", "address": "proxy.hardynetworks.net", "type": "account", "online": true, "connected_proxies": 1,
+   "supports_custom_ports": true, "require_subdomain": true, "supports_crowdsec": false, "private": false}
+]

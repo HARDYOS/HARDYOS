@@ -187,6 +187,15 @@ type UserGroups struct {
 	// by the names.
 	DomainSID string   `json:"domainSid"`
 	GroupSIDs []string `json:"groupSids"`
+	// SID and ObjectGUID identify the account itself. The GUID never
+	// changes, not on a rename either: HardyOS's sign-in provider (OIDC)
+	// uses it as the account's stable subject. Empty from an older helper.
+	SID        string `json:"sid"`
+	ObjectGUID string `json:"objectGuid"`
+	// PwdLastSet is when the password was last set (Unix seconds; 0 when
+	// it must be changed at next sign-in, or from an older helper). Signing
+	// in elsewhere with an older password stops when it moves on.
+	PwdLastSet int64 `json:"pwdLastSet"`
 }
 
 // UserGroups looks up an account's state and groups for sign-in.

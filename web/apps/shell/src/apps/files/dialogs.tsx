@@ -348,7 +348,9 @@ export function ShareLinkDialog({ share, entry, onClose }: { share: string; entr
   }
 
   if (made) {
-    const url = new URL(made.url, window.location.origin).toString();
+    // Through NetBird's reverse proxy (files.<base>) when published, so people
+    // without NetBird can open it; else this desktop's own address.
+    const url = made.publicUrl || new URL(made.url, window.location.origin).toString();
     return (
       <Dialog
         title="Link ready"

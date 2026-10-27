@@ -1,0 +1,284 @@
+package oidc
+
+import (
+	"context"
+	"crypto/rand"
+	"database/sql"
+	"encoding/base64"
+	"errors"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/zitadel/oidc/v3/pkg/oidc"
+
+	"github.com/hardyos/hardyos/daemon/internal/audit"
+	"github.com/hardyos/hardyos/daemon/internal/auth"
+)
+
+// Why a person can't sign in to an app.
+var (
+	ErrLocalAccountsOff = errors.New("HardyOS accounts can't sign in to apps here; sign in with your domain account (DOMAIN\\name)")
+	ErrNotInGroups      = errors.New("your account isn't in a group allowed to use this app; ask an administrator")
+	ErrNoSubject        = errors.New("the domain controller on this server isn't answering, so your account can't be confirmed; try again in a moment")
+)
+
+// allowed checks that u may use client c: local accounts only when they're
+// turned on; members of the client's groups when it has any.
+func (p *Provider) allowed(ctx context.Context, c *Client, u *auth.User) error {
+	if c.Disabled {
+		return errors.New("this app is turned off")
+	}
+	if u.IdentitySource() != auth.SourceDomain && !p.loadSettings(ctx).localAccounts {
+		return ErrLocalAccountsOff
+	}
+	if len(c.AllowedGroups) == 0 {
+		return nil
+	}
+	for _, g := range c.AllowedGroups {
+		if u.Matches(auth.PrincipalGroup, g) {
+			return nil
+		}
+	}
+	return ErrNotInGroups
+}
+
+// subjectFor returns the stable subject (sub) for u, recording it the
+// first time: a domain account's objectGUID (its SID with an older
+// directory helper), which survives renames; a random value for a local
+// account. If the directory says the account's GUID changed (the account
+// was deleted and another made with the same name), everything of the old
+// person ends (CheckAnchor); interactive (the password was just typed) the
+// new one gets its own subject, otherwise (an older sign-in session in
+// this browser) auth.ErrAccountReplaced.
+func (p *Provider) subjectFor(ctx context.Context, u *auth.User, interactive bool) (string, error) {
+	db := p.cfg.DB
+	var cur string
+	err := db.QueryRowContext(ctx, `SELECT sub FROM oidc_subjects WHERE user_id = ?`, u.ID).Scan(&cur)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	if u.IdentitySource() != auth.SourceDomain {
+		if cur != "" {
+			return cur, nil
+		}
+		b := make([]byte, 16)
+		_, _ = rand.Read(b)
+		sub := "local-" + base64.RawURLEncoding.EncodeToString(b)
+		if _, err := db.ExecContext(ctx, `INSERT INTO oidc_subjects (user_id, sub) VALUES (?, ?)`, u.ID, sub); err != nil {
+			return "", err
+		}
+		return sub, nil
+	}
+	guid := p.domainGUID(ctx, u)
+	if guid == "" {
+		if cur != "" {
+			return cur, nil // the directory can't be asked: keep what we know
+		}
+		return "", ErrNoSubject
+	}
+	if err := p.CheckAnchor(ctx, u, guid, interactive); err != nil {
+		return "", err
+	}
+	if err := db.QueryRowContext(ctx, `SELECT sub FROM oidc_subjects WHERE user_id = ?`, u.ID).Scan(&cur); err != nil {
+		return "", err
+	}
+	return cur, nil
+}
+
+// CheckAnchor implements auth.IdentityAnchor with oidc_subjects: the
+// directory object (GUID, else SID) each domain account row belongs to.
+// A row without one gets anchor. Another anchor means the name was given
+// to another person: their predecessor's desktop and app sessions, app
+// sign-ins (grants, tokens), provider sessions and consents all end; then,
+// interactive, the row is the new person's (new subject), otherwise
+// auth.ErrAccountReplaced.
+func (p *Provider) CheckAnchor(ctx context.Context, u *auth.User, anchor string, interactive bool) error {
+	if u == nil || anchor == "" || u.IdentitySource() != auth.SourceDomain {
+		return nil
+	}
+	db := p.cfg.DB
+	var cur, curGUID string
+	err := db.QueryRowContext(ctx, `SELECT sub, guid FROM oidc_subjects WHERE user_id = ?`, u.ID).Scan(&cur, &curGUID)
+	switch {
+	case err != nil && !errors.Is(err, sql.ErrNoRows):
+		return err
+	case err == nil && curGUID == anchor:
+		p.anchorConfirmed(u.ID)
+		return nil
+	case err == nil && curGUID == "" && !strings.HasPrefix(cur, "local-"):
+		// Recorded before anchors were kept: this is the one.
+		_, err := db.ExecContext(ctx, `UPDATE oidc_subjects SET guid = ? WHERE user_id = ?`, anchor, u.ID)
+		return err
+	case err == nil:
+		// Another person with the same name: nothing of the old one carries over.
+		p.endPredecessor(ctx, u)
+		if !interactive {
+			return auth.ErrAccountReplaced
+		}
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// A row of a forgotten-and-recreated users row with this GUID goes.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM oidc_subjects WHERE sub = ? OR user_id = ?`, anchor, u.ID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO oidc_subjects (user_id, sub, guid) VALUES (?, ?, ?)`, u.ID, anchor, anchor); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	p.anchorConfirmed(u.ID)
+	return nil
+}
+
+// endPredecessor ends everything a domain account row's previous owner
+// held.
+func (p *Provider) endPredecessor(ctx context.Context, u *auth.User) {
+	db := p.cfg.DB
+	_, _ = revokeWhere(ctx, db, p.now(), `user_id = ?`, u.ID)
+	_, _ = db.ExecContext(ctx, `DELETE FROM oidc_consents WHERE user_id = ?`, u.ID)
+	_, _ = db.ExecContext(ctx, `DELETE FROM oidc_browser_sessions WHERE user_id = ?`, u.ID)
+	if p.cfg.EndSessions != nil {
+		p.cfg.EndSessions(ctx, u.ID)
+	}
+	p.mu.Lock()
+	delete(p.anchorOK, u.ID)
+	p.mu.Unlock()
+	p.audit(ctx, "", u, "oidc.subject.change", u.Username, audit.Success,
+		"the domain account was replaced by another with the same name; the previous one's sessions and app sign-ins were ended")
+}
+
+// anchorFresh is how long a confirmed anchor isn't looked up again.
+const anchorFresh = 30 * time.Second
+
+func (p *Provider) anchorConfirmed(id int64) {
+	p.mu.Lock()
+	p.anchorOK[id] = p.now()
+	if len(p.anchorOK) > 10000 {
+		for k, t := range p.anchorOK {
+			if p.now().Sub(t) > anchorFresh {
+				delete(p.anchorOK, k)
+			}
+		}
+	}
+	p.mu.Unlock()
+}
+
+// checkAnchorNow asks the directory for u's anchor (at most every 30
+// seconds per person) and compares it with the recorded one.
+func (p *Provider) checkAnchorNow(ctx context.Context, u *auth.User) error {
+	if u.IdentitySource() != auth.SourceDomain {
+		return nil
+	}
+	p.mu.Lock()
+	t, ok := p.anchorOK[u.ID]
+	p.mu.Unlock()
+	if ok && p.now().Sub(t) < anchorFresh {
+		return nil
+	}
+	guid := p.domainGUID(ctx, u)
+	if guid == "" {
+		return nil // can't be asked: the groups refresh decides
+	}
+	return p.CheckAnchor(ctx, u, guid, false)
+}
+
+// domainGUID asks the directory for u's objectGUID (or SID); "" when it
+// can't be asked.
+func (p *Provider) domainGUID(ctx context.Context, u *auth.User) string {
+	d := p.cfg.SignIn.Domain
+	if d == nil {
+		return ""
+	}
+	_, name, ok := strings.Cut(u.IdentityPrincipal(), `\`)
+	if !ok {
+		return ""
+	}
+	a, err := d.Account(ctx, name)
+	if err != nil || a == nil || !a.Exists {
+		return ""
+	}
+	return auth.AccountAnchor(a)
+}
+
+// userForSubject loads the account behind a subject, checking it may still
+// sign in (LoadUser refreshes a domain account's groups like the desktop).
+// UserForSubject is the account behind a subject this provider issued, if
+// it may still sign in (Remote Access's app gateway signs people in to
+// published apps through the provider and needs the account).
+func (p *Provider) UserForSubject(ctx context.Context, sub string) (*auth.User, error) {
+	return p.userForSubject(ctx, sub)
+}
+
+func (p *Provider) userForSubject(ctx context.Context, sub string) (*auth.User, error) {
+	var id int64
+	if err := p.cfg.DB.QueryRowContext(ctx, `SELECT user_id FROM oidc_subjects WHERE sub = ?`, sub).Scan(&id); err != nil {
+		return nil, errors.New("unknown subject")
+	}
+	u, err := p.cfg.LoadUser(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if u.Disabled {
+		return nil, auth.ErrDisabledHere
+	}
+	if u.IdentitySource() != auth.SourceDomain && !p.loadSettings(ctx).localAccounts {
+		return nil, ErrLocalAccountsOff
+	}
+	// The subject was the directory object it was issued for; if the name
+	// now belongs to another one, the subject is no one's.
+	if err := p.checkAnchorNow(ctx, u); err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+// fillUserinfo sets the claims for u:
+//
+//	profile: name, preferred_username (alice), groups, hardyos_admin
+//	email:   email, email_verified
+//	groups:  groups (HOME\Family, ...), hardyos_admin
+//
+// A domain account without an email address in the directory gets its
+// user principal name (alice@home.example.net), marked unverified.
+func (p *Provider) fillUserinfo(ctx context.Context, info *oidc.UserInfo, u *auth.User, sub string, scopes []string) {
+	info.Subject = sub
+	short := u.IdentityPrincipal()
+	if _, n, ok := strings.Cut(short, `\`); ok {
+		short = n
+	}
+	if slices.Contains(scopes, oidc.ScopeProfile) {
+		info.Name = u.DisplayName
+		if info.Name == "" {
+			info.Name = short
+		}
+		info.PreferredUsername = short
+	}
+	if slices.Contains(scopes, oidc.ScopeEmail) {
+		switch {
+		case u.Email != "":
+			info.Email = u.Email
+			info.EmailVerified = true
+		case u.IdentitySource() == auth.SourceDomain:
+			if d := p.cfg.SignIn.Domain; d != nil {
+				if di, err := d.Info(ctx); err == nil && di != nil && di.DNS != "" {
+					info.Email = strings.ToLower(short + "@" + di.DNS)
+					info.AppendClaims("email_verified", false)
+				}
+			}
+		}
+	}
+	if slices.Contains(scopes, ScopeGroups) || slices.Contains(scopes, oidc.ScopeProfile) {
+		groups := u.IdentityGroups()
+		if groups == nil {
+			groups = []string{}
+		}
+		info.AppendClaims("groups", groups)
+		info.AppendClaims(ClaimAdmin, u.IsAdmin())
+	}
+}

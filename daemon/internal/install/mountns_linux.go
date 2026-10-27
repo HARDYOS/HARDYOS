@@ -28,7 +28,7 @@ import (
 // on the server) used to copy the bind into every service's namespace;
 // unmounting it on the server after cutting propagation left those copies
 // in place, holding the dataset, and "zpool export" failed with "pool is
-// busy" (decision 145).
+// busy" (decision 158).
 
 // privateMountNS runs fn on an OS thread of its own in a new mount
 // namespace (a recursive slave of the caller's). Commands fn starts (from
