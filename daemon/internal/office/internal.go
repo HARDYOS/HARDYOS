@@ -12,11 +12,12 @@ import (
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/clientip"
+	"github.com/hardyos/hardyos/daemon/internal/ports"
 )
 
 // InternalPort is hardyd's listener for the Document Server (plain HTTP on
 // the Docker host gateway address; decision 253).
-const InternalPort = 44251
+const InternalPort = ports.OfficeInternal
 
 // InternalHandler serves the two things the Document Server asks hardyd
 // for, and nothing else:

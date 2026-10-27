@@ -18,6 +18,7 @@ import (
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/ports"
 	"github.com/hardyos/hardyos/daemon/internal/replica"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 )
@@ -61,7 +62,7 @@ const (
 
 // DefaultPort is where a receiving server listens for other HardyOS
 // servers (mutual TLS, pinned keys).
-const DefaultPort = 44400
+const DefaultPort = ports.Replication
 
 // Limits on task settings.
 const (

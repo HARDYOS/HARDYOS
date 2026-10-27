@@ -64,11 +64,12 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/ports"
 )
 
 // Window proxy settings.
 const (
-	DefaultAppProxyBase = 44300
+	DefaultAppProxyBase = ports.AppProxyBase
 	proxyAuthPath       = "/__hardyos/auth"
 	proxyCookiePrefix   = "hardyos_app_"
 	proxyTokenTTL       = time.Minute

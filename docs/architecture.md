@@ -1861,6 +1861,9 @@ hardyd ── /s/-/ds/* ──▶ Document Server  <container address>:80  (cata
   visitor's name, then serves the editor on the office origin (a redirect
   from the desktop's address) or on `files.<base>`; participants of kind
   `link` read and write as the link's creator.
+- **Ports.** 44250 and 44251, like every fixed port of HardyOS's own
+  listeners (app gateway 44200, app windows 44300 and up, replication
+  44400), are in `internal/ports`, whose test refuses duplicates.
 - **Notes** is web only: Markdown files through `/files/*` as the person
   (list, download, chunked upload with overwrite after a stat check),
   rendered by a React-element Markdown renderer without HTML.

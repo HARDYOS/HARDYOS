@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/hardyos/hardyos/daemon/internal/ports"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 )
 
@@ -36,7 +37,7 @@ const (
 	Project = "hardyos-onlyoffice"
 	Service = "documentserver"
 	// InternalPort is hardyd's listener for the Document Server.
-	InternalPort = 44251
+	InternalPort = ports.OfficeInternal
 )
 
 // Chain names.

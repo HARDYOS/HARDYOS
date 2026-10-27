@@ -43,6 +43,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/fileworker"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/office"
+	"github.com/hardyos/hardyos/daemon/internal/ports"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/secretbox"
 	"github.com/hardyos/hardyos/daemon/internal/sharelinks"
@@ -55,7 +56,7 @@ const (
 	JobKindOfficeDisable  = "office.disable"
 	JobKindOfficeSettings = "office.settings"
 	// DefaultOfficePort is the office origin's port.
-	DefaultOfficePort = 44250
+	DefaultOfficePort = ports.Office
 	// officeTicketLifetime: how long the desktop has to load the editor
 	// window after asking to open a document.
 	officeTicketLifetime = time.Minute
