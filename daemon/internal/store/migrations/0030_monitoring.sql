@@ -31,11 +31,11 @@ INSERT INTO notify_channels (type, name, enabled, config, created_at, updated_at
     VALUES ('desktop', 'Desktop', 1, '{}', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
 -- Routing: for a category of alerts ("disk", "pool", ... or "*" for the
--- rest), the lowest severity each channel gets.
+-- rest), the lowest severity each channel gets ("off": none of them).
 CREATE TABLE notify_routes (
     category     TEXT NOT NULL,
     channel_id   INTEGER NOT NULL REFERENCES notify_channels(id) ON DELETE CASCADE,
-    min_severity TEXT NOT NULL CHECK (min_severity IN ('info', 'warning', 'critical')),
+    min_severity TEXT NOT NULL CHECK (min_severity IN ('info', 'warning', 'critical', 'off')),
     PRIMARY KEY (category, channel_id)
 );
 INSERT INTO notify_routes (category, channel_id, min_severity)

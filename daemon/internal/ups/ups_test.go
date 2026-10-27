@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -264,12 +265,10 @@ func TestDummyUPS(t *testing.T) {
 	write("upsd.users", files["upsd.users"])
 	write("upsd.conf", fmt.Sprintf("LISTEN 127.0.0.1 %d\n", port))
 	write("dummy.dev", "ups.status: OL\nbattery.charge: 100\nbattery.runtime: 3600\nups.load: 20\nups.mfr: Dummy\nups.model: Test 1500\n")
+	// NUT's daemons drop to this user; run them as whoever runs the test.
 	me := "root"
-	if u := os.Getenv("USER"); u != "" {
-		me = u
-	}
-	if os.Geteuid() != 0 {
-		me = fmt.Sprint(os.Geteuid())
+	if u, err := user.LookupId(fmt.Sprint(os.Geteuid())); err == nil {
+		me = u.Username
 	}
 	env := []string{"NUT_CONFPATH=" + dir, "NUT_STATEPATH=" + state, "NUT_ALTPIDPATH=" + state, "PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
 	var logs []*strings.Builder

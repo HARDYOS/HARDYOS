@@ -588,6 +588,10 @@ func (c *Channels) recordResult(ctx context.Context, id int64, sendErr error) {
 		store.Now(), boolInt(sendErr == nil), msg, id)
 }
 
+// RouteOff as a route's MinSeverity: the channel gets nothing of that
+// category (overriding "*").
+const RouteOff = "off"
+
 // Route is the lowest severity one channel gets for one category.
 type Route struct {
 	Category    string `json:"category"`
@@ -637,8 +641,8 @@ func (c *Channels) SetRoutes(ctx context.Context, routes []Route) error {
 		if !known[r.ChannelID] {
 			return invalid("no channel %d", r.ChannelID)
 		}
-		if !ValidSeverity(r.MinSeverity) {
-			return invalid("minSeverity must be info, warning or critical")
+		if !ValidSeverity(r.MinSeverity) && r.MinSeverity != RouteOff {
+			return invalid("minSeverity must be info, warning, critical or off")
 		}
 		k := r.Category + "\x00" + strconv.FormatInt(r.ChannelID, 10)
 		if seen[k] {
@@ -691,7 +695,7 @@ func (c *Channels) targets(ctx context.Context, kind, severity string) ([]*chann
 	slices.Sort(ids)
 	var out []*channelRow
 	for _, id := range ids {
-		if m := min[id]; SeverityRank(severity) < SeverityRank(m) {
+		if m := min[id]; m == RouteOff || SeverityRank(severity) < SeverityRank(m) {
 			continue
 		}
 		r, err := c.get(ctx, id, true)

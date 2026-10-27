@@ -231,9 +231,13 @@ func TestRoutingDedupAndRateLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	d.Notify(ctx, Event{Kind: "disk.temperature", Severity: SeverityWarning, Title: "sda is hot"})
+	if err := d.Channels.SetRoutes(ctx, []Route{{"*", 1, SeverityInfo}, {"*", id, SeverityWarning}, {"disk", id, SeverityCritical}, {"vm", id, RouteOff}}); err != nil {
+		t.Fatal(err)
+	}
+	d.Notify(ctx, Event{Kind: "vm.crashed", Severity: SeverityCritical, Title: "haos crashed"})
 	d.Notify(ctx, Event{Kind: "disk.smart", Severity: SeverityCritical, Title: "sda is failing"})
 	waitFor(t, func() bool { return len(h.got()) == 2 })
-	if strings.Contains(strings.Join(h.got(), ""), "sda is hot") {
+	if strings.Contains(strings.Join(h.got(), ""), "sda is hot") || strings.Contains(strings.Join(h.got(), ""), "haos crashed") {
 		t.Error("a warning reached a channel set to critical for disks")
 	}
 

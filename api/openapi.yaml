@@ -4952,7 +4952,7 @@ components:
       properties:
         category: { type: string, description: 'Alert category (disk, pool, ups, backup, ...) or "*"' }
         channelId: { type: integer, format: int64 }
-        minSeverity: { type: string, enum: [info, warning, critical] }
+        minSeverity: { type: string, enum: [info, warning, critical, "off"], description: '"off": none of this category (overrides "*")' }
     QuietHours:
       type: object
       required: [enabled, start, end, allow]

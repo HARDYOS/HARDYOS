@@ -4322,8 +4322,11 @@ export interface components {
             category: string;
             /** Format: int64 */
             channelId: number;
-            /** @enum {string} */
-            minSeverity: "info" | "warning" | "critical";
+            /**
+             * @description "off": none of this category (overrides "*")
+             * @enum {string}
+             */
+            minSeverity: "info" | "warning" | "critical" | "off";
         };
         QuietHours: {
             enabled: boolean;
