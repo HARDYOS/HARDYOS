@@ -34,6 +34,7 @@ tags:
   - name: apps
   - name: sharelinks
   - name: files
+  - name: remote
 paths:
   /health:
     get:
@@ -2987,6 +2988,169 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "503": { $ref: "#/components/responses/Unavailable" }
   # ---- end of App Store v2 apps API ----
+  # ---- Remote access: NetBird client and publishing (docs/remote-access.md, part A) ----
+  /remote:
+    get:
+      operationId: getRemote
+      summary: Remote Access status
+      description: |
+        The NetBird client on this server, the publishing settings (the
+        access token only as `hasToken`), every publishable thing (the
+        desktop and each app with a web page) with the last sync's state,
+        and the app gateway.
+      tags: [remote]
+      responses:
+        "200":
+          description: The status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RemoteStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /remote/join:
+    post:
+      operationId: joinNetBird
+      summary: Join a NetBird network with a setup key (job remote.join)
+      description: |
+        The setup key reaches the job only through hardyd's memory and goes
+        to `netbird up` in its environment; it is never in job parameters,
+        results, logs or answers.
+      tags: [remote]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RemoteJoinRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /remote/leave:
+    post:
+      operationId: leaveNetBird
+      summary: Leave the NetBird network (job remote.leave)
+      description: Removes this server's services from NetBird first (when it can), then signs out and turns the client off.
+      tags: [remote]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RemoteLeaveRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /remote/publishing:
+    put:
+      operationId: setRemotePublishing
+      summary: Save the publishing settings and update NetBird (job remote.settings)
+      tags: [remote]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RemotePublishingRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /remote/check:
+    get:
+      operationId: checkRemote
+      summary: The publishing setup check
+      description: Checks the token, this server's peer, the base domain in NetBird, the wildcard CNAME and the proxy cluster's capabilities; says what to add where.
+      tags: [remote]
+      responses:
+        "200":
+          description: The check
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RemoteCheck" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /remote/domain:
+    post:
+      operationId: remoteDomain
+      summary: Add the base domain to NetBird, or ask NetBird to verify it (job remote.domain)
+      tags: [remote]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RemoteDomainRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /remote/sync:
+    post:
+      operationId: syncRemote
+      summary: Update NetBird's services now (job remote.sync; it also runs every 10 minutes)
+      tags: [remote]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /remote/desktop:
+    put:
+      operationId: publishDesktop
+      summary: How the desktop is published (job remote.service)
+      tags: [remote]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PublishRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /apps/{id}/publish:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getAppPublish
+      summary: How an app is published through NetBird
+      tags: [remote, apps]
+      responses:
+        "200":
+          description: The app's publishing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppPublish" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    put:
+      operationId: publishApp
+      summary: Publish an app NetBird-only or publicly, or not at all (job remote.service)
+      tags: [remote, apps]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PublishRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  # ---- end of remote access ----
   /installer:
     get:
       operationId: getInstallerStatus
@@ -4324,8 +4488,12 @@ components:
         adopted: { type: boolean, description: An existing group was recorded }
     AppsOverview:
       type: object
-      required: [available, configured, pool, engineRunning, engineVersion, problem, apps, keptData, updates]
+      required: [available, configured, pool, engineRunning, engineVersion, problem, apps, keptData, updates, published]
       properties:
+        published:
+          type: object
+          additionalProperties: { type: string }
+          description: "Apps published through NetBird's reverse proxy: id to https://<app>.<base>/"
         available: { type: boolean, description: False when this build has no Docker }
         configured: { type: boolean, description: Docker has been set up on a pool }
         pool: { type: string, description: The pool holding Docker and every app }
@@ -4661,6 +4829,7 @@ components:
       properties:
         url: { type: string }
         proxied: { type: boolean, description: Through HardyOS's HTTPS window proxy (can be shown in a desktop window) }
+        published: { type: boolean, description: "The app's own published address (https://<app>.<base>, through NetBird's reverse proxy), given when the desktop is used at its published address" }
     AppCatalogApp:
       type: object
       required: [id, name, version, summary, url, sha256, icon]
@@ -4881,3 +5050,205 @@ components:
         overwrite: { type: boolean, description: Replace a file that's already there (never a folder) }
         modified: { type: integer, format: int64, description: The file's modification time in ms since 1970 (File.lastModified) }
     # ---- end of files API schemas (part C) ----
+    # ---- Remote access schemas (part A) ----
+    NetBirdClientStatus:
+      type: object
+      required: [installed, joined, running, state, connected, peersTotal, peersConnected, managementConnected]
+      properties:
+        installed: { type: boolean }
+        version: { type: string }
+        joined: { type: boolean, description: HardyOS joined this server to a NetBird network }
+        running: { type: boolean, description: netbird.service is active }
+        state:
+          type: string
+          enum: [not_installed, "off", connecting, connected, needs_login, login_failed, session_expired, idle, unknown]
+        connected: { type: boolean }
+        ip: { type: string, description: This server's NetBird address }
+        network: { type: string, description: The NetBird network (CIDR) }
+        fqdn: { type: string }
+        peersTotal: { type: integer }
+        peersConnected: { type: integer }
+        managementUrl: { type: string }
+        managementConnected: { type: boolean }
+        hostname: { type: string, description: This server's name in NetBird }
+        interface: { type: string }
+        problem: { type: string }
+    RemoteJoinRequest:
+      type: object
+      required: [managementUrl, setupKey]
+      properties:
+        managementUrl: { type: string, description: "The NetBird server, https://... (default https://vpn.hardynetworks.net)" }
+        setupKey: { type: string, writeOnly: true, description: A setup key from NetBird's dashboard; never stored or shown }
+        hostname: { type: string, description: "This server's name in NetBird (default nas)" }
+    RemoteLeaveRequest:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: string, description: The NetBird server's host name, typed to confirm }
+    PublishMode:
+      type: string
+      enum: ["", "off", netbird, public]
+      description: "Empty: follow the default for apps; netbird: NetBird devices only; public: the internet, with sign-in in front"
+    PublishAuth:
+      type: string
+      enum: ["", sso, password, pin, none]
+      description: "Public only: sso (NetBird's sign-in, HardyOS's own provider once it's NetBird's identity provider), a shared password or PIN, or none"
+    RemoteSettings:
+      type: object
+      required: [enabled, baseDomain, apiUrl, cluster, desktopName, defaultMode, instance, hasToken, tokenUnreadable]
+      properties:
+        enabled: { type: boolean }
+        baseDomain: { type: string, description: "Apps are https://<app>.<baseDomain>" }
+        apiUrl: { type: string, description: NetBird's API address (empty for the management URL) }
+        cluster: { type: string, description: The proxy cluster the base domain is served by }
+        desktopName: { type: string }
+        defaultMode: { type: string, enum: ["off", netbird, public] }
+        instance: { type: string, description: "This server's tag in its NetBird service names (hardyos-<instance>-...)" }
+        hasToken: { type: boolean }
+        tokenUnreadable: { type: boolean, description: A saved token can't be read on this server (restored from another one) }
+    RemotePublishingRequest:
+      type: object
+      required: [enabled, baseDomain]
+      properties:
+        enabled: { type: boolean }
+        baseDomain: { type: string }
+        apiUrl: { type: string }
+        cluster: { type: string }
+        desktopName: { type: string }
+        defaultMode: { type: string, enum: ["", "off", netbird, public] }
+        token: { type: string, writeOnly: true, description: "A NetBird access token (service user, Network Admin). Absent keeps the saved one; empty removes it" }
+    PublishConfig:
+      type: object
+      required: [mode, auth, groups, hardyosSignIn, hasSecret, default]
+      properties:
+        mode: { type: string, enum: ["off", netbird, public] }
+        auth: { type: string, enum: [sso, password, pin, none] }
+        groups: { type: array, items: { type: string }, description: "NetBird group IDs: who may reach it (NetBird-only) or sign in (SSO); empty: everyone (All)" }
+        hardyosSignIn: { type: boolean, description: "Apps: the gateway asks for a HardyOS sign-in first" }
+        hasSecret: { type: boolean, description: A password or PIN is saved }
+        default: { type: boolean, description: The app follows the default mode }
+    PublishItem:
+      type: object
+      required: [key, label, name, domain, url, config, published]
+      properties:
+        key: { type: string, description: "desktop, sso (HardyOS sign-in at sso.<base>, always public) or app:<id>" }
+        label: { type: string, description: Its name under the base domain }
+        name: { type: string }
+        domain: { type: string }
+        url: { type: string }
+        config: { $ref: "#/components/schemas/PublishConfig" }
+        published: { type: boolean, description: NetBird has HardyOS's service for it }
+        serviceId: { type: string }
+        status: { type: string, description: "NetBird's status: pending, certificate_pending, active, tunnel_not_created, certificate_failed, error" }
+        error: { type: string }
+        syncedAt: { type: string }
+    PublishRequest:
+      type: object
+      required: [mode]
+      properties:
+        mode: { $ref: "#/components/schemas/PublishMode" }
+        auth: { $ref: "#/components/schemas/PublishAuth" }
+        groups: { type: array, items: { type: string } }
+        hardyosSignIn: { type: boolean }
+        secret: { type: string, writeOnly: true, description: "Password (8+ characters) or PIN (4-12 digits). Absent keeps the saved one" }
+    AppPublish:
+      allOf:
+        - $ref: "#/components/schemas/PublishItem"
+        - type: object
+          required: [enabled, baseDomain, defaultMode]
+          properties:
+            enabled: { type: boolean, description: Publishing is set up }
+            baseDomain: { type: string }
+            defaultMode: { type: string }
+    RemoteSyncInfo:
+      type: object
+      required: [at, created, updated, deleted]
+      properties:
+        at: { type: string, format: date-time }
+        problem: { type: string }
+        created: { type: integer }
+        updated: { type: integer }
+        deleted: { type: integer }
+    RemoteGatewayInfo:
+      type: object
+      required: [listening]
+      properties:
+        listening: { type: boolean }
+        address: { type: string }
+        problem: { type: string }
+    RemoteStatus:
+      type: object
+      required: [available, client, defaultManagementUrl, items, gateway]
+      properties:
+        available: { type: boolean, description: Publishing is available on this server }
+        client: { $ref: "#/components/schemas/NetBirdClientStatus" }
+        defaultManagementUrl: { type: string }
+        settings: { $ref: "#/components/schemas/RemoteSettings" }
+        items: { type: array, items: { $ref: "#/components/schemas/PublishItem" } }
+        lastSync: { $ref: "#/components/schemas/RemoteSyncInfo" }
+        gateway: { $ref: "#/components/schemas/RemoteGatewayInfo" }
+    RemoteDomainRequest:
+      type: object
+      required: [action]
+      properties:
+        action: { type: string, enum: [add, verify] }
+        cluster: { type: string, description: "add: the proxy cluster (empty when NetBird has only one)" }
+    NetBirdDomain:
+      type: object
+      required: [id, domain, validated, type]
+      properties:
+        id: { type: string }
+        domain: { type: string }
+        validated: { type: boolean }
+        type: { type: string, description: free or custom }
+        target_cluster: { type: string }
+        require_subdomain: { type: boolean }
+        supports_private: { type: boolean }
+    NetBirdCluster:
+      type: object
+      required: [id, address, type, online, connected_proxies]
+      properties:
+        id: { type: string }
+        address: { type: string }
+        type: { type: string }
+        online: { type: boolean }
+        connected_proxies: { type: integer }
+        private: { type: boolean }
+    NetBirdGroup:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        peers_count: { type: integer }
+    RemoteCheckStep:
+      type: object
+      required: [id, title, state]
+      properties:
+        id: { type: string, enum: [netbird, base, token, peer, domain, dns, private, sso] }
+        title: { type: string }
+        state: { type: string, enum: [ok, warn, bad, skipped] }
+        detail: { type: string }
+    DNSRecord:
+      type: object
+      required: [type, name, target, proxy, ttl]
+      properties:
+        type: { type: string, enum: [CNAME] }
+        name: { type: string, description: "*.<base domain>" }
+        target: { type: string, description: The proxy cluster's address }
+        proxy: { type: string, description: "Cloudflare proxy status: DNS only (grey cloud)" }
+        ttl: { type: string }
+    RemoteCheck:
+      type: object
+      required: [steps, ready, supportsPrivate, domains, clusters, groups]
+      properties:
+        steps: { type: array, items: { $ref: "#/components/schemas/RemoteCheckStep" } }
+        record: { $ref: "#/components/schemas/DNSRecord" }
+        ready: { type: boolean }
+        supportsPrivate: { type: boolean, description: The proxy cluster can serve NetBird-only services }
+        domain: { $ref: "#/components/schemas/NetBirdDomain" }
+        domains: { type: array, items: { $ref: "#/components/schemas/NetBirdDomain" } }
+        clusters: { type: array, items: { $ref: "#/components/schemas/NetBirdCluster" } }
+        groups: { type: array, items: { $ref: "#/components/schemas/NetBirdGroup" } }
+        ssoIssuer: { type: string, description: "HardyOS's own sign-in provider's issuer, when set up" }
+    # ---- end of remote access schemas ----

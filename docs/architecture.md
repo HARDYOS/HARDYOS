@@ -1184,6 +1184,88 @@ them on (`settings.json`: `sftpEnabled`, `webdavEnabled`) and per folder
   lockout after ten wrong passwords, and an overriding drop-in caught by
   the effective-config check (PAM off, problem shown) and recovered.
 
+## Remote access (NetBird)
+
+User guide: [remote-access.md](remote-access.md); contract:
+`docs/plans/remote-access.md` sections 1-3 (part A); decisions 111-115.
+
+```
+ Browser ──https──► NetBird proxy (on the NetBird server: certificates, sign-in in front)
+                        │ WireGuard (NetBird network), Host passed through,
+                        │ X-Hardyos-Gateway: <secret>, X-Forwarded-For
+                        ▼
+              hardyd app gateway  <NetBird address>:44200 (TLS, desktop cert)
+                 ├─ <desktop>.<base>, sso.<base> ──► hardyd's own handler (real client address)
+                 └─ <app>.<base> ──────► 127.0.0.1:<app's web port>
+```
+
+- **The NetBird client.** The image installs NetBird's own Debian package,
+  pinned by version and SHA-256 and checked against NetBird's signing key
+  shipped in the repository (`os/live/config/hooks/normal/0150-netbird.hook.chroot`);
+  `netbird.service` stays off. hardyd-priv's `netbird.status`,
+  `netbird.join` (setup key in `NB_SETUP_KEY`, never argv), `netbird.leave`
+  (confirmation = the management host) and `netbird.settings`
+  (`internal/netbird`, `priv/netbird_ops.go`) run the client; a root-owned
+  marker in `/var/lib/netbird` records the join, so hardyd-priv starts the
+  service again after an update (updates carry `/var/lib/netbird/*.json`
+  over). Interface `wt0`.
+- **Publishing** (`internal/publish`). Settings in hardyd's database
+  (`settings` 'remote.publish'; table `remote_services`, migration
+  `0009_remote_access.sql`; `remote.base_domain` and `remote.desktop_name`
+  for the sign-in provider's issuer). The NetBird access token, the gateway's
+  shared secret and app passwords/PINs are sealed with AES-256-GCM
+  (additional data = the setting's name) with the key hardyd-priv's
+  `secrets.key` gives for purpose `remote-access` (`Sealer.Source`;
+  without it, a 0600 key file outside the database, for development). The sync lists NetBird's services and only ever
+  touches those named `hardyos-<instance>-…`: one per published thing
+  (the desktop, `sso.<base>` for HardyOS's sign-in provider, always public
+  with nothing in front, and each app),
+  target = this server's peer (looked up by its NetBird address), HTTPS to
+  port 44200 with `skip_tls_verify` (the hop is inside WireGuard),
+  `pass_host_header`, and the secret as a custom header. NetBird-only =
+  `private` + `access_groups` (needs a domain whose cluster
+  `supports_private`); public = `bearer_auth` (SSO), `password_auth`,
+  `pin_auth` or nothing. Changes are detected by a hash of what was sent
+  (passwords by their sealed form) and by comparing what NetBird shows;
+  `access_restrictions` are sent back as NetBird has them. A problem that
+  affects everything (no token, not connected, domain missing) changes
+  nothing. The setup check lists domains, clusters and groups, resolves
+  `hardyos-check-<random>.<base>` to verify the wildcard CNAME (following
+  the cluster's own CNAME chain) and compares NetBird's identity providers
+  with HardyOS's own OIDC issuer (`Config.SSOIssuer`, part B).
+- **Jobs.** `remote.join`, `remote.leave` (removes HardyOS's services
+  first), `remote.settings`, `remote.service`, `remote.sync`,
+  `remote.domain`, all locked on "remote"; secrets reach them through the
+  in-memory secret box. `RunRemote` syncs at start, every 10 minutes and two
+  seconds after any app job finishes (install, update, remove, reconfigure,
+  rollback), audits syncs that changed something (actor `hardyos`), and
+  re-reads the NetBird address every 30 seconds.
+- **The app gateway** (`api/appgateway.go`) listens on the NetBird address
+  only while something is published. It accepts a request only from the
+  NetBird network with the shared secret (NetBird's API doesn't say which
+  peers are its proxies; the secret proves the request came through a
+  service HardyOS made), drops the secret and `X-Netbird-*`, takes the
+  client from the right-most `X-Forwarded-For` and routes by Host. The
+  desktop gets hardyd's own handler with `RemoteAddr` set to the client, so
+  sign-in limits and the audit log see real addresses. Apps get the window
+  proxy's protections (`crossSiteRequest`, access rechecks every 30 s,
+  WebSocket tracking and closing, frame headers allowing the desktop's
+  published origin) without cookie renaming: cookies lose `Domain` (no app
+  can set them for its siblings) and `hardyos_*` ones are dropped both
+  ways. Sign-in is a round trip: the app host sets
+  `__Host-hardyos_gw_state` and redirects to
+  `<desktop>/apps/<id>/signin?state=<sha256>`; the desktop (its session,
+  `mayUse`, not cross-site) mints a one-minute single-use token bound to
+  that hash and redirects to the app's published `/__hardyos/auth`, which
+  needs the matching state cookie and sets `__Host-hardyos_gw` (HttpOnly,
+  Secure, SameSite=Lax). Gateway sessions live with the window proxy's
+  (same sign-out, account and access revocation; app jobs drop them). Per
+  app, "HardyOS sign-in" can be off for apps with native clients.
+- **Opening.** `POST /apps/{id}/open` from the desktop's published host
+  answers `https://<app>.<base>/` (`published: true`); elsewhere the
+  window proxy as before. `GET /apps` lists published addresses. The
+  desktop's CSP adds `frame-src https://*.<base>` while apps are published.
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly

@@ -125,7 +125,10 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 	}
 	// Remote access: the NetBird client and publishing through NetBird's
 	// reverse proxy. Secrets kept in the database (the access token) are
-	// sealed with a key next to it.
+	// sealed with a key next to it. With the sign-in provider (internal/oidc)
+	// integrated: Sealer.Source = the secretbox.PrivSource hardyd uses
+	// (hardyd-priv's secrets.key), OnNamesChanged = handler.OIDC().NamesChanged
+	// and api.Config.SSOIssuer = the provider's Issuer.
 	var remote *publish.Publisher
 	if !live {
 		remote = &publish.Publisher{Store: &publish.Store{DB: db,

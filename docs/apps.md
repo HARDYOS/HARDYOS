@@ -446,8 +446,15 @@ site. So the proxy does the separating:
   soon as a remove, reconfigure, update or rollback of the app finishes
   (which also ends its window sessions: open it again).
 
-What's left until each app gets its own subdomain (with the reverse
-proxy):
+Apps published through NetBird's reverse proxy ([remote-access.md](remote-access.md))
+open at their own address, `https://<app>.<base>`, when the desktop is used
+at its published address: there the browser keeps each app's cookies apart
+by itself, and HardyOS's app gateway signs people in with a round trip to
+the desktop (decision 115). The window proxy below stays for the desktop's
+home address and servers without publishing.
+
+What's left for apps opened through the window proxy (not at a published
+address):
 
 - Cookies an app's page sets from JavaScript can't be renamed. They are
   shared by the desktop and every app on the host, so any app's scripts can
@@ -474,7 +481,8 @@ proxy):
 | `GET/PUT /apps/{id}/access` | admin | Who may use the app |
 | `POST /apps/{id}/update` | admin | Update (job `apps.update`, snapshot first); `grants_required` when new permissions need allowing |
 | `GET /apps/{id}/snapshots`, `POST /apps/{id}/rollback` | admin | Snapshots and roll back (job, confirm = the app's name) |
-| `POST /apps/{id}/open` | who may use it | A link to open the app (through its window proxy) |
+| `POST /apps/{id}/open` | who may use it | A link to open the app (through its window proxy, or its published address) |
+| `GET/PUT /apps/{id}/publish` | admin | How the app is published through NetBird (job `remote.service`; docs/remote-access.md) |
 | `POST /apps/{id}/start\|stop\|restart`, `GET /apps/{id}/logs`, `DELETE /apps/{id}` | admin | As before |
 
 Who may use each app, imported catalogs and window ports are kept in

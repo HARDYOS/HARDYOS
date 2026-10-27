@@ -151,7 +151,7 @@ func RegisterRemoteJobs(m *jobs.Manager, pc *priv.Client, pub *publish.Publisher
 					notes = append(notes, "removed "+strconv.Itoa(n)+" services from NetBird")
 				}
 				s.Enabled = false
-				_, _ = pub.Store.Save(jc, s)
+				_, _ = pub.SaveSettings(jc, s)
 			}
 		}
 		jc.Progress(60, "Leaving the NetBird network")
@@ -187,7 +187,7 @@ func RegisterRemoteJobs(m *jobs.Manager, pc *priv.Client, pub *publish.Publisher
 				return nil, err
 			}
 		}
-		if _, err := pub.Store.Save(jc, p.Settings); err != nil {
+		if _, err := pub.SaveSettings(jc, p.Settings); err != nil {
 			return nil, err
 		}
 		return sync(jc)

@@ -77,6 +77,7 @@ export function AppFrameView({ id, name }: { id: string; name: string }) {
     <div className="app-frame">
       <div className="app-frame__bar">
         <span className="small muted app-frame__name">{name}</span>
+        {open?.published && <span className="small mono muted">{new URL(open.url).host}</span>}
         <span className="app-card__spacer" />
         <Button size="sm" variant="ghost" onClick={() => setNonce((n) => n + 1)} aria-label={`Reload ${name}`} title="Reload">
           <RefreshIcon size={14} />

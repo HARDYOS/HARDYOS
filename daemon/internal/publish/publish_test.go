@@ -100,6 +100,34 @@ func TestSealer(t *testing.T) {
 	}
 }
 
+type fakeSource struct{ key []byte }
+
+func (f fakeSource) Key(_ context.Context, purpose string) ([]byte, error) {
+	if purpose != KeyPurpose {
+		return nil, errors.New("wrong purpose " + purpose)
+	}
+	return f.key, nil
+}
+
+func TestSealerWithAKeySource(t *testing.T) {
+	src := fakeSource{key: []byte("0123456789abcdef0123456789abcdef")}
+	s := &Sealer{Source: src, KeyFile: filepath.Join(t.TempDir(), "unused")}
+	v, err := s.Seal("remote.token", "nbp_secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := (&Sealer{Source: src}).Open("remote.token", v); err != nil || got != "nbp_secret" {
+		t.Fatalf("open = %q %v", got, err)
+	}
+	if _, err := os.Stat(s.KeyFile); !os.IsNotExist(err) {
+		t.Fatal("made a key file despite the source")
+	}
+	other := fakeSource{key: []byte("fedcba9876543210fedcba9876543210")}
+	if _, err := (&Sealer{Source: other}).Open("remote.token", v); !errors.Is(err, ErrSealed) {
+		t.Fatalf("another key: %v", err)
+	}
+}
+
 func TestTokenIsSealedInTheDatabase(t *testing.T) {
 	e := newEnv(t)
 	raw, _ := e.db.GetSetting(e.ctx, "remote.token")
@@ -129,7 +157,7 @@ func TestTokenIsSealedInTheDatabase(t *testing.T) {
 func TestSyncCreatesKeepsAndRepairs(t *testing.T) {
 	e := newEnv(t)
 	res := e.sync(t)
-	if res.Problem != "" || res.Created != 3 {
+	if res.Problem != "" || res.Created != 4 {
 		t.Fatalf("first sync = %+v", res)
 	}
 	s, _ := e.st.Load(e.ctx)
@@ -153,6 +181,14 @@ func TestSyncCreatesKeepsAndRepairs(t *testing.T) {
 	// The desktop is public with its own sign-in page: nothing in front.
 	if desk.Auth.BearerAuth != nil || desk.Auth.PasswordAuth != nil || len(desk.Targets) != 1 {
 		t.Fatalf("desktop = %+v", desk)
+	}
+	// HardyOS's sign-in provider: public, nothing in front, always.
+	sso := byDomain(e.nb, "sso.home.example.net")
+	if sso == nil || sso.Private || sso.Auth.BearerAuth != nil || sso.Name != "hardyos-"+s.Instance+"-sso" {
+		t.Fatalf("sso = %+v", sso)
+	}
+	if b, _ := e.db.GetSetting(e.ctx, SettingBaseDomain); b != "home.example.net" {
+		t.Fatalf("base domain for the sign-in provider = %q", b)
 	}
 	it := item(res, AppKey("jellyfin"))
 	if !it.Published || it.URL != "https://jellyfin.home.example.net" || it.Status != "active" || it.Error != "" || !it.Config.Default {
@@ -230,7 +266,7 @@ func TestAppLifecycle(t *testing.T) {
 	s, _ := e.st.Load(e.ctx)
 	s.Enabled = false
 	_, _ = e.st.Save(e.ctx, s)
-	if res := e.sync(t); res.Deleted != 1 || len(e.nb.ServiceList()) != 0 {
+	if res := e.sync(t); res.Deleted != 2 || len(e.nb.ServiceList()) != 0 {
 		t.Fatalf("disabled = %+v %v", res, e.nb.ServiceList())
 	}
 }
@@ -374,7 +410,7 @@ func TestRemoveAll(t *testing.T) {
 	e.nb.Services["foreign"] = &netbird.Service{ID: "foreign", Name: "grafana", Domain: "grafana.home.example.net"}
 	e.nb.Unlock()
 	n, err := e.pub.RemoveAll(e.ctx, e.in)
-	if err != nil || n != 3 || len(e.nb.ServiceList()) != 1 {
+	if err != nil || n != 4 || len(e.nb.ServiceList()) != 1 {
 		t.Fatalf("remove all = %d %v %v", n, err, e.nb.ServiceList())
 	}
 }

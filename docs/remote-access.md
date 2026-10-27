@@ -1,0 +1,195 @@
+# Remote access
+
+HardyOS reaches the outside world through [NetBird](https://netbird.io):
+
+- **NetBird's VPN.** The server joins your NetBird network as a peer, so your
+  laptops and phones with NetBird reach it from anywhere at its NetBird
+  address (100.x.y.z), like at home.
+- **NetBird's reverse proxy.** HardyOS publishes the desktop and each app
+  with a web page at its own address under a domain you choose, like
+  `https://nas.home.hardynetworks.net` and
+  `https://jellyfin.home.hardynetworks.net`. NetBird's proxy (on your NetBird
+  server) makes the certificates and forwards each request to this server
+  over the NetBird network, so nothing at home needs a port opened. Each
+  address is either **NetBird-only** (only NetBird devices can open it) or
+  **public** (anyone on the internet, with a sign-in in front).
+
+Everything is in **Control Panel › Remote Access**; each app's own
+publishing is also on its App Store page (**Remote access** tab).
+
+## 1. Join the NetBird network
+
+In NetBird's dashboard (for Cade: `https://vpn.hardynetworks.net`):
+
+1. **Setup Keys › Create Setup Key.** One-off is enough; give it a name
+   like "HardyOS". Auto-assigned groups are up to you (they decide which
+   NetBird policies apply to the server).
+2. Copy the key.
+
+In HardyOS, Control Panel › Remote Access › **Join a NetBird network**:
+the NetBird server (already filled in), the setup key and this server's
+name in NetBird (`nas` by default). **Join** starts NetBird on the server
+and signs it in. The key is used once and isn't kept anywhere.
+
+The card then shows the server's NetBird address, its name in NetBird's
+DNS, and how many peers are connected. **Leave** removes HardyOS's
+published services from NetBird, signs the server out of NetBird (removing
+it from the peer list when NetBird can be reached) and turns NetBird off;
+type the NetBird server's name to confirm.
+
+The NetBird client stays joined across HardyOS updates. A settings
+restore onto a new install doesn't bring NetBird's identity along: join
+again with a new setup key.
+
+## 2. Get NetBird's reverse proxy ready
+
+Publishing needs, on the NetBird side:
+
+- **A NetBird proxy.** Self-hosted NetBird runs it next to the management
+  server (NetBird's reverse proxy documentation: the proxy container with
+  `NB_PROXY_DOMAIN`, behind Traefik with TLS passthrough). The reverse proxy
+  is a beta feature of NetBird.
+- **A custom domain** for the apps: Reverse Proxy › Custom Domains › Add
+  Domain, for example `home.hardynetworks.net`, with your proxy cluster.
+  HardyOS can add it for you (Setup check › **Add to NetBird**).
+- **The wildcard DNS record** NetBird checks before it uses the domain. In
+  Cloudflare (DNS › Records › Add record):
+
+  | Type | Name | Target | Proxy status | TTL |
+  | --- | --- | --- | --- | --- |
+  | CNAME | `*.home` (shown in full as `*.home.hardynetworks.net`) | your proxy cluster's address, for example `proxy.hardynetworks.net` | **DNS only** (the grey cloud) | Auto |
+
+  The Setup check shows the exact record for your domain and cluster. Keep
+  the proxy status **DNS only**: NetBird's proxy must get the connections
+  itself to make the certificates. Then press **Verify** (HardyOS asks
+  NetBird to check it). NetBird forgets a domain that isn't verified within
+  48 hours; add it again if that happens. If the domain has CAA records,
+  they must allow your proxy's certificate authority (Let's Encrypt for a
+  self-hosted proxy).
+- **An access token** HardyOS uses to manage its services: in NetBird,
+  **Team › Service Users › Create Service User** with the role **Network
+  Admin**, then **Create Token** on it. Copy the token (`nbp_...`); NetBird
+  shows it once.
+
+## 3. Publishing settings
+
+Control Panel › Remote Access › **Publishing**:
+
+- **Base domain**: the custom domain from step 2.
+- **Desktop's name**: the desktop is `https://<name>.<base domain>`
+  (`nas` by default).
+- **New apps are**: NetBird devices only, public with HardyOS sign-in in
+  front, or not published. Each app can choose otherwise.
+- **NetBird access token**: paste it. It's stored encrypted (sealed with a
+  key that isn't in the database, so settings backups never carry it in
+  the clear) and is never shown again; paste a new one to replace it, or
+  **Remove the token**. After restoring settings onto another server, paste
+  it again.
+- **NetBird API address**: empty uses the NetBird server the server joined.
+
+Turn on **Publish the desktop and apps** and save. HardyOS adds a
+service in NetBird for the desktop and for every app with a web page, and
+the **Setup check** says what's missing, if anything: the token, this
+server in NetBird's peer list, the domain, the DNS record, whether
+NetBird-only services are possible, and whether NetBird uses HardyOS's own
+sign-in.
+
+## NetBird-only or public
+
+| | NetBird-only | Public |
+| --- | --- | --- |
+| Who can open it | NetBird devices in the chosen groups (All by default) | Anyone on the internet |
+| Sign-in in front (NetBird's) | None: being a NetBird device in the right group is the sign-in | HardyOS sign-in (SSO), a shared password or PIN, or none |
+| HardyOS sign-in (apps) | Yes, unless turned off for the app | Yes, unless turned off for the app |
+| Needs | A proxy cluster with the **Private** capability: a NetBird proxy running inside a NetBird client (NetBird's "Bring Your Own Proxy" with the private option). NetBird's shared cloud clusters don't have it | Nothing more |
+
+Choose **NetBird-only** for things only the family's own devices should
+reach (the desktop, admin tools), when your proxy setup allows it. Choose
+**Public** for things people open from devices without NetBird (a TV, a
+friend's phone): the sign-in in front keeps strangers out before anything
+reaches the server.
+
+- **HardyOS sign-in (SSO)** signs people in with NetBird's identity
+  provider. Once HardyOS's own sign-in (Control Panel › Sign-in, OIDC) is
+  NetBird's identity provider, that is the family's HardyOS accounts; the
+  Setup check says whether it is.
+- **Password** (8 characters or more) and **PIN** (4 to 12 digits) are one
+  secret for everyone. HardyOS keeps them encrypted and sends them to
+  NetBird, which keeps only a hash.
+- **None** leaves just the app's own sign-in (and HardyOS's, below).
+
+IP and country rules (Access Control on a service in NetBird's dashboard)
+are left to NetBird: HardyOS keeps whatever you set there.
+
+### HardyOS sign-in for apps
+
+Apps also ask for a HardyOS sign-in by default: the first time an app's
+address is opened in a browser, it goes to the desktop's address and back
+(signing in to the desktop if needed), and only people who may use the app
+(App Store › the app › Who can use it) get in. Signing out of the desktop
+signs out of the apps, and access changes apply within 30 seconds, open
+WebSockets included.
+
+Apps with phone or TV clients (Jellyfin's apps, sync clients) can't do
+that round trip: turn **Ask for a HardyOS sign-in too** off for them. The
+app's own sign-in (and the sign-in in front, if public) then protects it,
+and HardyOS's "Who can use it" isn't checked at its address.
+
+The desktop has its own sign-in page, so it's published public with no
+sign-in in front by default. NetBird's server must reach HardyOS's sign-in
+provider on the desktop's address, so keep the desktop public once that
+is set up. With a password or PIN in front of the desktop, share links
+(`/s/...`) and the sign-in provider (`/oidc`) still open without it.
+
+## Opening published apps
+
+When you use the desktop at its published address
+(`https://nas.home.hardynetworks.net`), apps open at their own addresses,
+in windows and new tabs alike. At the desktop's home address (its LAN IP or
+name) apps open through the window proxy as before. Each app's address is
+also on its App Store card.
+
+Each app at its own address keeps its cookies to itself: browsers keep
+cookies per host, so the renaming the window proxy does (docs/apps.md, App
+windows) isn't needed there.
+
+## At home
+
+Devices at home use the same addresses: they go out to NetBird's proxy and
+back over the NetBird network. One name and one certificate everywhere. (A
+port forward at home isn't needed, and HardyOS doesn't set one up.)
+
+## How HardyOS keeps NetBird in step
+
+- HardyOS names its services `hardyos-<tag>-desktop`,
+  `hardyos-<tag>-sso` (HardyOS's own sign-in at `https://sso.<base domain>`,
+  always public: NetBird's server and everyone signing in must reach it) and
+  `hardyos-<tag>-app-<id>`, where the tag is this server's own. It never
+  changes or removes a service without its tag; if another service already
+  uses an app's address, the app shows that and stays unpublished.
+- Installing, changing, updating, rolling back or removing an app updates
+  NetBird a few seconds after the job finishes; a failure shows on the app
+  (and in Remote Access) and never fails the install.
+- Every 10 minutes HardyOS puts back anything changed on its services in
+  NetBird's dashboard (except IP and country rules) and recreates any that
+  were deleted. **Update NetBird now** does it at once.
+- Turning publishing off, or leaving NetBird, removes HardyOS's services.
+  Its custom domain stays in NetBird.
+
+## Troubleshooting
+
+- **Status "Getting a certificate"** for more than a few minutes: the DNS
+  record is missing or proxied (orange cloud), or a CAA record blocks the
+  proxy's certificate authority.
+- **"Waiting for the tunnel"** (`tunnel_not_created`): NetBird's proxy
+  can't reach this server over NetBird. Check that the server is connected
+  (Remote Access › NetBird) and that NetBird's policies let the proxy reach
+  this server on TCP port 44200.
+- **"This port only takes requests from NetBird's reverse proxy"**: the
+  gateway port was opened directly; use the app's published address.
+- **An app called `sso`** can't use `sso.<base domain>`: that name is
+  HardyOS's sign-in.
+- **The token was refused (401) or isn't allowed (403)**: create a new token
+  on a service user with the Network Admin role.
+- **NetBird-only greyed out**: your proxy cluster has no Private
+  capability (see the table above).

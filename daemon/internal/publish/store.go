@@ -40,6 +40,14 @@ const (
 // DesktopKey is the desktop's row in remote_services; apps are "app:<id>".
 const DesktopKey = "desktop"
 
+// SSOKey is HardyOS's own sign-in provider (OIDC) at sso.<base>: always
+// public with nothing in front, since NetBird's server and every browser
+// signing in must reach it. hardyd routes that host to the provider.
+const SSOKey = "sso"
+
+// SSOLabel is the provider's name under the base domain.
+const SSOLabel = "sso"
+
 // AppKey is an app's row key.
 func AppKey(id string) string { return "app:" + id }
 
@@ -190,8 +198,27 @@ func (st *Store) Save(ctx context.Context, s Settings) (Settings, error) {
 		s.Instance = randomHex(3)
 	}
 	b, _ := json.Marshal(s)
-	return s, st.DB.SetSetting(ctx, settingPublish, string(b))
+	if err := st.DB.SetSetting(ctx, settingPublish, string(b)); err != nil {
+		return s, err
+	}
+	// The names HardyOS's sign-in provider builds its issuer from
+	// (https://sso.<base>), read by internal/oidc: only while published.
+	base := ""
+	if s.Enabled {
+		base = s.BaseDomain
+	}
+	if err := st.DB.SetSetting(ctx, SettingBaseDomain, base); err != nil {
+		return s, err
+	}
+	return s, st.DB.SetSetting(ctx, SettingDesktopName, s.DesktopName)
 }
+
+// Settings the sign-in provider (internal/oidc, part B) reads for its
+// issuer: the base domain while publishing is on, and the desktop's name.
+const (
+	SettingBaseDomain  = "remote.base_domain"
+	SettingDesktopName = "remote.desktop_name"
+)
 
 func (st *Store) sealed(ctx context.Context, key string) (string, error) {
 	if st.DB == nil {
@@ -287,6 +314,9 @@ func (st *Store) rows(ctx context.Context) (map[string]*row, error) {
 
 // resolve fills in what an unset choice means for key.
 func resolve(key string, r *row, s Settings) ServiceConfig {
+	if key == SSOKey {
+		return ServiceConfig{Mode: ModePublic, Auth: AuthNone, Groups: []string{}, Default: true}
+	}
 	c := ServiceConfig{HardyOSSignIn: true}
 	if r != nil {
 		c = r.cfg

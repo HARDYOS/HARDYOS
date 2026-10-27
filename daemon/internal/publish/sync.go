@@ -86,6 +86,9 @@ type Publisher struct {
 	NewAPI      func(baseURL, token string) Backend
 	GatewayPort int
 	Now         func() time.Time
+	// OnNamesChanged runs after the settings are saved (the sign-in
+	// provider's NamesChanged: its issuer follows the base domain).
+	OnNamesChanged func()
 
 	mu sync.Mutex // one sync at a time
 }
@@ -124,6 +127,15 @@ func (p *Publisher) API(ctx context.Context, s Settings, in Inputs) (Backend, er
 		return p.NewAPI(base, tok), nil
 	}
 	return &netbird.API{BaseURL: base, Token: tok}, nil
+}
+
+// SaveSettings saves the settings and tells the sign-in provider.
+func (p *Publisher) SaveSettings(ctx context.Context, s Settings) (Settings, error) {
+	out, err := p.Store.Save(ctx, s)
+	if err == nil && p.OnNamesChanged != nil {
+		p.OnNamesChanged()
+	}
+	return out, err
 }
 
 // ServicePrefix is the name prefix of this server's services.
@@ -173,7 +185,7 @@ func (p *Publisher) plan(s Settings, rows map[string]*row, apps []App) []want {
 		}
 		return want{item: it}
 	}
-	out := []want{mk(DesktopKey, s.DesktopName, "Desktop")}
+	out := []want{mk(DesktopKey, s.DesktopName, "Desktop"), mk(SSOKey, SSOLabel, "HardyOS sign-in")}
 	sorted := slices.Clone(apps)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
 	for _, a := range sorted {

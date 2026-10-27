@@ -431,7 +431,7 @@ func (e *remoteEnv) setUp(t *testing.T) (secret string) {
 		t.Fatalf("publish = %v", j)
 	}
 	res := j["result"].(map[string]any)
-	if res["created"] != float64(3) || res["problem"] != nil {
+	if res["created"] != float64(4) || res["problem"] != nil {
 		t.Fatalf("sync = %v", res)
 	}
 	ctx, cancel := context.WithCancel(e.ctx)
@@ -466,6 +466,10 @@ func TestGatewayOnlyTakesNetBirdsProxy(t *testing.T) {
 		}
 	}
 	b := e.browser(t, secret)
+	// sso.<base> is hardyd's own handler (the sign-in provider takes it).
+	if code, _, _ := b.nav(t, "GET", "https://sso.home.example.net/api/v1/health", nil); code != 200 {
+		t.Fatalf("sso host = %d", code)
+	}
 	if code, _, _ := b.nav(t, "GET", "https://unknown.home.example.net/", nil); code != 404 {
 		t.Fatalf("unpublished host = %d", code)
 	}

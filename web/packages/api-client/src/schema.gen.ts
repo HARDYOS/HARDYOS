@@ -2499,6 +2499,179 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/remote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Remote Access status
+         * @description The NetBird client on this server, the publishing settings (the
+         *     access token only as `hasToken`), every publishable thing (the
+         *     desktop and each app with a web page) with the last sync's state,
+         *     and the app gateway.
+         */
+        get: operations["getRemote"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/remote/join": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Join a NetBird network with a setup key (job remote.join)
+         * @description The setup key reaches the job only through hardyd's memory and goes
+         *     to `netbird up` in its environment; it is never in job parameters,
+         *     results, logs or answers.
+         */
+        post: operations["joinNetBird"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/remote/leave": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Leave the NetBird network (job remote.leave)
+         * @description Removes this server's services from NetBird first (when it can), then signs out and turns the client off.
+         */
+        post: operations["leaveNetBird"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/remote/publishing": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Save the publishing settings and update NetBird (job remote.settings) */
+        put: operations["setRemotePublishing"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/remote/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The publishing setup check
+         * @description Checks the token, this server's peer, the base domain in NetBird, the wildcard CNAME and the proxy cluster's capabilities; says what to add where.
+         */
+        get: operations["checkRemote"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/remote/domain": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Add the base domain to NetBird, or ask NetBird to verify it (job remote.domain) */
+        post: operations["remoteDomain"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/remote/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Update NetBird's services now (job remote.sync; it also runs every 10 minutes) */
+        post: operations["syncRemote"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/remote/desktop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** How the desktop is published (job remote.service) */
+        put: operations["publishDesktop"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/apps/{id}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** How an app is published through NetBird */
+        get: operations["getAppPublish"];
+        /** Publish an app NetBird-only or publicly, or not at all (job remote.service) */
+        put: operations["publishApp"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/installer": {
         parameters: {
             query?: never;
@@ -3727,6 +3900,10 @@ export interface components {
             adopted: boolean;
         };
         AppsOverview: {
+            /** @description Apps published through NetBird's reverse proxy: id to https://<app>.<base>/ */
+            published: {
+                [key: string]: string;
+            };
             /** @description False when this build has no Docker */
             available: boolean;
             /** @description Docker has been set up on a pool */
@@ -4045,6 +4222,8 @@ export interface components {
             url: string;
             /** @description Through HardyOS's HTTPS window proxy (can be shown in a desktop window) */
             proxied: boolean;
+            /** @description The app's own published address (https://<app>.<base>, through NetBird's reverse proxy), given when the desktop is used at its published address */
+            published?: boolean;
         };
         AppCatalogApp: {
             id: string;
@@ -4290,6 +4469,209 @@ export interface components {
              * @description The file's modification time in ms since 1970 (File.lastModified)
              */
             modified?: number;
+        };
+        NetBirdClientStatus: {
+            installed: boolean;
+            version?: string;
+            /** @description HardyOS joined this server to a NetBird network */
+            joined: boolean;
+            /** @description netbird.service is active */
+            running: boolean;
+            /** @enum {string} */
+            state: "not_installed" | "off" | "connecting" | "connected" | "needs_login" | "login_failed" | "session_expired" | "idle" | "unknown";
+            connected: boolean;
+            /** @description This server's NetBird address */
+            ip?: string;
+            /** @description The NetBird network (CIDR) */
+            network?: string;
+            fqdn?: string;
+            peersTotal: number;
+            peersConnected: number;
+            managementUrl?: string;
+            managementConnected: boolean;
+            /** @description This server's name in NetBird */
+            hostname?: string;
+            interface?: string;
+            problem?: string;
+        };
+        RemoteJoinRequest: {
+            /** @description The NetBird server, https://... (default https://vpn.hardynetworks.net) */
+            managementUrl: string;
+            /** @description A setup key from NetBird's dashboard; never stored or shown */
+            setupKey: string;
+            /** @description This server's name in NetBird (default nas) */
+            hostname?: string;
+        };
+        RemoteLeaveRequest: {
+            /** @description The NetBird server's host name */
+            confirm: string;
+        };
+        /**
+         * @description Empty: follow the default for apps; netbird: NetBird devices only; public: the internet, with sign-in in front
+         * @enum {string}
+         */
+        PublishMode: "" | "off" | "netbird" | "public";
+        /**
+         * @description Public only: sso (NetBird's sign-in, HardyOS's own provider once it's NetBird's identity provider), a shared password or PIN, or none
+         * @enum {string}
+         */
+        PublishAuth: "" | "sso" | "password" | "pin" | "none";
+        RemoteSettings: {
+            enabled: boolean;
+            /** @description Apps are https://<app>.<baseDomain> */
+            baseDomain: string;
+            /** @description NetBird's API address (empty for the management URL) */
+            apiUrl: string;
+            /** @description The proxy cluster the base domain is served by */
+            cluster: string;
+            desktopName: string;
+            /** @enum {string} */
+            defaultMode: "off" | "netbird" | "public";
+            /** @description This server's tag in its NetBird service names (hardyos-<instance>-...) */
+            instance: string;
+            hasToken: boolean;
+            /** @description A saved token can't be read on this server (restored from another one) */
+            tokenUnreadable: boolean;
+        };
+        RemotePublishingRequest: {
+            enabled: boolean;
+            baseDomain: string;
+            apiUrl?: string;
+            cluster?: string;
+            desktopName?: string;
+            /** @enum {string} */
+            defaultMode?: "" | "off" | "netbird" | "public";
+            /** @description A NetBird access token (service user, Network Admin). Absent keeps the saved one; empty removes it */
+            token?: string;
+        };
+        PublishConfig: {
+            /** @enum {string} */
+            mode: "off" | "netbird" | "public";
+            /** @enum {string} */
+            auth: "sso" | "password" | "pin" | "none";
+            /** @description NetBird group IDs: who may reach it (NetBird-only) or sign in (SSO); empty: everyone (All) */
+            groups: string[];
+            /** @description Apps: the gateway asks for a HardyOS sign-in first */
+            hardyosSignIn: boolean;
+            /** @description A password or PIN is saved */
+            hasSecret: boolean;
+            /** @description The app follows the default mode */
+            default: boolean;
+        };
+        PublishItem: {
+            /** @description desktop, sso (HardyOS sign-in at sso.<base>, always public) or app:<id> */
+            key: string;
+            /** @description Its name under the base domain */
+            label: string;
+            name: string;
+            domain: string;
+            url: string;
+            config: components["schemas"]["PublishConfig"];
+            /** @description NetBird has HardyOS's service for it */
+            published: boolean;
+            serviceId?: string;
+            /** @description NetBird's status: pending, certificate_pending, active, tunnel_not_created, certificate_failed, error */
+            status?: string;
+            error?: string;
+            syncedAt?: string;
+        };
+        PublishRequest: {
+            mode: components["schemas"]["PublishMode"];
+            auth?: components["schemas"]["PublishAuth"];
+            groups?: string[];
+            hardyosSignIn?: boolean;
+            /** @description Password (8+ characters) or PIN (4-12 digits). Absent keeps the saved one */
+            secret?: string;
+        };
+        AppPublish: components["schemas"]["PublishItem"] & {
+            /** @description Publishing is set up */
+            enabled: boolean;
+            baseDomain: string;
+            defaultMode: string;
+        };
+        RemoteSyncInfo: {
+            /** Format: date-time */
+            at: string;
+            problem?: string;
+            created: number;
+            updated: number;
+            deleted: number;
+        };
+        RemoteGatewayInfo: {
+            listening: boolean;
+            address?: string;
+            problem?: string;
+        };
+        RemoteStatus: {
+            /** @description Publishing is available on this server */
+            available: boolean;
+            client: components["schemas"]["NetBirdClientStatus"];
+            defaultManagementUrl: string;
+            settings?: components["schemas"]["RemoteSettings"];
+            items: components["schemas"]["PublishItem"][];
+            lastSync?: components["schemas"]["RemoteSyncInfo"];
+            gateway: components["schemas"]["RemoteGatewayInfo"];
+        };
+        RemoteDomainRequest: {
+            /** @enum {string} */
+            action: "add" | "verify";
+            /** @description add: the proxy cluster (empty when NetBird has only one) */
+            cluster?: string;
+        };
+        NetBirdDomain: {
+            id: string;
+            domain: string;
+            validated: boolean;
+            /** @description free or custom */
+            type: string;
+            target_cluster?: string;
+            require_subdomain?: boolean;
+            supports_private?: boolean;
+        };
+        NetBirdCluster: {
+            id: string;
+            address: string;
+            type: string;
+            online: boolean;
+            connected_proxies: number;
+            private?: boolean;
+        };
+        NetBirdGroup: {
+            id: string;
+            name: string;
+            peers_count?: number;
+        };
+        RemoteCheckStep: {
+            /** @enum {string} */
+            id: "netbird" | "base" | "token" | "peer" | "domain" | "dns" | "private" | "sso";
+            title: string;
+            /** @enum {string} */
+            state: "ok" | "warn" | "bad" | "skipped";
+            detail?: string;
+        };
+        DNSRecord: {
+            /** @enum {string} */
+            type: "CNAME";
+            /** @description *.<base domain> */
+            name: string;
+            /** @description The proxy cluster's address */
+            target: string;
+            /** @description Cloudflare proxy status: DNS only (grey cloud) */
+            proxy: string;
+            ttl: string;
+        };
+        RemoteCheck: {
+            steps: components["schemas"]["RemoteCheckStep"][];
+            record?: components["schemas"]["DNSRecord"];
+            ready: boolean;
+            /** @description The proxy cluster can serve NetBird-only services */
+            supportsPrivate: boolean;
+            domain?: components["schemas"]["NetBirdDomain"];
+            domains: components["schemas"]["NetBirdDomain"][];
+            clusters: components["schemas"]["NetBirdCluster"][];
+            groups: components["schemas"]["NetBirdGroup"][];
+            /** @description HardyOS's own sign-in provider's issuer, when set up */
+            ssoIssuer?: string;
         };
     };
     responses: {
@@ -8415,6 +8797,215 @@ export interface operations {
                     "application/json": components["schemas"]["AppOpen"];
                 };
             };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getRemote: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RemoteStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    joinNetBird: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RemoteJoinRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    leaveNetBird: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RemoteLeaveRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    setRemotePublishing: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RemotePublishingRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    checkRemote: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The check */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RemoteCheck"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    remoteDomain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RemoteDomainRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    syncRemote: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    publishDesktop: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PublishRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getAppPublish: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The app's publishing */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppPublish"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    publishApp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PublishRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
             400: components["responses"]["Invalid"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];

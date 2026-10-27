@@ -293,9 +293,12 @@ func (rt *remoteRuntime) apply(ctx context.Context, st *netbird.ClientStatus, li
 				continue
 			}
 			host := strings.ToLower(it.Domain)
-			if it.Key == publish.DesktopKey {
+			if it.Key == publish.DesktopKey || it.Key == publish.SSOKey {
+				// hardyd's own handler (the sign-in provider takes its host).
 				routes[host] = &gwRoute{key: it.Key, host: host}
-				desktopHost = host
+				if it.Key == publish.DesktopKey {
+					desktopHost = host
+				}
 				continue
 			}
 			a, ok := web[strings.TrimPrefix(it.Key, "app:")]

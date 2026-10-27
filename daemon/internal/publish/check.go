@@ -133,7 +133,13 @@ func (p *Publisher) Check(ctx context.Context, in Inputs, res Resolver, sso SSOI
 	}
 	doms, err := api.Domains(ctx)
 	if err != nil {
-		add("token", "Access token", "bad", err.Error())
+		msg := err.Error()
+		if netbird.IsNotFound(err) {
+			// The dashboard uses the same API: without it there's no
+			// reverse proxy to set up by hand either.
+			msg = "This NetBird server has no reverse proxy (its API answered 404 for /api/reverse-proxies). Update NetBird's management server to a version with Reverse Proxy, and run a NetBird proxy."
+		}
+		add("token", "Access token", "bad", msg)
 		skip("peer", "domain", "dns", "private", "sso")
 		return out, nil
 	}
