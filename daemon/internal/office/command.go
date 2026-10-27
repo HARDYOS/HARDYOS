@@ -29,7 +29,7 @@ var saveFormats = map[string]map[string]bool{
 
 // SaveFormat reports whether a save of a file of type orig may come back as
 // ft: a short lowercase extension the editor writes for that kind of
-// document (decision 274).
+// document (decision 301).
 func SaveFormat(orig, ft string) bool {
 	if !fileTypeRE.MatchString(ft) {
 		return false

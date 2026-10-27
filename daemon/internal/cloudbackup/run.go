@@ -308,6 +308,17 @@ func (r *Root) backupApp(ctx context.Context, repo *Repo, it Item, snap string, 
 		return err
 	}
 	ir.Name, ir.Consistent = src.Name, true
+	// A database dump into the app's folders first, so the version holds
+	// a consistent copy next to the (crash-consistent) database files. A
+	// failed dump doesn't stop the backup: the files are still there.
+	step(Progress{}, "Preparing "+src.Name+"'s data")
+	if _, err := r.Apps.PreBackup(ctx, it.ID); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		ir.Warning = "the app's own database dump didn't run (" + err.Error() + "); its database files are crash-consistent"
+		r.log().Warn("cloud backup: app dump", "app", it.ID, "err", err)
+	}
 	m.Apps = append(m.Apps, *src)
 	return r.folderBackup(ctx, repo, it, src.Dataset, snap, tags, ir, step, "Backing up "+src.Name)
 }

@@ -16,7 +16,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/files"
 )
 
-// Security review of PR #31 (decisions 263-276).
+// Security review of PR #31 (decisions 263-269, 297-302).
 
 // HIGH-1: every person's "~home" is a different folder; sessions are kept
 // apart by the folder they really are.

@@ -413,6 +413,10 @@ func TestBackupVMAndApp(t *testing.T) {
 	if got := read(t, filepath.Join(appDir, "data", "db.sqlite")); got != "app data v1" {
 		t.Fatalf("app data %q", got)
 	}
+	// The app's own dump ran before the snapshot: the version holds it.
+	if got := read(t, filepath.Join(appDir, "data", "dump.sql")); got != "dump of app data v1" || len(e.apps.dumps) != 1 {
+		t.Fatalf("app dump %q (%v)", got, e.apps.dumps)
+	}
 	if _, err := os.Stat(filepath.Join(appDir, "data", "extra")); err == nil {
 		t.Fatal("app rollback kept a file the version doesn't have")
 	}

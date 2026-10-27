@@ -588,6 +588,24 @@ func (p *Provider) proceed(w http.ResponseWriter, r *http.Request, base string, 
 		return
 	}
 	a.UserID, a.Subject, a.AuthTime, a.AMR = u.ID, sub, authTime.UTC(), []string{"pwd"}
+	// A sign-in for an app on another device (Immich's phone app, through
+	// its mobile redirect) is always confirmed by the person: a link that
+	// starts one can't finish silently on an existing sign-in.
+	if c.ManagedBy != "" && p.cfg.ConfirmRedirect != nil && p.cfg.ConfirmRedirect(c.ManagedBy, a.RedirectURI) {
+		if a.hasPrompt(oidc.PromptNone) {
+			p.errorRedirect(w, r, base, a, consentRequired(), posted)
+			return
+		}
+		if err := p.storage().saveAuthRequest(ctx, a, false); err != nil {
+			p.problem(w, base, http.StatusInternalServerError, "Something went wrong", "Go back to the app and sign in again.")
+			return
+		}
+		b := p.browser(w, r)
+		p.render(w, http.StatusOK, &page{Kind: "confirm", Base: base, Title: "Continue to " + c.Name + "?", Heading: "Continue to " + c.Name + "?",
+			Lead: "Signed in as " + displayName(u), Client: c.Name, AppHost: appHost(a.RedirectURI), ID: a.ID,
+			CSRF: p.mac("consent", a.ID, b)})
+		return
+	}
 	if !c.FirstParty && (a.hasPrompt(oidc.PromptConsent) || !p.consented(ctx, u.ID, c.ID, a.Scopes)) {
 		if a.hasPrompt(oidc.PromptNone) {
 			p.errorRedirect(w, r, base, a, consentRequired(), posted)

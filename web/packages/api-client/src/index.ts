@@ -280,3 +280,10 @@ export type ReplicationPairing = S["ReplicationPairing"];
 export type ReplicationPairingCode = S["ReplicationPairingCode"];
 export type ReplicationSource = S["ReplicationSource"];
 export type ReplicationReceive = S["ReplicationReceive"];
+// Photos: Immich set up by HardyOS (phase 7 part C)
+export type PhotosInfo = S["PhotosInfo"];
+export type PhotosSettings = S["PhotosSettings"];
+export type PhotosLibrary = S["PhotosLibrary"];
+export type PhotosFamily = S["PhotosFamily"];
+export type PhotosStatus = S["PhotosStatus"];
+export type PhotosView = S["PhotosView"];

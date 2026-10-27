@@ -43,7 +43,7 @@ shared folders, `HARDY_UID` and the `gpu`/`hostNetwork` permissions are in
 | --- | --- | --- | --- | --- |
 | Jellyfin | `jellyfin/jellyfin:12.3` | MEDIA read (`/media`) | gpu | Plays the library, never changes it; GPU for hardware transcoding (`/dev/dri`, NVIDIA) |
 | Plex Media Server | `plexinc/pms-docker:1.43.5.11079-b3b13e506` | MEDIA read (`/media`) | gpu | As Jellyfin. Bridge networking with `ADVERTISE_IP`, so it needs the claim code (password setting) to link to the Plex account |
-| Immich | `immich-app/immich-server` + `immich-machine-learning:v3.3.5`, `immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0`, `valkey:9` | PHOTOS write (`/data`), EXISTING read (`/mnt/existing`, optional external library) | gpu | Immich owns its upload folder (originals, thumbnails, encoded video, DB backups); existing photos are only read. GPU for video transcoding; machine learning runs on the CPU |
+| Immich | `immich-app/immich-server` + `immich-machine-learning:v3.3.5` (and its `-cuda`, `-openvino`, `-rocm` variants), `immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0`, `valkey:9`, all by digest | PHOTOS write (`/data`), EXISTING, EXISTING_2, EXISTING_3 read (`/mnt/existing*`), FAMILY read (`/mnt/family`) | gpu | The desktop's Photos ([docs/photos.md](../docs/photos.md)): HardyOS configures sign-in, libraries and the family library through Immich's API. GPU for video transcoding; machine learning on the CPU, plus the accelerated service for the server's GPU (managed settings `ML_*_REPLICAS`, idle until Photos turns one on) |
 | Home Assistant | `home-assistant/home-assistant:2026.10.4` | none | hostNetwork | Device discovery (mDNS, SSDP, broadcasts) needs the server's network; port 8123 fixed. Runs as root (the image doesn't support another user) |
 | AdGuard Home | `adguard/adguardhome:v0.107.79` | none | hostNetwork | DNS on port 53 of the server's address and real client addresses in its logs. `--web-addr` pins the admin site to the WEB port. The DC has its own address (macvlan), so no clash on 53 |
 | Vaultwarden | `vaultwarden/server:1.37.4` | none | none | Self-contained; listens on 8080 inside so it can run unprivileged. Admin page only with a password setting |
@@ -70,9 +70,9 @@ Things these apps would like that a package can't say yet:
 - **GPU group.** Apps that run as their own user need the host's `render`
   group (`group_add`) to open `/dev/dri/renderD*`, and its number differs per
   server. The engine should add it when it keeps `/dev/dri` for a `gpu` app.
-- **Hardware-specific images.** Immich's accelerated machine learning is a
-  different image (`-cuda`, `-openvino`), which a package can't pick per
-  server; it runs on the CPU.
+- **Hardware-specific images.** A package can't pick an image per server by
+  itself. Immich ships one service per accelerated image with 0 replicas,
+  and Photos turns the right one on (managed settings).
 - **USB sticks and Bluetooth** for Home Assistant: devices are fixed in the
   manifest (and must exist), and Bluetooth needs the host's D-Bus socket.
 - **A TCP and UDP port pair** (qBittorrent) can't be tied to the same number.

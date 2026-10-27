@@ -1078,7 +1078,7 @@ func (o officeLinks) Serve(w http.ResponseWriter, r *http.Request, l *sharelinks
 		Name: office.CleanGuestName(visitor) + " (guest)", WantEdit: edit, MayEdit: edit, Lang: editorLang(r),
 		IP: rt.s.clientIP(r),
 		// Download and print only where the link lets people keep a copy
-		// anyway: an edit link without a download limit (decision 275).
+		// anyway: an edit link without a download limit (decision 302).
 		NoDownload: !edit || l.MaxDownloads > 0,
 	})
 	if err != nil {

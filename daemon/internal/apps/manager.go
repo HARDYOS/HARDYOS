@@ -734,7 +734,9 @@ type PrepareResult struct {
 	Name     string         `json:"name"`
 	Services []ServiceImage `json:"services"`
 	Upgrade  bool           `json:"upgrade"`
-	Warnings []string       `json:"warnings"`
+	// NewData: the app's dataset was made now (no data kept from before).
+	NewData  bool     `json:"newData,omitempty"`
+	Warnings []string `json:"warnings"`
 }
 
 // Prepare checks the package and request, creates the app's dataset and
@@ -799,6 +801,7 @@ func (m *Manager) prepare(ctx context.Context, pkg *Package, a PrepareArgs, reco
 		return nil, ErrNotInstalled
 	}
 	res.Upgrade = prev != nil && !prev.state.Removed
+	res.NewData = prev == nil
 	// What a live install carries over when the request leaves it out.
 	var live *installedApp
 	if res.Upgrade {
@@ -924,6 +927,11 @@ func (m *Manager) prepare(ctx context.Context, pkg *Package, a PrepareArgs, reco
 		case asked:
 		case oldEnv[s.Env] != "":
 			v = oldEnv[s.Env]
+			if s.Managed && checkSettingValue(s, v) != nil {
+				// A managed value the new version no longer offers goes
+				// back to the default; whoever manages it sets it again.
+				v = s.Default
+			}
 		default:
 			v = s.Default
 		}

@@ -104,7 +104,7 @@ func TestApplySFTP(t *testing.T) {
 	f.OnPrefix("groupadd ", sysexec.Result{})
 	f.OnPrefix("gpasswd ", sysexec.Result{})
 	f.On("sshd -t", "")
-	f.OnPrefix("sshd -T ", sysexec.Result{Stdout: []byte("forcecommand internal-sftp -d /\nchrootdirectory " + filepath.Join(dir, "views") + "/%U\n" +
+	f.OnPrefix("sshd -T ", sysexec.Result{Stdout: []byte("forcecommand internal-sftp -d / -P symlink,hardlink\nchrootdirectory " + filepath.Join(dir, "views") + "/%U\n" +
 		"disableforwarding yes\nallowgroups hardyos-sftp\nauthenticationmethods password\npubkeyauthentication no\npermittty no\n" +
 		"allowtcpforwarding no\nallowagentforwarding no\nx11forwarding no\npermittunnel no\n")})
 	m := newTestManager(t, f, l)

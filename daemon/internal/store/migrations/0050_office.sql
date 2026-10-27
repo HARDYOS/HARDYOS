@@ -1,4 +1,4 @@
--- Office (phase 7 part B, docs/office.md, decisions 250-275).
+-- Office (phase 7 part B, docs/office.md, decisions 250-269, 297-302).
 --
 -- An editing session is one version of one file open in the Document
 -- Server under a document key. Everyone who opens the file while it is open

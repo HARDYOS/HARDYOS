@@ -2,9 +2,9 @@
   "format": 1,
   "id": "immich",
   "name": "Immich",
-  "version": "3.3.5",
+  "version": "3.3.5.1",
   "summary": "Back up the photos and videos from everyone's phones, and browse them like Google Photos.",
-  "description": "Immich backs up the photos and videos from your family's phones automatically and lets you browse them on a timeline, on a map, by the people in them, or by searching for things like \"beach\" or \"birthday cake\". Albums can be shared with each other. Everything stays on this server.\n\nWhen installing, choose where Immich keeps the photos: an empty folder such as Media > Photos > Immich is a good place. Immich organises that folder itself (originals, thumbnails, converted videos and its own database backups), so don't put other files in it. If you already have photos on the server, give them to Immich as \"Existing photos\": it reads them without changing them (add them in Immich under Administration > External Libraries, path /mnt/existing).\n\nThen open Immich, create the administrator account, and install the Immich app on each phone with this server's address. Face and object search run on the processor; the graphics chip, if there is one, is used to convert videos (Administration > Settings > Video Transcoding > Hardware Acceleration).",
+  "description": "Immich backs up the photos and videos from your family's phones automatically and lets you browse them on a timeline, on a map, by the people in them, or by searching for things like \"beach\" or \"birthday cake\". Everything stays on this server.\n\nHardyOS sets Immich up as the desktop's Photos app: everyone signs in with their HardyOS account (once Remote Access has a base domain), each person's phone backs up into their own library, a family shared folder can be shown to the whole family, and photos already on the server are indexed where they are, without being moved. Its settings are in Control Panel > Photos.\n\nWhen installing, choose where Immich keeps the photos: an empty shared folder of its own, such as Photos, that only administrators can open over the network. Immich organises it itself (each person's originals, thumbnails, converted videos and its own database backups). Existing photos and the family folder are only read.\n\nFace, object and text search run on the processor, or on a graphics card when the server has one that isn't lent to a virtual machine; videos are converted with the graphics chip when there is one.",
   "publisher": "Immich project (packaged by HardyOS)",
   "website": "https://immich.app",
   "icon": "icon.svg",
@@ -12,31 +12,63 @@
   "minMemoryMB": 6144,
   "web": { "port": "WEB", "path": "/" },
   "ports": [
-    { "name": "WEB", "label": "Website and phone apps", "default": 2283 }
+    { "name": "WEB", "label": "Website (on the server only; reached through HardyOS)", "default": 2283 }
   ],
   "settings": [
-    { "env": "DB_PASSWORD", "generate": "secret" }
+    { "env": "DB_PASSWORD", "generate": "secret" },
+    { "env": "ML_CUDA_REPLICAS", "label": "NVIDIA machine learning", "type": "select", "options": ["0", "1"], "default": "0", "managed": true },
+    { "env": "ML_OPENVINO_REPLICAS", "label": "Intel machine learning", "type": "select", "options": ["0", "1"], "default": "0", "managed": true },
+    { "env": "ML_ROCM_REPLICAS", "label": "AMD machine learning", "type": "select", "options": ["0", "1"], "default": "0", "managed": true }
   ],
   "folders": [
     { "path": "postgres", "mode": "0700" },
+    { "path": "db-dump", "mode": "0700" },
     { "path": "redis", "mode": "0700" },
-    { "path": "model-cache", "mode": "0750" }
+    { "path": "model-cache", "mode": "0750" },
+    { "path": "model-cache-cuda", "mode": "0750" },
+    { "path": "model-cache-openvino", "mode": "0750" },
+    { "path": "model-cache-rocm", "mode": "0750" }
   ],
   "shares": [
     {
       "name": "PHOTOS",
       "label": "Where Immich keeps photos",
-      "help": "Uploaded photos and videos go here, with Immich's thumbnails and backups. Pick an empty folder, for example Media > Photos > Immich.",
+      "help": "Phone backups and uploads go here, one folder per person, with Immich's thumbnails and database backups. Pick an empty shared folder that only administrators can open, for example Photos.",
       "access": "write",
-      "suggest": "media"
+      "suggest": "photos"
     },
     {
       "name": "EXISTING",
       "label": "Existing photos (optional)",
-      "help": "Photos already on the server that Immich should show too. It only reads them. In Immich they're at /mnt/existing.",
+      "help": "Photos already on the server that should appear in someone's library. Immich only reads them. Choose whose library each folder joins in Control Panel > Photos.",
       "access": "read",
       "suggest": "media"
+    },
+    {
+      "name": "EXISTING_2",
+      "label": "More existing photos (optional)",
+      "help": "Another shared folder with existing photos. Immich only reads it.",
+      "access": "read"
+    },
+    {
+      "name": "EXISTING_3",
+      "label": "More existing photos (optional)",
+      "help": "Another shared folder with existing photos. Immich only reads it.",
+      "access": "read"
+    },
+    {
+      "name": "FAMILY",
+      "label": "Family photos (optional)",
+      "help": "A shared folder the whole family puts photos in, for example Family Photos. Immich only reads it and shows it to the people chosen in Control Panel > Photos.",
+      "access": "read"
     }
   ],
-  "permissions": { "gpu": true }
+  "permissions": { "gpu": true, "rocm": true },
+  "backup": {
+    "dump": {
+      "service": "database",
+      "command": ["pg_dump", "--username=postgres", "--dbname=immich", "--format=custom", "--file=/dump/immich.dump"],
+      "timeoutSeconds": 1800
+    }
+  }
 }

@@ -16,7 +16,7 @@ import (
 // effectiveOK is what sshd -T prints for a domain account with the drop-in
 // in effect (trimmed to the settings that matter, plus some others).
 func effectiveOK(root string) string {
-	return "port 22\nusepam yes\nforcecommand internal-sftp -d /\nchrootdirectory " + root + "/%U\n" +
+	return "port 22\nusepam yes\nforcecommand internal-sftp -d / -P symlink,hardlink\nchrootdirectory " + root + "/%U\n" +
 		"disableforwarding yes\nallowgroups hardyos-sftp\nauthenticationmethods password\npubkeyauthentication no\n" +
 		"permittty no\nallowtcpforwarding no\nallowagentforwarding no\nx11forwarding no\npermittunnel no\npasswordauthentication yes\n"
 }
@@ -98,7 +98,7 @@ func TestCheckEffective(t *testing.T) {
 		"another chroot":     strings.Replace(effectiveOK(root), root+"/%U", "/", 1),
 		"tty":                strings.Replace(effectiveOK(root), "permittty no", "permittty yes", 1),
 		"any method":         strings.Replace(effectiveOK(root), "authenticationmethods password", "authenticationmethods any", 1),
-		"no forcecommand":    strings.Replace(effectiveOK(root), "forcecommand internal-sftp -d /\n", "", 1),
+		"no forcecommand":    strings.Replace(effectiveOK(root), "forcecommand internal-sftp -d / -P symlink,hardlink\n", "", 1),
 		"no forwarding off":  strings.Replace(effectiveOK(root), "disableforwarding yes", "disableforwarding no", 1),
 	} {
 		if err := CheckEffective(out, root); err == nil {
@@ -135,7 +135,7 @@ func TestApplyVerifiesSSHDBeforePAM(t *testing.T) {
 		t.Fatal("PAM not on")
 	}
 	// Something overrides the drop-in now: PAM goes off on the next apply.
-	run.On(probe, strings.Replace(effectiveOK(m.root()), "forcecommand internal-sftp -d /", "forcecommand none", 1))
+	run.On(probe, strings.Replace(effectiveOK(m.root()), "forcecommand internal-sftp -d / -P symlink,hardlink", "forcecommand none", 1))
 	n := len(run.Lines())
 	st, err := m.Apply(ctx, true, users, binds)
 	if err == nil || !strings.Contains(st.Problem, "off until this is fixed") || !strings.Contains(st.Problem, "forcecommand") {

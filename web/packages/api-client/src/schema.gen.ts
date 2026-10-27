@@ -3091,6 +3091,79 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/photos": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Whether Photos (the catalog's Immich) is installed and this person may open it */
+        get: operations["getPhotos"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/photos/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Photos settings and the last sync's status */
+        get: operations["getPhotosSettings"];
+        /** Change Photos settings and apply them to Immich (job photos.settings) */
+        put: operations["setPhotosSettings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/photos/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Apply Photos to Immich now (job photos.sync) */
+        post: operations["syncPhotos"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/photos/link": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Link an Immich set up before Photos with an administrator's API key (job photos.link)
+         * @description The key reaches the job only through hardyd's memory and is kept
+         *     sealed; it is never in job parameters, results or answers.
+         */
+        post: operations["linkPhotos"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/installer": {
         parameters: {
             query?: never;
@@ -6311,6 +6384,128 @@ export interface components {
             share: string;
             path: string;
             access: string;
+        };
+        PhotosInfo: {
+            /** @description The catalog's Immich is installed */
+            installed: boolean;
+            /** @description This person may open it */
+            mayUse: boolean;
+            appId: string;
+            /** @description Immich signs people in with HardyOS */
+            sso: boolean;
+            /** @description Immich's address for phones (empty when not published) */
+            publishedUrl: string;
+        };
+        PhotosLibrary: {
+            /**
+             * Format: int64
+             * @description The HardyOS account whose Immich library it joins
+             */
+            ownerId: number;
+            /**
+             * @description The app's existing-photos share it's in
+             * @enum {string}
+             */
+            share: "EXISTING" | "EXISTING_2" | "EXISTING_3";
+            /** @description A folder inside that shared folder (empty: all of it) */
+            path: string;
+            name: string;
+        };
+        PhotosFamily: {
+            enabled: boolean;
+            name: string;
+            /** @description Who sees it; empty for everyone who may use Immich */
+            members: components["schemas"]["AppPrincipal"][];
+        };
+        PhotosSettings: {
+            /** @description Sign in to Immich with HardyOS (needs https://sso.<base>) */
+            sso: boolean;
+            /** @description Keep Immich's own passwords while SSO is on */
+            passwordLogin: boolean;
+            /** @description Immich's sign-in page goes straight to HardyOS */
+            autoLaunch: boolean;
+            /** @description Storage limit for new people (0: none) */
+            defaultQuotaGiB: number;
+            /** @enum {string} */
+            mlAcceleration: "auto" | "cpu" | "cuda" | "openvino" | "rocm";
+            scanHours: number;
+            watch: boolean;
+            libraries: components["schemas"]["PhotosLibrary"][];
+            family: components["schemas"]["PhotosFamily"];
+        };
+        PhotosSSO: {
+            active: boolean;
+            issuer?: string;
+            clientId?: string;
+            redirectUris: string[];
+            /** @description Why it's off while the settings ask for it */
+            why?: string;
+        };
+        PhotosML: {
+            /** @enum {string} */
+            mode: "cpu" | "cuda" | "openvino" | "rocm";
+            reason: string;
+            /** @description The GPU is with a VM now: Immich uses the processor until it's back */
+            lent: boolean;
+        };
+        PhotosLibraryState: {
+            key: string;
+            name: string;
+            owner: string;
+            importPath: string;
+            immichId?: string;
+            assets: number;
+            problem?: string;
+        };
+        PhotosFamilyState: {
+            active: boolean;
+            members: number;
+            immichId?: string;
+            problem?: string;
+        };
+        PhotosPerson: {
+            username: string;
+            email: string;
+            immichId: string;
+            /** @description Has signed in with HardyOS */
+            linked: boolean;
+            /** @description What HardyOS did about the account (moved aside for holding a HardyOS address, suspended, restored) */
+            flag?: string;
+        };
+        PhotosStatus: {
+            /** Format: date-time */
+            at: string;
+            installed: boolean;
+            catalog: boolean;
+            version?: string;
+            /** @description HardyOS has its Immich service account's key */
+            linked: boolean;
+            /** @description Immich was set up before Photos: link it with an administrator's API key */
+            needsLink: boolean;
+            problem?: string;
+            /** @description Something only an attacker could have done in Immich (also sent as a critical alert) */
+            incident?: string;
+            notes: string[];
+            sso: components["schemas"]["PhotosSSO"];
+            publishedUrl?: string;
+            /** @description Published without a sign-in in front, as the phone app needs */
+            phoneReady: boolean;
+            ml: components["schemas"]["PhotosML"];
+            libraries: components["schemas"]["PhotosLibraryState"][];
+            family: components["schemas"]["PhotosFamilyState"];
+            people: components["schemas"]["PhotosPerson"][];
+        };
+        PhotosView: {
+            settings: components["schemas"]["PhotosSettings"];
+            status: components["schemas"]["PhotosStatus"] | null;
+            shares: components["schemas"]["AppShare"][];
+            libraryShares: string[];
+            /** @description A Photos job is waiting or running */
+            running: boolean;
+        };
+        PhotosLinkRequest: {
+            /** @description An Immich administrator's API key (with all permissions) */
+            apiKey: string;
         };
         AppLimits: {
             /** @description 0 = no limit */
@@ -13141,6 +13336,101 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             503: components["responses"]["Unavailable"];
+        };
+    };
+    getPhotos: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Photos for the desktop's icon */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PhotosInfo"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    getPhotosSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Settings and status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PhotosView"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    setPhotosSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PhotosSettings"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    syncPhotos: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    linkPhotos: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PhotosLinkRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     getInstallerStatus: {
