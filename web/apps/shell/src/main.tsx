@@ -7,6 +7,7 @@ import "@fontsource/jetbrains-mono/600.css";
 import "./styles/tokens.css";
 import "./styles/shell.css";
 import "./styles/components.css";
+import "./styles/monitor.css";
 
 import { QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode } from "react";

@@ -20,7 +20,13 @@ type PingResult struct {
 	Hostname string    `json:"hostname"`
 	Time     time.Time `json:"time"`
 	EUID     int       `json:"euid"`
+	// Started is when this hardyd-priv started: hardyd's monitor notices
+	// restarts by it changing.
+	Started time.Time `json:"started"`
 }
+
+// started is when this process began.
+var started = time.Now().UTC()
 
 // RegisterBuiltins adds the operations that ship with this build.
 func RegisterBuiltins(s *Server) {
@@ -31,6 +37,7 @@ func RegisterBuiltins(s *Server) {
 			Hostname: host,
 			Time:     time.Now().UTC(),
 			EUID:     os.Geteuid(),
+			Started:  started,
 		}, nil
 	})
 }

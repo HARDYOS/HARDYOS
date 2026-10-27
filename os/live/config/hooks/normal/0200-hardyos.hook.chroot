@@ -36,6 +36,13 @@ cat > /etc/sysctl.d/60-hardyos-ptrace.conf <<'SYSCTL'
 kernel.yama.ptrace_scope = 1
 SYSCTL
 
+# Monitoring: hardyd reads SMART itself (without waking sleeping disks) and
+# schedules self-tests, so smartd stays off; NUT stays off until a UPS is
+# set up in Control Panel > UPS (hardyd-priv enables what the setup needs).
+systemctl disable smartmontools.service smartd.service >/dev/null 2>&1 || true
+systemctl disable nut.target nut-server.service nut-monitor.service nut-driver.target \
+  nut-driver-enumerator.path nut-driver-enumerator.service >/dev/null 2>&1 || true
+
 # Docker stays off at boot: its data lives on a pool (not the boot
 # environment), so hardyd-priv starts it once that pool is mounted.
 systemctl disable docker.service docker.socket containerd.service >/dev/null 2>&1 || true

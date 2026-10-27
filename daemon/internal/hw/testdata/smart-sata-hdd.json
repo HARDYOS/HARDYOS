@@ -1,0 +1,45 @@
+{
+  "json_format_version": [1, 0],
+  "smartctl": {"version": [7, 4], "argv": ["smartctl", "--json=c", "-a", "/dev/disk/by-id/ata-WDC_WD120EFBX-68B0EN0_5QG0AAAA"], "exit_status": 0},
+  "device": {"name": "/dev/disk/by-id/ata-WDC_WD120EFBX-68B0EN0_5QG0AAAA", "info_name": "/dev/sda [SAT]", "type": "sat", "protocol": "ATA"},
+  "model_family": "Western Digital Red Plus",
+  "model_name": "WDC WD120EFBX-68B0EN0",
+  "serial_number": "5QG0AAAA",
+  "wwn": {"naa": 5, "oui": 3274, "id": 12345678901},
+  "firmware_version": "85.00A85",
+  "user_capacity": {"blocks": 23437770752, "bytes": 12000138625024},
+  "logical_block_size": 512,
+  "physical_block_size": 4096,
+  "rotation_rate": 7200,
+  "form_factor": {"ata_value": 2, "name": "3.5 inches"},
+  "smart_support": {"available": true, "enabled": true},
+  "smart_status": {"passed": true},
+  "ata_smart_data": {
+    "offline_data_collection": {"status": {"value": 130, "string": "was completed without error", "passed": true}, "completion_seconds": 101},
+    "self_test": {"status": {"value": 0, "string": "completed without error", "passed": true}, "polling_minutes": {"short": 2, "extended": 1271}},
+    "capabilities": {"values": [91, 3], "exec_offline_immediate_supported": true, "self_tests_supported": true}
+  },
+  "ata_smart_attributes": {
+    "revision": 16,
+    "table": [
+      {"id": 1, "name": "Raw_Read_Error_Rate", "value": 100, "worst": 100, "thresh": 16, "when_failed": "", "flags": {"value": 11, "string": "PO-R-- ", "prefailure": true}, "raw": {"value": 0, "string": "0"}},
+      {"id": 3, "name": "Spin_Up_Time", "value": 186, "worst": 186, "thresh": 24, "when_failed": "", "flags": {"value": 7, "string": "POS--- ", "prefailure": true}, "raw": {"value": 8090, "string": "290 (Average 289)"}},
+      {"id": 4, "name": "Start_Stop_Count", "value": 100, "worst": 100, "thresh": 0, "when_failed": "", "flags": {"value": 18, "string": "-O--C- "}, "raw": {"value": 61, "string": "61"}},
+      {"id": 5, "name": "Reallocated_Sector_Ct", "value": 100, "worst": 100, "thresh": 5, "when_failed": "", "flags": {"value": 51, "string": "PO--CK ", "prefailure": true}, "raw": {"value": 0, "string": "0"}},
+      {"id": 9, "name": "Power_On_Hours", "value": 99, "worst": 99, "thresh": 0, "when_failed": "", "flags": {"value": 18, "string": "-O--C- "}, "raw": {"value": 12004, "string": "12004"}},
+      {"id": 12, "name": "Power_Cycle_Count", "value": 100, "worst": 100, "thresh": 0, "when_failed": "", "flags": {"value": 50, "string": "-O--CK "}, "raw": {"value": 58, "string": "58"}},
+      {"id": 194, "name": "Temperature_Celsius", "value": 176, "worst": 160, "thresh": 0, "when_failed": "", "flags": {"value": 2, "string": "-O---- "}, "raw": {"value": 158914134050, "string": "34 (Min/Max 22/37)"}},
+      {"id": 197, "name": "Current_Pending_Sector", "value": 100, "worst": 100, "thresh": 0, "when_failed": "", "flags": {"value": 34, "string": "-O---K "}, "raw": {"value": 0, "string": "0"}},
+      {"id": 198, "name": "Offline_Uncorrectable", "value": 100, "worst": 100, "thresh": 0, "when_failed": "", "flags": {"value": 8, "string": "---R-- "}, "raw": {"value": 0, "string": "0"}},
+      {"id": 199, "name": "UDMA_CRC_Error_Count", "value": 200, "worst": 200, "thresh": 0, "when_failed": "", "flags": {"value": 10, "string": "-O-R-- "}, "raw": {"value": 0, "string": "0"}}
+    ]
+  },
+  "power_on_time": {"hours": 12004},
+  "power_cycle_count": 58,
+  "temperature": {"current": 34},
+  "ata_smart_error_log": {"summary": {"revision": 1, "count": 0}},
+  "ata_smart_self_test_log": {"standard": {"revision": 1, "table": [
+    {"type": {"value": 1, "string": "Short offline"}, "status": {"value": 0, "string": "Completed without error", "passed": true}, "lifetime_hours": 11980},
+    {"type": {"value": 2, "string": "Extended offline"}, "status": {"value": 0, "string": "Completed without error", "passed": true}, "lifetime_hours": 11500}
+  ], "count": 2, "error_count_total": 0, "error_count_outdated": 0}}
+}
