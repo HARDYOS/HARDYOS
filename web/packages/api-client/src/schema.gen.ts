@@ -3785,7 +3785,7 @@ export interface paths {
         get?: never;
         put?: never;
         /** Restore from a version (a job; a rollback needs the item's name typed) */
-        post: operations["restoreBackup"];
+        post: operations["restoreCloudBackup"];
         delete?: never;
         options?: never;
         head?: never;
@@ -12692,7 +12692,7 @@ export interface operations {
             403: components["responses"]["Forbidden"];
         };
     };
-    restoreBackup: {
+    restoreCloudBackup: {
         parameters: {
             query?: never;
             header?: never;

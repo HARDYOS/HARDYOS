@@ -124,9 +124,19 @@ export const INSTALL_STEPS = [
   "Finishing up",
 ] as const;
 
+/** The extra step of a "Restore from backup" install (after the settings). */
+export const RESTORE_STEP = "Bringing back the settings and the domain from the backup";
+
+/** The steps of an install, with the restore step when restoring. */
+export function installSteps(restore = false): string[] {
+  const out: string[] = [...INSTALL_STEPS];
+  if (restore) out.splice(out.indexOf("Installing the boot loader"), 0, RESTORE_STEP);
+  return out;
+}
+
 /** Index of the step a job message belongs to (-1 when unknown). */
-export function stepIndex(message: string): number {
-  return INSTALL_STEPS.findIndex((s) => s === message);
+export function stepIndex(message: string, restore = false): number {
+  return installSteps(restore).findIndex((s) => s === message);
 }
 
 /** Formats a typed code as XXXX-XXXX. */

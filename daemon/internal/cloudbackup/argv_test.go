@@ -95,10 +95,13 @@ func TestCancelKillsRestic(t *testing.T) {
 	if pid == "" {
 		t.Fatal("the child never started")
 	}
-	if _, err := os.Stat("/proc/" + pid); err == nil {
-		st, _ := os.ReadFile("/proc/" + pid + "/stat")
-		if !strings.Contains(string(st), ") Z ") {
-			t.Fatalf("the child %s survived the cancel", pid)
+	// SIGKILL is sent; give the kernel a moment to take the process down.
+	for i := 0; i < 100; i++ {
+		st, err := os.ReadFile("/proc/" + pid + "/stat")
+		if err != nil || strings.Contains(string(st), ") Z ") || strings.Contains(string(st), ") X ") {
+			return
 		}
+		sleepMS(50)
 	}
+	t.Fatalf("the child %s survived the cancel", pid)
 }
