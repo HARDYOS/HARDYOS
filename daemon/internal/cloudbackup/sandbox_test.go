@@ -76,7 +76,8 @@ type probeResult struct {
 	UID       int      `json:"uid"`
 	RootWrite string   `json:"rootWrite"`
 	RWWrite   string   `json:"rwWrite"`
-	Present   []string `json:"present"`
+	Present   []string `json:"present"` // secrets that exist (not just as the way to a bind)
+	Leaked    []string `json:"leaked"`  // anything else found under them
 	Dev       []string `json:"dev"`
 	Pids      []string `json:"pids"`
 	Unix      string   `json:"unix"`
@@ -97,18 +98,54 @@ func errText(err error) string {
 var sandboxSecrets = []string{"/etc/shadow", "/etc/passwd", "/run/hardyos/priv.sock", "/var/run/docker.sock", "/run/docker.sock",
 	"/var/lib/samba", "/var/lib/hardyos", "/etc/hardyos", "/root", "/home", "/dev/sda", "/dev/vda", "/dev/zfs", "/dev/kvm", "/sys"}
 
-// sandboxProbe: a writable folder, a host address.
+// sandboxProbe: a writable folder, a host address, and the run's binds
+// (comma-separated): their parent folders exist as the empty way to them.
 func sandboxProbe(args []string) int {
-	if len(args) != 2 {
+	if len(args) != 3 {
 		return 2
 	}
+	binds := strings.Split(args[2], ",")
 	r := probeResult{UID: os.Getuid()}
 	r.RootWrite = errText(os.WriteFile("/x", []byte("x"), 0o600))
 	r.RWWrite = errText(os.WriteFile(filepath.Join(args[0], "x"), []byte("x"), 0o600))
-	for _, p := range sandboxSecrets {
-		if _, err := os.Lstat(p); err == nil {
-			r.Present = append(r.Present, p)
+	onWay := func(p string) bool { // p is a bind or a folder on the way to one
+		for _, b := range binds {
+			if p == b || strings.HasPrefix(b, p+"/") {
+				return true
+			}
 		}
+		return false
+	}
+	isBind := func(p string) bool {
+		for _, b := range binds {
+			if p == b {
+				return true
+			}
+		}
+		return false
+	}
+	for _, p := range sandboxSecrets {
+		if _, err := os.Lstat(p); err != nil {
+			continue
+		}
+		if !onWay(p) {
+			r.Present = append(r.Present, p)
+			continue
+		}
+		// A parent of a bind: it may hold nothing but the way to the binds.
+		_ = filepath.WalkDir(p, func(q string, d os.DirEntry, err error) error {
+			if err != nil || q == p {
+				return nil
+			}
+			if !onWay(q) {
+				r.Leaked = append(r.Leaked, q)
+				return filepath.SkipDir
+			}
+			if isBind(q) && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		})
 	}
 	if es, err := os.ReadDir("/dev"); err == nil {
 		for _, e := range es {
@@ -200,7 +237,8 @@ func TestSandbox(t *testing.T) {
 		want string
 	}{{"read", capsRead, "0000000000000004"}, {"restore", capsRestore, "000000000000000b"}, {"none", capsNone, "0000000000000000"}} {
 		t.Run(c.name, func(t *testing.T) {
-			out, err := r.run(ctx, repo, call{args: []string{"__sandbox-probe", filepath.Join(base, "cache", "x"), ln.Addr().String()}, writable: []string{rw}, caps: c.caps})
+			binds := append([]string{exe, filepath.Join(base, "cache", "x"), rw}, sb.ExtraRO...)
+			out, err := r.run(ctx, repo, call{args: []string{"__sandbox-probe", filepath.Join(base, "cache", "x"), ln.Addr().String(), strings.Join(binds, ",")}, writable: []string{rw}, caps: c.caps})
 			if err != nil {
 				t.Fatalf("%v: %s", err, out)
 			}
@@ -214,8 +252,8 @@ func TestSandbox(t *testing.T) {
 			if res.RootWrite == "ok" || res.RWWrite != "ok" {
 				t.Errorf("writes: root %q, staging %q", res.RootWrite, res.RWWrite)
 			}
-			if len(res.Present) > 0 {
-				t.Errorf("visible in the sandbox: %v", res.Present)
+			if len(res.Present) > 0 || len(res.Leaked) > 0 {
+				t.Errorf("visible in the sandbox: %v; beside the way to its binds: %v", res.Present, res.Leaked)
 			}
 			sort.Strings(res.Dev)
 			if strings.Join(res.Dev, ",") != "fd,null,random,stderr,stdin,stdout,urandom,zero" {
@@ -237,7 +275,7 @@ func TestSandbox(t *testing.T) {
 	}
 	// Without the restic user, nothing runs.
 	r.Sandbox = &Sandbox{Helper: exe}
-	if _, err := r.run(ctx, repo, call{args: []string{"__sandbox-probe", rw, ln.Addr().String()}}); err == nil || !strings.Contains(err.Error(), "hardyos-restic") {
+	if _, err := r.run(ctx, repo, call{args: []string{"__sandbox-probe", rw, ln.Addr().String(), rw}}); err == nil || !strings.Contains(err.Error(), "hardyos-restic") {
 		t.Fatalf("ran without the restic user: %v", err)
 	}
 }
