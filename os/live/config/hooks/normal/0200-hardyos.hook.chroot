@@ -43,6 +43,23 @@ systemctl disable smartmontools.service smartd.service >/dev/null 2>&1 || true
 systemctl disable nut.target nut-server.service nut-monitor.service nut-driver.target \
   nut-driver-enumerator.path nut-driver-enumerator.service >/dev/null 2>&1 || true
 
+# The mail server stays off at boot: its mail lives on a pool, so
+# hardyd-priv renders its configuration and starts these once that pool is
+# mounted (and only after the mail server is turned on). Mailboxes belong
+# to hardyos-vmail; Rspamd reads its statistics from its own Redis
+# instance's socket (redis group). Postfix's stock configuration (port 25
+# for local mail) stays off too until HardyOS has written its own.
+systemctl disable postfix.service dovecot.service dovecot.socket rspamd.service redis-server.service \
+  radicale.service clamav-daemon.service clamav-freshclam.service >/dev/null 2>&1 || true
+if ! getent group hardyos-vmail >/dev/null; then
+  addgroup --system hardyos-vmail
+fi
+if ! getent passwd hardyos-vmail >/dev/null; then
+  adduser --system --ingroup hardyos-vmail --home /nonexistent --no-create-home \
+    --shell /usr/sbin/nologin --gecos "HardyOS mailboxes" hardyos-vmail
+fi
+adduser _rspamd redis >/dev/null 2>&1 || true
+
 # Docker stays off at boot: its data lives on a pool (not the boot
 # environment), so hardyd-priv starts it once that pool is mounted.
 systemctl disable docker.service docker.socket containerd.service >/dev/null 2>&1 || true

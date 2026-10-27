@@ -177,6 +177,18 @@ jobs:
           sudo docker ps -a --filter label=org.hardyos.app
           for c in $(sudo docker ps -aq --filter label=org.hardyos.app); do sudo docker logs --tail 80 "$c" 2>&1; done
 
+  mail:
+    name: Mail server (Postfix, Dovecot, Rspamd, Radicale)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache: false
+      - name: no open relay, TLS-only sign-in, PROXY only from the VPS, brute force blocked without locking out the LAN, DKIM, Junk, calendars
+        run: scripts/mail-integration.sh
+
   vms:
     name: Virtual machines (KVM)
     runs-on: ubuntu-24.04

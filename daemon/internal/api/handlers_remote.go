@@ -43,6 +43,7 @@ const (
 func remoteInputs(ctx context.Context, pc *priv.Client, db *store.DB) (publish.Inputs, *netbird.ClientStatus, []apps.App) {
 	var in publish.Inputs
 	in.ShareLinks = activeShareLinks(ctx, db)
+	in.MailHost = mailPublishHost(ctx, db)
 	st := &netbird.ClientStatus{State: "unknown"}
 	if pc == nil {
 		return in, st, nil

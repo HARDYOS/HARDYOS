@@ -122,6 +122,23 @@ bridge-utils
 dnsmasq-base
 iptables
 
+# Mail server (Control Panel > Mail, docs/mail.md): Postfix (SMTP), Dovecot
+# (IMAP, LMTP, Sieve), Rspamd (spam, DKIM signing) with its own Redis,
+# Radicale (calendars and contacts) and ClamAV (optional virus scanning).
+# All from Debian's signed archive; every unit stays off until the mail
+# server is turned on (hardyd-priv renders their configuration and starts
+# them once the mail dataset's pool is mounted).
+postfix
+dovecot-core
+dovecot-imapd
+dovecot-lmtpd
+dovecot-sieve
+rspamd
+redis-server
+radicale
+clamav-daemon
+clamav-freshclam
+
 # Live system
 live-boot
 live-config

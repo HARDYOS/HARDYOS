@@ -59,6 +59,13 @@ const FilesKey = "files"
 // FilesLabel is its name under the base domain.
 const FilesLabel = "files"
 
+// MailKey is the mail server's name (mail.<base>, Control Panel › Mail):
+// mail app settings (autoconfig, autodiscover) and calendars and contacts
+// (/dav-mail/, each request signed in with the person's own password).
+// Public with nothing in front, while the mail server is on and its name
+// is directly under the base domain; the gateway serves nothing else there.
+const MailKey = "mail"
+
 // AppKey is an app's row key.
 func AppKey(id string) string { return "app:" + id }
 
@@ -359,7 +366,7 @@ func (st *Store) rows(ctx context.Context) (map[string]*row, error) {
 
 // resolve fills in what an unset choice means for key.
 func resolve(key string, r *row, s Settings) ServiceConfig {
-	if key == SSOKey || key == FilesKey {
+	if key == SSOKey || key == FilesKey || key == MailKey {
 		return ServiceConfig{Mode: ModePublic, Auth: AuthNone, Groups: []string{}, Default: true}
 	}
 	c := ServiceConfig{HardyOSSignIn: true}

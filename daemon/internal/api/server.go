@@ -22,6 +22,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/files"
 	"github.com/hardyos/hardyos/daemon/internal/installer"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/mail/manage"
 	"github.com/hardyos/hardyos/daemon/internal/metrics"
 	"github.com/hardyos/hardyos/daemon/internal/monitor"
 	"github.com/hardyos/hardyos/daemon/internal/notify"
@@ -114,6 +115,9 @@ type Config struct {
 	// GPUUploadDir is where uploaded vGPU driver files are saved for
 	// hardyd-priv (default gpu.UploadDir; tests use a temp dir).
 	GPUUploadDir string
+	// Mail is the family mail server (Control Panel › Mail); nil leaves it
+	// out.
+	Mail *manage.Service
 }
 
 // Server is hardyd's HTTP handler.
@@ -195,6 +199,7 @@ func New(cfg Config) *Server {
 			s.cfg.SSOIssuer = s.oidc.Issuer
 		}
 	}
+	s.configureMail()
 	if cfg.CloudBackups != nil && cfg.Jobs != nil && cfg.Installer == nil {
 		s.registerCloudJobs(cfg.Jobs)
 	}
@@ -240,6 +245,7 @@ func (s *Server) routes() {
 		s.storageRoutes()
 		s.notifyRoutes()
 		s.monitorRoutes()
+		s.mailRoutes() // Control Panel › Mail and what mail apps ask (installed systems: Config.Mail is nil on the live ISO)
 		if s.cfg.Updates != nil {
 			// Installed systems only, like updates (the live installer has neither).
 			s.updateRoutes()

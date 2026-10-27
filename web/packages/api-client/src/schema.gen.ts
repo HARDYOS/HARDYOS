@@ -4512,6 +4512,409 @@ export interface paths {
         patch: operations["updateReplicationSource"];
         trace?: never;
     };
+    "/mail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The mail server's settings, state, domains and environment (admin)
+         * @description Control Panel › Mail. Secrets (the SES secret access key, the
+         *     Cloudflare token) are never returned, only whether they're set.
+         *     Outside this API, hardyd also serves mail app settings without a
+         *     sign-in (`/.well-known/autoconfig/mail/config-v1.1.xml`,
+         *     `/mail/config-v1.1.xml`, `/autodiscover/autodiscover.xml`),
+         *     `/.well-known/caldav` and `/.well-known/carddav` (redirects), and
+         *     calendars and contacts at `/dav-mail/` (HTTP Basic with the
+         *     person's mail address and password, then Radicale).
+         */
+        get: operations["getMail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mail/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Save the settings (and secrets); applies them when on, stops the server when turned off (admin, job) */
+        put: operations["saveMailSettings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mail/apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Render and restart the mail server from the current settings (admin, job) */
+        post: operations["applyMail"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mail/domains": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Mail domains (admin) */
+        get: operations["listMailDomains"];
+        put?: never;
+        /** Add a mail domain (admin; a job when the server is on) */
+        post: operations["addMailDomain"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mail/domains/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Remove a domain no mailbox, alias or group uses; confirm = its name (admin) */
+        delete: operations["deleteMailDomain"];
+        options?: never;
+        head?: never;
+        /** Change DMARC, MTA-STS, Cloudflare publishing, or rotate the DKIM key (admin) */
+        patch: operations["updateMailDomain"];
+        trace?: never;
+    };
+    "/mail/domains/{name}/dns": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        /** The DNS records a domain needs, with the last check (admin) */
+        get: operations["getMailDNS"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mail/domains/{name}/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Look the domain's records up in public DNS now (admin) */
+        post: operations["checkMailDNS"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mail/domains/{name}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Write the domain's records into Cloudflare (admin, job) */
+        post: operations["publishMailDNS"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mail/domains/{name}/ses": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Add the domain to Amazon SES (Easy DKIM, custom MAIL FROM) and store its records (admin, job) */
+        post: operations["verifyMailSES"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mail/ses": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The SES account (sandbox, quota) and each domain's identity (admin) */
+        get: operations["getMailSES"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mail/vps": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The script to run on the VPS, made from the current settings (admin) */
+        get: operations["getMailVPS"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mail/vps/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Test the VPS from here (port 25 relays home; 993 and 465 reach this server) (admin) */
+        post: operations["checkMailVPS"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mail/mailboxes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Every mailbox with its use (admin) */
+        get: operations["listMailboxes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mail/mailboxes/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Give every domain account a mailbox now (admin, job) */
+        post: operations["syncMailboxes"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mail/mailboxes/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete a mailbox and every message in it; confirm = its address; only for turned-off or deleted accounts (admin, job) */
+        delete: operations["deleteMailbox"];
+        options?: never;
+        head?: never;
+        /** Change a mailbox's address, aliases, quota or sign-in (admin) */
+        patch: operations["updateMailbox"];
+        trace?: never;
+    };
+    "/mail/groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Group addresses (admin) */
+        get: operations["listMailGroups"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mail/groups/{address}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                address: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /** Create or change a group address (admin) */
+        put: operations["setMailGroup"];
+        post?: never;
+        /** Remove a group address (admin) */
+        delete: operations["deleteMailGroup"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mail/queue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Messages waiting to be delivered (admin) */
+        get: operations["getMailQueue"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mail/queue/flush": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Retry every waiting message now (admin, job) */
+        post: operations["flushMailQueue"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mail/certificate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Install an uploaded certificate chain and key (PEM; the key reaches the job in memory only) (admin, job) */
+        put: operations["uploadMailCertificate"];
+        /** Get a Let's Encrypt certificate (DNS-01 through Cloudflare); force renews a valid one (admin, job) */
+        post: operations["renewMailCertificate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mail/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The signed-in person's mailbox and how to set up their devices */
+        get: operations["getMyMail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mail/me/profile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** An Apple configuration profile (.mobileconfig) for mail, calendars and contacts (no password in it) */
+        get: operations["getMyMailProfile"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -7938,6 +8341,240 @@ export interface components {
             /** @description Where other servers can reach this one */
             addresses: components["schemas"]["ReplicationAddress"][];
             problem?: string;
+        };
+        MailSettings: {
+            enabled?: boolean;
+            /** @description Pool holding <pool>/mail */
+            pool?: string;
+            /** @description The mail server's public name (MX target */
+            hostname?: string;
+            /** @description Domain of new mailboxes */
+            defaultDomain?: string;
+            /** @enum {string} */
+            addressStyle?: "firstname" | "username";
+            /** @description New mailboxes' size limit (0: none) */
+            defaultQuotaMb?: number;
+            /** @description The VPS's NetBird address (relayed mail and forwarded mail apps come from it) */
+            vpsPeer?: string;
+            vpsIpv4?: string;
+            vpsIpv6?: string;
+            sesRegion?: string;
+            sesAccessKeyId?: string;
+            /** @description Use bounce.<domain> as SES's MAIL FROM */
+            sesMailFrom?: boolean;
+            clamav?: boolean;
+            junkScore?: number;
+            maxMessageMb?: number;
+            sendPerHour?: number;
+            postmaster?: string;
+            sharedCalendar?: boolean;
+            /** @enum {string} */
+            tlsMode?: "self" | "manual" | "acme";
+            acmeEmail?: string;
+            acmeStaging?: boolean;
+            /** @description Sender of HardyOS's notifications through this server ("" for none) */
+            notifyFrom?: string;
+        };
+        MailSettingsRequest: {
+            settings: components["schemas"]["MailSettings"];
+            /** @description Write-only; omit to keep, empty to remove */
+            sesSecretKey?: string;
+            /** @description Write-only (Zone › DNS › Edit); omit to keep, empty to remove */
+            cloudflareToken?: string;
+        };
+        MailCert: {
+            names?: string[];
+            issuer?: string;
+            /** Format: date-time */
+            notAfter?: string;
+            selfSigned?: boolean;
+            fingerprint?: string;
+            pem?: string;
+        };
+        MailQueueItem: {
+            id: string;
+            queue: string;
+            /** Format: date-time */
+            arrivedAt: string;
+            size: number;
+            sender: string;
+            recipients: string[];
+            reason: string;
+        };
+        MailStatus: {
+            services: {
+                [key: string]: string;
+            };
+            queue: components["schemas"]["MailQueueItem"][];
+            cert?: components["schemas"]["MailCert"];
+            usedMb: number;
+            running: boolean;
+        };
+        MailRecord: {
+            /** @enum {string} */
+            type: "MX" | "TXT" | "CNAME" | "A" | "AAAA" | "SRV";
+            name: string;
+            value: string;
+            priority: number;
+            purpose: string;
+            required: boolean;
+            note?: string;
+        };
+        MailCheck: components["schemas"]["MailRecord"] & {
+            /** @enum {string} */
+            status: "ok" | "missing" | "wrong" | "error";
+            found: string[];
+            detail?: string;
+        };
+        MailDNSState: {
+            /** Format: date-time */
+            at: string;
+            summary: {
+                ok: number;
+                problems: number;
+                optional: number;
+                ready: boolean;
+            };
+            checks: components["schemas"]["MailCheck"][];
+        };
+        MailDomain: {
+            name: string;
+            selector: string;
+            dkimPublicKey: string;
+            /** @enum {string} */
+            dmarcPolicy: "none" | "quarantine" | "reject";
+            /** @enum {string} */
+            mtaSts: "off" | "testing" | "enforce";
+            cloudflare: boolean;
+            sesDkimTokens: string[];
+            sesStatus: string;
+            lastCheck?: components["schemas"]["MailDNSState"];
+            /** Format: date-time */
+            createdAt: string;
+        };
+        MailDomainRequest: {
+            name: string;
+            /** @enum {string} */
+            dmarcPolicy?: "none" | "quarantine" | "reject";
+            cloudflare?: boolean;
+        };
+        MailDomainUpdate: {
+            /** @enum {string} */
+            dmarcPolicy?: "none" | "quarantine" | "reject";
+            /** @enum {string} */
+            mtaSts?: "off" | "testing" | "enforce";
+            cloudflare?: boolean;
+            rotateDkim?: boolean;
+        };
+        MailDNS: {
+            domain: string;
+            records: components["schemas"]["MailRecord"][];
+            lastCheck?: components["schemas"]["MailDNSState"];
+            mtaStsPolicy?: string;
+            missing: {
+                [key: string]: string;
+            };
+        };
+        MailOverview: {
+            settings: components["schemas"]["MailSettings"];
+            sesSecretSet: boolean;
+            cloudflareTokenSet: boolean;
+            status?: components["schemas"]["MailStatus"];
+            statusError?: string;
+            domains: components["schemas"]["MailDomain"][];
+            mailboxCount: number;
+            netbirdAddress: string;
+            webmailInstalled: boolean;
+            pools: string[];
+            /** @description https://mail.<base> when published through Remote Access */
+            publishedUrl: string;
+        };
+        Mailbox: {
+            id: number;
+            account: string;
+            address: string;
+            displayName: string;
+            aliases: string[];
+            quotaMb: number;
+            enabled: boolean;
+            /** @enum {string} */
+            accountState: "active" | "disabled" | "deleted";
+            customAddress: boolean;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+            usedKb?: number;
+        };
+        MailboxUpdate: {
+            address?: string;
+            aliases?: string[];
+            quotaMb?: number;
+            enabled?: boolean;
+        };
+        MailGroup: {
+            address: string;
+            targets: string[];
+            /** Format: date-time */
+            createdAt?: string;
+        };
+        MailSESIdentity: {
+            exists?: boolean;
+            verifiedForSending?: boolean;
+            dkimStatus?: string;
+            dkimTokens?: string[];
+            mailFromDomain?: string;
+            mailFromStatus?: string;
+        };
+        MailSESStatus: {
+            account?: {
+                /** @description false: the SES sandbox (only verified recipients) */
+                productionAccess?: boolean;
+                sendingEnabled?: boolean;
+                max24HourSend?: number;
+                sentLast24Hours?: number;
+                enforcementStatus?: string;
+            };
+            identities: {
+                [key: string]: components["schemas"]["MailSESIdentity"];
+            };
+            error?: string;
+        };
+        MailVPS: {
+            /** @description Bash for the VPS (run as root) */
+            script: string;
+            problem?: string;
+            homePeer: string;
+            hostname: string;
+            relayPort: number;
+            proxyPorts: number[];
+        };
+        MailVPSCheck: {
+            name: string;
+            ok: boolean;
+            detail: string;
+        };
+        MailManualSettings: {
+            address: string;
+            username: string;
+            imapHost: string;
+            imapPort: number;
+            imapTls: string;
+            smtpHost: string;
+            smtpPort: number;
+            smtpTls: string;
+            altSmtpPort: number;
+            davUrl: string;
+            familyCalendarUrl: string;
+            familyContactsUrl: string;
+        };
+        MailMe: {
+            enabled: boolean;
+            mailbox?: components["schemas"]["Mailbox"];
+            usedKb: number;
+            settings?: components["schemas"]["MailManualSettings"];
+            webmailInstalled: boolean;
+            reason?: string;
         };
     };
     responses: {
@@ -15067,6 +15704,575 @@ export interface operations {
             400: components["responses"]["Invalid"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getMail: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Overview */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailOverview"];
+                };
+            };
+        };
+    };
+    saveMailSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MailSettingsRequest"];
+            };
+        };
+        responses: {
+            /** @description Saved while the mail server stays off */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailSettings"];
+                };
+            };
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+        };
+    };
+    applyMail: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+        };
+    };
+    listMailDomains: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Domains */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailDomain"][];
+                };
+            };
+        };
+    };
+    addMailDomain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MailDomainRequest"];
+            };
+        };
+        responses: {
+            /** @description Added (the mail server is off) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailDomain"];
+                };
+            };
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+        };
+    };
+    deleteMailDomain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConfirmRequest"];
+            };
+        };
+        responses: {
+            /** @description Removed (the mail server is off) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        deleted?: boolean;
+                    };
+                };
+            };
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+        };
+    };
+    updateMailDomain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MailDomainUpdate"];
+            };
+        };
+        responses: {
+            /** @description Changed (the mail server is off) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailDomain"];
+                };
+            };
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getMailDNS: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Records */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailDNS"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+        };
+    };
+    checkMailDNS: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Result */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailDNSState"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+        };
+    };
+    publishMailDNS: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    verifyMailSES: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getMailSES: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description SES */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailSESStatus"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+        };
+    };
+    getMailVPS: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description VPS setup */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailVPS"];
+                };
+            };
+        };
+    };
+    checkMailVPS: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Checks */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailVPSCheck"][];
+                };
+            };
+            400: components["responses"]["Invalid"];
+        };
+    };
+    listMailboxes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Mailboxes */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Mailbox"][];
+                };
+            };
+        };
+    };
+    syncMailboxes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+        };
+    };
+    deleteMailbox: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConfirmRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    updateMailbox: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MailboxUpdate"];
+            };
+        };
+        responses: {
+            /** @description Changed (the mail server is off) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Mailbox"];
+                };
+            };
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listMailGroups: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Groups */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailGroup"][];
+                };
+            };
+        };
+    };
+    setMailGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                address: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    targets: string[];
+                };
+            };
+        };
+        responses: {
+            /** @description Saved (the mail server is off) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailGroup"];
+                };
+            };
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+        };
+    };
+    deleteMailGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                address: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed (the mail server is off) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        deleted?: boolean;
+                    };
+                };
+            };
+            202: components["responses"]["JobAccepted"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getMailQueue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Queue */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailQueueItem"][];
+                };
+            };
+        };
+    };
+    flushMailQueue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+        };
+    };
+    uploadMailCertificate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    chain: string;
+                    key: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+        };
+    };
+    renewMailCertificate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    force?: boolean;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+        };
+    };
+    getMyMail: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Mailbox */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailMe"];
+                };
+            };
+        };
+    };
+    getMyMailProfile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Profile */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/x-apple-aspen-config": string;
+                };
+            };
             404: components["responses"]["NotFound"];
         };
     };

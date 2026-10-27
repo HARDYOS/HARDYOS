@@ -115,6 +115,9 @@ type proxyListener struct {
 	port   int
 	target atomic.Pointer[url.URL]
 	srv    *http.Server
+	// webmail: the catalog's Mail app (Roundcube): each request carries
+	// the person's mailbox sign-in (a token tied to this session).
+	webmail atomic.Bool
 }
 
 type proxyToken struct {
@@ -434,8 +437,10 @@ func (p *appProxy) ensure(ctx context.Context, a apps.App) (int, error) {
 		return 0, errors.New("the window proxy isn't running")
 	}
 	target := appTarget(a)
+	webmail := a.ID == WebmailAppID && a.Source == apps.SourceCatalog
 	if l := p.listeners[a.ID]; l != nil {
 		l.target.Store(target)
+		l.webmail.Store(webmail)
 		return l.port, nil
 	}
 	st := p.s.appStore()
@@ -469,6 +474,7 @@ func (p *appProxy) ensure(ctx context.Context, a apps.App) (int, error) {
 	}
 	l := &proxyListener{appID: a.ID, port: port}
 	l.target.Store(target)
+	l.webmail.Store(webmail)
 	l.srv = &http.Server{
 		Handler:           p.handler(l),
 		ReadHeaderTimeout: 15 * time.Second,
@@ -504,6 +510,13 @@ func (p *appProxy) handler(l *proxyListener) http.Handler {
 			pr.Out.Host = pr.In.Host // links the app builds point back at the proxy
 			pr.SetXForwarded()
 			appRequestCookies(pr.Out.Header, l.appID)
+			if l.webmail.Load() {
+				// Only HardyOS signs people in to webmail.
+				pr.Out.Header.Del("Authorization")
+				if c, ok := pr.In.Context().Value(webmailKey{}).(webmailCreds); ok {
+					pr.Out.SetBasicAuth(c.address, c.token)
+				}
+			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			p.fixResponse(resp, l)
@@ -535,8 +548,48 @@ func (p *appProxy) handler(l *proxyListener) http.Handler {
 				"Your HardyOS sign-in ended or an administrator changed who may use it. Open it again from the desktop.")
 			return
 		}
+		if l.webmail.Load() {
+			if c, ok := p.webmailCreds(r, ss, key); ok {
+				r = r.WithContext(context.WithValue(r.Context(), webmailKey{}, c))
+			}
+		}
 		rp.ServeHTTP(&trackingWriter{ResponseWriter: w, p: p, key: key, ss: ss}, r)
 	})
+}
+
+type webmailKey struct{}
+
+type webmailCreds struct{ address, token string }
+
+// webmailCreds is the mailbox sign-in for a Mail app window session: the
+// person's own mailbox and a token good while this session is.
+func (p *appProxy) webmailCreds(r *http.Request, ss *proxySession, key string) (webmailCreds, bool) {
+	svc := p.s.cfg.Mail
+	if svc == nil {
+		return webmailCreds{}, false
+	}
+	u, err := p.s.users.Get(r.Context(), ss.userID)
+	if err != nil {
+		return webmailCreds{}, false
+	}
+	acct := accountOf(u)
+	if acct == "" {
+		return webmailCreds{}, false
+	}
+	addr, tok, err := svc.WebmailLogin(r.Context(), acct, key)
+	if err != nil {
+		return webmailCreds{}, false
+	}
+	return webmailCreds{address: addr, token: tok}, true
+}
+
+// sessionAlive reports whether a window session (by key) is still open and
+// was checked recently (webmail tokens last as long).
+func (p *appProxy) sessionAlive(key string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ss := p.sessions[key]
+	return ss != nil && !ss.gateway && time.Now().Before(ss.expires) && time.Since(ss.checked) < 3*proxyRecheck
 }
 
 // crossAppRequest says why a request looks like it comes from another page

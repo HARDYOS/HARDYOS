@@ -126,6 +126,12 @@ export const CameraIcon = svg(
     <circle cx="12" cy="13" r="3.5" />
   </>,
 );
+export const MailIcon = svg(
+  <>
+    <rect x="3" y="5" width="18" height="14" rx="2" />
+    <path d="M3 7l9 6 9-6" />
+  </>,
+);
 export const CalendarIcon = svg(
   <>
     <rect x="3" y="5" width="18" height="16" rx="2" />

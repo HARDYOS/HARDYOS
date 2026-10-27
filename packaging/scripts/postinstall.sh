@@ -39,6 +39,19 @@ if ! getent passwd hardyos-restic >/dev/null; then
     --shell /usr/sbin/nologin --gecos "HardyOS cloud backups (restic)" hardyos-restic
 fi
 
+# Mailboxes on disk belong to this user; Dovecot's mail processes run as
+# it (never root). Rspamd reads its Redis instance's socket.
+if ! getent group hardyos-vmail >/dev/null; then
+  addgroup --system hardyos-vmail
+fi
+if ! getent passwd hardyos-vmail >/dev/null; then
+  adduser --system --ingroup hardyos-vmail --home /nonexistent --no-create-home \
+    --shell /usr/sbin/nologin --gecos "HardyOS mailboxes" hardyos-vmail
+fi
+if getent passwd _rspamd >/dev/null && getent group redis >/dev/null; then
+  adduser _rspamd redis >/dev/null 2>&1 || true
+fi
+
 if [ -d /run/systemd/system ]; then
   systemctl daemon-reload
   systemctl enable hardyos-issue.service hardyd-priv.service hardyd.service >/dev/null

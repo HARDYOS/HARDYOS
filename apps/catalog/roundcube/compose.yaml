@@ -1,0 +1,64 @@
+# Roundcube webmail for HardyOS's mail server (docs/mail.md).
+#
+# It talks to Dovecot (IMAPS, 993) and Postfix (SMTPS, 465) on this server
+# through host.docker.internal. The connection stays on the server's own
+# Docker bridge; the server's certificate is for its public name, so
+# Roundcube doesn't check it here (written into hardyos.inc.php below).
+#
+# Sign-in: HardyOS's window proxy sends the person's mailbox address and a
+# token tied to their desktop session as HTTP Basic credentials, which
+# Roundcube's bundled http_authentication plugin uses to sign in. hardyd
+# checks the token when Dovecot asks. Without them (opened another way)
+# Roundcube shows its own sign-in form: mail address and domain password.
+#
+# The web port is bound to 127.0.0.1 only: the window proxy is the way in.
+services:
+  roundcube:
+    image: docker.io/roundcube/roundcubemail:1.7.4-apache
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      TZ: ${HARDY_TZ}
+      ROUNDCUBEMAIL_DEFAULT_HOST: ssl://host.docker.internal
+      ROUNDCUBEMAIL_DEFAULT_PORT: "993"
+      ROUNDCUBEMAIL_SMTP_SERVER: ssl://host.docker.internal
+      ROUNDCUBEMAIL_SMTP_PORT: "465"
+      ROUNDCUBEMAIL_DB_TYPE: sqlite
+      ROUNDCUBEMAIL_SKIN: elastic
+      ROUNDCUBEMAIL_PLUGINS: http_authentication,archive,zipdownload,markasjunk
+      ROUNDCUBEMAIL_UPLOAD_MAX_FILESIZE: 25M
+    # HardyOS's settings for Roundcube, written at every start, then the
+    # image's own entrypoint.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mkdir -p /var/roundcube/config
+        cat > /var/roundcube/config/hardyos.inc.php <<'PHP'
+        <?php
+        $$config['imap_conn_options'] = ['ssl' => ['verify_peer' => false, 'verify_peer_name' => false]];
+        $$config['smtp_conn_options'] = ['ssl' => ['verify_peer' => false, 'verify_peer_name' => false]];
+        $$config['smtp_user'] = '%u';
+        $$config['smtp_pass'] = '%p';
+        $$config['product_name'] = 'HardyOS Mail';
+        $$config['junk_mbox'] = 'Junk';
+        $$config['create_default_folders'] = true;
+        $$config['login_autocomplete'] = 0;
+        $$config['ip_check'] = false;
+        $$config['use_https'] = true;
+        $$config['session_lifetime'] = 60;
+        PHP
+        exec /docker-entrypoint.sh apache2-foreground
+    ports:
+      - "127.0.0.1:${HARDY_PORT_WEB}:80"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${HARDY_APP_DATA}/db:/var/roundcube/db
+      - ${HARDY_APP_DATA}/config:/var/roundcube/config
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3

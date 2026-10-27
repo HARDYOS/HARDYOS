@@ -26,6 +26,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/gpu"
 	"github.com/hardyos/hardyos/daemon/internal/hw"
 	"github.com/hardyos/hardyos/daemon/internal/install"
+	"github.com/hardyos/hardyos/daemon/internal/mail"
 	"github.com/hardyos/hardyos/daemon/internal/netbird"
 	"github.com/hardyos/hardyos/daemon/internal/network"
 	"github.com/hardyos/hardyos/daemon/internal/nfs"
@@ -195,6 +196,12 @@ func main() {
 			log.Error("file access isn't available", "err", err)
 		}
 		go am.OnStart(ctx)
+		// The mail server: configuration rendered by root from what hardyd
+		// sends (validated again here); back after a restart once its pool
+		// is mounted.
+		mailRoot := &mail.Root{Runner: sysexec.Exec{}, Log: log}
+		priv.RegisterMail(s, mailRoot)
+		go mailRoot.OnStart(ctx)
 		// Virtual machines: libvirt is driven from here only. Adding or
 		// removing the VM bridge takes the domain controller off the port
 		// first and puts it on the new parent after.

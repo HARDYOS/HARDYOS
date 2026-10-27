@@ -32,6 +32,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/install"
 	"github.com/hardyos/hardyos/daemon/internal/installer"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/mail/manage"
 	"github.com/hardyos/hardyos/daemon/internal/metrics"
 	"github.com/hardyos/hardyos/daemon/internal/monitor"
 	"github.com/hardyos/hardyos/daemon/internal/notify"
@@ -212,6 +213,16 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 			Audit: &audit.Log{DB: db, Events: broker}, Sealer: &replication.Sealer{Source: secrets}, Log: log}
 		repl.RegisterJobs(manager)
 	}
+	// The family mail server (docs/mail.md): Postfix, Dovecot, Rspamd and
+	// Radicale run by hardyd-priv; hardyd keeps the settings, answers
+	// Dovecot's sign-in questions and sends notifications through it.
+	var mailSvc *manage.Service
+	if !live {
+		mailSvc = &manage.Service{Store: &manage.Store{DB: db, Keys: secrets}, Priv: pc, Notify: alerts, Log: log,
+			Channels: &notify.Channels{DB: db, Keys: secrets}}
+		api.RegisterMailJobs(manager, mailSvc, pc)
+		alerts.LoopbackTLS = mailSvc.LoopbackTLS
+	}
 	var inst *installer.Service
 	if live {
 		inst = &installer.Service{Priv: pc, Jobs: manager, Limiter: auth.NewLoginLimiter()}
@@ -230,7 +241,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		WebRoot: webRoot, Insecure: httpsAddr == "", Installer: inst, Updates: upd, Backups: bk, CloudBackups: cloud,
 		Apps: appStore, Files: fileAccess, TrustedProxies: trustedProxies, Secrets: secrets, Remote: remote,
 		Replication: repl,
-		Alerts:      alerts, Monitor: mon,
+		Alerts:      alerts, Monitor: mon, Mail: mailSvc,
 	})
 
 	go housekeeping(ctx, log, &auth.Sessions{DB: db})
@@ -240,12 +251,13 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		// After an update, confirm the new version once it has stayed up for
 		// a minute and report the result.
 		go upd.ConfirmWhenHealthy(ctx, time.Minute)
-		go upd.RunChecks(ctx) // look for new versions on GitHub daily
-		go bk.Run(ctx)        // nightly settings backup
-		go cloud.Run(ctx)     // cloud backup schedules, prunes and checks
-		go repl.Run(ctx)      // replication schedule, stale alerts, receiving from other servers
-		go alerts.Run(ctx)    // alert delivery and quiet-hours summaries
-		go mon.Run(ctx)       // checks, self-test schedule, UPS, resource history
+		go upd.RunChecks(ctx)                      // look for new versions on GitHub daily
+		go bk.Run(ctx)                             // nightly settings backup
+		go cloud.Run(ctx)                          // cloud backup schedules, prunes and checks
+		go repl.Run(ctx)                           // replication schedule, stale alerts, receiving from other servers
+		go alerts.Run(ctx)                         // alert delivery and quiet-hours summaries
+		go mon.Run(ctx)                            // checks, self-test schedule, UPS, resource history
+		go handler.RunMail(ctx, api.MailOptions{}) // Dovecot's sign-ins, mailboxes for new accounts, mail alerts
 		if p := handler.OIDC(); p != nil {
 			go p.Start(ctx) // sign-in provider: signing keys on schedule, expired sign-ins removed
 		}

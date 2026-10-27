@@ -1,0 +1,96 @@
+/* Mail: Control Panel › Mail and the Mail app. */
+
+.mail-app {
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow: auto;
+  height: 100%;
+}
+
+.mail-settings {
+  display: grid;
+  grid-template-columns: minmax(160px, auto) 1fr;
+  gap: 6px 16px;
+  margin: 10px 0 0;
+}
+
+.mail-row {
+  display: contents;
+}
+
+.mail-row dt,
+.mail-row dd {
+  margin: 0;
+}
+
+.mail-row dd {
+  word-break: break-all;
+}
+
+.mail-copy {
+  margin-left: 6px;
+  border: 0;
+  background: none;
+  color: var(--hos-text-muted);
+  cursor: pointer;
+  padding: 2px;
+  vertical-align: middle;
+  border-radius: 4px;
+}
+
+.mail-copy:hover,
+.mail-copy:focus-visible {
+  color: #22d3ee;
+  background: var(--hos-surface-2);
+}
+
+.mail-steps {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mail-script {
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--hos-surface-border);
+  font-family: var(--hos-font-mono);
+  font-size: 12px;
+  white-space: pre;
+}
+
+.mail-checks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mail-dns td {
+  vertical-align: top;
+}
+
+.mail-dns-name {
+  word-break: break-all;
+  max-width: 220px;
+}
+
+.mail-dns-value {
+  word-break: break-all;
+  font-family: var(--hos-font-mono);
+}
+
+.mail-note {
+  font-family: inherit;
+  margin-top: 4px;
+}
