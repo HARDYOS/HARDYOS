@@ -5,10 +5,10 @@ import (
 	"time"
 )
 
-// Notifications go through a small local interface: internal/notify's
-// event delivery (email, push, ...) is being built separately and plugs
-// in here; until then hardyd wires NopNotifier. Event has exactly the
-// fields of notify.Event.
+// Notifications go through a small local interface; hardyd plugs in the
+// alert dispatcher (internal/notify), so routing, channels and quiet hours
+// apply. Event has exactly the fields of notify.Event, and every kind
+// starts with "backup." (the routing category).
 
 // Severities.
 const (

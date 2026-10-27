@@ -2,6 +2,7 @@ import type { User } from "@hardy/api-client";
 import { useEffect } from "react";
 import { PendingNetwork, useNetworkStatus } from "../apps/control-panel/Network";
 import { useEvents } from "../hooks/useEvents";
+import { openLinkFromHash } from "../links";
 import { visibleApps } from "../shell";
 import { Toasts } from "../ui/toasts";
 import { openApp } from "../wm/open";
@@ -23,6 +24,8 @@ export function Desktop({ user }: { user: User }) {
     onResize();
     return () => window.removeEventListener("resize", onResize);
   }, []);
+  // A link from an alert email or chat message (#open=storage/disks/sda).
+  useEffect(() => openLinkFromHash(user), [user]);
 
   return (
     <div className="desktop wallpaper">

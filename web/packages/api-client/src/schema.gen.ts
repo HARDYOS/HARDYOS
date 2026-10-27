@@ -801,6 +801,306 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/notifications/unread": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** How many of your notifications you haven't read */
+        get: operations["countUnreadNotifications"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/alerts/channels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Where alerts go, the desktop first (admin). Secrets are never returned. */
+        get: operations["listAlertChannels"];
+        put?: never;
+        /**
+         * Add a channel (admin). New channels get warning and critical alerts of every category.
+         * @description Webhooks must be https. Discord, Slack and Teams channels accept only their
+         *     services' hosts; a generic webhook needs `config.allowAnyHost`. Hosts on this
+         *     server or a private network are refused, here and again at every connection.
+         */
+        post: operations["createAlertChannel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/alerts/channels/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Remove a channel (admin; not the desktop) */
+        delete: operations["deleteAlertChannel"];
+        options?: never;
+        head?: never;
+        /** Change a channel (admin). Omitted secrets are kept; an empty string clears one. */
+        patch: operations["updateAlertChannel"];
+        trace?: never;
+    };
+    "/alerts/channels/{id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Send a test alert to one channel now (admin) */
+        post: operations["testAlertChannel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/alerts/routes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Routing rules (admin) */
+        get: operations["listAlertRoutes"];
+        /**
+         * Replace every routing rule (admin)
+         * @description A channel gets an alert when the rule for the alert's category (or "*") has a minimum severity at or below the alert's.
+         */
+        put: operations["setAlertRoutes"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/alerts/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Quiet hours, duplicate and rate limits (admin) */
+        get: operations["getAlertSettings"];
+        /** Change quiet hours, duplicate and rate limits (admin) */
+        put: operations["saveAlertSettings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/alerts/deliveries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Recent deliveries to channels, newest first (admin) */
+        get: operations["listAlertDeliveries"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/alerts/categories": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The routing categories (admin) */
+        get: operations["listAlertCategories"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/monitor/series": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Every resource history series (admin) */
+        get: operations["listMetricSeries"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/monitor/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Resource history for some series over a range (admin)
+         * @description `from` is clamped to two years ago and `to` to now; a range needing more
+         *     than 48 stored values per returned point is refused (400).
+         *     Values come from the finest tier that still covers the range (10 s for a
+         *     day, 1 min for 7 days, 15 min for 90 days, 1 h for 2 years), averaged down
+         *     to at most `points` values.
+         */
+        get: operations["getMetricHistory"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/monitor/conditions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** What the monitor sees wrong right now, most severe first (admin) */
+        get: operations["listConditions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/monitor/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Thresholds and the self-test and scrub schedule (admin) */
+        get: operations["getMonitorSettings"];
+        /** Change thresholds and schedules (admin) */
+        put: operations["saveMonitorSettings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/monitor/disks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Every disk with its last SMART reading and self-test schedule (admin) */
+        get: operations["listDiskInfo"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/monitor/disks/{name}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Kernel disk name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start a SMART self-test now (admin, job) */
+        post: operations["startDiskSelfTest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/ups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The UPS setup (passwords never returned) and its last reading (admin) */
+        get: operations["getUPS"];
+        /** Set up the UPS and apply it (admin, job) */
+        put: operations["saveUPS"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/ups/detect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Look for UPSes on USB (admin) */
+        get: operations["detectUPS"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/system/updates": {
         parameters: {
             query?: never;
@@ -4106,6 +4406,21 @@ export interface components {
         };
         SMART: {
             device: string;
+            /** @description ATA, SCSI or NVMe */
+            protocol: string;
+            firmware: string;
+            /** @description Asleep and not woken to read it */
+            standby: boolean;
+            powerCycles?: number | null;
+            reportedUncorrect?: number | null;
+            grownDefects?: number | null;
+            uncorrectedErrors?: number | null;
+            availableSpare?: number | null;
+            spareThreshold?: number | null;
+            unsafeShutdowns?: number | null;
+            attributes: components["schemas"]["SMARTAttribute"][];
+            selfTest: components["schemas"]["SelfTestState"];
+            selfTests: components["schemas"]["SelfTest"][];
             model: string;
             serial: string;
             capacityBytes: number;
@@ -4274,6 +4589,10 @@ export interface components {
             readonly lastError?: string;
         };
         Notification: {
+            /** @description Event kind, e.g. "disk.smart" (empty for older entries) */
+            kind: string;
+            /** @description Where it points in the desktop, e.g. "storage/disks/sda" */
+            link: string;
             /** Format: int64 */
             id: number;
             /** Format: date-time */
@@ -4312,6 +4631,317 @@ export interface components {
             current: components["schemas"]["MetricSample"];
             history: components["schemas"]["MetricSample"][];
             cpus: number;
+        };
+        UnreadCount: {
+            count: number;
+        };
+        /** @description A channel's settings without secrets; each type uses its own fields. */
+        AlertChannelConfig: {
+            /** @description Where a webhook points (its URL is a secret) */
+            readonly urlHost?: string;
+            /** @description Generic webhooks only: post to any public https host */
+            allowAnyHost?: boolean;
+            /** @description Email sender */
+            from?: string;
+            to?: string[];
+            /** @description SMTP server */
+            host?: string;
+            port?: number;
+            /** @enum {string} */
+            security?: "starttls" | "tls" | "none";
+            username?: string;
+            /** @description SMTP: allow a port other than 25, 465, 587 and 2525 */
+            allowAnyPort?: boolean;
+            /** @description SES region, e.g. us-east-1 */
+            region?: string;
+            accessKeyId?: string;
+            configurationSet?: string;
+        };
+        /** @description Secrets to set; an omitted field keeps the stored value, an empty string clears it. */
+        AlertSecretsInput: {
+            url?: string;
+            password?: string;
+            secretAccessKey?: string;
+        };
+        AlertChannel: {
+            /** Format: int64 */
+            id: number;
+            /** @enum {string} */
+            type: "desktop" | "discord" | "slack" | "teams" | "webhook" | "smtp" | "ses";
+            name: string;
+            enabled: boolean;
+            config: components["schemas"]["AlertChannelConfig"];
+            secretsSet: {
+                [key: string]: boolean;
+            };
+            /** Format: date-time */
+            lastAt: string | null;
+            lastOk: boolean | null;
+            lastError: string;
+        };
+        AlertChannelInput: {
+            /** @enum {string} */
+            type: "desktop" | "discord" | "slack" | "teams" | "webhook" | "smtp" | "ses";
+            name: string;
+            enabled?: boolean;
+            config: components["schemas"]["AlertChannelConfig"];
+            secrets?: components["schemas"]["AlertSecretsInput"];
+        };
+        ChannelTestResult: {
+            ok: boolean;
+            error: string;
+        };
+        AlertRoute: {
+            /** @description Alert category (disk, pool, ups, backup, ...) or "*" */
+            category: string;
+            /** Format: int64 */
+            channelId: number;
+            /**
+             * @description "off": none of this category (overrides "*")
+             * @enum {string}
+             */
+            minSeverity: "info" | "warning" | "critical" | "off";
+        };
+        QuietHours: {
+            enabled: boolean;
+            /** @example 22:00 */
+            start: string;
+            /** @example 07:00 */
+            end: string;
+            /**
+             * @description Alerts at this severity or above still go out
+             * @enum {string}
+             */
+            allow: "warning" | "critical";
+        };
+        AlertSettings: {
+            quietHours: components["schemas"]["QuietHours"];
+            dedupMinutes: number;
+            maxPerHour: number;
+            /** @description The desktop's address for links in messages */
+            serverUrl: string;
+        };
+        AlertDelivery: {
+            /** Format: int64 */
+            id: number;
+            /** Format: date-time */
+            at: string;
+            /** Format: int64 */
+            channelId: number;
+            kind: string;
+            /** @enum {string} */
+            severity: "info" | "warning" | "critical";
+            title: string;
+            /** @enum {string} */
+            status: "sent" | "failed" | "held" | "suppressed";
+            detail: string;
+        };
+        AlertCategory: {
+            id: string;
+            label: string;
+            description: string;
+        };
+        SeriesInfo: {
+            /**
+             * @example cpu.percent
+             * @example disk.read:sda
+             * @example app.cpu:immich
+             */
+            name: string;
+            label: string;
+            /**
+             * @example percent
+             * @example bytes
+             * @example bytes/s
+             * @example celsius
+             * @example seconds
+             * @example watts
+             * @example volts
+             * @example count
+             */
+            unit: string;
+            /** Format: date-time */
+            lastSeen: string;
+        };
+        SeriesData: {
+            name: string;
+            label: string;
+            unit: string;
+            values: (number | null)[];
+        };
+        HistoryResult: {
+            /** Format: date-time */
+            from: string;
+            /** Format: date-time */
+            to: string;
+            /** @description Seconds between values */
+            step: number;
+            tier: number;
+            series: components["schemas"]["SeriesData"][];
+        };
+        Condition: {
+            key: string;
+            kind: string;
+            /** @enum {string} */
+            severity: "info" | "warning" | "critical";
+            title: string;
+            body: string;
+            link: string;
+            /** Format: date-time */
+            since: string;
+        };
+        SmartSchedule: {
+            enabled: boolean;
+            shortDays: number;
+            longDays: number;
+            windowStart: number;
+            windowEnd: number;
+            scrubInWindow: boolean;
+            excluded: string[];
+        };
+        MonitorSettings: {
+            poolWarnPct: number;
+            poolCritPct: number;
+            hddWarnC: number;
+            hddCritC: number;
+            ssdWarnC: number;
+            ssdCritC: number;
+            sensorWarnC: number;
+            sensorCritC: number;
+            smart: components["schemas"]["SmartSchedule"];
+        };
+        TestState: {
+            byId: string;
+            /** Format: date-time */
+            nextShortAt: string;
+            /** Format: date-time */
+            nextLongAt: string;
+            /** Format: date-time */
+            lastShortAt: string | null;
+            /** Format: date-time */
+            lastLongAt: string | null;
+            /** @enum {string} */
+            running: "" | "short" | "long";
+            /** Format: date-time */
+            runningSince: string | null;
+            lastType: string;
+            lastResult: string;
+            lastPassed: boolean | null;
+            /** Format: date-time */
+            lastDoneAt: string | null;
+            excluded: boolean;
+        };
+        DiskInfo: {
+            disk: components["schemas"]["Disk"];
+            smart: components["schemas"]["SMART"] | null;
+            /** Format: date-time */
+            readAt: string | null;
+            tests: components["schemas"]["TestState"] | null;
+            asleep: boolean;
+            supported: boolean;
+        };
+        SMARTAttribute: {
+            id: number;
+            name: string;
+            value: number;
+            worst: number;
+            thresh: number;
+            raw: number;
+            rawString: string;
+            whenFailed: string;
+        };
+        SelfTest: {
+            type: string;
+            status: string;
+            passed: boolean | null;
+            hours: number | null;
+        };
+        SelfTestState: {
+            running: boolean;
+            remainingPct: number | null;
+            status: string;
+            shortMinutes: number;
+            longMinutes: number;
+        };
+        UPSConfig: {
+            /** @enum {string} */
+            mode: "off" | "local" | "netclient";
+            name?: string;
+            /** @enum {string} */
+            driver?: "usbhid-ups" | "nutdrv_qx" | "blazer_usb" | "blazer_ser" | "apcsmart" | "bcmxcp_usb" | "tripplite_usb" | "riello_usb" | "dummy-ups";
+            port?: string;
+            vendorId?: string;
+            productId?: string;
+            serial?: string;
+            description?: string;
+            shutdownCharge?: number;
+            shutdownRuntime?: number;
+            serveNetwork?: boolean;
+            clientUser?: string;
+            /** @description With serveNetwork: the one address of this server upsd listens on */
+            listenAddress?: string;
+            remoteHost?: string;
+            remotePort?: number;
+            remoteUps?: string;
+            remoteUser?: string;
+            /** @description Netclient: use TLS (the NUT server must offer it) */
+            remoteTls?: boolean;
+            /** @description Netclient with TLS: verify the server's certificate against the system's CAs */
+            remoteVerify?: boolean;
+        };
+        UPSSecretsInput: {
+            clientPassword?: string;
+            remotePassword?: string;
+        };
+        UPSStatus: {
+            ups: string;
+            manufacturer: string;
+            model: string;
+            serial: string;
+            driver: string;
+            raw: string;
+            flags: string[];
+            onLine: boolean;
+            onBattery: boolean;
+            lowBattery: boolean;
+            replaceBattery: boolean;
+            charging: boolean;
+            overload: boolean;
+            forcedShutdown: boolean;
+            chargePct: number | null;
+            runtimeSecs: number | null;
+            loadPct: number | null;
+            inputVolts: number | null;
+            outputVolts: number | null;
+            batteryVolts: number | null;
+            nominalWatts: number | null;
+            lowChargePct: number | null;
+            lowRuntimeSec: number | null;
+            vars: {
+                [key: string]: string;
+            };
+        };
+        UPSView: {
+            /** @description This server's addresses, for listenAddress */
+            addresses: string[];
+            config: components["schemas"]["UPSConfig"];
+            secretsSet: {
+                [key: string]: boolean;
+            };
+            status: components["schemas"]["UPSStatus"] | null;
+            error: string;
+            /** Format: date-time */
+            checkedAt: string | null;
+        };
+        UPSDevice: {
+            driver: string;
+            port: string;
+            vendorId: string;
+            productId: string;
+            vendor: string;
+            product: string;
+            serial: string;
+            bus: string;
         };
         InstalledVersion: {
             /** @example rpool/ROOT/hardyos-0.1.0 */
@@ -8140,6 +8770,498 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    countUnreadNotifications: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Unread count */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UnreadCount"];
+                };
+            };
+        };
+    };
+    listAlertChannels: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Channels */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertChannel"][];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    createAlertChannel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AlertChannelInput"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertChannel"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+        };
+    };
+    deleteAlertChannel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["Invalid"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateAlertChannel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AlertChannelInput"];
+            };
+        };
+        responses: {
+            /** @description Updated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertChannel"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    testAlertChannel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description How it went */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelTestResult"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listAlertRoutes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Rules */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertRoute"][];
+                };
+            };
+        };
+    };
+    setAlertRoutes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    routes: components["schemas"]["AlertRoute"][];
+                };
+            };
+        };
+        responses: {
+            /** @description Rules */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertRoute"][];
+                };
+            };
+            400: components["responses"]["Invalid"];
+        };
+    };
+    getAlertSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertSettings"];
+                };
+            };
+        };
+    };
+    saveAlertSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AlertSettings"];
+            };
+        };
+        responses: {
+            /** @description Saved */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertSettings"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+        };
+    };
+    listAlertDeliveries: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deliveries */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertDelivery"][];
+                };
+            };
+        };
+    };
+    listAlertCategories: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Categories */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertCategory"][];
+                };
+            };
+        };
+    };
+    listMetricSeries: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Series */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SeriesInfo"][];
+                };
+            };
+        };
+    };
+    getMetricHistory: {
+        parameters: {
+            query: {
+                /** @description Comma-separated names; a trailing * matches a prefix (app.cpu:*) */
+                series: string;
+                range?: "1h" | "6h" | "24h" | "7d" | "30d" | "90d" | "1y" | "2y";
+                /** @description RFC 3339; overrides range */
+                from?: string;
+                to?: string;
+                points?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description History */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HistoryResult"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+        };
+    };
+    listConditions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Conditions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Condition"][];
+                };
+            };
+        };
+    };
+    getMonitorSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MonitorSettings"];
+                };
+            };
+        };
+    };
+    saveMonitorSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MonitorSettings"];
+            };
+        };
+        responses: {
+            /** @description Saved */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MonitorSettings"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+        };
+    };
+    listDiskInfo: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Disks */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiskInfo"][];
+                };
+            };
+        };
+    };
+    startDiskSelfTest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Kernel disk name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @enum {string} */
+                    test: "short" | "long";
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    getUPS: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description UPS */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UPSView"];
+                };
+            };
+        };
+    };
+    saveUPS: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    config: components["schemas"]["UPSConfig"];
+                    secrets?: components["schemas"]["UPSSecretsInput"];
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+        };
+    };
+    detectUPS: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Found */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UPSDevice"][];
+                };
             };
         };
     };

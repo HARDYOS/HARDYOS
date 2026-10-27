@@ -1,0 +1,16 @@
+{
+  "smartctl": {"version": [7, 4], "exit_status": 8},
+  "device": {"name": "/dev/nvme1", "type": "nvme", "protocol": "NVMe"},
+  "model_name": "Budget NVMe 512GB",
+  "serial_number": "N1",
+  "smart_status": {"passed": false, "nvme": {"value": 5}},
+  "nvme_smart_health_information_log": {"critical_warning": 5, "temperature": 79, "available_spare": 4, "available_spare_threshold": 10,
+    "percentage_used": 104, "power_cycles": 900, "power_on_hours": 30001, "unsafe_shutdowns": 210, "media_errors": 37},
+  "temperature": {"current": 79},
+  "power_on_time": {"hours": 30001},
+  "nvme_self_test_log": {
+    "current_self_test_operation": {"value": 1, "string": "Short self-test in progress"},
+    "current_self_test_completion_percent": 30,
+    "table": [{"self_test_code": {"value": 1, "string": "Short"}, "self_test_result": {"value": 7, "string": "Completed: failed segments"}, "power_on_hours": 29990}]
+  }
+}

@@ -23,6 +23,12 @@ zfs-zed
 zfs-initramfs
 smartmontools
 nvme-cli
+# UPS: NUT (Network UPS Tools). nut-server has upsd and the drivers
+# (usbhid-ups, nutdrv_qx, dummy-ups ...), nut-client has upsmon, which shuts
+# the server down cleanly; both stay off until Control Panel > UPS is set
+# up (hardyd-priv's ups.apply writes /etc/nut and starts them).
+nut-server
+nut-client
 hdparm
 lsscsi
 gdisk

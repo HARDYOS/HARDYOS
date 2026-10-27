@@ -39,6 +39,10 @@ const (
 	// SID in the domain's settings (domain.AdminsGroupArgs ->
 	// domain.AdminsGroup).
 	OpDomainAdminsGroupCreate = "domain.admins_group.create"
+
+	// OpDomainReplication reports replication from the partner DCs
+	// (samba-tool drs showrepl; monitoring).
+	OpDomainReplication = "domain.replication"
 )
 
 // DomainDestroyArgs confirms deleting the domain by naming it.
@@ -95,6 +99,10 @@ type DomainGroupsResult struct {
 
 // RegisterDomain adds the domain controller operations.
 func RegisterDomain(s *Server, m *domain.Manager) {
+	s.Handle(OpDomainReplication, func(ctx context.Context, _ json.RawMessage) (any, error) {
+		r, err := m.Replication(ctx)
+		return r, domainErr(err)
+	})
 	s.Handle(OpDomainStatus, func(ctx context.Context, _ json.RawMessage) (any, error) {
 		st, err := m.Status(ctx)
 		return st, domainErr(err)

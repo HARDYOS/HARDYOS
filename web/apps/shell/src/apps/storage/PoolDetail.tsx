@@ -8,6 +8,7 @@ import { AlertIcon, PauseIcon, PlayIcon, StopIcon } from "../../icons";
 import { Alert, Badge, Button, Card, ErrorBox, Field, Loading, PageHeader, Progress, Select, Stat } from "../../ui";
 import { ConfirmDialog, Dialog } from "../../ui/Dialog";
 import { toast } from "../../ui/toasts";
+import { ConditionList } from "../monitor/parts";
 import { JobProgress } from "../shared";
 import { healthTone } from "./StorageManager";
 
@@ -204,6 +205,7 @@ export function PoolDetail({ pool, onGone }: { pool: string; onGone: () => void 
         </Card>
       )}
 
+      <ConditionList match={(k) => k.startsWith("pool.") && k.endsWith(`:${pool}`)} hideEmpty />
       {warnings.map(({ disk, health: h }) => (
         <Alert key={h.byId} tone={h.health === "failing" ? "bad" : "warn"} title={`${disk?.name ?? h.byId}: ${h.health}`}>
           {h.reasons.join("; ")}. {h.health === "failing" ? "Replace this disk soon." : "Keep an eye on it."}

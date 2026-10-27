@@ -1,0 +1,20 @@
+  pool: tank
+ state: DEGRADED
+status: One or more devices has experienced an unrecoverable error.  An
+	attempt was made to correct the error.  Applications are unaffected.
+action: Determine if the device needs to be replaced, and clear the errors
+	using 'zpool clear' or replace the device with 'zpool replace'.
+   see: https://openzfs.github.io/openzfs-docs/msg/ZFS-8000-9P
+  scan: scrub repaired 1.50M in 05:12:33 with 3 errors on Sun Oct 25 05:12:34 2026
+config:
+
+	NAME                                                STATE     READ WRITE CKSUM
+	tank                                                DEGRADED     0     0     0
+	  raidz1-0                                          DEGRADED     0     0     0
+	    /dev/disk/by-id/ata-ST4000VN008-2DR166_ZDH1AAAA-part1  ONLINE       0     0     0
+	    /dev/disk/by-id/ata-ST4000VN008-2DR166_ZDH1BBBB-part1  FAULTED     12     0    41  too many errors
+	    /dev/disk/by-id/ata-ST4000VN008-2DR166_ZDH1CCCC-part1  ONLINE       0     0     2
+	logs
+	  /dev/disk/by-id/nvme-INTEL_SSDPE21D280GA_PHM1-part1    ONLINE       1     0     0
+
+errors: 3 data errors, use '-v' for a list

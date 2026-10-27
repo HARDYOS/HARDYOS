@@ -29,6 +29,13 @@ type Service struct {
 	Notify  *notify.Center
 	Log     *slog.Logger
 	Monitor time.Duration // how often long jobs poll pool status; default 15s
+	// HealthElsewhere: internal/monitor checks pool health and SMART (with
+	// routing, thresholds and history), so Tick leaves those to it.
+	HealthElsewhere bool
+	// ScrubAllowed, when set, says whether a due scrub may start now
+	// (internal/monitor: inside the maintenance window, one pool at a
+	// time, not during a long disk self-test).
+	ScrubAllowed func(ctx context.Context, pool string, now time.Time) bool
 }
 
 // Job kinds.

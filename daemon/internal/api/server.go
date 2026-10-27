@@ -23,6 +23,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/installer"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/metrics"
+	"github.com/hardyos/hardyos/daemon/internal/monitor"
 	"github.com/hardyos/hardyos/daemon/internal/notify"
 	"github.com/hardyos/hardyos/daemon/internal/oidc"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
@@ -44,6 +45,11 @@ type Config struct {
 	Limiter *auth.LoginLimiter
 	Storage *storage.Service // nil disables storage endpoints
 	Notify  *notify.Center   // nil disables notification endpoints
+	// Alerts routes events to channels (Control Panel > Notifications);
+	// nil leaves those endpoints out.
+	Alerts *notify.Dispatcher
+	// Monitor is resource history, disk health and the UPS (nil: none).
+	Monitor *monitor.Service
 	Metrics *metrics.Collector
 	// Installer, when set, turns hardyd into the live ISO's web installer:
 	// only the installer API is served.
@@ -229,6 +235,7 @@ func (s *Server) routes() {
 		m.Handle("POST /api/v1/system/self-test", s.admin(s.handleSelfTest))
 		s.storageRoutes()
 		s.notifyRoutes()
+		s.monitorRoutes()
 		if s.cfg.Updates != nil {
 			// Installed systems only, like updates (the live installer has neither).
 			s.updateRoutes()

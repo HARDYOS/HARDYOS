@@ -1,0 +1,32 @@
+{
+  "json_format_version": [1, 0],
+  "smartctl": {"version": [7, 4], "exit_status": 72},
+  "device": {"name": "/dev/sdc", "info_name": "/dev/sdc [SAT]", "type": "sat", "protocol": "ATA"},
+  "model_family": "Seagate IronWolf",
+  "model_name": "ST4000VN008-2DR166",
+  "serial_number": "ZDH1BBBB",
+  "firmware_version": "SC60",
+  "user_capacity": {"blocks": 7814037168, "bytes": 4000787030016},
+  "rotation_rate": 5980,
+  "smart_status": {"passed": true},
+  "ata_smart_data": {
+    "self_test": {"status": {"value": 121, "string": "completed: read failure", "remaining_percent": 10, "passed": false}, "polling_minutes": {"short": 1, "extended": 593}}
+  },
+  "ata_smart_attributes": {"revision": 10, "table": [
+    {"id": 1, "name": "Raw_Read_Error_Rate", "value": 66, "worst": 50, "thresh": 44, "when_failed": "", "raw": {"value": 3627392, "string": "3627392"}},
+    {"id": 5, "name": "Reallocated_Sector_Ct", "value": 88, "worst": 88, "thresh": 10, "when_failed": "", "raw": {"value": 1688, "string": "1688"}},
+    {"id": 9, "name": "Power_On_Hours", "value": 47, "worst": 47, "thresh": 0, "when_failed": "", "raw": {"value": 46593, "string": "46593"}},
+    {"id": 187, "name": "Reported_Uncorrect", "value": 1, "worst": 1, "thresh": 0, "when_failed": "", "raw": {"value": 312, "string": "312"}},
+    {"id": 194, "name": "Temperature_Celsius", "value": 41, "worst": 55, "thresh": 0, "when_failed": "", "raw": {"value": 41, "string": "41 (0 18 0 0 0)"}},
+    {"id": 197, "name": "Current_Pending_Sector", "value": 1, "worst": 1, "thresh": 0, "when_failed": "", "raw": {"value": 64, "string": "64"}},
+    {"id": 198, "name": "Offline_Uncorrectable", "value": 1, "worst": 1, "thresh": 0, "when_failed": "", "raw": {"value": 64, "string": "64"}},
+    {"id": 199, "name": "UDMA_CRC_Error_Count", "value": 200, "worst": 200, "thresh": 0, "when_failed": "", "raw": {"value": 0, "string": "0"}}
+  ]},
+  "power_on_time": {"hours": 46593},
+  "power_cycle_count": 102,
+  "temperature": {"current": 41},
+  "ata_smart_self_test_log": {"standard": {"revision": 1, "table": [
+    {"type": {"value": 2, "string": "Extended offline"}, "status": {"value": 121, "string": "Completed: read failure", "remaining_percent": 10, "passed": false}, "lifetime_hours": 46590, "lba": 1953522976},
+    {"type": {"value": 1, "string": "Short offline"}, "status": {"value": 0, "string": "Completed without error", "passed": true}, "lifetime_hours": 46420}
+  ], "count": 2, "error_count_total": 1, "error_count_outdated": 0}}
+}
