@@ -196,9 +196,22 @@ func (m *Manager) Snapshot(ctx context.Context, a SnapshotArgs) (*SnapshotResult
 	if err != nil {
 		return nil, err
 	}
+	// Labels have one-second resolution: a run right after another waits
+	// for the next second.
 	label := SnapName(a.Task, m.now())
-	if _, ok := m.exists(ctx, ds+"@"+label); ok {
-		return nil, fmt.Errorf("the snapshot %s already exists; try again in a second", label)
+	for i := 0; ; i++ {
+		if _, ok := m.exists(ctx, ds+"@"+label); !ok {
+			break
+		}
+		if i == 3 {
+			return nil, fmt.Errorf("the snapshot %s already exists; try again in a second", label)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Second):
+		}
+		label = SnapName(a.Task, m.now())
 	}
 	take := func(ctx context.Context) error {
 		_, err := m.zfs(ctx, "snapshot", "-r", ds+"@"+label)
