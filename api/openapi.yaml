@@ -37,6 +37,7 @@ tags:
   - name: sharelinks
   - name: files
   - name: remote
+  - name: photos
   - name: oidc
   - name: vms
   - name: replication
@@ -3499,6 +3500,74 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "503": { $ref: "#/components/responses/Unavailable" }
   # ---- end of remote access ----
+  # ---- photos (docs/photos.md) ----
+  /photos:
+    get:
+      operationId: getPhotos
+      summary: Whether Photos (the catalog's Immich) is installed and this person may open it
+      tags: [photos]
+      responses:
+        "200":
+          description: Photos for the desktop's icon
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PhotosInfo" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /photos/settings:
+    get:
+      operationId: getPhotosSettings
+      summary: Photos settings and the last sync's status
+      tags: [photos]
+      responses:
+        "200":
+          description: Settings and status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PhotosView" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    put:
+      operationId: setPhotosSettings
+      summary: Change Photos settings and apply them to Immich (job photos.settings)
+      tags: [photos]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PhotosSettings" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /photos/sync:
+    post:
+      operationId: syncPhotos
+      summary: Apply Photos to Immich now (job photos.sync)
+      tags: [photos]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /photos/link:
+    post:
+      operationId: linkPhotos
+      summary: Link an Immich set up before Photos with an administrator's API key (job photos.link)
+      description: |
+        The key reaches the job only through hardyd's memory and is kept
+        sealed; it is never in job parameters, results or answers.
+      tags: [photos]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PhotosLinkRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  # ---- end of photos ----
   /installer:
     get:
       operationId: getInstallerStatus
@@ -6531,6 +6600,122 @@ components:
         share: { type: string }
         path: { type: string }
         access: { type: string }
+    PhotosInfo:
+      type: object
+      required: [installed, mayUse, appId, sso, publishedUrl]
+      properties:
+        installed: { type: boolean, description: The catalog's Immich is installed }
+        mayUse: { type: boolean, description: This person may open it }
+        appId: { type: string }
+        sso: { type: boolean, description: Immich signs people in with HardyOS }
+        publishedUrl: { type: string, description: "Immich's address for phones (empty when not published)" }
+    PhotosLibrary:
+      type: object
+      required: [ownerId, share, path, name]
+      properties:
+        ownerId: { type: integer, format: int64, description: The HardyOS account whose Immich library it joins }
+        share: { type: string, enum: [EXISTING, EXISTING_2, EXISTING_3], description: The app's existing-photos share it's in }
+        path: { type: string, description: "A folder inside that shared folder (empty: all of it)" }
+        name: { type: string }
+    PhotosFamily:
+      type: object
+      required: [enabled, name, members]
+      properties:
+        enabled: { type: boolean }
+        name: { type: string }
+        members:
+          type: array
+          description: Who sees it; empty for everyone who may use Immich
+          items: { $ref: "#/components/schemas/AppPrincipal" }
+    PhotosSettings:
+      type: object
+      required: [sso, passwordLogin, autoLaunch, defaultQuotaGiB, mlAcceleration, scanHours, watch, libraries, family]
+      properties:
+        sso: { type: boolean, description: "Sign in to Immich with HardyOS (needs https://sso.<base>)" }
+        passwordLogin: { type: boolean, description: "Keep Immich's own passwords while SSO is on" }
+        autoLaunch: { type: boolean, description: "Immich's sign-in page goes straight to HardyOS" }
+        defaultQuotaGiB: { type: integer, description: "Storage limit for new people (0: none)" }
+        mlAcceleration: { type: string, enum: [auto, cpu, cuda, openvino, rocm] }
+        scanHours: { type: integer, minimum: 1, maximum: 168 }
+        watch: { type: boolean }
+        libraries: { type: array, items: { $ref: "#/components/schemas/PhotosLibrary" } }
+        family: { $ref: "#/components/schemas/PhotosFamily" }
+    PhotosSSO:
+      type: object
+      required: [active, redirectUris]
+      properties:
+        active: { type: boolean }
+        issuer: { type: string }
+        clientId: { type: string }
+        redirectUris: { type: array, items: { type: string } }
+        why: { type: string, description: Why it's off while the settings ask for it }
+    PhotosML:
+      type: object
+      required: [mode, reason, lent]
+      properties:
+        mode: { type: string, enum: [cpu, cuda, openvino, rocm] }
+        reason: { type: string }
+        lent: { type: boolean, description: "The GPU is with a VM now: Immich uses the processor until it's back" }
+    PhotosLibraryState:
+      type: object
+      required: [key, name, owner, importPath, assets]
+      properties:
+        key: { type: string }
+        name: { type: string }
+        owner: { type: string }
+        importPath: { type: string }
+        immichId: { type: string }
+        assets: { type: integer }
+        problem: { type: string }
+    PhotosFamilyState:
+      type: object
+      required: [active, members]
+      properties:
+        active: { type: boolean }
+        members: { type: integer }
+        immichId: { type: string }
+        problem: { type: string }
+    PhotosPerson:
+      type: object
+      required: [username, email, immichId, linked]
+      properties:
+        username: { type: string }
+        email: { type: string }
+        immichId: { type: string }
+        linked: { type: boolean, description: Has signed in with HardyOS }
+    PhotosStatus:
+      type: object
+      required: [at, installed, catalog, linked, needsLink, notes, sso, phoneReady, ml, libraries, family, people]
+      properties:
+        at: { type: string, format: date-time }
+        installed: { type: boolean }
+        catalog: { type: boolean }
+        version: { type: string }
+        linked: { type: boolean, description: "HardyOS has its Immich service account's key" }
+        needsLink: { type: boolean, description: "Immich was set up before Photos: link it with an administrator's API key" }
+        problem: { type: string }
+        notes: { type: array, items: { type: string } }
+        sso: { $ref: "#/components/schemas/PhotosSSO" }
+        publishedUrl: { type: string }
+        phoneReady: { type: boolean, description: "Published without a sign-in in front, as the phone app needs" }
+        ml: { $ref: "#/components/schemas/PhotosML" }
+        libraries: { type: array, items: { $ref: "#/components/schemas/PhotosLibraryState" } }
+        family: { $ref: "#/components/schemas/PhotosFamilyState" }
+        people: { type: array, items: { $ref: "#/components/schemas/PhotosPerson" } }
+    PhotosView:
+      type: object
+      required: [settings, status, shares, libraryShares, running]
+      properties:
+        settings: { $ref: "#/components/schemas/PhotosSettings" }
+        status: { oneOf: [{ $ref: "#/components/schemas/PhotosStatus" }, { type: "null" }] }
+        shares: { type: array, items: { $ref: "#/components/schemas/AppShare" } }
+        libraryShares: { type: array, items: { type: string } }
+        running: { type: boolean, description: A Photos job is waiting or running }
+    PhotosLinkRequest:
+      type: object
+      required: [apiKey]
+      properties:
+        apiKey: { type: string, description: "An Immich administrator's API key (with all permissions)" }
     AppLimits:
       type: object
       required: [memoryMB, cpus]

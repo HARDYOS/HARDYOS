@@ -110,10 +110,15 @@ type Setting struct {
 	// Generate "secret": HardyOS makes a random value on first install and
 	// keeps it on reinstalls and updates. It is never shown or asked for.
 	Generate string `json:"generate,omitempty"`
+	// Managed: another part of HardyOS sets it (Photos turns Immich's
+	// accelerated machine learning on), not the install form. It's an
+	// ordinary setting otherwise: checked against its type and options,
+	// kept across updates, changed with apps.reconfigure.
+	Managed bool `json:"managed,omitempty"`
 }
 
 // Hidden reports whether the install form leaves this setting out.
-func (s Setting) Hidden() bool { return s.Generate != "" }
+func (s Setting) Hidden() bool { return s.Generate != "" || s.Managed }
 
 // Secret reports whether the value must stay out of job history, logs and the API.
 func (s Setting) Secret() bool { return s.Generate != "" || s.Type == "password" }
@@ -296,8 +301,14 @@ func (m *Manifest) Validate() error {
 				p.addf("setting %s needs a label", s.Env)
 			}
 		case "secret":
+			if s.Managed {
+				p.addf("setting %s: a generated secret can't also be managed", s.Env)
+			}
 		default:
 			p.addf("setting %s: generate must be \"secret\"", s.Env)
+		}
+		if s.Managed && s.Type == "password" {
+			p.addf("setting %s: a password can't be managed", s.Env)
 		}
 		switch s.Type {
 		case "", "text", "number", "boolean", "password":

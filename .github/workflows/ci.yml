@@ -170,6 +170,31 @@ jobs:
           sudo docker ps -a --filter label=org.hardyos.app
           for c in $(sudo docker ps -aq --filter label=org.hardyos.app); do sudo docker logs --tail 80 "$c" 2>&1; done
 
+  photos:
+    name: Photos (Immich)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache: false
+      - name: Docker and Compose
+        run: |
+          docker version --format 'Docker {{.Server.Version}}'
+          docker compose version
+      - name: build test binary
+        working-directory: daemon
+        run: go test -c -o "$RUNNER_TEMP/photos.test" ./internal/photos
+      - name: the catalog's Immich set up by Photos, signing in with HardyOS's provider
+        working-directory: daemon/internal/photos
+        run: sudo HARDYOS_IMMICH_INTEGRATION=1 "$RUNNER_TEMP/photos.test" -test.run TestImmichIntegration -test.v -test.timeout 20m
+      - name: container logs
+        if: failure()
+        run: |
+          sudo docker ps -a --filter label=com.docker.compose.project=hardyos-immich-it
+          for c in $(sudo docker ps -aq --filter label=com.docker.compose.project=hardyos-immich-it); do sudo docker logs --tail 80 "$c" 2>&1; done
+
   vms:
     name: Virtual machines (KVM)
     runs-on: ubuntu-24.04

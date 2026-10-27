@@ -32,6 +32,11 @@ func (p *Provider) allowed(ctx context.Context, c *Client, u *auth.User) error {
 	if u.IdentitySource() != auth.SourceDomain && !p.loadSettings(ctx).localAccounts {
 		return ErrLocalAccountsOff
 	}
+	if c.ManagedBy != "" && p.cfg.ManagedAccess != nil {
+		if err := p.cfg.ManagedAccess(ctx, c.ManagedBy, u); err != nil {
+			return err
+		}
+	}
 	if len(c.AllowedGroups) == 0 {
 		return nil
 	}
@@ -281,4 +286,68 @@ func (p *Provider) fillUserinfo(ctx context.Context, info *oidc.UserInfo, u *aut
 		info.AppendClaims("groups", groups)
 		info.AppendClaims(ClaimAdmin, u.IsAdmin())
 	}
+	if slices.Contains(scopes, ScopePhotos) {
+		role := "user"
+		if u.IsAdmin() {
+			role = "admin"
+		}
+		label := StorageLabel(short)
+		info.AppendClaims(ClaimPhotosRole, role)
+		info.AppendClaims(ClaimStorageLabel, label)
+		if slices.Contains(scopes, oidc.ScopeEmail) && info.Email == "" {
+			info.Email = PlaceholderEmail(label)
+			info.AppendClaims("email_verified", false)
+		}
+	}
+}
+
+// PlaceholderEmail is the address an account without one has in apps that
+// need an address to tell people apart (Immich): <label>@hardyos.invalid
+// (.invalid never resolves, RFC 2606).
+func PlaceholderEmail(label string) string { return label + "@hardyos.invalid" }
+
+// StorageLabel turns an account's short name into a folder name: lower
+// case letters, digits, '.', '_' and '-' (anything else becomes '-'), at
+// most 64 characters, never starting or ending with '.'.
+func StorageLabel(short string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(short) {
+		if b.Len() >= 64 {
+			break
+		}
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	out := strings.Trim(b.String(), ".")
+	if out == "" {
+		out = "user"
+	}
+	return out
+}
+
+// AppProfile is what a sign-in with the Photos scope tells an app about a
+// person, for setting their account up before they first sign in.
+type AppProfile struct {
+	Subject      string `json:"subject"`
+	Email        string `json:"email"`
+	Name         string `json:"name"`
+	StorageLabel string `json:"storageLabel"`
+	Admin        bool   `json:"admin"`
+}
+
+// ProfileFor returns u's AppProfile, recording a subject for u if it has
+// none yet (a domain account's needs the directory).
+func (p *Provider) ProfileFor(ctx context.Context, u *auth.User) (*AppProfile, error) {
+	sub, err := p.subjectFor(ctx, u, false)
+	if err != nil {
+		return nil, err
+	}
+	info := new(oidc.UserInfo)
+	p.fillUserinfo(ctx, info, u, sub, []string{oidc.ScopeOpenID, oidc.ScopeProfile, oidc.ScopeEmail, ScopePhotos})
+	label, _ := info.Claims[ClaimStorageLabel].(string)
+	return &AppProfile{Subject: sub, Email: strings.ToLower(strings.TrimSpace(info.Email)), Name: info.Name, StorageLabel: label, Admin: u.IsAdmin()}, nil
 }

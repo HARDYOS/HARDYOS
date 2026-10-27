@@ -71,7 +71,12 @@ catalog in `apps/catalog/`) and check it with `hardyctl app-check`.
   `"generate": "secret"` makes a random 64-character password at the first
   install and keeps it across updates and reinstalls; it's never shown.
   Values can't contain single quotes or line breaks. Names starting with `HARDY_`
-  belong to HardyOS.
+  belong to HardyOS. `"managed": true` marks a setting another part of
+  HardyOS sets (Photos turns Immich's GPU machine learning on, see
+  [photos.md](photos.md)): it's left out of the install form and the
+  settings screen, checked like any other, kept across updates, and set
+  back to its default by an update that no longer offers its value. Not
+  for passwords or generated secrets.
 - **folders**: created under the data folder before the app starts, with
   the owner (`uid:gid`) and mode the containers need. Without an owner, a
   folder HardyOS creates belongs to the app's own user (`HARDY_UID`); an
@@ -101,7 +106,7 @@ catalog in `apps/catalog/`) and check it with `hardyctl app-check`.
     are then fixed at their defaults (HardyOS can't move them) and must be
     free; such apps may also use ports below 1024 (DNS on 53).
   - `gpu`: services may use the graphics devices (`/dev/dri`,
-    `/dev/dri/renderD*`) and NVIDIA reservations
+    `/dev/dri/renderD*`, and `/dev/kfd` for AMD's ROCm) and NVIDIA reservations
     (`deploy.resources.reservations.devices` with `driver: nvidia` and
     `capabilities: [gpu]`). HardyOS looks for the hardware when installing:
     without render nodes the devices are dropped, without `/dev/nvidia0` and
@@ -152,6 +157,9 @@ runs. Anything not allowed is refused:
   folder mounted twice is fine. No named volumes (data goes in folders
   HardyOS can snapshot); anonymous volumes and tmpfs are fine.
 - Published ports only as declared in the manifest.
+- A service with `deploy.replicas: 0` runs nothing, and installs and updates
+  don't download its image; give it `pull_policy: never` so Compose
+  doesn't either. Turning it on (a managed setting) downloads it first.
 - Capabilities and devices only as declared in the manifest's permissions
   (graphics devices and NVIDIA reservations with `gpu`).
 - `security_opt` only `no-new-privileges`; sysctls only `net.*`; logging

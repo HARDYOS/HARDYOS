@@ -50,8 +50,9 @@ func (s *Server) newOIDC() *oidc.Provider {
 			}
 			s.proxy.endUser(id)
 		},
-		Insecure: s.cfg.Insecure,
-		Log:      s.log,
+		ManagedAccess: s.photosAccess,
+		Insecure:      s.cfg.Insecure,
+		Log:           s.log,
 	})
 	if err != nil {
 		s.log.Error("sign-in provider unavailable", "err", err)

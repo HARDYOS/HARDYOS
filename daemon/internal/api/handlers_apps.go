@@ -92,6 +92,13 @@ func takeSettings(settings map[string]string, ref, what string) (map[string]stri
 // far it has got, so a big image moves the bar instead of sitting still.
 func pullImages(jc *jobs.Context, pc *priv.Client, id string, services []apps.ServiceImage, from, to float64) ([]string, error) {
 	var notes []string
+	var active []apps.ServiceImage
+	for _, sv := range services {
+		if !sv.Idle {
+			active = append(active, sv)
+		}
+	}
+	services = active
 	step := (to - from) / float64(max(len(services), 1))
 	for i, sv := range services {
 		base := from + float64(i)*step

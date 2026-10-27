@@ -1,7 +1,7 @@
 import type { AppManifest, ShellBridge } from "@hardy/sdk";
 import type { User } from "@hardy/api-client";
 import { type ComponentType, type LazyExoticComponent, type ReactNode, createContext, lazy, useContext } from "react";
-import { ActivityIcon, BagIcon, FolderIcon, ListIcon, ScreenIcon, SlidersIcon, StorageIcon, TerminalIcon, VMIcon } from "./icons";
+import { ActivityIcon, BagIcon, FolderIcon, ListIcon, PhotoIcon, ScreenIcon, SlidersIcon, StorageIcon, TerminalIcon, VMIcon } from "./icons";
 
 /** Props every app window receives. */
 export interface AppProps {
@@ -32,6 +32,15 @@ export const APPS: AppDef[] = [
     glyph: (s) => <FolderIcon size={s} />,
     component: lazy(() => import("./apps/files/FileManager")),
     defaultSize: { width: 1080, height: 700 },
+  },
+  {
+    id: "os.hardy.photos",
+    name: "Photos",
+    icon: "photo",
+    color: "#8B5CFF",
+    glyph: (s) => <PhotoIcon size={s} />,
+    component: lazy(() => import("./apps/photos/PhotosApp")),
+    defaultSize: { width: 1180, height: 760 },
   },
   {
     id: "os.hardy.storage",

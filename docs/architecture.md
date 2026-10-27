@@ -1629,6 +1629,87 @@ Details: [monitoring.md](monitoring.md).
   (10 s/1 day, 1 min/7 days, 15 min/90 days, 1 h/2 years) fed by pluggable
   `monitor.Source`s.
 
+## Photos (Immich)
+
+Phase 7 part C (decisions 270-284; user guide `docs/photos.md`). The
+desktop's Photos is the catalog's Immich app, configured by hardyd through
+Immich's own API; nothing new runs as root.
+
+```
+ phone / browser ──https──► immich.<base> (NetBird proxy, public, nothing in front)
+        │                        └─► app gateway (HardyOS sign-in off) ─► 127.0.0.1:<web port> immich-server
+        │ OAuth (code + PKCE)                                                │  ▲
+        └────────► sso.<base> ── hardyd's OIDC provider ◄── discovery/token ─┘  │ API key (x-api-key)
+                                     │ client "photos-immich" (Clients.Ensure)    │
+ hardyd: photos.sync job ────────────┴─ Immich API on 127.0.0.1 ─────────────────┘
+        │ apps.status / apps.services / apps.pull / apps.reconfigure / apps.up, devices.inventory (hardyd-priv)
+```
+
+- **Package** (`apps/catalog/immich`, 3.3.5.1). Every image pinned by
+  digest; every service as the app's user; `PHOTOS` (write, `/data`),
+  `EXISTING`, `EXISTING_2`, `EXISTING_3` (read, `/mnt/existing*`) and
+  `FAMILY` (read, `/mnt/family`). Machine learning: the CPU service always,
+  plus `-cuda`, `-openvino` and `-rocm` services with
+  `deploy.replicas: ${ML_*_REPLICAS}` (0 by default) and
+  `pull_policy: never`. Those are **managed settings**
+  (`Setting.Managed`): hidden from the install form and the settings
+  screen, checked like any other, kept across updates, and reset to their
+  default by an update whose options no longer include the old value.
+  `ServiceImage.Idle` marks services with 0 replicas: installs and updates
+  don't download them, and Compose doesn't either (`pull_policy`).
+  The `gpu` permission now also covers `/dev/kfd` (ROCm), dropped like
+  `/dev/dri` when the server has none.
+- **`internal/photos`** (hardyd, unprivileged): `Settings` (Normalize),
+  `ChooseML` (GPUs from the devices inventory, `runtime.GOARCH`),
+  `RedirectURIs`, `Apply` (merges HardyOS's part of Immich's system config
+  into the current one: OAuth, password login, storage template, ML
+  URLs, library scan, DB dumps, external domain; everything else is left
+  as Immich's administrators set it), an `Immich` API client (bounded
+  bodies, no redirects, 127.0.0.1 only), `Reconciler.Run` (admin account
+  and key, family account and partner-only key, config, people,
+  libraries, partners) and `Store` (migration `0060_photos.sql`:
+  `photos_libraries`, `photos_partners`; settings rows `photos.settings`,
+  `photos.status`, `photos.ml_applied`; `photos.immich` and
+  `photos.oidc_client` sealed with secretbox purpose `photos`, bound to
+  the row's name). `immichfake` is a test double of Immich's API.
+- **Jobs** (`api/handlers_photos.go`): `photos.sync`, `photos.settings`,
+  `photos.link`, locked `app:immich` with the app's own jobs. Changes are
+  audited as HardyOS's (`photos.sync`, `oidc.client.*`). `RunPhotos`
+  starts a sync (a system job) after hardyd starts, after Immich's app
+  jobs, `remote.*`, `vms.*` and OIDC settings jobs, every 6 hours, and
+  when its 5-minute check finds an accelerated ML service down while its
+  GPU is back with the server, or a new OAuth-linked Immich account.
+- **Sign-in.** Only with the issuer `https://sso.<base>` (Immich's
+  server checks the provider's certificate). The managed client's
+  redirect URIs: `/auth/login` and `/user-settings` on the published
+  origin and the window proxy's origin, plus
+  `/api/oauth/mobile-redirect` on the published origin (Immich's mobile
+  override; the provider takes https only, exact matches). Scope
+  `hardyos_photos` adds `hardyos_photos_role`, `hardyos_storage_label`
+  and a placeholder `email` (`<label>@hardyos.invalid`) to the ID token
+  and userinfo. `oidc.Config.ManagedAccess` lets the client's owner refuse
+  a person at sign-in and refresh: Photos allows the app's access list.
+  `Provider.ProfileFor` gives the same subject/email/label for accounts
+  made ahead of a first sign-in.
+- **Machine learning.** `apps.reconfigure` with the managed settings
+  (after `apps.pull` of the chosen service), then `apps.up`; Immich's ML
+  URLs list the accelerated service first and the CPU one as fallback.
+- **Publishing.** Phones need Immich published without a sign-in in front
+  (gateway HardyOS sign-in off; NetBird SSO off): the Control Panel button
+  uses the existing `PUT /apps/immich/publish` (public, auth none,
+  `confirmOpen`), audited as before.
+- **Web.** `apps/photos/PhotosApp` (the dock's Photos: `GET /photos`, then
+  `AppFrameView` for the app, with a "sign in in a tab" bar while SSO is on)
+  and Control Panel › Photos (`control-panel/Photos.tsx`).
+- **Tests.** `internal/photos` (settings, ML choice, redirect URIs, config
+  merge, sealing, reconciliation against `immichfake`), `internal/apps`
+  (`immich_test.go`: digests, idle services, read-only mounts, managed
+  settings), `internal/oidc` (`photos_test.go`: claims, ManagedAccess),
+  `internal/api` (`photos_test.go`: the client's exact redirect URIs,
+  sealed secret, Immich's config, ML switch, access, SSO off) and CI's
+  **Photos (Immich)** job: the real Immich 3.3.5 with HardyOS's provider
+  (`TestImmichIntegration`).
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly

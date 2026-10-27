@@ -1,8 +1,11 @@
 # Immich for HardyOS, following Immich's own docker-compose.yml (and its
-# rootless variant) for v3.3.5. Every service runs as the app's own user.
+# rootless variant) for v3.3.5. Every service runs as the app's own user and
+# every image is pinned by digest. HardyOS's Photos integration
+# (docs/photos.md) configures Immich through its API: sign-in with HardyOS,
+# libraries, machine learning addresses.
 services:
   immich-server:
-    image: ghcr.io/immich-app/immich-server:v3.3.5
+    image: ghcr.io/immich-app/immich-server:v3.3.5@sha256:485d546a2e31d6a8b4db8423fcba5c109de8c218d93410af115fd1ccfc4352a6
     user: "${HARDY_UID}:${HARDY_GID}"
     security_opt:
       - no-new-privileges:true
@@ -18,8 +21,18 @@ services:
     ports:
       - "${HARDY_PORT_WEB}:2283"
     volumes:
+      # Uploads, thumbnails, encoded video and Immich's own database dumps
+      # (backups/). The storage template files each person's photos under
+      # library/<their HardyOS user name>/.
       - ${HARDY_SHARE_PHOTOS}:/data
+      # Photos already on the server, indexed in place as external
+      # libraries (read-only: Immich never changes or moves them).
       - ${HARDY_SHARE_EXISTING}:/mnt/existing:ro
+      - ${HARDY_SHARE_EXISTING_2}:/mnt/existing-2:ro
+      - ${HARDY_SHARE_EXISTING_3}:/mnt/existing-3:ro
+      # The family library: an external library owned by Immich's "Family"
+      # account and shared with the family as a partner.
+      - ${HARDY_SHARE_FAMILY}:/mnt/family:ro
     depends_on:
       redis:
         condition: service_healthy
@@ -39,10 +52,12 @@ services:
               capabilities: [gpu]
     # The image's own health check (immich-healthcheck) applies.
 
+  # Face, object and text recognition on the processor. Always running: it is
+  # the fallback whenever an accelerated service below isn't (no GPU, or the
+  # GPU is lent to a virtual machine). Models load on first use and unload
+  # after five idle minutes.
   immich-machine-learning:
-    # Runs on the processor. Accelerated variants (-cuda, -openvino) are
-    # separate images, which a package can't choose per server yet.
-    image: ghcr.io/immich-app/immich-machine-learning:v3.3.5
+    image: ghcr.io/immich-app/immich-machine-learning:v3.3.5@sha256:5b28c9352c8374b8a1ed96fbdd8d6755fea6e43510ec43fdf6538aa02ea40f56
     user: "${HARDY_UID}:${HARDY_GID}"
     security_opt:
       - no-new-privileges:true
@@ -53,6 +68,72 @@ services:
     volumes:
       - ${HARDY_APP_DATA}/model-cache:/cache
     # The image's own health check (python3 healthcheck.py) applies.
+
+  # Accelerated machine learning, one per kind of GPU (amd64 only). HardyOS's
+  # Photos integration turns on at most one (ML_*_REPLICAS, managed settings)
+  # for the GPU it finds; with 0 replicas a service doesn't run and its image
+  # isn't downloaded.
+  immich-machine-learning-cuda:
+    # Downloaded by HardyOS before the service is turned on, never by
+    # Compose: with 0 replicas the image may not be on the server.
+    pull_policy: never
+    image: ghcr.io/immich-app/immich-machine-learning:v3.3.5-cuda@sha256:ba820b5b2ce199ef085bd5a42f092218f16994149019c5ab252bf387c22a99b4
+    user: "${HARDY_UID}:${HARDY_GID}"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - NET_RAW
+    environment:
+      TZ: ${HARDY_TZ}
+    volumes:
+      - ${HARDY_APP_DATA}/model-cache-cuda:/cache
+    deploy:
+      replicas: ${ML_CUDA_REPLICAS}
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  immich-machine-learning-openvino:
+    # Downloaded by HardyOS before the service is turned on, never by
+    # Compose: with 0 replicas the image may not be on the server.
+    pull_policy: never
+    image: ghcr.io/immich-app/immich-machine-learning:v3.3.5-openvino@sha256:1dbac7f811b51b80c55ee0cf678e0089d3532c798f14a65747d5d7b473a4f9d6
+    user: "${HARDY_UID}:${HARDY_GID}"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - NET_RAW
+    environment:
+      TZ: ${HARDY_TZ}
+    volumes:
+      - ${HARDY_APP_DATA}/model-cache-openvino:/cache
+    devices:
+      - /dev/dri:/dev/dri
+    deploy:
+      replicas: ${ML_OPENVINO_REPLICAS}
+
+  immich-machine-learning-rocm:
+    # Downloaded by HardyOS before the service is turned on, never by
+    # Compose: with 0 replicas the image may not be on the server.
+    pull_policy: never
+    image: ghcr.io/immich-app/immich-machine-learning:v3.3.5-rocm@sha256:3cc72b962dbfe38525645bd0ef45248e18e86942080516c5c7ecb0f03e72bd02
+    user: "${HARDY_UID}:${HARDY_GID}"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - NET_RAW
+    environment:
+      TZ: ${HARDY_TZ}
+    volumes:
+      - ${HARDY_APP_DATA}/model-cache-rocm:/cache
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    deploy:
+      replicas: ${ML_ROCM_REPLICAS}
 
   redis:
     image: docker.io/valkey/valkey:9@sha256:c123e3715db63d06d4ad6964884037aa0d5d4d703939b9929954112889708e1d

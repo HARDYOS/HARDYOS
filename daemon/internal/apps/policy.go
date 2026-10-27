@@ -111,8 +111,10 @@ var basicCapabilities = map[string]bool{
 	"KILL": true, "AUDIT_WRITE": true,
 }
 
-// driRE matches the graphics devices the gpu permission allows.
-var driRE = regexp.MustCompile(`^/dev/dri(/(card|renderD)[0-9]{1,3})?$`)
+// driRE matches the graphics devices the gpu permission allows: DRM
+// (/dev/dri) and AMD's compute interface (/dev/kfd, which ROCm needs next
+// to /dev/dri).
+var driRE = regexp.MustCompile(`^(/dev/dri(/(card|renderD)[0-9]{1,3})?|/dev/kfd)$`)
 
 // nvidiaCapabilities may be asked for in an NVIDIA device reservation.
 var nvidiaCapabilities = map[string]bool{"gpu": true, "compute": true, "utility": true, "video": true, "graphics": true, "display": true}
@@ -620,7 +622,13 @@ func (r Resolved) Services() []ServiceImage {
 	for name, raw := range services {
 		svc, _ := raw.(map[string]any)
 		img, _ := svc["image"].(string)
-		out = append(out, ServiceImage{Service: name, Image: img})
+		si := ServiceImage{Service: name, Image: img}
+		if dp, ok := svc["deploy"].(map[string]any); ok {
+			if n, ok := dp["replicas"].(float64); ok && n == 0 {
+				si.Idle = true
+			}
+		}
+		out = append(out, si)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Service < out[j].Service })
 	return out
@@ -630,6 +638,10 @@ func (r Resolved) Services() []ServiceImage {
 type ServiceImage struct {
 	Service string `json:"service"`
 	Image   string `json:"image"`
+	// Idle: the service runs no containers (deploy.replicas 0), so installs
+	// and updates don't download its image (pull_policy: never keeps
+	// Compose from doing it either). Turning it on downloads it first.
+	Idle bool `json:"idle,omitempty"`
 }
 
 // ParseResolved reads `docker compose config --format json` output.

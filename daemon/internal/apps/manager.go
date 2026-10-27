@@ -924,6 +924,11 @@ func (m *Manager) prepare(ctx context.Context, pkg *Package, a PrepareArgs, reco
 		case asked:
 		case oldEnv[s.Env] != "":
 			v = oldEnv[s.Env]
+			if s.Managed && checkSettingValue(s, v) != nil {
+				// A managed value the new version no longer offers goes
+				// back to the default; whoever manages it sets it again.
+				v = s.Default
+			}
 		default:
 			v = s.Default
 		}

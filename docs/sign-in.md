@@ -40,6 +40,7 @@ desktop's own address), HardyOS doesn't ask for the password again.
 | `email`, `email_verified` | `alice@example.net`, `true` | `email` (without an address in Domain > Users: `alice@home.example.net`, unverified) |
 | `groups` | `["HOME\\Domain Users", "HOME\\Family"]` | `groups` or `profile` |
 | `hardyos_admin` | `true` | `groups` or `profile` |
+| `hardyos_photos_role`, `hardyos_storage_label` | `admin`, `alice` | `hardyos_photos` (Immich, [photos.md](photos.md)); with it every account has an `email` (`alice@hardyos.invalid` when it has none) |
 
 Apps an administrator adds as "set up by me for this server" (NetBird's
 presets) don't ask; any other app shows a consent screen once per person,

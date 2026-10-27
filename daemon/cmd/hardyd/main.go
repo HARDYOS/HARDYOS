@@ -236,6 +236,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		if p := handler.OIDC(); p != nil {
 			go p.Start(ctx) // sign-in provider: signing keys on schedule, expired sign-ins removed
 		}
+		go handler.RunPhotos(ctx, api.PhotosOptions{}) // Photos: keeps the Immich app set up
 	}
 
 	var servers []*http.Server

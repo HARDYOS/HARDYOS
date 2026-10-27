@@ -194,7 +194,11 @@ func (r Resolved) adaptGPU(hw gpuHardware, sys func(string) string, appName stri
 				if driRE.MatchString(src) {
 					fi, err := os.Stat(sys(src))
 					if err != nil || (src == "/dev/dri" && !hw.DRI) {
-						warn = append(warn, fmt.Sprintf("This server has no graphics chip (%s), so %s runs without hardware acceleration", src, appName))
+						if src == "/dev/kfd" {
+							warn = append(warn, fmt.Sprintf("This server has no AMD compute device (%s), so %s runs without ROCm", src, appName))
+						} else {
+							warn = append(warn, fmt.Sprintf("This server has no graphics chip (%s), so %s runs without hardware acceleration", src, appName))
+						}
 						continue
 					}
 					if gid := deviceGroup(fi, sys); gid > 0 {
