@@ -285,22 +285,66 @@ func (h *History) metaSet(ctx context.Context, key string, v int64) {
 	_, _ = h.db.ExecContext(ctx, `INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, v)
 }
 
-// values reads a tier's values in [from, to) for one series, stepping by
-// the tier's step (NaN where there's nothing). Caller holds h.mu.
-func (h *History) values(ctx context.Context, id int64, ti int, from, to time.Time) ([]float32, error) {
+// maxReadValues bounds one read of one series (two years of hours is
+// 17,520; a day at 10 s is 8,640).
+const maxReadValues = 20000
+
+// readRange reads a tier's values in [from, to) for one series, one value
+// per step (NaN where there's nothing). Chunks with unsaved values come
+// from memory; the rest from one range query. h.mu is held only to copy
+// the in-memory chunks, never during the database read, and nothing read
+// here is cached.
+func (h *History) readRange(ctx context.Context, id int64, ti int, from, to time.Time) ([]float32, error) {
 	tr := Tiers[ti]
 	step := int64(tr.step / time.Second)
+	chunkSec := int64(tr.chunk / time.Second)
 	f, t := from.Unix()-from.Unix()%step, to.Unix()
-	var out []float32
-	for ts := f; ts < t; {
-		c, k, err := h.chunkFor(ctx, id, ti, time.Unix(ts, 0))
-		if err != nil {
+	if t <= f {
+		return nil, nil
+	}
+	n := (t - f + step - 1) / step
+	if n > maxReadValues {
+		return nil, fmt.Errorf("history read of %d values is too large", n)
+	}
+	out := nanChunk(int(n))
+	first := f - f%chunkSec
+	cached := map[int64][]float32{}
+	h.mu.Lock()
+	for k, c := range h.chunks {
+		if k.series == id && k.tier == ti && k.start >= first && k.start < t {
+			cached[k.start] = append([]float32(nil), c.vals...)
+		}
+	}
+	h.mu.Unlock()
+	fill := func(start int64, vals []float32) {
+		for i, v := range vals {
+			ts := start + int64(i)*step
+			if ts >= f && ts < t {
+				out[(ts-f)/step] = v
+			}
+		}
+	}
+	rows, err := h.db.QueryContext(ctx, `SELECT start, data FROM chunks WHERE series_id = ? AND tier = ? AND start >= ? AND start < ? ORDER BY start`, id, ti, first, t)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var start int64
+		var data []byte
+		if err := rows.Scan(&start, &data); err != nil {
 			return nil, err
 		}
-		end := k.start + int64(tr.chunk/time.Second)
-		for ; ts < t && ts < end; ts += step {
-			out = append(out, c.vals[(ts-k.start)/step])
+		if _, ok := cached[start]; ok {
+			continue
 		}
+		fill(start, decode(data, tr.slots()))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for start, vals := range cached {
+		fill(start, vals)
 	}
 	return out, nil
 }
@@ -319,6 +363,7 @@ func (h *History) Rollup(ctx context.Context, now time.Time) error {
 func (h *History) rollupTier(ctx context.Context, ti int, now time.Time) error {
 	tr, fine := Tiers[ti], Tiers[ti-1]
 	step := int64(tr.step / time.Second)
+	fineStep := int64(fine.step / time.Second)
 	key := fmt.Sprintf("rollup.%d", ti)
 	last := h.metaGet(ctx, key) // start of the next bucket to compute
 	end := now.Unix() - now.Unix()%step
@@ -334,31 +379,41 @@ func (h *History) rollupTier(ctx context.Context, ti int, now time.Time) error {
 		ids = append(ids, id)
 	}
 	h.mu.Unlock()
-	for b := last; b < end; b += step {
-		h.mu.Lock()
-		for _, id := range ids {
-			vals, err := h.values(ctx, id, ti-1, time.Unix(b, 0), time.Unix(b+step, 0))
-			if err != nil {
-				h.mu.Unlock()
-				return err
-			}
+	per := int(step / fineStep)
+	for _, id := range ids {
+		vals, err := h.readRange(ctx, id, ti-1, time.Unix(last, 0), time.Unix(end, 0))
+		if err != nil {
+			return err
+		}
+		type agg struct {
+			at  int64
+			avg float32
+		}
+		var out []agg
+		for i := 0; i < len(vals); i += per {
 			var sum float64
-			n := 0
-			for _, v := range vals {
+			cnt := 0
+			for _, v := range vals[i:min(i+per, len(vals))] {
 				if !math.IsNaN(float64(v)) {
 					sum += float64(v)
-					n++
+					cnt++
 				}
 			}
-			if n == 0 {
-				continue
+			if cnt > 0 {
+				out = append(out, agg{last + int64(i/per)*step, float32(sum / float64(cnt))})
 			}
-			c, k, err := h.chunkFor(ctx, id, ti, time.Unix(b, 0))
+		}
+		if len(out) == 0 {
+			continue
+		}
+		h.mu.Lock()
+		for _, a := range out {
+			c, k, err := h.chunkFor(ctx, id, ti, time.Unix(a.at, 0))
 			if err != nil {
 				h.mu.Unlock()
 				return err
 			}
-			c.vals[slot(time.Unix(b, 0), k, tr)] = float32(sum / float64(n))
+			c.vals[slot(time.Unix(a.at, 0), k, tr)] = a.avg
 			c.dirty = true
 		}
 		h.mu.Unlock()
@@ -434,17 +489,34 @@ type HistoryResult struct {
 // MaxQuerySeries bounds one query.
 const MaxQuerySeries = 64
 
+// maxGroup bounds how many stored values one returned value may average:
+// a range needing more than maxPoints*maxGroup values of its tier is
+// refused rather than read.
+const maxGroup = 48
+
+// ErrRange: a history range that can't be served.
+type ErrRange struct{ Msg string }
+
+func (e *ErrRange) Error() string { return e.Msg }
+
 // Query returns series in [from, to) with at most maxPoints values each,
-// from the finest tier that still covers from.
+// from the finest tier that still covers from. from is clamped to what
+// the store keeps (two years) and to to now.
 func (h *History) Query(ctx context.Context, names []string, from, to, now time.Time, maxPoints int) (*HistoryResult, error) {
 	if len(names) > MaxQuerySeries {
-		return nil, fmt.Errorf("at most %d series at once", MaxQuerySeries)
+		return nil, &ErrRange{fmt.Sprintf("at most %d series at once", MaxQuerySeries)}
 	}
 	if maxPoints <= 0 || maxPoints > 2000 {
 		maxPoints = 500
 	}
+	if oldest := now.Add(-Tiers[len(Tiers)-1].keep); from.Before(oldest) {
+		from = oldest
+	}
+	if to.After(now) {
+		to = now
+	}
 	if !to.After(from) {
-		return nil, fmt.Errorf("the range is empty")
+		return nil, &ErrRange{"the range is empty"}
 	}
 	if err := h.Flush(ctx); err != nil {
 		return nil, err
@@ -464,15 +536,27 @@ func (h *History) Query(ctx context.Context, names []string, from, to, now time.
 	if group < 1 {
 		group = 1
 	}
+	if group > maxGroup {
+		return nil, &ErrRange{"the range is too long for that few points"}
+	}
 	res := &HistoryResult{From: time.Unix(f, 0).UTC(), To: to.UTC(), Step: int(step) * group, Tier: ti, Series: []SeriesData{}}
+	type want struct {
+		name string
+		id   int64
+		ok   bool
+		meta SeriesInfo
+	}
+	var ws []want
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	for _, name := range names {
 		id, ok := h.ids[name]
-		m := h.meta[name]
-		sd := SeriesData{Name: name, Label: m.Label, Unit: m.Unit, Values: []*float64{}}
-		if ok {
-			vals, err := h.values(ctx, id, ti, time.Unix(f, 0), to)
+		ws = append(ws, want{name, id, ok, h.meta[name]})
+	}
+	h.mu.Unlock()
+	for _, w := range ws {
+		sd := SeriesData{Name: w.name, Label: w.meta.Label, Unit: w.meta.Unit, Values: []*float64{}}
+		if w.ok {
+			vals, err := h.readRange(ctx, w.id, ti, time.Unix(f, 0), to)
 			if err != nil {
 				return nil, err
 			}

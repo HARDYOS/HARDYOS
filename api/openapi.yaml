@@ -1094,7 +1094,7 @@ paths:
   /monitor/series:
     get:
       operationId: listMetricSeries
-      summary: Every resource history series
+      summary: Every resource history series (admin)
       tags: [monitor]
       responses:
         "200":
@@ -1107,8 +1107,10 @@ paths:
   /monitor/history:
     get:
       operationId: getMetricHistory
-      summary: Resource history for some series over a range
+      summary: Resource history for some series over a range (admin)
       description: |
+        `from` is clamped to two years ago and `to` to now; a range needing more
+        than 48 stored values per returned point is refused (400).
         Values come from the finest tier that still covers the range (10 s for a
         day, 1 min for 7 days, 15 min for 90 days, 1 h for 2 years), averaged down
         to at most `points` values.
@@ -4908,6 +4910,7 @@ components:
         port: { type: integer }
         security: { type: string, enum: [starttls, tls, none] }
         username: { type: string }
+        allowAnyPort: { type: boolean, description: "SMTP: allow a port other than 25, 465, 587 and 2525" }
         region: { type: string, description: "SES region, e.g. us-east-1" }
         accessKeyId: { type: string }
         configurationSet: { type: string }
@@ -5119,10 +5122,13 @@ components:
         shutdownRuntime: { type: integer, minimum: 0, maximum: 3600 }
         serveNetwork: { type: boolean }
         clientUser: { type: string }
+        listenAddress: { type: string, description: "With serveNetwork: the one address of this server upsd listens on" }
         remoteHost: { type: string }
         remotePort: { type: integer }
         remoteUps: { type: string }
         remoteUser: { type: string }
+        remoteTls: { type: boolean, description: "Netclient: use TLS (the NUT server must offer it)" }
+        remoteVerify: { type: boolean, description: "Netclient with TLS: verify the server's certificate against the system's CAs" }
     UPSSecretsInput:
       type: object
       properties:
@@ -5159,8 +5165,9 @@ components:
         vars: { type: object, additionalProperties: { type: string } }
     UPSView:
       type: object
-      required: [config, secretsSet, status, error, checkedAt]
+      required: [config, secretsSet, status, error, checkedAt, addresses]
       properties:
+        addresses: { type: array, items: { type: string }, description: "This server's addresses, for listenAddress" }
         config: { $ref: "#/components/schemas/UPSConfig" }
         secretsSet: { type: object, additionalProperties: { type: boolean } }
         status: { oneOf: [{ $ref: "#/components/schemas/UPSStatus" }, { type: "null" }] }

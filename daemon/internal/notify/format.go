@@ -80,11 +80,26 @@ func trunc(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
+// Alert text carries names others chose (file, app, VM and disk names): it
+// must never become a link or formatting in a chat app. Only HardyOS's own
+// link (the server address) is a real link.
+
+// discordMarkdown are the characters Discord's markdown gives meaning.
+var discordMarkdown = strings.NewReplacer(
+	`\`, `\\`, "*", `\*`, "_", `\_`, "~", `\~`, "`", "\\`", "|", `\|`, ">", `\>`, "<", `\<`,
+	"[", `\[`, "]", `\]`, "(", `\(`, ")", `\)`, "#", `\#`, "-", `\-`, "@", "@\u200b",
+	// Break bare URLs so they aren't linked.
+	"://", ":\u200b//",
+)
+
+// discordEscape makes untrusted text literal in a Discord embed.
+func discordEscape(s string) string { return discordMarkdown.Replace(s) }
+
 // discordPayload: an embed with the severity's color.
 func discordPayload(m message) []byte {
 	embed := map[string]any{
-		"title":       trunc(m.Title, 256),
-		"description": trunc(m.body(), 4000),
+		"title":       trunc(discordEscape(m.Title), 256),
+		"description": trunc(discordEscape(m.body()), 4000),
 		"color":       sevColor[m.Severity],
 		"timestamp":   m.Time.UTC().Format(time.RFC3339),
 		"footer":      map[string]string{"text": trunc(m.footer(), 2048)},
@@ -111,7 +126,8 @@ func slackPayload(m message) []byte {
 		map[string]any{"type": "header", "text": map[string]any{"type": "plain_text", "text": trunc(m.Title, 150), "emoji": true}},
 	}
 	if b := m.body(); b != "" {
-		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": trunc(slackEscape(b), 3000)}})
+		// verbatim: no automatic links or mentions in the alert's own text.
+		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": trunc(slackEscape(b), 3000), "verbatim": true}})
 	}
 	ctx := icon + " " + slackEscape(m.footer())
 	if u := m.url(); u != "" {
@@ -127,13 +143,20 @@ func slackPayload(m message) []byte {
 // Office 365 connectors accept.
 func teamsPayload(m message) []byte {
 	color := map[string]string{SeverityInfo: "Accent", SeverityWarning: "Warning", SeverityCritical: "Attention"}[m.Severity]
-	body := []any{
-		map[string]any{"type": "TextBlock", "text": m.Title, "weight": "Bolder", "size": "Medium", "wrap": true, "color": color},
+	// RichTextBlock text runs are plain text: TextBlock would read the
+	// alert's text as markdown (links included).
+	run := func(text string, extra map[string]any) map[string]any {
+		r := map[string]any{"type": "TextRun", "text": text}
+		for k, v := range extra {
+			r[k] = v
+		}
+		return map[string]any{"type": "RichTextBlock", "inlines": []any{r}}
 	}
+	body := []any{run(m.Title, map[string]any{"weight": "Bolder", "size": "Medium", "color": color})}
 	if b := m.body(); b != "" {
-		body = append(body, map[string]any{"type": "TextBlock", "text": trunc(b, 4000), "wrap": true})
+		body = append(body, run(trunc(b, 4000), nil))
 	}
-	body = append(body, map[string]any{"type": "TextBlock", "text": m.footer(), "isSubtle": true, "size": "Small", "wrap": true})
+	body = append(body, run(m.footer(), map[string]any{"isSubtle": true, "size": "Small"}))
 	card := map[string]any{
 		"$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
 		"type":    "AdaptiveCard",

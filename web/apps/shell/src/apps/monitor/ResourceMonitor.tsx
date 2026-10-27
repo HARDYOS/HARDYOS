@@ -17,14 +17,19 @@ type Tab = "overview" | "history" | "apps" | "vms" | "alerts" | "jobs";
 export default function ResourceMonitor({ args }: AppProps) {
   const { user } = useShell();
   const admin = user.role === "admin";
-  const [tab, setTab] = useState<Tab>((args?.tab as Tab) ?? "overview");
+  const [tab, setTab] = useState<Tab>(admin ? ((args?.tab as Tab) ?? "overview") : "overview");
   const [range, setRange] = useState<HistoryRange>("24h");
   const tabs: [Tab, string][] = [
     ["overview", "Now"],
-    ["history", "History"],
-    ["apps", "Apps"],
-    ["vms", "VMs"],
-    ...(admin ? ([["alerts", "Alerts"]] as [Tab, string][]) : []),
+    // History names apps, VMs, pools and disks: administrators only.
+    ...(admin
+      ? ([
+          ["history", "History"],
+          ["apps", "Apps"],
+          ["vms", "VMs"],
+          ["alerts", "Alerts"],
+        ] as [Tab, string][])
+      : []),
     ["jobs", "Jobs"],
   ];
   return (

@@ -630,9 +630,7 @@ func TestHistoryTiersAndQuery(t *testing.T) {
 		t.Errorf("gap filled: %v", *r.Series[0].Values[10])
 	}
 	// Tier 1 has minute averages.
-	h.mu.Lock()
-	vals, _ := h.values(ctx, h.ids["cpu.percent"], 1, start, start.Add(3*time.Minute))
-	h.mu.Unlock()
+	vals, _ := h.readRange(ctx, h.ids["cpu.percent"], 1, start, start.Add(3*time.Minute))
 	if len(vals) != 3 || vals[0] != 2.5 || vals[2] != 14.5 {
 		t.Errorf("tier 1 %v", vals)
 	}
@@ -713,5 +711,45 @@ func TestSettingsValidate(t *testing.T) {
 	w := Schedule{WindowStart: 23, WindowEnd: 5}
 	if !w.InWindow(time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)) || w.InWindow(time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)) {
 		t.Error("window over midnight")
+	}
+}
+
+// The review's exploit: an absurd range must be clamped, quick, and must
+// not fill the chunk cache.
+func TestHistoryHugeRange(t *testing.T) {
+	ctx := context.Background()
+	h, _ := OpenHistory(ctx, ":memory:")
+	defer h.Close()
+	now := time.Now()
+	_ = h.Record(ctx, SeriesInfo{Name: "cpu.percent"}, now.Add(-time.Minute), 5)
+	_ = h.Flush(ctx)
+	h.mu.Lock()
+	before := len(h.chunks)
+	h.mu.Unlock()
+	from := time.Date(0, 1, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(9999, 12, 31, 0, 0, 0, 0, time.UTC)
+	start := time.Now()
+	r, err := h.Query(ctx, []string{"cpu.percent"}, from, to, now, 2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Errorf("query took %v", time.Since(start))
+	}
+	if r.Tier != 3 || len(r.Series[0].Values) > 2000 || r.From.Before(now.Add(-731*24*time.Hour)) || r.To.After(now) {
+		t.Errorf("tier %d, %d values, %v..%v", r.Tier, len(r.Series[0].Values), r.From, r.To)
+	}
+	h.mu.Lock()
+	after := len(h.chunks)
+	h.mu.Unlock()
+	if after != before {
+		t.Errorf("query cached chunks: %d -> %d", before, after)
+	}
+	// Too long for the points asked: refused.
+	if _, err := h.Query(ctx, []string{"cpu.percent"}, now.Add(-730*24*time.Hour), now, now, 10); err == nil {
+		t.Error("2 years in 10 points accepted")
+	}
+	if _, err := h.Query(ctx, []string{"cpu.percent"}, to, to.Add(time.Hour), now, 100); err == nil {
+		t.Error("a future range accepted")
 	}
 }

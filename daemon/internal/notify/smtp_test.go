@@ -187,7 +187,7 @@ func (s *smtpServer) serve(c net.Conn) {
 }
 
 func smtpChannel(port int, security string, user, pw string) *channelRow {
-	return &channelRow{Channel: Channel{Type: TypeSMTP, Config: ChannelConfig{Host: "localhost", Port: port, Security: security, Username: user,
+	return &channelRow{Channel: Channel{Type: TypeSMTP, Config: ChannelConfig{Host: "localhost", Port: port, Security: security, Username: user, AllowAnyPort: true,
 		From: "nas@example.com", To: []string{"cade@example.com", "wife@example.com"}}}, secrets: Secrets{Password: pw}}
 }
 
@@ -280,5 +280,122 @@ func TestBuildEmailHeaderSafety(t *testing.T) {
 	}
 	if !strings.Contains(strconv.Quote(head), "Subject:") {
 		t.Error("no subject")
+	}
+}
+
+// rawServer answers every connection with what write sends.
+func rawServer(t *testing.T, write func(net.Conn)) int {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { defer c.Close(); write(c) }()
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+func TestSMTPBoundedAndNotSMTP(t *testing.T) {
+	d, _ := newTestDispatcher(t)
+	// An endless greeting line: stopped at the per-answer cap, not buffered.
+	flood := rawServer(t, func(c net.Conn) {
+		chunk := []byte(strings.Repeat("A", 32<<10))
+		for range 200 { // 6.4 MB
+			if _, err := c.Write(chunk); err != nil {
+				return
+			}
+		}
+	})
+	start := time.Now()
+	err := d.sendSMTP(t.Context(), smtpChannel(flood, SecurityNone, "", ""), testMessage())
+	if err == nil || time.Since(start) > 10*time.Second {
+		t.Fatalf("flood: %v after %v", err, time.Since(start))
+	}
+	// Something that isn't a mail server: say so, without its words.
+	web := rawServer(t, func(c net.Conn) { _, _ = c.Write([]byte("HTTP/1.1 400 Bad Request <script>x</script>\r\n\r\n")) })
+	err = d.sendSMTP(t.Context(), smtpChannel(web, SecurityNone, "", ""), testMessage())
+	if err == nil || !strings.Contains(err.Error(), "isn't an SMTP server") || strings.Contains(err.Error(), "script") {
+		t.Fatalf("not SMTP: %v", err)
+	}
+	// Ports: mail ports only, unless allowed.
+	ch := smtpChannel(2526, SecurityNone, "", "")
+	ch.Config.AllowAnyPort = false
+	if err := d.sendSMTP(t.Context(), ch, testMessage()); err == nil || !strings.Contains(err.Error(), "isn't a mail port") {
+		t.Fatalf("port: %v", err)
+	}
+	if _, err := normalizeConfig(TypeSMTP, ChannelConfig{Host: "mail.example.com", Port: 8080, From: "a@b.c", To: []string{"a@b.c"}}, Secrets{}); err == nil {
+		t.Error("port 8080 accepted without the opt-in")
+	}
+	if _, err := normalizeConfig(TypeSMTP, ChannelConfig{Host: "mail.example.com", Port: 8080, AllowAnyPort: true, From: "a@b.c", To: []string{"a@b.c"}}, Secrets{}); err != nil {
+		t.Errorf("port 8080 with the opt-in: %v", err)
+	}
+}
+
+func TestLimitedConnCaps(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	go func() {
+		defer b.Close()
+		_, _ = b.Write(make([]byte, smtpAnswerMax+10))
+	}()
+	lc := newLimitedConn(a)
+	buf := make([]byte, 4096)
+	var n int
+	var err error
+	for err == nil {
+		var k int
+		k, err = lc.Read(buf)
+		n += k
+	}
+	if n != smtpAnswerMax || err != errSMTPTooMuch {
+		t.Errorf("read %d, %v", n, err)
+	}
+}
+
+func TestDestinationChangeNeedsPassword(t *testing.T) {
+	d, _ := newTestDispatcher(t)
+	ctx := t.Context()
+	ch, err := d.Channels.Create(ctx, ChannelInput{Type: TypeSMTP, Name: "Gmail",
+		Config:  ChannelConfig{Host: "smtp.gmail.com", Username: "cade@gmail.com", From: "cade@gmail.com", To: []string{"cade@example.com"}},
+		Secrets: &SecretsInput{Password: strp("app password")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := ch.Config
+	// Same destination, new recipients: the password stays.
+	cfg.To = []string{"wife@example.com"}
+	if _, err := d.Channels.Update(ctx, ch.ID, ChannelInput{Config: cfg}); err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range []func(*ChannelConfig){
+		func(c *ChannelConfig) { c.Host = "mail.evil.example" },
+		func(c *ChannelConfig) { c.Port = 465; c.Security = SecurityTLS },
+		func(c *ChannelConfig) { c.Security = SecurityNone },
+		func(c *ChannelConfig) { c.Username = "other@gmail.com" },
+	} {
+		c := ch.Config
+		change(&c)
+		if _, err := d.Channels.Update(ctx, ch.ID, ChannelInput{Config: c}); err == nil || !strings.Contains(err.Error(), "enter the password again") {
+			t.Errorf("%+v: %v", c, err)
+		}
+	}
+	c := ch.Config
+	c.Host = "smtp.example.com"
+	if _, err := d.Channels.Update(ctx, ch.ID, ChannelInput{Config: c, Secrets: &SecretsInput{Password: strp("new password")}}); err != nil {
+		t.Errorf("with the password: %v", err)
+	}
+	ses, _ := d.Channels.Create(ctx, ChannelInput{Type: TypeSES, Name: "SES", Config: ChannelConfig{Region: "us-east-1", AccessKeyID: "AKIAEXAMPLEEXAMPLE", From: "a@example.com", To: []string{"a@example.com"}},
+		Secrets: &SecretsInput{SecretAccessKey: strp("secretkey")}})
+	sc := ses.Config
+	sc.Region = "eu-west-1"
+	if _, err := d.Channels.Update(ctx, ses.ID, ChannelInput{Config: sc}); err == nil {
+		t.Error("SES region changed without the key")
 	}
 }

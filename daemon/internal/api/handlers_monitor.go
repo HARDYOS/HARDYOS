@@ -29,8 +29,9 @@ func (s *Server) monitorRoutes() {
 		return
 	}
 	m := s.mux
-	m.Handle("GET /api/v1/monitor/series", s.authed(s.handleSeries))
-	m.Handle("GET /api/v1/monitor/history", s.authed(s.handleHistory))
+	// History names apps, VMs, pools and disks: administrators only.
+	m.Handle("GET /api/v1/monitor/series", s.admin(s.handleSeries))
+	m.Handle("GET /api/v1/monitor/history", s.admin(s.handleHistory))
 	m.Handle("GET /api/v1/monitor/conditions", s.admin(s.handleConditions))
 	m.Handle("GET /api/v1/monitor/settings", s.admin(s.handleMonitorSettings))
 	m.Handle("PUT /api/v1/monitor/settings", s.admin(s.handleSaveMonitorSettings))
@@ -80,8 +81,13 @@ func RegisterMonitorJobs(m *jobs.Manager, mon *monitor.Service, pc *priv.Client)
 				defer cancel()
 				var res ups.ApplyResult
 				if err := pc.Call(ctx, priv.OpUPSApply, ups.ApplyArgs{Config: cfg, Secrets: sec}, &res); err != nil {
+					// Keep what's running: the setup before this one.
+					if rerr := mon.UPS.RestorePrevious(context.WithoutCancel(jc)); rerr != nil {
+						return nil, errors.Join(err, rerr)
+					}
 					return nil, err
 				}
+				_ = mon.UPS.ForgetPrevious(jc)
 				jc.Progress(90, "Reading the UPS")
 				mon.UPS.Poll(jc)
 				return res, nil
@@ -149,8 +155,13 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request, _ *auth.U
 	}
 	points, _ := strconv.Atoi(q.Get("points"))
 	res, err := h.Query(r.Context(), names, from, to, now, points)
+	var re *monitor.ErrRange
+	if errors.As(err, &re) {
+		writeError(w, http.StatusBadRequest, "invalid", re.Msg)
+		return
+	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
+		internalError(s, w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
@@ -175,6 +186,9 @@ func (s *Server) handleSaveMonitorSettings(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	saved, err := s.cfg.Monitor.SaveSettings(r.Context(), st)
+	if err != nil {
+		s.record(r, u, "monitor.settings.save", "", audit.Failure, err.Error())
+	}
 	var ve *monitor.ValidationError
 	if errors.As(err, &ve) {
 		writeError(w, http.StatusBadRequest, "invalid", ve.Msg)
@@ -252,9 +266,10 @@ func (s *Server) handleSaveUPS(w http.ResponseWriter, r *http.Request, u *auth.U
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	cfg, _, err := s.cfg.Monitor.UPS.Save(r.Context(), req.Config, req.Secrets)
+	cfg, _, moved, err := s.cfg.Monitor.UPS.Save(r.Context(), req.Config, req.Secrets)
 	var ve *ups.ValidationError
 	if errors.As(err, &ve) {
+		s.record(r, u, "ups.apply", req.Config.Mode, audit.Failure, ve.Msg)
 		writeError(w, http.StatusBadRequest, "invalid", ve.Msg)
 		return
 	}
@@ -268,6 +283,9 @@ func (s *Server) handleSaveUPS(w http.ResponseWriter, r *http.Request, u *auth.U
 		target += " " + cfg.Driver + " network=" + strconv.FormatBool(cfg.ServeNetwork)
 	case ups.ModeNetClient:
 		target += " " + cfg.RemoteUPS + "@" + cfg.RemoteHost
+		if moved {
+			target += " (destination changed)"
+		}
 	}
 	s.submit(w, r, u, JobKindUPSApply, "Set up the UPS", map[string]string{"mode": cfg.Mode}, "ups.apply", target, nil)
 }

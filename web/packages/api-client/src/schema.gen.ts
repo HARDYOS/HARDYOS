@@ -960,7 +960,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Every resource history series */
+        /** Every resource history series (admin) */
         get: operations["listMetricSeries"];
         put?: never;
         post?: never;
@@ -978,8 +978,10 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Resource history for some series over a range
-         * @description Values come from the finest tier that still covers the range (10 s for a
+         * Resource history for some series over a range (admin)
+         * @description `from` is clamped to two years ago and `to` to now; a range needing more
+         *     than 48 stored values per returned point is refused (400).
+         *     Values come from the finest tier that still covers the range (10 s for a
          *     day, 1 min for 7 days, 15 min for 90 days, 1 h for 2 years), averaged down
          *     to at most `points` values.
          */
@@ -4278,6 +4280,8 @@ export interface components {
             /** @enum {string} */
             security?: "starttls" | "tls" | "none";
             username?: string;
+            /** @description SMTP: allow a port other than 25, 465, 587 and 2525 */
+            allowAnyPort?: boolean;
             /** @description SES region, e.g. us-east-1 */
             region?: string;
             accessKeyId?: string;
@@ -4504,10 +4508,16 @@ export interface components {
             shutdownRuntime?: number;
             serveNetwork?: boolean;
             clientUser?: string;
+            /** @description With serveNetwork: the one address of this server upsd listens on */
+            listenAddress?: string;
             remoteHost?: string;
             remotePort?: number;
             remoteUps?: string;
             remoteUser?: string;
+            /** @description Netclient: use TLS (the NUT server must offer it) */
+            remoteTls?: boolean;
+            /** @description Netclient with TLS: verify the server's certificate against the system's CAs */
+            remoteVerify?: boolean;
         };
         UPSSecretsInput: {
             clientPassword?: string;
@@ -4542,6 +4552,8 @@ export interface components {
             };
         };
         UPSView: {
+            /** @description This server's addresses, for listenAddress */
+            addresses: string[];
             config: components["schemas"]["UPSConfig"];
             secretsSet: {
                 [key: string]: boolean;

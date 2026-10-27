@@ -5,9 +5,12 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io/fs"
+	"net"
+	"net/netip"
 	"os"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 
 	"github.com/hardyos/hardyos/daemon/internal/rootfile"
@@ -38,6 +41,22 @@ type Root struct {
 	// to root:nut, mode 0640 (upsd and upsmon read them as nut).
 	Write func(path string, data []byte, mode os.FileMode) error
 	Chown func(path string) error
+	// Addrs lists this server's addresses (default: its interfaces').
+	Addrs func() ([]netip.Addr, error)
+}
+
+func interfaceAddrs() ([]netip.Addr, error) {
+	as, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil, err
+	}
+	var out []netip.Addr
+	for _, a := range as {
+		if p, err := netip.ParsePrefix(a.String()); err == nil {
+			out = append(out, p.Addr().Unmap())
+		}
+	}
+	return out, nil
 }
 
 func (r *Root) dir() string {
@@ -79,6 +98,19 @@ func (r *Root) Apply(ctx context.Context, a ApplyArgs) (*ApplyResult, error) {
 	cfg, err := a.Config.Normalize(a.Secrets)
 	if err != nil {
 		return nil, err
+	}
+	if cfg.ServeNetwork {
+		addrs := r.Addrs
+		if addrs == nil {
+			addrs = interfaceAddrs
+		}
+		have, err := addrs()
+		if err != nil {
+			return nil, err
+		}
+		if !slices.Contains(have, netip.MustParseAddr(cfg.ListenAddress)) {
+			return nil, invalid("%s isn't one of this server's addresses", cfg.ListenAddress)
+		}
 	}
 	files, err := Files(cfg, a.Secrets, monitorPassword())
 	if err != nil {

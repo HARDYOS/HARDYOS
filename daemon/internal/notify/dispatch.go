@@ -336,6 +336,12 @@ func (d *Dispatcher) dispatch(ctx context.Context, e Event, level Level, source 
 			m.Note = fmt.Sprintf("%d similar alert(s) were held back during the last hour.", held)
 		}
 		if quiet {
+			var held int
+			_ = d.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM notify_deferred WHERE channel_id = ?`, ch.ID).Scan(&held)
+			if held >= MaxDeferred {
+				d.record(ctx, ch.ID, e, "suppressed", "quiet hours: already holding the most alerts kept for the summary")
+				continue
+			}
 			if _, err := d.DB.ExecContext(ctx, `INSERT INTO notify_deferred (channel_id, at, kind, severity, title, body, link) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 				ch.ID, store.FormatTime(e.Time), e.Kind, e.Severity, e.Title, e.Body, e.Link); err == nil {
 				d.record(ctx, ch.ID, e, "held", "quiet hours")
@@ -413,6 +419,22 @@ func (d *Dispatcher) delay(attempt int) time.Duration {
 
 const maxAttempts = 3
 
+// MaxDeferred is how many alerts quiet hours hold per channel.
+const MaxDeferred = 1000
+
+// pruneBuckets forgets rate-limit buckets that have refilled (nothing
+// sent about that subject for two hours).
+func (d *Dispatcher) pruneBuckets() {
+	now := d.now()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for k, b := range d.buckets {
+		if now.Sub(b.last) > 2*time.Hour {
+			delete(d.buckets, k)
+		}
+	}
+}
+
 func (d *Dispatcher) deliver(ctx context.Context, dl delivery) {
 	sctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	err := d.send(sctx, dl.ch, dl.m)
@@ -463,6 +485,7 @@ func (d *Dispatcher) Run(ctx context.Context) {
 			return
 		case <-t.C:
 			d.flushQuiet(ctx)
+			d.pruneBuckets()
 		}
 	}
 }

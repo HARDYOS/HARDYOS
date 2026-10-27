@@ -34,14 +34,17 @@ var blockedPrefixes = func() []netip.Prefix {
 		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
 		"192.0.0.0/24", "192.0.2.0/24", "192.88.99.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24",
 		"203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4", "255.255.255.255/32",
-		"::/128", "::1/128", "64:ff9b:1::/48", "100::/64", "2001::/32", "2001:db8::/32", "fc00::/7", "fe80::/10", "ff00::/8",
+		"::/96", "::1/128", "64:ff9b:1::/48", "fec0::/10", "100::/64", "2001::/32", "2001:db8::/32", "fc00::/7", "fe80::/10", "ff00::/8",
 	} {
 		out = append(out, netip.MustParsePrefix(s))
 	}
 	return out
 }()
 
-var nat64 = netip.MustParsePrefix("64:ff9b::/96")
+var (
+	nat64  = netip.MustParsePrefix("64:ff9b::/96")
+	sixTo4 = netip.MustParsePrefix("2002::/16")
+)
 
 // publicAddr reports whether ip is a public unicast address.
 func publicAddr(ip netip.Addr) bool {
@@ -49,6 +52,13 @@ func publicAddr(ip netip.Addr) bool {
 	if ip.Is6() && nat64.Contains(ip) {
 		b := ip.As16()
 		ip = netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]})
+	}
+	if ip.Is6() && sixTo4.Contains(ip) {
+		// 6to4 carries an IPv4 address in bits 16-47: judge that one.
+		b := ip.As16()
+		if !publicAddr(netip.AddrFrom4([4]byte{b[2], b[3], b[4], b[5]})) {
+			return false
+		}
 	}
 	if !ip.IsValid() || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsMulticast() || ip.IsUnspecified() {
 		return false

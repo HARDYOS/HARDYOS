@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 )
@@ -80,11 +81,18 @@ func orNever(s string) string {
 	return s
 }
 
+// ReplicationTimeout bounds samba-tool drs showrepl.
+var ReplicationTimeout = 45 * time.Second
+
 // Replication asks this DC how replication from its partners is going.
+//
+// Only reading the configuration holds the manager's lock; samba-tool runs
+// outside it with its own timeout, so a slow or stuck DC never blocks
+// domain changes.
 func (m *Manager) Replication(ctx context.Context) (*Replication, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	c, err := m.Load()
+	m.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
@@ -94,6 +102,8 @@ func (m *Manager) Replication(ctx context.Context) (*Replication, error) {
 	if !c.Enabled || !m.serviceActive(ctx) {
 		return &Replication{Reason: "the domain controller isn't running", Links: []ReplLink{}, Failing: []string{}}, nil
 	}
+	ctx, cancel := context.WithTimeout(ctx, ReplicationTimeout)
+	defer cancel()
 	out, err := sysexec.Output(ctx, m.Runner, "ip", "netns", "exec", m.ns(), "samba-tool", "drs", "showrepl", "--json", "-s", m.SmbConf(), "-P")
 	if err != nil {
 		return nil, err

@@ -11,6 +11,7 @@ package ups
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"regexp"
 	"sort"
 	"strconv"
@@ -58,12 +59,21 @@ type Config struct {
 	// it runs low, before this one does. They sign in as ClientUser.
 	ServeNetwork bool   `json:"serveNetwork"`
 	ClientUser   string `json:"clientUser"`
+	// ListenAddress is the one address of this server upsd listens on for
+	// other servers (besides localhost): never every address.
+	ListenAddress string `json:"listenAddress"`
 
 	// Network client: the NUT server the UPS is on.
 	RemoteHost string `json:"remoteHost"`
 	RemotePort int    `json:"remotePort"`
 	RemoteUPS  string `json:"remoteUps"`
 	RemoteUser string `json:"remoteUser"`
+	// RemoteTLS talks to the NUT server over TLS (it must have TLS set up);
+	// RemoteVerify also checks its certificate against the system's CAs
+	// for RemoteHost. The NUT server is trusted either way: it can shut
+	// this server down.
+	RemoteTLS    bool `json:"remoteTls"`
+	RemoteVerify bool `json:"remoteVerify"`
 }
 
 // Secrets are a UPS setup's passwords.
@@ -111,7 +121,8 @@ func (c Config) Normalize(s Secrets) (Config, error) {
 	case ModeLocal:
 		out := Config{Mode: ModeLocal, Name: c.Name, Driver: c.Driver, Port: c.Port, VendorID: strings.ToLower(c.VendorID),
 			ProductID: strings.ToLower(c.ProductID), Serial: strings.TrimSpace(c.Serial), Description: strings.TrimSpace(c.Description),
-			ShutdownCharge: c.ShutdownCharge, ShutdownRuntime: c.ShutdownRuntime, ServeNetwork: c.ServeNetwork, ClientUser: c.ClientUser}
+			ShutdownCharge: c.ShutdownCharge, ShutdownRuntime: c.ShutdownRuntime, ServeNetwork: c.ServeNetwork, ClientUser: c.ClientUser,
+			ListenAddress: strings.TrimSpace(c.ListenAddress)}
 		if out.Name == "" {
 			out.Name = "ups"
 		}
@@ -166,13 +177,18 @@ func (c Config) Normalize(s Secrets) (Config, error) {
 			if !ValidPassword(s.ClientPassword) {
 				return c, invalid("the password for other servers must be 8-64 characters without spaces, quotes, \\ or #")
 			}
+			ip, err := netip.ParseAddr(out.ListenAddress)
+			if err != nil || ip.Zone() != "" || ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() || ip.IsLinkLocalUnicast() {
+				return c, invalid("choose the address of this server other servers reach the UPS on")
+			}
+			out.ListenAddress = ip.Unmap().String()
 		} else {
-			out.ClientUser = ""
+			out.ClientUser, out.ListenAddress = "", ""
 		}
 		return out, nil
 	case ModeNetClient:
 		out := Config{Mode: ModeNetClient, RemoteHost: strings.ToLower(strings.TrimSpace(c.RemoteHost)), RemotePort: c.RemotePort,
-			RemoteUPS: c.RemoteUPS, RemoteUser: c.RemoteUser}
+			RemoteUPS: c.RemoteUPS, RemoteUser: c.RemoteUser, RemoteTLS: c.RemoteTLS, RemoteVerify: c.RemoteTLS && c.RemoteVerify}
 		if out.RemotePort == 0 {
 			out.RemotePort = DefaultPort
 		}
@@ -263,7 +279,7 @@ func Files(c Config, s Secrets, monitorPassword string) (map[string]string, erro
 		}
 		upsd.WriteString("LISTEN 127.0.0.1 3493\nLISTEN ::1 3493\n")
 		if c.ServeNetwork {
-			upsd.WriteString("LISTEN 0.0.0.0 3493\nLISTEN :: 3493\n")
+			fmt.Fprintf(&upsd, "LISTEN %s 3493\n", c.ListenAddress)
 		}
 		fmt.Fprintf(&users, "[%s]\n\tpassword = %s\n\tupsmon primary\n", MonitorUser, monitorPassword)
 		if c.ServeNetwork {
@@ -285,6 +301,12 @@ func Files(c Config, s Secrets, monitorPassword string) (map[string]string, erro
 			host = "[" + host + "]"
 		}
 		fmt.Fprintf(&mon, "MONITOR %s@%s:%d 1 %s %s secondary\n", c.RemoteUPS, host, c.RemotePort, c.RemoteUser, s.RemotePassword)
+		if c.RemoteTLS {
+			mon.WriteString("FORCESSL 1\n")
+			if c.RemoteVerify {
+				mon.WriteString("CERTVERIFY 1\nCERTPATH /etc/ssl/certs\n")
+			}
+		}
 	}
 	mon.WriteString(`MINSUPPLIES 1
 SHUTDOWNCMD "/sbin/shutdown -h +0"

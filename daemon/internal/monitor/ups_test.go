@@ -104,7 +104,7 @@ func newUPSService(t *testing.T, addr string) (*UPSService, *events) {
 	host, port, _ := net.SplitHostPort(addr)
 	var p int
 	fmt.Sscan(port, &p)
-	if _, _, err := s.Save(context.Background(), ups.Config{Mode: ups.ModeNetClient, RemoteHost: host, RemotePort: p, RemoteUser: "monuser"},
+	if _, _, _, err := s.Save(context.Background(), ups.Config{Mode: ups.ModeNetClient, RemoteHost: host, RemotePort: p, RemoteUser: "monuser"},
 		&UPSSecretsInput{RemotePassword: strp("s3cret-pass")}); err != nil {
 		t.Fatal(err)
 	}
@@ -156,5 +156,39 @@ func TestUPSTransitions(t *testing.T) {
 	_ = s.DB.QueryRow(`SELECT value FROM settings WHERE key = 'ups.secrets'`).Scan(&raw)
 	if strings.Contains(raw, "s3cret") {
 		t.Error("UPS password stored in the clear")
+	}
+}
+
+func TestUPSDestinationAndRollback(t *testing.T) {
+	f := newFakeUPSD(t)
+	s, _ := newUPSService(t, f.ln.Addr().String())
+	ctx := context.Background()
+	cfg, _, _ := s.Config(ctx)
+	moved := cfg
+	moved.RemoteHost = "evil.example.com"
+	if _, _, m, err := s.Save(ctx, moved, nil); err == nil || !m || !strings.Contains(err.Error(), "enter the password again") {
+		t.Fatalf("moved without a password: %v %v", m, err)
+	}
+	moved.RemoteHost, moved.RemotePort = cfg.RemoteHost, 3494
+	if _, _, _, err := s.Save(ctx, moved, &UPSSecretsInput{}); err == nil {
+		t.Fatal("port changed without a password")
+	}
+	// Same destination: fine without the password.
+	if _, _, m, err := s.Save(ctx, cfg, nil); err != nil || m {
+		t.Fatalf("unchanged: %v %v", m, err)
+	}
+	// A new setup that fails to apply is rolled back.
+	moved.RemoteHost, moved.RemotePort = "nas2.home.arpa", cfg.RemotePort
+	if _, _, _, err := s.Save(ctx, moved, &UPSSecretsInput{RemotePassword: strp("other-pass")}); err != nil {
+		t.Fatal(err)
+	}
+	if c, sec, _ := s.Config(ctx); c.RemoteHost != "nas2.home.arpa" || sec.RemotePassword != "other-pass" {
+		t.Fatalf("saved %+v", c)
+	}
+	if err := s.RestorePrevious(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if c, sec, _ := s.Config(ctx); c.RemoteHost != cfg.RemoteHost || sec.RemotePassword != "s3cret-pass" {
+		t.Errorf("after rollback %+v %q", c, sec.RemotePassword)
 	}
 }

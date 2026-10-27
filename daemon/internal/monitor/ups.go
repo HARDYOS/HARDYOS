@@ -2,12 +2,15 @@ package monitor
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -30,6 +33,30 @@ type UPSView struct {
 	Status     *ups.Status     `json:"status"`
 	Error      string          `json:"error"`
 	CheckedAt  *time.Time      `json:"checkedAt"`
+	// Addresses are this server's addresses, for the one upsd listens on.
+	Addresses []string `json:"addresses"`
+}
+
+// serverAddrs lists this server's unicast addresses (not loopback or
+// link-local), for choosing where upsd listens.
+func serverAddrs() []string {
+	out := []string{}
+	as, err := net.InterfaceAddrs()
+	if err != nil {
+		return out
+	}
+	for _, a := range as {
+		p, err := netip.ParsePrefix(a.String())
+		if err != nil {
+			continue
+		}
+		ip := p.Addr().Unmap()
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsMulticast() || ip.IsUnspecified() {
+			continue
+		}
+		out = append(out, ip.String())
+	}
+	return out
 }
 
 const (
@@ -101,8 +128,12 @@ func (s *UPSService) Config(ctx context.Context) (ups.Config, ups.Secrets, error
 
 // Save validates and stores a setup; it returns what hardyd-priv should
 // apply. Applying it is a job (internal/api).
-func (s *UPSService) Save(ctx context.Context, c ups.Config, in *UPSSecretsInput) (ups.Config, ups.Secrets, error) {
-	_, sec, _ := s.Config(ctx)
+//
+// The setup before is kept until RestorePrevious or ForgetPrevious (the
+// apply job calls one of them), so a setup that fails to apply is rolled
+// back. moved reports that the remote UPS server, port or user changed.
+func (s *UPSService) Save(ctx context.Context, c ups.Config, in *UPSSecretsInput) (norm ups.Config, sec ups.Secrets, moved bool, err error) {
+	old, sec, _ := s.Config(ctx)
 	if in != nil {
 		if in.ClientPassword != nil {
 			sec.ClientPassword = *in.ClientPassword
@@ -111,9 +142,25 @@ func (s *UPSService) Save(ctx context.Context, c ups.Config, in *UPSSecretsInput
 			sec.RemotePassword = *in.RemotePassword
 		}
 	}
-	norm, err := c.Normalize(sec)
+	norm, err = c.Normalize(sec)
 	if err != nil {
-		return c, sec, err
+		return c, sec, false, err
+	}
+	// The remote password only goes to the server it was entered for.
+	if old.Mode == ups.ModeNetClient && norm.Mode == ups.ModeNetClient &&
+		(old.RemoteHost != norm.RemoteHost || old.RemotePort != norm.RemotePort || old.RemoteUser != norm.RemoteUser) {
+		moved = true
+		if in == nil || in.RemotePassword == nil {
+			return c, sec, true, &ups.ValidationError{Msg: "the UPS server, port or user changed: enter the password again"}
+		}
+	}
+	prevCfg, _ := s.DB.GetSetting(ctx, upsConfigKey)
+	prevSec, _ := s.DB.GetSetting(ctx, upsSecretsKey)
+	if err := s.DB.SetSetting(ctx, upsConfigKey+".prev", prevCfg); err != nil {
+		return norm, sec, moved, err
+	}
+	if err := s.DB.SetSetting(ctx, upsSecretsKey+".prev", prevSec); err != nil {
+		return norm, sec, moved, err
 	}
 	switch norm.Mode {
 	case ups.ModeLocal:
@@ -128,34 +175,65 @@ func (s *UPSService) Save(ctx context.Context, c ups.Config, in *UPSSecretsInput
 	}
 	b, _ := json.Marshal(norm)
 	if err := s.DB.SetSetting(ctx, upsConfigKey, string(b)); err != nil {
-		return norm, sec, err
+		return norm, sec, moved, err
 	}
 	sealed := ""
 	if sec != (ups.Secrets{}) {
 		k, err := s.key(ctx)
 		if err != nil {
-			return norm, sec, err
+			return norm, sec, moved, err
 		}
 		plain, _ := json.Marshal(sec)
 		box, err := secretbox.Seal(k, plain, []byte("settings:"+upsSecretsKey))
 		if err != nil {
-			return norm, sec, err
+			return norm, sec, moved, err
 		}
 		sealed = base64.StdEncoding.EncodeToString(box)
 	}
 	if err := s.DB.SetSetting(ctx, upsSecretsKey, sealed); err != nil {
-		return norm, sec, err
+		return norm, sec, moved, err
 	}
+	s.reset()
+	return norm, sec, moved, nil
+}
+
+func (s *UPSService) reset() {
 	s.mu.Lock()
 	s.last, s.lastErr, s.baseline, s.failures, s.commAlert = nil, "", false, 0, false
 	s.mu.Unlock()
-	return norm, sec, nil
+}
+
+// RestorePrevious puts back the setup from before the last Save (its
+// apply failed).
+func (s *UPSService) RestorePrevious(ctx context.Context) error {
+	cfg, err := s.DB.GetSetting(ctx, upsConfigKey+".prev")
+	if err != nil {
+		return nil // nothing kept
+	}
+	sec, _ := s.DB.GetSetting(ctx, upsSecretsKey+".prev")
+	if cfg == "" {
+		cfg = `{"mode":"off"}`
+	}
+	if err := s.DB.SetSetting(ctx, upsConfigKey, cfg); err != nil {
+		return err
+	}
+	if err := s.DB.SetSetting(ctx, upsSecretsKey, sec); err != nil {
+		return err
+	}
+	s.reset()
+	return s.ForgetPrevious(ctx)
+}
+
+// ForgetPrevious drops the kept setup (the new one is applied).
+func (s *UPSService) ForgetPrevious(ctx context.Context) error {
+	_, err := s.DB.ExecContext(ctx, `DELETE FROM settings WHERE key IN (?, ?)`, upsConfigKey+".prev", upsSecretsKey+".prev")
+	return err
 }
 
 // View returns the setup (without passwords) and the last reading.
 func (s *UPSService) View(ctx context.Context) (*UPSView, error) {
 	c, sec, err := s.Config(ctx)
-	v := &UPSView{Config: c, SecretsSet: map[string]bool{"clientPassword": sec.ClientPassword != "", "remotePassword": sec.RemotePassword != ""}}
+	v := &UPSView{Config: c, SecretsSet: map[string]bool{"clientPassword": sec.ClientPassword != "", "remotePassword": sec.RemotePassword != ""}, Addresses: serverAddrs()}
 	if err != nil {
 		v.Error = err.Error()
 	}
@@ -264,6 +342,12 @@ func (s *UPSService) Poll(ctx context.Context) {
 	q := s.Query
 	if q == nil {
 		q = ups.Query
+		if c.Mode == ups.ModeNetClient && c.RemoteTLS {
+			tc := &tls.Config{ServerName: c.RemoteHost, MinVersion: tls.VersionTLS12, InsecureSkipVerify: !c.RemoteVerify} //nolint:gosec // encryption without verification is the administrator's choice
+			q = func(ctx context.Context, addr, name string) (*ups.Status, error) {
+				return ups.QueryTLS(ctx, addr, name, tc)
+			}
+		}
 	}
 	qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	st, err := q(qctx, addr, name)

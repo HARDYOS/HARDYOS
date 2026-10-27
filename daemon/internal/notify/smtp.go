@@ -33,6 +33,50 @@ import (
 // or its network, and even then a password is only sent over TLS or to
 // this machine (net/smtp's PLAIN rule, which LOGIN follows too).
 
+// What a mail server may send: 64 KiB per answer (reset whenever HardyOS
+// sends a command) and 1 MiB for the whole conversation. A hostile or
+// broken server can't make hardyd buffer more.
+const (
+	smtpAnswerMax = 64 << 10
+	smtpTotalMax  = 1 << 20
+)
+
+var errSMTPTooMuch = errors.New("the mail server sent more than any SMTP answer needs")
+
+// limitedConn caps what's read from a mail server.
+type limitedConn struct {
+	net.Conn
+	answer, total int64
+}
+
+func newLimitedConn(c net.Conn) *limitedConn {
+	return &limitedConn{Conn: c, answer: smtpAnswerMax, total: smtpTotalMax}
+}
+
+func (c *limitedConn) Read(p []byte) (int, error) {
+	if c.answer <= 0 || c.total <= 0 {
+		return 0, errSMTPTooMuch
+	}
+	if int64(len(p)) > c.answer {
+		p = p[:c.answer]
+	}
+	if int64(len(p)) > c.total {
+		p = p[:c.total]
+	}
+	n, err := c.Conn.Read(p)
+	c.answer -= int64(n)
+	c.total -= int64(n)
+	return n, err
+}
+
+func (c *limitedConn) Write(p []byte) (int, error) {
+	c.answer = smtpAnswerMax
+	return c.Conn.Write(p)
+}
+
+// SMTPPorts are the ports an email channel may use without AllowAnyPort.
+var SMTPPorts = map[int]bool{25: true, 465: true, 587: true, 2525: true}
+
 // loginAuth is the LOGIN mechanism (Microsoft 365 and some relays offer
 // only it).
 type loginAuth struct {
@@ -160,15 +204,22 @@ func (d *Dispatcher) sendSMTP(ctx context.Context, ch *channelRow, m message) er
 	}
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	dialer := &net.Dialer{Timeout: 15 * time.Second}
-	var conn net.Conn
-	if cfg.Security == SecurityTLS {
-		conn, err = (&tls.Dialer{NetDialer: dialer, Config: tlsCfg}).DialContext(ctx, "tcp", addr)
-	} else {
-		conn, err = dialer.DialContext(ctx, "tcp", addr)
+	if !SMTPPorts[cfg.Port] && !cfg.AllowAnyPort {
+		return &sendError{Msg: fmt.Sprintf("port %d isn't a mail port (25, 465, 587, 2525)", cfg.Port)}
 	}
+	dialer := &net.Dialer{Timeout: 15 * time.Second}
+	raw, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return smtpError("connecting to "+addr, err)
+	}
+	var conn net.Conn = newLimitedConn(raw)
+	if cfg.Security == SecurityTLS {
+		tc := tls.Client(conn, tlsCfg)
+		if err := tc.HandshakeContext(ctx); err != nil {
+			raw.Close()
+			return smtpError("TLS with "+addr, err)
+		}
+		conn = tc
 	}
 	deadline, _ := ctx.Deadline()
 	_ = conn.SetDeadline(deadline)
@@ -177,7 +228,12 @@ func (d *Dispatcher) sendSMTP(ctx context.Context, ch *channelRow, m message) er
 	c, err := smtp.NewClient(conn, cfg.Host)
 	if err != nil {
 		conn.Close()
-		return smtpError("greeting", err)
+		// Whatever answered isn't speaking SMTP; don't repeat what it said.
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			return &sendError{Msg: addr + " didn't greet like a mail server (timed out)", Temporary: true}
+		}
+		return &sendError{Msg: addr + " isn't an SMTP server (no SMTP greeting)"}
 	}
 	defer c.Close()
 	helo, _ := osHostname()

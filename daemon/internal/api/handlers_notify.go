@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
@@ -143,13 +144,22 @@ func (s *Server) handleUpdateChannel(w http.ResponseWriter, r *http.Request, u *
 	if !decodeJSON(w, r, &in) {
 		return
 	}
+	old, err := s.cfg.Alerts.Channels.Get(r.Context(), id)
+	if err != nil {
+		s.writeAlertError(w, err)
+		return
+	}
 	ch, err := s.cfg.Alerts.Channels.Update(r.Context(), id, in)
 	if err != nil {
 		s.record(r, u, "alerts.channel.update", strconv.FormatInt(id, 10), audit.Failure, err.Error())
 		s.writeAlertError(w, err)
 		return
 	}
-	s.record(r, u, "alerts.channel.update", strconv.FormatInt(id, 10)+" "+ch.Name, audit.Success, secretsChanged(in.Secrets))
+	detail := secretsChanged(in.Secrets)
+	if notify.DestinationChanged(ch.Type, old.Config, ch.Config) {
+		detail = strings.TrimSpace("destination changed " + detail)
+	}
+	s.record(r, u, "alerts.channel.update", strconv.FormatInt(id, 10)+" "+ch.Name, audit.Success, detail)
 	writeJSON(w, http.StatusOK, ch)
 }
 
@@ -159,6 +169,7 @@ func (s *Server) handleDeleteChannel(w http.ResponseWriter, r *http.Request, u *
 		return
 	}
 	if err := s.cfg.Alerts.Channels.Delete(r.Context(), id); err != nil {
+		s.record(r, u, "alerts.channel.delete", strconv.FormatInt(id, 10), audit.Failure, err.Error())
 		s.writeAlertError(w, err)
 		return
 	}
@@ -213,6 +224,7 @@ func (s *Server) handleSetRoutes(w http.ResponseWriter, r *http.Request, u *auth
 		req.Routes = []notify.Route{}
 	}
 	if err := s.cfg.Alerts.Channels.SetRoutes(r.Context(), req.Routes); err != nil {
+		s.record(r, u, "alerts.routes.save", strconv.Itoa(len(req.Routes))+" rules", audit.Failure, err.Error())
 		s.writeAlertError(w, err)
 		return
 	}
@@ -231,6 +243,7 @@ func (s *Server) handleSaveAlertSettings(w http.ResponseWriter, r *http.Request,
 	}
 	saved, err := s.cfg.Alerts.SaveSettings(r.Context(), st)
 	if err != nil {
+		s.record(r, u, "alerts.settings.save", "", audit.Failure, err.Error())
 		s.writeAlertError(w, err)
 		return
 	}

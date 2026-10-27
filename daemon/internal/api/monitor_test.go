@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,7 +62,8 @@ func newMonitorEnv(t *testing.T) *monitorEnv {
 	senv := priv.StorageEnv{Runner: fake, Root: root}
 	priv.RegisterStorage(ps, senv)
 	priv.RegisterMonitor(ps, priv.MonitorEnv{Storage: senv, UPS: &ups.Root{Runner: fake, Root: fstest.MapFS{}, Dir: upsDir,
-		Write: func(p string, b []byte, m os.FileMode) error { return os.WriteFile(p, b, m) }, Chown: func(string) error { return nil }}})
+		Write: func(p string, b []byte, m os.FileMode) error { return os.WriteFile(p, b, m) }, Chown: func(string) error { return nil },
+		Addrs: func() ([]netip.Addr, error) { return []netip.Addr{netip.MustParseAddr("192.168.1.10")}, nil }}})
 	go func() { _ = ps.Serve(ctx, ln) }()
 	pc := priv.NewClient(sock)
 
@@ -203,6 +205,22 @@ func TestMonitorAPI(t *testing.T) {
 	if code := admin.do("GET", "/api/v1/monitor/history", nil, nil); code != 400 {
 		t.Errorf("history without series: %d", code)
 	}
+	// The security review's URL: clamped, quick, bounded.
+	start := time.Now()
+	code := admin.do("GET", "/api/v1/monitor/history?series=cpu.percent,mem.*,app.cpu:*&from=0000-01-01T00:00:00Z&to=9999-12-31T00:00:00Z&points=2000", nil, &hist)
+	if code != 200 || time.Since(start) > 3*time.Second || len(hist.Series) != 1 || len(hist.Series[0].Values) > 2000 || hist.To.After(time.Now()) {
+		t.Errorf("huge range: %d in %v, %d series", code, time.Since(start), len(hist.Series))
+	}
+	// History is for administrators.
+	admin.do("POST", "/api/v1/users", map[string]string{"username": "kid", "password": "kidpassword1"}, nil)
+	kid := env.client(t)
+	kid.do("POST", "/api/v1/auth/login", map[string]string{"username": "kid", "password": "kidpassword1"}, nil)
+	if code := kid.do("GET", "/api/v1/monitor/history?series=cpu.percent", nil, nil); code != 403 {
+		t.Errorf("non-admin history: %d", code)
+	}
+	if code := kid.do("GET", "/api/v1/monitor/series", nil, nil); code != 403 {
+		t.Errorf("non-admin series: %d", code)
+	}
 
 	// Settings.
 	var set monitor.Settings
@@ -250,7 +268,7 @@ func TestUPSAPI(t *testing.T) {
 	env := newMonitorEnv(t)
 	admin := adminClient(t, env.testEnv)
 	var acc struct{ Job struct{ ID string } }
-	code := admin.do("PUT", "/api/v1/ups", map[string]any{"config": map[string]any{"mode": "local", "serveNetwork": true, "shutdownCharge": 30},
+	code := admin.do("PUT", "/api/v1/ups", map[string]any{"config": map[string]any{"mode": "local", "serveNetwork": true, "listenAddress": "192.168.1.10", "shutdownCharge": 30},
 		"secrets": map[string]string{"clientPassword": "family-ups-pw"}}, &acc)
 	if code != 202 {
 		t.Fatalf("save %d", code)
@@ -274,5 +292,44 @@ func TestUPSAPI(t *testing.T) {
 	var devs []ups.Device
 	if code := admin.do("GET", "/api/v1/ups/detect", nil, &devs); code != 200 || devs == nil {
 		t.Errorf("detect %d %v", code, devs)
+	}
+}
+
+func TestAlertAuditAndDestination(t *testing.T) {
+	env := newMonitorEnv(t)
+	admin := adminClient(t, env.testEnv)
+	var ch map[string]any
+	if code := admin.do("POST", "/api/v1/alerts/channels", map[string]any{"type": "smtp", "name": "Gmail",
+		"config":  map[string]any{"host": "smtp.gmail.com", "username": "cade@gmail.com", "from": "cade@gmail.com", "to": []string{"cade@example.com"}},
+		"secrets": map[string]string{"password": "app password"}}, &ch); code != 201 {
+		t.Fatalf("create %d", code)
+	}
+	id := itoa(int(ch["id"].(float64)))
+	cfg := ch["config"].(map[string]any)
+	cfg["host"] = "mail.evil.example"
+	if code := admin.do("PATCH", "/api/v1/alerts/channels/"+id, map[string]any{"config": cfg}, nil); code != 400 {
+		t.Errorf("moved without the password: %d", code)
+	}
+	if code := admin.do("PATCH", "/api/v1/alerts/channels/"+id, map[string]any{"config": cfg, "secrets": map[string]string{"password": "other"}}, nil); code != 200 {
+		t.Errorf("moved with the password: %d", code)
+	}
+	admin.do("DELETE", "/api/v1/alerts/channels/1", nil, nil)
+	admin.do("PUT", "/api/v1/alerts/routes", map[string]any{"routes": []map[string]any{{"category": "bad cat", "channelId": 1, "minSeverity": "info"}}}, nil)
+	admin.do("PUT", "/api/v1/alerts/settings", map[string]any{"quietHours": map[string]any{"start": "25:00", "end": "07:00", "allow": "critical"}, "dedupMinutes": 1, "maxPerHour": 1}, nil)
+	admin.do("PUT", "/api/v1/monitor/settings", map[string]any{"poolWarnPct": 10}, nil)
+	var entries []map[string]any
+	admin.do("GET", "/api/v1/audit?limit=100", nil, &entries)
+	got := map[string]bool{}
+	for _, e := range entries {
+		got[e["action"].(string)+" "+e["outcome"].(string)] = true
+		if e["action"] == "alerts.channel.update" && e["outcome"] == "success" && !strings.Contains(e["detail"].(string), "destination changed") {
+			t.Errorf("update detail %q", e["detail"])
+		}
+	}
+	for _, want := range []string{"alerts.channel.update failure", "alerts.channel.update success", "alerts.channel.delete failure",
+		"alerts.routes.save failure", "alerts.settings.save failure", "monitor.settings.save failure"} {
+		if !got[want] {
+			t.Errorf("no audit entry %q (have %v)", want, got)
+		}
 	}
 }

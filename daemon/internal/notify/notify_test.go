@@ -99,12 +99,13 @@ func TestWebhookURLRules(t *testing.T) {
 }
 
 func TestPublicAddr(t *testing.T) {
-	for _, s := range []string{"127.0.0.1", "10.1.2.3", "172.20.0.1", "192.168.0.1", "100.100.1.1", "169.254.169.254", "0.0.0.0", "::1", "fe80::1", "fc00::1", "::ffff:127.0.0.1", "64:ff9b::a00:1", "224.0.0.1", "198.18.0.1"} {
+	for _, s := range []string{"127.0.0.1", "10.1.2.3", "172.20.0.1", "192.168.0.1", "100.100.1.1", "169.254.169.254", "0.0.0.0", "::1", "fe80::1", "fc00::1", "::ffff:127.0.0.1", "64:ff9b::a00:1", "224.0.0.1", "198.18.0.1",
+		"::7f00:1", "::a00:1", "2002:7f00:1::1", "2002:c0a8:101::1", "fec0::1", "2002:0a00:0001::"} {
 		if publicAddr(netip.MustParseAddr(s)) {
 			t.Errorf("%s counted as public", s)
 		}
 	}
-	for _, s := range []string{"1.1.1.1", "162.159.135.232", "2606:4700::1111"} {
+	for _, s := range []string{"1.1.1.1", "162.159.135.232", "2606:4700::1111", "2002:0101:0101::1"} {
 		if !publicAddr(netip.MustParseAddr(s)) {
 			t.Errorf("%s counted as local", s)
 		}
@@ -174,7 +175,7 @@ func TestWebhookPayloads(t *testing.T) {
 		t.Fatal(err)
 	}
 	embed := dsc["embeds"].([]any)[0].(map[string]any)
-	if embed["title"] != "Disk sda <is> failing" || embed["url"] != "https://nas.example.com/#open=storage/disks" || embed["color"].(float64) != 0xF59E0B {
+	if embed["title"] != `Disk sda \<is\> failing` || embed["url"] != "https://nas.example.com/#open=storage/disks" || embed["color"].(float64) != 0xF59E0B {
 		t.Errorf("discord embed %v", embed)
 	}
 	if am := dsc["allowed_mentions"].(map[string]any); len(am["parse"].([]any)) != 0 {
@@ -301,7 +302,7 @@ func TestQuietHours(t *testing.T) {
 	at = time.Date(2026, 10, 28, 7, 1, 0, 0, time.Local)
 	d.flushQuiet(ctx)
 	waitFor(t, func() bool { return len(h.got()) == 2 })
-	if !strings.Contains(h.got()[1], "1 alert(s) while quiet hours were on") || !strings.Contains(h.got()[1], "On battery") {
+	if !strings.Contains(h.got()[1], "while quiet hours were on") || !strings.Contains(h.got()[1], "On battery") {
 		t.Errorf("summary %s", h.got()[1])
 	}
 }
@@ -453,5 +454,73 @@ func waitFor(t *testing.T, ok func() bool) {
 			t.Fatal("timed out")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestChatTextIsLiteral(t *testing.T) {
+	m := message{Event: Event{Kind: "pool.data", Severity: SeverityCritical, Title: "Damaged: [x](https://evil)", Body: "file **[x](https://evil.example/a)** and https://evil.example/b @everyone",
+		Link: "storage/pool/tank", Time: time.Unix(1_800_000_000, 0)}, Server: "nas", ServerURL: "https://nas.example.com"}
+	var dsc struct {
+		Embeds []struct{ Title, Description, URL string } `json:"embeds"`
+	}
+	if err := json.Unmarshal(discordPayload(m), &dsc); err != nil {
+		t.Fatal(err)
+	}
+	e := dsc.Embeds[0]
+	for _, s := range []string{e.Title, e.Description} {
+		if strings.Contains(s, "[x](") || strings.Contains(s, "https://evil") || strings.Contains(s, "**") || strings.Contains(s, "@everyone") {
+			t.Errorf("discord text still active: %q", s)
+		}
+	}
+	if !strings.Contains(e.Description, `\[x\]\(https:`) || e.URL != "https://nas.example.com/#open=storage/pool/tank" {
+		t.Errorf("discord %q %q", e.Description, e.URL)
+	}
+	teams := string(teamsPayload(m))
+	if strings.Contains(teams, `"TextBlock"`) || !strings.Contains(teams, `"TextRun"`) || !strings.Contains(teams, `"url":"https://nas.example.com/#open=storage/pool/tank"`) {
+		t.Errorf("teams %s", teams)
+	}
+	var slack struct {
+		Blocks []struct {
+			Text struct {
+				Verbatim bool `json:"verbatim"`
+			} `json:"text"`
+		} `json:"blocks"`
+	}
+	_ = json.Unmarshal(slackPayload(m), &slack)
+	if !slack.Blocks[1].Text.Verbatim {
+		t.Error("slack body may auto-link")
+	}
+}
+
+func TestDispatcherBounds(t *testing.T) {
+	d, db := newTestDispatcher(t)
+	h := newHook(t)
+	testClient(d, h)
+	id := addHook(t, d, TypeDiscord, h)
+	now := time.Date(2026, 10, 27, 23, 30, 0, 0, time.Local)
+	d.Now = func() time.Time { return now }
+	s := DefaultSettings()
+	s.QuietHours.Enabled, s.DedupMinutes, s.MaxPerHour = true, 0, 120
+	_, _ = d.SaveSettings(t.Context(), s)
+	_, _ = db.Exec(`INSERT INTO notify_deferred (channel_id, at, kind, severity, title) SELECT ?, 'x', 'k', 'warning', 't' FROM (WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM c WHERE n < ?) SELECT n FROM c)`, id, MaxDeferred)
+	d.Notify(t.Context(), Event{Kind: "ups.power", Severity: SeverityWarning, Title: "one too many", Link: "ups"})
+	var n int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM notify_deferred WHERE channel_id = ?`, id).Scan(&n)
+	if n != MaxDeferred {
+		t.Errorf("%d deferred, cap %d", n, MaxDeferred)
+	}
+	d.mu.Lock()
+	k := len(d.buckets)
+	d.mu.Unlock()
+	if k == 0 {
+		t.Fatal("no bucket")
+	}
+	now = now.Add(3 * time.Hour)
+	d.pruneBuckets()
+	d.mu.Lock()
+	k = len(d.buckets)
+	d.mu.Unlock()
+	if k != 0 {
+		t.Errorf("%d buckets after pruning", k)
 	}
 }

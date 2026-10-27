@@ -320,10 +320,16 @@ function ChannelDialog({ channel, onClose, onSaved }: { channel: AlertChannel | 
               <Field label="User name" hint="Usually the full email address">
                 {(id) => <TextInput id={id} autoComplete="off" value={cfg.username ?? ""} onChange={(e) => set({ username: e.target.value })} />}
               </Field>
-              <Field label="Password" hint={isSet("password") ? "Saved. Leave empty to keep it." : "For Gmail, an app password"}>
+              <Field label="Password" hint={isSet("password") ? "Saved. Changing the server, port, encryption or user needs it again." : "For Gmail, an app password"}>
                 {(id) => <TextInput id={id} type="password" autoComplete="new-password" value={password} placeholder={isSet("password") ? "••••••••" : ""} onChange={(e) => setPassword(e.target.value)} />}
               </Field>
             </div>
+            <Toggle
+              label="Allow another port"
+              description="Mail servers use 25, 465, 587 or 2525. Turn this on only if yours really uses another."
+              checked={!!cfg.allowAnyPort}
+              onChange={(v) => set({ allowAnyPort: v })}
+            />
           </>
         )}
 

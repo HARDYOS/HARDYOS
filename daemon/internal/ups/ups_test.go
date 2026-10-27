@@ -3,9 +3,17 @@ package ups
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"os/user"
@@ -21,7 +29,7 @@ import (
 
 func TestNormalizeAndFiles(t *testing.T) {
 	cfg := Config{Mode: ModeLocal, VendorID: "0764", ProductID: "0501", Serial: "CXXKV2000536", Description: "Rack UPS",
-		ShutdownCharge: 25, ShutdownRuntime: 300, ServeNetwork: true}
+		ShutdownCharge: 25, ShutdownRuntime: 300, ServeNetwork: true, ListenAddress: "192.168.1.10"}
 	files, err := Files(cfg, Secrets{ClientPassword: "s3cret-pass"}, "MonitorPassw0rd")
 	if err != nil {
 		t.Fatal(err)
@@ -29,7 +37,7 @@ func TestNormalizeAndFiles(t *testing.T) {
 	for name, want := range map[string][]string{
 		"nut.conf":    {"MODE=netserver"},
 		"ups.conf":    {"[ups]", "driver = usbhid-ups", "port = auto", "vendorid = 0764", `serial = "CXXKV2000536"`, "ignorelb", "override.battery.charge.low = 25", "override.battery.runtime.low = 300"},
-		"upsd.conf":   {"LISTEN 127.0.0.1 3493", "LISTEN 0.0.0.0 3493"},
+		"upsd.conf":   {"LISTEN 127.0.0.1 3493", "LISTEN 192.168.1.10 3493"},
 		"upsd.users":  {"[hardyos-monitor]", "password = MonitorPassw0rd", "upsmon primary", "[hardyos-client]", "password = s3cret-pass", "upsmon secondary"},
 		"upsmon.conf": {"MONITOR ups@localhost 1 hardyos-monitor MonitorPassw0rd primary", `SHUTDOWNCMD "/sbin/shutdown -h +0"`, "RUN_AS_USER nut"},
 	} {
@@ -38,6 +46,13 @@ func TestNormalizeAndFiles(t *testing.T) {
 				t.Errorf("%s lacks %q:\n%s", name, w, files[name])
 			}
 		}
+	}
+	if c := files["upsd.conf"]; strings.Contains(c, "0.0.0.0") || strings.Contains(c, "LISTEN :: ") {
+		t.Errorf("upsd listens everywhere:\n%s", c)
+	}
+	files, _ = Files(Config{Mode: ModeNetClient, RemoteHost: "nas1.home.arpa", RemoteUser: "hardyos-client", RemoteTLS: true, RemoteVerify: true}, Secrets{RemotePassword: "s3cret-pass"}, "")
+	if !strings.Contains(files["upsmon.conf"], "FORCESSL 1\nCERTVERIFY 1\nCERTPATH /etc/ssl/certs") {
+		t.Errorf("TLS netclient:\n%s", files["upsmon.conf"])
 	}
 	// Without network serving: localhost only, no client account.
 	files, _ = Files(Config{Mode: ModeLocal}, Secrets{}, "MonitorPassw0rd")
@@ -73,7 +88,11 @@ func TestNormalizeRejects(t *testing.T) {
 		{Config{Mode: ModeLocal, ShutdownCharge: 95}, Secrets{}},
 		{Config{Mode: ModeLocal, ServeNetwork: true}, Secrets{ClientPassword: "short"}},
 		{Config{Mode: ModeLocal, ServeNetwork: true}, Secrets{ClientPassword: "has space in it"}},
-		{Config{Mode: ModeLocal, ServeNetwork: true, ClientUser: MonitorUser}, Secrets{ClientPassword: "longenough"}},
+		{Config{Mode: ModeLocal, ServeNetwork: true, ClientUser: MonitorUser, ListenAddress: "10.0.0.2"}, Secrets{ClientPassword: "longenough"}},
+		{Config{Mode: ModeLocal, ServeNetwork: true}, Secrets{ClientPassword: "longenough"}},
+		{Config{Mode: ModeLocal, ServeNetwork: true, ListenAddress: "0.0.0.0"}, Secrets{ClientPassword: "longenough"}},
+		{Config{Mode: ModeLocal, ServeNetwork: true, ListenAddress: "::"}, Secrets{ClientPassword: "longenough"}},
+		{Config{Mode: ModeLocal, ServeNetwork: true, ListenAddress: "10.0.0.2 3493\nLISTEN 0.0.0.0"}, Secrets{ClientPassword: "longenough"}},
 		{Config{Mode: ModeNetClient, RemoteHost: "nas;rm", RemoteUser: "u"}, Secrets{RemotePassword: "longenough"}},
 		{Config{Mode: ModeNetClient, RemoteHost: "nas", RemoteUser: "u"}, Secrets{RemotePassword: `quote"d-pass`}},
 		{Config{Mode: ModeNetClient, RemoteHost: "nas", RemoteUser: ""}, Secrets{RemotePassword: "longenough"}},
@@ -156,6 +175,15 @@ func TestApplyWritesAndStarts(t *testing.T) {
 	}
 	if _, err := r.Apply(context.Background(), ApplyArgs{Config: Config{Mode: ModeLocal, Port: "/dev/sda"}}); err == nil {
 		t.Error("invalid setup applied")
+	}
+	r.Addrs = func() ([]netip.Addr, error) { return []netip.Addr{netip.MustParseAddr("192.168.1.10")}, nil }
+	shared := Config{Mode: ModeLocal, ServeNetwork: true, ListenAddress: "192.168.1.99"}
+	if _, err := r.Apply(context.Background(), ApplyArgs{Config: shared, Secrets: Secrets{ClientPassword: "longenough"}}); err == nil || !strings.Contains(err.Error(), "isn't one of this server's addresses") {
+		t.Errorf("foreign listen address: %v", err)
+	}
+	shared.ListenAddress = "192.168.1.10"
+	if _, err := r.Apply(context.Background(), ApplyArgs{Config: shared, Secrets: Secrets{ClientPassword: "longenough"}}); err != nil {
+		t.Errorf("own listen address: %v", err)
 	}
 }
 
@@ -334,4 +362,94 @@ func firstExisting(paths ...string) string {
 		}
 	}
 	return ""
+}
+
+// rawUPSD answers every connection with what reply writes.
+func rawUPSD(t *testing.T, reply func(net.Conn)) string {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				_, _ = bufio.NewReader(c).ReadString('\n')
+				reply(c)
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+func TestQueryCaps(t *testing.T) {
+	long := rawUPSD(t, func(c net.Conn) {
+		fmt.Fprintf(c, "BEGIN LIST VAR ups\nVAR ups x \"%s\"\nEND LIST VAR ups\n", strings.Repeat("a", 300))
+	})
+	if _, err := Query(context.Background(), long, "ups"); err == nil {
+		t.Error("a 300-byte value was accepted")
+	}
+	many := rawUPSD(t, func(c net.Conn) {
+		fmt.Fprint(c, "BEGIN LIST VAR ups\n")
+		for i := range 600 {
+			fmt.Fprintf(c, "VAR ups v%d \"1\"\n", i)
+		}
+		fmt.Fprint(c, "END LIST VAR ups\n")
+	})
+	if _, err := Query(context.Background(), many, "ups"); err == nil {
+		t.Error("600 variables accepted")
+	}
+	line := rawUPSD(t, func(c net.Conn) {
+		_, _ = c.Write([]byte("BEGIN LIST VAR ups\n" + strings.Repeat("V", 64<<10)))
+	})
+	if _, err := Query(context.Background(), line, "ups"); err == nil {
+		t.Error("a 64 KiB line accepted")
+	}
+	endless := rawUPSD(t, func(c net.Conn) {
+		_, _ = c.Write([]byte("BEGIN LIST VAR ups\n"))
+		for range 100000 {
+			if _, err := c.Write([]byte("VAR ups x \"1\"\n")); err != nil {
+				return
+			}
+		}
+	})
+	start := time.Now()
+	if _, err := Query(context.Background(), endless, "ups"); err == nil || time.Since(start) > 5*time.Second {
+		t.Errorf("an endless answer: %v after %v", err, time.Since(start))
+	}
+}
+
+func TestQueryTLS(t *testing.T) {
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "localhost"}, DNSNames: []string{"localhost"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert := tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+	addr := rawUPSD(t, func(c net.Conn) {
+		fmt.Fprint(c, "OK STARTTLS\n")
+		tc := tls.Server(c, &tls.Config{Certificates: []tls.Certificate{cert}})
+		r := bufio.NewReader(tc)
+		_, _ = r.ReadString('\n')
+		fmt.Fprint(tc, "BEGIN LIST VAR ups\nVAR ups ups.status \"OB\"\nEND LIST VAR ups\n")
+	})
+	st, err := QueryTLS(context.Background(), addr, "ups", &tls.Config{InsecureSkipVerify: true}) //nolint:gosec // test
+	if err != nil || !st.OnBattery {
+		t.Fatalf("%+v %v", st, err)
+	}
+	// Verification against the system's CAs fails for a self-signed server.
+	if _, err := QueryTLS(context.Background(), addr, "ups", &tls.Config{ServerName: "localhost"}); err == nil {
+		t.Error("an unverifiable certificate was accepted")
+	}
+	plain := rawUPSD(t, func(c net.Conn) { fmt.Fprint(c, "ERR FEATURE-NOT-CONFIGURED\n") })
+	if _, err := QueryTLS(context.Background(), plain, "ups", &tls.Config{}); err == nil || !strings.Contains(err.Error(), "doesn't offer TLS") {
+		t.Errorf("no TLS: %v", err)
+	}
 }

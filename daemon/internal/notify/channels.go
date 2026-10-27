@@ -60,6 +60,8 @@ type ChannelConfig struct {
 	Port     int    `json:"port,omitempty"`
 	Security string `json:"security,omitempty"`
 	Username string `json:"username,omitempty"`
+	// AllowAnyPort allows a port other than 25, 465, 587 and 2525.
+	AllowAnyPort bool `json:"allowAnyPort,omitempty"`
 
 	// Amazon SES API v2.
 	Region           string `json:"region,omitempty"`
@@ -267,6 +269,10 @@ func normalizeConfig(typ string, in ChannelConfig, sec Secrets) (ChannelConfig, 
 		}
 		if out.Port < 1 || out.Port > 65535 {
 			return out, invalid("the port must be between 1 and 65535")
+		}
+		out.AllowAnyPort = in.AllowAnyPort
+		if !SMTPPorts[out.Port] && !out.AllowAnyPort {
+			return out, invalid("mail servers use port 25, 465, 587 or 2525; allow another port explicitly if yours differs")
 		}
 		out.Username = strings.TrimSpace(in.Username)
 		if len(out.Username) > 256 || strings.ContainsAny(out.Username, "\r\n") {
@@ -554,6 +560,16 @@ func (c *Channels) Update(ctx context.Context, id int64, in ChannelInput) (*Chan
 	if err != nil {
 		return nil, err
 	}
+	// A saved password or key only ever goes where it was entered for: a
+	// new destination needs it typed again.
+	if DestinationChanged(cur.Type, cur.Config, cfg) {
+		switch {
+		case cur.Type == TypeSMTP && cur.secrets.Password != "" && (in.Secrets == nil || in.Secrets.Password == nil):
+			return nil, invalid("the mail server or user changed: enter the password again")
+		case cur.Type == TypeSES && (in.Secrets == nil || in.Secrets.SecretAccessKey == nil):
+			return nil, invalid("the region or access key changed: enter the secret access key again")
+		}
+	}
 	sealed, err := c.seal(ctx, id, sec)
 	if err != nil {
 		return nil, err
@@ -564,6 +580,19 @@ func (c *Channels) Update(ctx context.Context, id int64, in ChannelInput) (*Chan
 		return nil, err
 	}
 	return c.Get(ctx, id)
+}
+
+// DestinationChanged reports whether a channel's settings now send its
+// stored secret somewhere else (another mail server, port, encryption or
+// user; another SES region or key).
+func DestinationChanged(typ string, old, cur ChannelConfig) bool {
+	switch typ {
+	case TypeSMTP:
+		return old.Host != cur.Host || old.Port != cur.Port || old.Security != cur.Security || old.Username != cur.Username || old.AllowAnyPort != cur.AllowAnyPort
+	case TypeSES:
+		return old.Region != cur.Region || old.AccessKeyID != cur.AccessKeyID
+	}
+	return false
 }
 
 // Delete removes a channel (not the desktop).

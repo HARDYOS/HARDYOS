@@ -1,8 +1,13 @@
 package domain
 
 import (
+	"context"
+	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 )
 
 const showreplTwoDCs = `{
@@ -33,5 +38,48 @@ func TestParseShowrepl(t *testing.T) {
 	}
 	if _, err := ParseShowrepl([]byte("ERROR")); err == nil {
 		t.Error("garbage parsed")
+	}
+}
+
+// slowRunner blocks samba-tool until its context ends.
+type slowRunner struct{ *sysexec.Fake }
+
+func (s slowRunner) Run(ctx context.Context, stdin []byte, name string, args ...string) (sysexec.Result, error) {
+	if name == "ip" && len(args) > 3 && args[3] == "samba-tool" {
+		<-ctx.Done()
+		return sysexec.Result{}, ctx.Err()
+	}
+	return s.Fake.Run(ctx, stdin, name, args...)
+}
+
+func TestReplicationDoesntHoldTheLock(t *testing.T) {
+	f := &sysexec.Fake{}
+	m := testManager(t, f)
+	f.OnPrefix("systemctl is-active", sysexec.Result{})
+	_ = os.MkdirAll(m.dataPath(), 0o700)
+	if err := m.save(&Config{Domain: "home.example.net", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	m.Runner = slowRunner{f}
+	old := ReplicationTimeout
+	ReplicationTimeout = 300 * time.Millisecond
+	defer func() { ReplicationTimeout = old }()
+	done := make(chan error, 1)
+	go func() { _, err := m.Replication(context.Background()); done <- err }()
+	time.Sleep(50 * time.Millisecond)
+	locked := make(chan struct{})
+	go func() { m.mu.Lock(); m.mu.Unlock(); close(locked) }()
+	select {
+	case <-locked:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("samba-tool held the domain lock")
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("a stuck samba-tool didn't time out")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no timeout")
 	}
 }

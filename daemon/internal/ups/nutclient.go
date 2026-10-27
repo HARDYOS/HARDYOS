@@ -3,8 +3,10 @@ package ups
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sort"
 	"strconv"
@@ -88,21 +90,50 @@ func nutErr(line string) error {
 // Query reads every variable of one UPS from a NUT server (upsd) over its
 // network protocol; no sign-in is needed for reading.
 func Query(ctx context.Context, addr, ups string) (*Status, error) {
+	return QueryTLS(ctx, addr, ups, nil)
+}
+
+// Limits on what a NUT server may send: a NUT answer is small, and a
+// remote server is not trusted to keep it so.
+const (
+	maxLine  = 4096      // bytes per line
+	maxValue = 256       // bytes per value
+	maxVars  = 500       // variables per UPS
+	maxTotal = 256 << 10 // bytes per conversation
+)
+
+// QueryTLS is Query over TLS (NUT's STARTTLS) when tlsCfg is set.
+func QueryTLS(ctx context.Context, addr, ups string, tlsCfg *tls.Config) (*Status, error) {
 	if !nameRE.MatchString(ups) {
 		return nil, fmt.Errorf("invalid UPS name %q", ups)
 	}
 	d := net.Dialer{Timeout: 5 * time.Second}
-	conn, err := d.DialContext(ctx, "tcp", addr)
+	raw, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	defer raw.Close()
+	_ = raw.SetDeadline(time.Now().Add(10 * time.Second))
+	var conn io.ReadWriter = raw
+	if tlsCfg != nil {
+		if _, err := fmt.Fprint(raw, "STARTTLS\n"); err != nil {
+			return nil, err
+		}
+		line, err := bufio.NewReaderSize(io.LimitReader(raw, maxLine), 64).ReadString('\n')
+		if err != nil || !strings.HasPrefix(line, "OK STARTTLS") {
+			return nil, errors.New("the NUT server doesn't offer TLS (STARTTLS)")
+		}
+		tc := tls.Client(raw, tlsCfg)
+		if err := tc.HandshakeContext(ctx); err != nil {
+			return nil, fmt.Errorf("TLS with the NUT server: %w", err)
+		}
+		conn = tc
+	}
 	if _, err := fmt.Fprintf(conn, "LIST VAR %s\n", ups); err != nil {
 		return nil, err
 	}
-	sc := bufio.NewScanner(conn)
-	sc.Buffer(make([]byte, 4096), 1<<20)
+	sc := bufio.NewScanner(io.LimitReader(conn, maxTotal))
+	sc.Buffer(make([]byte, maxLine), maxLine)
 	vars := map[string]string{}
 	begun := false
 	for sc.Scan() {
@@ -119,10 +150,14 @@ func Query(ctx context.Context, addr, ups string) (*Status, error) {
 			rest := strings.TrimPrefix(line, "VAR ")
 			f := strings.SplitN(rest, " ", 3)
 			if len(f) == 3 && f[0] == ups {
-				vars[f[1]] = unquote(f[2])
+				v := unquote(f[2])
+				if len(v) > maxValue || len(f[1]) > 128 {
+					return nil, errors.New("the NUT server sent a value longer than NUT allows")
+				}
+				vars[f[1]] = v
 			}
 		}
-		if len(vars) > 2000 {
+		if len(vars) > maxVars {
 			return nil, errors.New("the NUT server sent too many variables")
 		}
 	}

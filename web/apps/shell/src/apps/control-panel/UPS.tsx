@@ -175,6 +175,18 @@ export function UPS() {
               />
               {cfg.serveNetwork && (
                 <div className="grid-2" style={{ gap: 12 }}>
+                  <Field label="Listen on" hint="The address other servers reach this one on; upsd listens there and on localhost only">
+                    {(id) => (
+                      <Select id={id} value={cfg.listenAddress ?? ""} onChange={(e) => edit({ listenAddress: e.target.value })}>
+                        <option value="">Choose an address…</option>
+                        {v.addresses.map((a) => (
+                          <option key={a} value={a}>
+                            {a}
+                          </option>
+                        ))}
+                      </Select>
+                    )}
+                  </Field>
                   <Field label="User name for other servers">
                     {(id) => <TextInput id={id} className="input mono" value={cfg.clientUser || "hardyos-client"} onChange={(e) => edit({ clientUser: e.target.value })} />}
                   </Field>
@@ -206,7 +218,23 @@ export function UPS() {
                   {(id) => <TextInput id={id} type="password" autoComplete="new-password" value={remotePw} placeholder={v.secretsSet.remotePassword ? "••••••••" : ""} onChange={(e) => { setRemotePw(e.target.value); setDraft({ ...cfg }); }} />}
                 </Field>
               </div>
-              <Alert tone="info">This server shuts down when the UPS server says the battery is low, before the UPS server itself does.</Alert>
+              <Toggle
+                label="Use TLS"
+                description="Encrypt the connection. The UPS server must have TLS set up in NUT."
+                checked={!!cfg.remoteTls}
+                onChange={(on) => edit({ remoteTls: on, remoteVerify: on ? cfg.remoteVerify : false })}
+              />
+              {cfg.remoteTls && (
+                <Toggle
+                  label="Verify its certificate"
+                  description="Check the server's certificate for this host name against the system's trusted certificate authorities."
+                  checked={!!cfg.remoteVerify}
+                  onChange={(on) => edit({ remoteVerify: on })}
+                />
+              )}
+              <Alert tone="warn" title="The UPS server is trusted">
+                This server shuts down whenever the UPS server says so (low battery or a forced shutdown). Only connect to a server you control.
+              </Alert>
             </>
           )}
         </div>

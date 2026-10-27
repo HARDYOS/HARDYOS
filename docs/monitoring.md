@@ -51,6 +51,8 @@ everything; a new channel gets warnings and critical alerts of every kind.
 - *Quiet hours* (optional, e.g. 22:00-07:00): chat and email alerts below
   the chosen severity (critical by default) are held and sent as one summary
   when quiet hours end. The desktop shows everything as it happens.
+- Quiet hours hold at most 1,000 alerts per channel; more are logged as
+  suppressed. Rate-limit state for subjects quiet for two hours is dropped.
 - Failed deliveries are retried (after 30 s and 2 min) when the failure is
   temporary (network, 429, 5xx, SMTP 4xx). The last 500 deliveries are in
   the delivery log.
@@ -65,6 +67,22 @@ holds the token). Email is the exception: an SMTP server may be on this
 machine or the LAN (the family mail server). STARTTLS is required when
 chosen (never a silent fallback); without encryption a password is only
 sent to this machine.
+
+**Secrets stay with their destination.** Changing an email channel's
+server, port, encryption or user (or an SES channel's region or key)
+needs the password or key typed again; the audit log notes "destination
+changed". The same holds for a networked UPS's server, port or user.
+
+**Mail servers** are read with limits (64 KiB per answer, 1 MiB per
+conversation); something that doesn't greet like an SMTP server gets "isn't
+an SMTP server" without its own words repeated; ports are 25, 465, 587 or
+2525 unless **Allow another port** is on.
+
+**Untrusted text stays text.** Alert text carries names others chose (file,
+app, VM, disk names). In Discord it's escaped (markdown characters, `@`, and
+`://` so bare URLs aren't linked); Teams cards use plain-text runs, never
+markdown blocks; Slack's text is `verbatim` (no auto-links or mentions).
+Only HardyOS's own address is a link.
 
 Links in messages point to the desktop's address (**Server address for
 links**, e.g. `https://nas.example.com`) with `#open=<link>`; the desktop
@@ -126,11 +144,26 @@ HardyOS uses NUT. Three setups:
   levels and NUT's `upsmon` shuts the server down (`/sbin/shutdown -h +0`).
   The shutdown never depends on hardyd running.
 - **Share this UPS with other servers** makes this server a NUT server
-  (`MODE=netserver`, upsd listening on port 3493) with an account for the
-  other servers (`upsmon secondary`).
+  (`MODE=netserver`) with an account for the other servers (`upsmon
+  secondary`). upsd listens on localhost and on **one** address of this
+  server chosen in the UI (hardyd-priv checks it's really one of the
+  server's), never on every address.
 - **Connected to another server** (netclient): upsmon watches the UPS on
   the other server and shuts this one down when told, before that server
-  shuts down itself.
+  shuts down itself. **Use TLS** sets `FORCESSL 1` (the server must have TLS
+  set up in NUT) and hardyd reads it over NUT's STARTTLS; **Verify its
+  certificate** adds `CERTVERIFY 1` with the system CAs (`CERTPATH
+  /etc/ssl/certs`; NUT builds using NSS need a certificate database
+  instead). Without verification the link is encrypted but not
+  authenticated.
+- **Trust.** The NUT server a netclient connects to can shut that server
+  down at any time (low battery or forced shutdown). Connect only to servers
+  you control; the UI says so.
+
+Saving a UPS setup keeps the previous one until the `ups.apply` job has
+applied the new one; if applying fails, the previous setup is restored.
+hardyd's NUT client caps what a server may send (4 KiB per line, 256 bytes
+per value, 500 variables, 256 KiB in all).
 
 hardyd-priv writes `/etc/nut/{nut.conf,ups.conf,upsd.conf,upsd.users,upsmon.conf}`
 (root:nut, 0640) and starts only what the setup needs; the local upsmon
@@ -151,6 +184,11 @@ backups stay small:
 | 1 | 1 minute | 7 days |
 | 2 | 15 minutes | 90 days |
 | 3 | 1 hour | 2 years |
+
+History is for administrators (it names apps, VMs, pools and disks).
+Queries are bounded: `from` is clamped to two years ago and `to` to now, a
+range needing more than 48 stored values per returned point is refused, a
+read is one range query per series, and nothing read is cached.
 
 Each tier stores chunks of float32 values per series (one row per hour of
 10-second values, 1.4 KB), and each coarser tier is the average of the one
@@ -181,14 +219,14 @@ Resource Monitor shows a card for any series prefix it's given.
 | `GET/POST /alerts/channels`, `PATCH/DELETE /alerts/channels/{id}`, `POST /alerts/channels/{id}/test` | admin | Channels (secrets write-only) |
 | `GET/PUT /alerts/routes`, `GET /alerts/categories` | admin | Routing |
 | `GET/PUT /alerts/settings`, `GET /alerts/deliveries` | admin | Quiet hours, limits, delivery log |
-| `GET /monitor/series`, `GET /monitor/history?series=cpu.percent,app.cpu:*&range=24h&points=300` | signed in | History |
+| `GET /monitor/series`, `GET /monitor/history?series=cpu.percent,app.cpu:*&range=24h&points=300` | admin | History |
 | `GET /monitor/conditions` | admin | What's wrong now |
 | `GET/PUT /monitor/settings` | admin | Thresholds, self-test and scrub window |
 | `GET /monitor/disks`, `POST /monitor/disks/{name}/test` | admin | Disk health, self-test now (job `monitor.smart.test`) |
 | `GET/PUT /ups`, `GET /ups/detect` | admin | UPS setup (job `ups.apply`), detection |
 
 Changing channels, routing, settings, UPS setup and starting tests are
-audited (never with secret values).
+audited, failures as well as successes (never with secret values).
 
 ## Root operations
 
@@ -198,7 +236,7 @@ audited (never with secret values).
 | `hw.smart.test` | device, test (short, long, abort) | `smartctl -t short|long` / `-X` |
 | `ups.detect` | none | `nut-scanner -U -q`, else sysfs |
 | `ups.apply` | setup and passwords (validated) | writes /etc/nut, `upsdrvsvcctl resync`, enables and restarts the NUT units it needs |
-| `domain.replication` | none | `samba-tool drs showrepl --json` in the DC's namespace |
+| `domain.replication` | none | `samba-tool drs showrepl --json` in the DC's namespace (45 s timeout, outside the domain lock) |
 | `system.ping` | none | now also returns when hardyd-priv started |
 
 The monitor's polling operations are logged at debug level.
