@@ -180,6 +180,13 @@ type Manager struct {
 	lastParent string
 	// othersChecked is when the list of other DCs was last refreshed.
 	othersChecked time.Time
+
+	// netMu guards the DC's links (macvlan and shim) and held; it's taken
+	// on its own, never while waiting for the network manager.
+	netMu sync.Mutex
+	// held: a bridge is being added or removed, so the DC stays off the
+	// LAN until it's done (HoldNetwork / ReleaseNetwork).
+	held bool
 }
 
 func or(v, def string) string {

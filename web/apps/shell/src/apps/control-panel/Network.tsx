@@ -159,6 +159,7 @@ export function Network() {
             <tbody>
               {cfg.interfaces.map((it, i) => {
                 const bond = cfg.bonds.find((b) => b.members.includes(it.name));
+                const bridge = (cfg.bridges ?? []).find((b) => b.port === it.name);
                 return (
                   <tr key={it.name}>
                     <td>
@@ -170,6 +171,8 @@ export function Network() {
                     <td>
                       {bond ? (
                         <span className="muted small">Part of {bond.name}</span>
+                      ) : bridge ? (
+                        <span className="muted small">Under the bridge {bridge.name}, which has its address</span>
                       ) : (
                         <AddressingEditor
                           name={it.name}
@@ -188,6 +191,7 @@ export function Network() {
       </Card>
 
       <BondsCard cfg={cfg} live={st.live} edit={edit} />
+      <BridgesCard cfg={cfg} edit={edit} />
       <VLANsCard cfg={cfg} live={st.live} edit={edit} />
 
       {reviewing && (
@@ -201,6 +205,43 @@ export function Network() {
         />
       )}
     </>
+  );
+}
+
+/** Bridges put virtual machines on the home network; the first VM that
+ * needs one creates it. Removing one gives its address back to the port. */
+function BridgesCard({ cfg, edit }: { cfg: NetworkConfig; edit: (fn: (c: NetworkConfig) => NetworkConfig) => void }) {
+  const bridges = cfg.bridges ?? [];
+  if (bridges.length === 0) return null;
+  return (
+    <Card title="Bridges for virtual machines">
+      <p className="small muted" style={{ marginTop: 0 }}>
+        Virtual machines plug into a bridge to be on your network like any other computer. The bridge has the server's address.
+      </p>
+      <div className="stack">
+        {bridges.map((br, i) => (
+          <div key={br.name} className="row" style={{ alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+            <div className="stack" style={{ gap: 2, minWidth: 140 }}>
+              <strong className="mono">{br.name}</strong>
+              <span className="small muted">over {br.port}</span>
+            </div>
+            <AddressingEditor
+              name={br.name}
+              value={br}
+              canVLAN={cfg.vlans.some((v) => v.parent === br.name)}
+              onChange={(a) => edit((c) => ({ ...c, bridges: (c.bridges ?? []).map((x, j) => (j === i ? { ...x, ...a } : x)) }))}
+            />
+            <IconButton
+              label={`Remove ${br.name}`}
+              title={`Remove ${br.name}: VMs on the home network lose their connection until it's back`}
+              onClick={() => edit((c) => ({ ...c, bridges: (c.bridges ?? []).filter((_, j) => j !== i) }))}
+            >
+              <TrashIcon size={16} />
+            </IconButton>
+          </div>
+        ))}
+      </div>
+    </Card>
   );
 }
 
@@ -414,7 +455,11 @@ function BondsCard({ cfg, live, edit }: { cfg: NetworkConfig; live: LiveInterfac
                   </Select>
                 )}
               </Field>
-              <AddressingEditor name={b.name} value={b} canVLAN={cfg.vlans.some((v) => v.parent === b.name)} onChange={(a) => setBond(i, { ...b, ...a })} />
+              {(cfg.bridges ?? []).some((br) => br.port === b.name) ? (
+                <span className="muted small">Under a bridge, which has its address</span>
+              ) : (
+                <AddressingEditor name={b.name} value={b} canVLAN={cfg.vlans.some((v) => v.parent === b.name)} onChange={(a) => setBond(i, { ...b, ...a })} />
+              )}
             </div>
           ))}
         </div>

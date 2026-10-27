@@ -34,6 +34,7 @@ tags:
   - name: apps
   - name: sharelinks
   - name: files
+  - name: vms
 paths:
   /health:
     get:
@@ -3096,6 +3097,311 @@ paths:
       responses:
         "202": { description: Restarting }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  # ---- virtual machines API (phase 5 part C, docs/vms.md) ----
+  /vms:
+    get:
+      operationId: listVMs
+      summary: Every virtual machine with its state, CPU and memory use, and disks kept from deleted VMs
+      tags: [vms]
+      responses:
+        "200":
+          description: The VMs
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VMOverview" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    post:
+      operationId: createVM
+      summary: Create a VM (a job - downloads, the network bridge, the VirtIO drivers disc, disks, import, start)
+      description: |
+        Administrators only. The spec is checked here and again by the root
+        helper, which builds the libvirt definition itself. The first VM on
+        the home network (bridge or VLAN network card) puts the server's
+        network on a bridge, keeping its address; if the server can't be
+        reached that way the change is undone and the job fails.
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMCreateRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /vms/templates:
+    get:
+      operationId: listVMTemplates
+      summary: The New VM wizard's templates, with presets and suggested downloads
+      tags: [vms]
+      responses:
+        "200":
+          description: Templates, in order
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/VMTemplate" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /vms/capabilities:
+    get:
+      operationId: getVMCapabilities
+      summary: What the server can do for VMs (KVM, firmware, TPM, pools, bridge, ISO library)
+      tags: [vms]
+      responses:
+        "200":
+          description: Capabilities
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VMCapabilities" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /vms/bridge:
+    post:
+      operationId: createVMBridge
+      summary: Put the server's network on a bridge for VMs now (a job; same address, undone if the server becomes unreachable)
+      tags: [vms]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /vms/kept/delete:
+    post:
+      operationId: deleteVMKeptDisks
+      summary: Delete disks kept from a deleted VM (a job)
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMKeptDeleteRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /vms/isos:
+    get:
+      operationId: listVMLibrary
+      summary: The ISO library (the ISOs shared folder) and downloads in progress
+      tags: [vms]
+      responses:
+        "200":
+          description: The library
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VMLibrary" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /vms/isos/download:
+    post:
+      operationId: downloadVMImage
+      summary: Download an installer (.iso) or disk image into the ISO library by link (a job; https only, optional SHA-256)
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMDownload" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /vms/isos/{name}:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+    delete:
+      operationId: deleteVMImage
+      summary: Delete a file from the ISO library that no VM has in a drive (a job)
+      tags: [vms]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /vms/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getVM
+      summary: One VM, with its addresses and disk use
+      tags: [vms]
+      responses:
+        "200":
+          description: The VM
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VM" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      operationId: updateVM
+      summary: Change a VM's hardware and settings (a job; most changes apply at its next start)
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMUpdateRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: deleteVM
+      summary: Delete a VM that's off (a job); its disks are deleted or kept
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMDeleteRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /vms/{id}/{action}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - name: action
+        in: path
+        required: true
+        schema: { type: string, enum: [start, stop, force-stop, restart, reset] }
+        description: stop asks the guest to shut down; force-stop pulls the plug; reset is a hard restart
+    post:
+      operationId: vmAction
+      summary: Start, shut down, turn off, restart or reset a VM (a job)
+      tags: [vms]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /vms/{id}/logs:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: lines, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 5000 } }
+    get:
+      operationId: getVMLogs
+      summary: The end of the VM's QEMU log
+      tags: [vms]
+      responses:
+        "200":
+          description: The log
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VMLogs" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /vms/{id}/snapshots:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: listVMSnapshots
+      summary: The VM's snapshots, newest first
+      tags: [vms]
+      responses:
+        "200":
+          description: Snapshots
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/VMSnapshot" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      operationId: snapshotVM
+      summary: Snapshot the whole VM (disks, settings, firmware); file systems are frozen first with the guest agent (a job)
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMSnapshotRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /vms/{id}/snapshots/{name}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: name, in: path, required: true, schema: { type: string } }
+    delete:
+      operationId: deleteVMSnapshot
+      summary: Delete one snapshot (a job)
+      tags: [vms]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /vms/{id}/rollback:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: rollbackVM
+      summary: Put a VM that's off back to a snapshot (a job; later snapshots and changes are lost)
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMRollbackRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /vms/{id}/console:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: openVMConsole
+      summary: A one-time pass to a running VM's screen, valid for a minute
+      description: |
+        Open the returned path as a WebSocket (subprotocol "binary"): it
+        carries the VM's VNC (RFB) stream for noVNC. The pass works once,
+        for this VM only. Opening and closing are audited.
+      tags: [vms]
+      responses:
+        "200":
+          description: The pass
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VMConsoleSession" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /vms/{id}/console/ws:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: token, in: query, required: true, schema: { type: string } }
+    get:
+      operationId: vmConsoleSocket
+      summary: The VM's screen as a WebSocket (RFB in binary frames), for a pass from /vms/{id}/console
+      tags: [vms]
+      responses:
+        "101": { description: Switching to the WebSocket }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  # ---- end of virtual machines API ----
 components:
   securitySchemes:
     session:
@@ -3751,8 +4057,8 @@ components:
       properties:
         mode:
           type: string
-          enum: [dhcp, static, "off", member]
-          description: member is set by the server for bond members
+          enum: [dhcp, static, "off", member, bridged]
+          description: member is set by the server for bond members, bridged for the port or bond under a bridge
         address: { type: string, description: "Static only: CIDR, like 192.168.1.20/24" }
         gateway: { type: string, description: Static only, optional }
         mtu: { type: integer, description: 0 or absent for the default 1500 }
@@ -3790,12 +4096,25 @@ components:
         interfaces: { type: array, items: { $ref: "#/components/schemas/NetworkInterface" } }
         bonds: { type: array, items: { $ref: "#/components/schemas/NetworkBond" } }
         vlans: { type: array, items: { $ref: "#/components/schemas/NetworkVLAN" } }
+        bridges:
+          type: array
+          items: { $ref: "#/components/schemas/NetworkBridge" }
+          description: Bridges for virtual machines; leaving it out keeps the current ones
+    NetworkBridge:
+      allOf:
+        - $ref: "#/components/schemas/NetworkAddressing"
+        - type: object
+          required: [name, port]
+          properties:
+            name: { type: string, description: br0 to br9 }
+            port: { type: string, description: The port or bond it runs over (it takes that one's address) }
+            mac: { type: string, description: "The port's MAC address, kept so DHCP gives the same address" }
     LiveInterface:
       type: object
       required: [name, kind, mac, up, carrier, speedMbps, addresses]
       properties:
         name: { type: string }
-        kind: { type: string, enum: [port, bond, vlan, other] }
+        kind: { type: string, enum: [port, bond, vlan, bridge, other] }
         mac: { type: string }
         up: { type: boolean }
         carrier: { type: boolean, description: A cable is connected and the link is up }
@@ -4881,3 +5200,308 @@ components:
         overwrite: { type: boolean, description: Replace a file that's already there (never a folder) }
         modified: { type: integer, format: int64, description: The file's modification time in ms since 1970 (File.lastModified) }
     # ---- end of files API schemas (part C) ----
+    # ---- virtual machines API schemas (phase 5 part C) ----
+    VMCPU:
+      type: object
+      required: [cores, threads]
+      properties:
+        cores: { type: integer, minimum: 1, maximum: 256 }
+        threads: { type: integer, enum: [1, 2], description: Threads per core }
+    VMMemory:
+      type: object
+      required: [mb, balloon]
+      properties:
+        mb: { type: integer, minimum: 128 }
+        balloon: { type: boolean, description: The guest can give unused memory back and report its use }
+    VMFirmware:
+      type: object
+      required: [type, secureBoot, tpm]
+      properties:
+        type: { type: string, enum: [uefi, bios] }
+        secureBoot: { type: boolean }
+        tpm: { type: boolean, description: A TPM 2.0 (swtpm), as Windows 11 needs }
+    VMDisk:
+      type: object
+      required: [name, sizeGB, bus]
+      properties:
+        name: { type: string, description: disk0 to disk9 }
+        sizeGB: { type: integer, minimum: 1 }
+        bus: { type: string, enum: [virtio-scsi, virtio-blk, sata] }
+        import:
+          type: object
+          required: [file]
+          properties:
+            file: { type: string, description: A disk image in the ISO library, copied into the disk when the VM is created }
+    VMMedia:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string, enum: [iso, virtio, cloudinit, empty], description: "iso: a file from the ISO library; virtio: the VirtIO drivers disc; cloudinit: the generated cloud-init disc" }
+        iso: { type: string }
+    VMNIC:
+      type: object
+      required: [mode, model]
+      properties:
+        mode: { type: string, enum: [bridge, nat, vlan], description: "bridge: on the home network (its own address from the router); nat: behind the server; vlan: a VLAN of the home network" }
+        vlan: { type: integer, minimum: 1, maximum: 4094 }
+        model: { type: string, enum: [virtio, e1000e] }
+        mac: { type: string, description: Empty for a new card (one is made up) }
+    VMCloudInit:
+      type: object
+      required: [user, sshKeys, installAgent]
+      properties:
+        user: { type: string }
+        sshKeys: { type: array, items: { type: string } }
+        hostname: { type: string }
+        passwordHash: { type: string, description: Never sent by the server; set a password with the request's password }
+        installAgent: { type: boolean }
+    VMAutostart:
+      type: object
+      required: [enabled, order, delaySec]
+      properties:
+        enabled: { type: boolean }
+        order: { type: integer, minimum: 0, maximum: 999, description: Lower starts first }
+        delaySec: { type: integer, minimum: 0, maximum: 600, description: Wait after starting this VM before the next }
+    VMDevice:
+      type: object
+      required: [kind, id]
+      description: A passed-through device (see the devices API); checked and prepared by the devices code when the VM starts
+      properties:
+        kind: { type: string, enum: [pci, usb, gpu, vgpu] }
+        id: { type: string, description: "PCI address (0000:01:00.0) or USB vendor:product / bus-port" }
+        vgpuType: { type: string }
+        romFile: { type: string }
+        primary: { type: boolean, description: The GPU is the VM's main display }
+    VMSpec:
+      type: object
+      required: [id, name, template, os, pool, cpu, memory, firmware, disks, media, nics, video, guestAgent, boot, autostart, devices]
+      properties:
+        id: { type: string, description: "Short name: 2-32 lowercase letters, digits and dashes" }
+        name: { type: string }
+        description: { type: string }
+        template: { type: string }
+        os: { type: string, enum: [windows, linux, other] }
+        pool: { type: string }
+        uuid: { type: string }
+        cpu: { $ref: "#/components/schemas/VMCPU" }
+        memory: { $ref: "#/components/schemas/VMMemory" }
+        firmware: { $ref: "#/components/schemas/VMFirmware" }
+        disks: { type: array, items: { $ref: "#/components/schemas/VMDisk" } }
+        media: { type: array, items: { $ref: "#/components/schemas/VMMedia" } }
+        nics: { type: array, items: { $ref: "#/components/schemas/VMNIC" } }
+        video: { type: string, enum: [virtio, vga, bochs, none] }
+        guestAgent: { type: boolean }
+        cloudInit: { $ref: "#/components/schemas/VMCloudInit" }
+        boot: { type: array, items: { type: string, enum: [disk, cdrom, network] } }
+        autostart: { $ref: "#/components/schemas/VMAutostart" }
+        devices: { type: array, items: { $ref: "#/components/schemas/VMDevice" } }
+        streaming:
+          type: object
+          required: [remote]
+          properties:
+            remote: { type: boolean, description: Publish Sunshine through the VPN for play away from home }
+        labels: { type: object, additionalProperties: { type: string } }
+    VM:
+      allOf:
+        - $ref: "#/components/schemas/VMSpec"
+        - type: object
+          required: [dataset, state, cpuPercent, memoryUsedMB, addresses, passwordSet, restartNeeded, diskUsage]
+          properties:
+            dataset: { type: string }
+            state: { type: string, enum: [running, stopped, paused, shutting-down, crashed, suspended, unknown] }
+            cpuPercent: { type: number }
+            memoryUsedMB: { type: integer }
+            addresses: { type: array, items: { type: string } }
+            passwordSet: { type: boolean }
+            restartNeeded: { type: boolean, description: Hardware changed while it ran }
+            diskUsage: { type: object, additionalProperties: { type: integer, format: int64 }, description: Bytes each disk uses on the pool }
+    VMKeptDisk:
+      type: object
+      required: [dataset, vm, pool, bytes]
+      properties:
+        dataset: { type: string }
+        vm: { type: string }
+        pool: { type: string }
+        bytes: { type: integer, format: int64 }
+    VMOverview:
+      type: object
+      required: [vms, kept]
+      properties:
+        vms: { type: array, items: { $ref: "#/components/schemas/VM" } }
+        kept: { type: array, items: { $ref: "#/components/schemas/VMKeptDisk" } }
+    VMPreset:
+      type: object
+      required: [id, name, summary, cores, threads, memoryMB, diskGB]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        summary: { type: string }
+        cores: { type: integer }
+        threads: { type: integer }
+        memoryMB: { type: integer }
+        diskGB: { type: integer }
+    VMImage:
+      type: object
+      required: [name, kind, urls]
+      properties:
+        name: { type: string }
+        kind: { type: string, enum: [iso, disk] }
+        urls: { type: [object, "null"], additionalProperties: { type: string }, description: Download links by architecture (x86_64, aarch64) }
+        page: { type: string }
+    VMTemplate:
+      type: object
+      required: [id, name, summary, group, os, install, firmware, diskBus, nicModel, nics, video, virtio, cloudInit, balloon, gpu, presets, defaultPreset, minMemoryMB, minDiskGB, images, notes]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        summary: { type: string }
+        group: { type: string, enum: [windows, linux, gaming, appliance, other] }
+        os: { type: string, enum: [windows, linux, other] }
+        install: { type: string, enum: [iso, image, cloud] }
+        firmware: { $ref: "#/components/schemas/VMFirmware" }
+        diskBus: { type: string }
+        nicModel: { type: string }
+        nics: { type: integer }
+        video: { type: string }
+        virtio: { type: boolean }
+        cloudInit: { type: boolean }
+        balloon: { type: boolean }
+        gpu: { type: boolean }
+        presets: { type: array, items: { $ref: "#/components/schemas/VMPreset" } }
+        defaultPreset: { type: string }
+        minMemoryMB: { type: integer }
+        minDiskGB: { type: integer }
+        images: { type: [array, "null"], items: { $ref: "#/components/schemas/VMImage" } }
+        notes: { type: [array, "null"], items: { type: string } }
+    VMArch:
+      type: object
+      required: [arch, machine]
+      properties:
+        arch: { type: string }
+        machine: { type: string }
+        sata: { type: boolean }
+        cdBus: { type: string }
+        tpmModel: { type: string }
+        hyperV: { type: boolean }
+        smm: { type: boolean }
+        vmport: { type: boolean }
+        legacyBios: { type: boolean }
+        pit: { type: boolean }
+    VMCapabilities:
+      type: object
+      required: [supported, problem, kvm, arch, cpus, memoryMB, pools, uefi, secureBoot, tpm, libvirt, bridge, library, virtio, devices, committedMB]
+      properties:
+        supported: { type: boolean }
+        problem: { type: string, description: Why VMs can't run, in plain words }
+        kvm: { type: boolean }
+        arch: { $ref: "#/components/schemas/VMArch" }
+        cpus: { type: integer }
+        memoryMB: { type: integer }
+        pools: { type: array, items: { type: string } }
+        uefi: { type: boolean }
+        secureBoot: { type: boolean }
+        tpm: { type: boolean }
+        libvirt: { type: string }
+        bridge: { type: string, description: The home network's bridge, empty until the first bridged VM }
+        library: { type: string, description: The ISOs shared folder's pool, empty when there's none }
+        virtio: { type: boolean, description: The VirtIO drivers disc is downloaded }
+        devices: { description: The devices code's overview (IOMMU, GPUs) when it's there }
+        committedMB: { type: integer, description: Memory of the running VMs }
+    VMTask:
+      type: object
+      required: [id, kind, vm, file, progress, message, done, error, started, finished]
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [download, import] }
+        vm: { type: string }
+        file: { type: string }
+        progress: { type: number }
+        message: { type: string }
+        done: { type: boolean }
+        error: { type: string }
+        started: { type: string, format: date-time }
+        finished: { type: string, format: date-time }
+    VMLibraryFile:
+      type: object
+      required: [name, kind, size, modified, usedBy]
+      properties:
+        name: { type: string }
+        kind: { type: string, enum: [iso, disk] }
+        size: { type: integer, format: int64 }
+        modified: { type: string, format: date-time }
+        usedBy: { type: array, items: { type: string }, description: VMs that have it in a drive }
+    VMLibrary:
+      type: object
+      required: [pool, path, files, tasks]
+      properties:
+        pool: { type: string, description: Empty until the ISOs shared folder exists }
+        path: { type: string }
+        files: { type: array, items: { $ref: "#/components/schemas/VMLibraryFile" } }
+        tasks: { type: array, items: { $ref: "#/components/schemas/VMTask" } }
+    VMDownload:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string, description: An https:// link }
+        name: { type: string, description: Save as (default from the link; .gz and .bz2 are unpacked) }
+        sha256: { type: string }
+        pool: { type: string, description: Where to make the ISOs shared folder if there's none }
+    VMCreateRequest:
+      type: object
+      required: [spec]
+      properties:
+        spec: { $ref: "#/components/schemas/VMSpec" }
+        password: { type: string, description: The cloud-init user's password (never stored as typed) }
+        start: { type: boolean }
+        downloads: { type: array, items: { $ref: "#/components/schemas/VMDownload" }, maxItems: 4, description: Files to download into the ISO library first }
+    VMUpdateRequest:
+      type: object
+      required: [spec]
+      properties:
+        spec: { $ref: "#/components/schemas/VMSpec" }
+        password: { type: string }
+        removeDisks: { type: array, items: { type: string }, description: Disks left out of the spec that may be deleted (the VM must be off) }
+    VMDeleteRequest:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: string, description: The VM's name or display name }
+        keepDisks: { type: boolean }
+    VMKeptDeleteRequest:
+      type: object
+      required: [dataset, confirm]
+      properties:
+        dataset: { type: string }
+        confirm: { type: string, description: The deleted VM's name }
+    VMSnapshot:
+      type: object
+      required: [name, label, created, bytes, consistent]
+      properties:
+        name: { type: string }
+        label: { type: string }
+        created: { type: string, format: date-time }
+        bytes: { type: integer, format: int64 }
+        consistent: { type: boolean, description: The guest's file systems were frozen first (or it was off) }
+    VMSnapshotRequest:
+      type: object
+      properties:
+        label: { type: string, maxLength: 80 }
+    VMRollbackRequest:
+      type: object
+      required: [snapshot, confirm]
+      properties:
+        snapshot: { type: string }
+        confirm: { type: string }
+    VMConsoleSession:
+      type: object
+      required: [token, expires, path]
+      properties:
+        token: { type: string }
+        expires: { type: string, format: date-time }
+        path: { type: string, description: The WebSocket to open }
+    VMLogs:
+      type: object
+      required: [logs]
+      properties:
+        logs: { type: string }
+    # ---- end of virtual machines API schemas ----

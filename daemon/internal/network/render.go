@@ -62,6 +62,10 @@ func RenderInterfaces(c Config) string {
 		case ModeMember:
 			// The bond stanza lists its members (bond-slaves).
 			continue
+		case ModeBridged:
+			// The bridge brings it up (bridge-ports).
+			fmt.Fprintf(&b, "\niface %s inet manual\n", it.Name)
+			writeMTU(&b, it.Name, it.MTU)
 		case ModeOff:
 			if !vlanParents[it.Name] {
 				fmt.Fprintf(&b, "\n# %s is off\n", it.Name)
@@ -87,19 +91,54 @@ func RenderInterfaces(c Config) string {
 			opts = append(opts, "bond-primary "+bd.Members[0])
 		}
 		a := bd.Addressing
-		if a.Mode == ModeOff {
+		if a.Mode == ModeOff || a.Mode == ModeBridged {
 			a.Mode = "manual"
 		}
 		writeStanza(&b, bd.Name, a, opts, false)
+	}
+	bridges := map[string]bool{}
+	for _, br := range c.Bridges {
+		bridges[br.Name] = true
+		a := br.Addressing
+		if a.Mode == ModeOff {
+			a.Mode = "manual"
+		}
+		writeStanza(&b, br.Name, a, BridgeOptions(br), false)
 	}
 	for _, v := range c.VLANs {
 		a := v.Addressing
 		if a.Mode == ModeOff {
 			a.Mode = "manual"
 		}
-		writeStanza(&b, v.Name(), a, []string{"vlan-raw-device " + v.Parent}, false)
+		opts := []string{"vlan-raw-device " + v.Parent}
+		if bridges[v.Parent] {
+			// The bridge filters VLANs, so its own port must carry this one.
+			opts = append(opts, fmt.Sprintf("pre-up bridge vlan add dev %s vid %d self", v.Parent, v.ID))
+		}
+		writeStanza(&b, v.Name(), a, opts, false)
 	}
 	return b.String()
+}
+
+// BridgeOptions are a bridge's ifupdown options: no spanning tree or
+// forwarding delay (one uplink, nothing to loop), the port's own MAC
+// address (DHCP keeps giving the server its address), and VLAN filtering
+// with every VLAN allowed on the uplink so VMs can be put on VLANs.
+func BridgeOptions(br Bridge) []string {
+	opts := []string{
+		"bridge-ports " + br.Port,
+		"bridge-stp off",
+		"bridge-fd 0",
+		"bridge-waitport 0",
+	}
+	if br.MAC != "" {
+		opts = append(opts, "hwaddress ether "+br.MAC)
+	}
+	opts = append(opts,
+		"post-up ip link set dev "+br.Name+" type bridge vlan_filtering 1",
+		"post-up bridge vlan add dev "+br.Port+" vid 2-4094",
+	)
+	return opts
 }
 
 // writeStanza writes one interface. hotplug (physical ports on DHCP) uses

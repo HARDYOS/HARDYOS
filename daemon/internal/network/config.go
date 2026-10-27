@@ -29,6 +29,22 @@ type Config struct {
 	Interfaces []Interface `json:"interfaces"`
 	Bonds      []Bond      `json:"bonds"`
 	VLANs      []VLAN      `json:"vlans"`
+	// Bridges put virtual machines on the network beside the server: the
+	// bridge takes over its port's (or bond's) address, and that port
+	// becomes Mode "bridged". Missing in older settings (nil).
+	Bridges []Bridge `json:"bridges"`
+}
+
+// Bridge is a virtual switch over a port or bond, for VMs (decision 121).
+// It's VLAN-aware: VMs can be put on a VLAN of the home network.
+type Bridge struct {
+	Name string `json:"name"` // br0 … br9
+	// Port is the physical port or bond it runs over.
+	Port string `json:"port"`
+	// MAC is the port's own address, kept by the bridge so DHCP gives the
+	// server the same address as before.
+	MAC string `json:"mac,omitempty"`
+	Addressing
 }
 
 // Addressing is how an interface gets its address.
@@ -73,6 +89,8 @@ const (
 	ModeStatic = "static"
 	ModeOff    = "off"
 	ModeMember = "member"
+	// ModeBridged: the port or bond carries a bridge, which has the address.
+	ModeBridged = "bridged"
 )
 
 // BondPolicies are the supported bonding policies.
@@ -82,6 +100,8 @@ var (
 	hostnameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 	ifaceRE    = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]{0,14}$`)
 	bondRE     = regexp.MustCompile(`^bond[0-9]{1,2}$`)
+	bridgeRE   = regexp.MustCompile(`^br[0-9]$`)
+	macRE      = regexp.MustCompile(`^[0-9a-f]{2}(:[0-9a-f]{2}){5}$`)
 	domainRE   = regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$`)
 )
 
@@ -104,15 +124,36 @@ func (c *Config) Normalize() {
 			members[m] = true
 		}
 	}
+	if c.Bridges == nil {
+		c.Bridges = []Bridge{}
+	}
+	bridged := map[string]bool{}
+	for i := range c.Bridges {
+		c.Bridges[i].Port = strings.TrimSpace(c.Bridges[i].Port)
+		c.Bridges[i].MAC = strings.ToLower(strings.TrimSpace(c.Bridges[i].MAC))
+		bridged[c.Bridges[i].Port] = true
+	}
 	for i := range c.Interfaces {
-		if members[c.Interfaces[i].Name] {
+		switch {
+		case members[c.Interfaces[i].Name]:
 			c.Interfaces[i].Addressing = Addressing{Mode: ModeMember}
-		} else if c.Interfaces[i].Mode == ModeMember {
+		case bridged[c.Interfaces[i].Name]:
+			c.Interfaces[i].Addressing = Addressing{Mode: ModeBridged, MTU: c.Interfaces[i].MTU}
+		case c.Interfaces[i].Mode == ModeMember || c.Interfaces[i].Mode == ModeBridged:
 			c.Interfaces[i].Mode = ModeOff
+		}
+	}
+	for i := range c.Bonds {
+		switch {
+		case bridged[c.Bonds[i].Name]:
+			c.Bonds[i].Addressing = Addressing{Mode: ModeBridged, MTU: c.Bonds[i].MTU}
+		case c.Bonds[i].Mode == ModeBridged:
+			c.Bonds[i].Mode = ModeOff
 		}
 	}
 	sort.Slice(c.Interfaces, func(i, j int) bool { return c.Interfaces[i].Name < c.Interfaces[j].Name })
 	sort.Slice(c.Bonds, func(i, j int) bool { return c.Bonds[i].Name < c.Bonds[j].Name })
+	sort.Slice(c.Bridges, func(i, j int) bool { return c.Bridges[i].Name < c.Bridges[j].Name })
 	sort.Slice(c.VLANs, func(i, j int) bool {
 		if c.VLANs[i].Parent != c.VLANs[j].Parent {
 			return c.VLANs[i].Parent < c.VLANs[j].Parent
@@ -170,7 +211,23 @@ func (c *Config) Validate(ports []string) error {
 
 	gateways := 0
 	addressed := 0
+	bridgedPorts := map[string]bool{}
+	for _, br := range c.Bridges {
+		bridgedPorts[br.Port] = true
+	}
 	checkAddr := func(name string, a Addressing, allowMember bool) {
+		if a.Mode == ModeBridged {
+			if !bridgedPorts[name] {
+				add("%s: only a port or bond under a bridge can be bridged", name)
+			}
+			if a.Address != "" || a.Gateway != "" {
+				add("%s is under a bridge, so the bridge has its address", name)
+			}
+			if a.MTU != 0 && (a.MTU < 1280 || a.MTU > 9216) {
+				add("%s: MTU must be between 1280 and 9216 (or empty for the default 1500)", name)
+			}
+			return
+		}
 		switch a.Mode {
 		case ModeDHCP:
 			addressed++
@@ -260,6 +317,32 @@ func (c *Config) Validate(ports []string) error {
 		checkAddr(b.Name, b.Addressing, false)
 	}
 
+	ported := map[string]string{}
+	for _, br := range c.Bridges {
+		if !bridgeRE.MatchString(br.Name) {
+			add("bridge name %q must be br0 to br9", br.Name)
+			continue
+		}
+		claim(br.Name, "bridge")
+		kind, ok := names[br.Port]
+		switch {
+		case br.Port == "":
+			add("%s needs a port or bond to run over", br.Name)
+		case !ok || (kind != "port" && kind != "bond"):
+			add("%s: %s is not a port or bond on this server", br.Name, br.Port)
+		case memberOf[br.Port] != "":
+			add("%s: %s is a member of %s; put the bridge on %s instead", br.Name, br.Port, memberOf[br.Port], memberOf[br.Port])
+		}
+		if other, dup := ported[br.Port]; dup {
+			add("%s is under both %s and %s", br.Port, other, br.Name)
+		}
+		ported[br.Port] = br.Name
+		if br.MAC != "" && !macRE.MatchString(br.MAC) {
+			add("%s: %q isn't a MAC address", br.Name, br.MAC)
+		}
+		checkAddr(br.Name, br.Addressing, false)
+	}
+
 	vlanIDs := map[string]bool{}
 	for _, v := range c.VLANs {
 		name := v.Name()
@@ -272,8 +355,11 @@ func (c *Config) Validate(ports []string) error {
 			continue
 		}
 		parentKind, ok := names[v.Parent]
-		if !ok || (parentKind != "port" && parentKind != "bond") {
-			add("VLAN %d: %s is not a port or bond on this server", v.ID, v.Parent)
+		if !ok || (parentKind != "port" && parentKind != "bond" && parentKind != "bridge") {
+			add("VLAN %d: %s is not a port, bond or bridge on this server", v.ID, v.Parent)
+		}
+		if br := ported[v.Parent]; br != "" {
+			add("VLAN %d: %s is under %s; put the VLAN on %s instead", v.ID, v.Parent, br, br)
 		}
 		if _, isMember := memberOf[v.Parent]; isMember {
 			add("VLAN %d: %s is a bond member; put the VLAN on %s instead", v.ID, v.Parent, memberOf[v.Parent])
@@ -309,20 +395,33 @@ func isBroadcast(p netip.Prefix) bool {
 	return host&mask == mask
 }
 
-// HasStatic reports whether any interface uses a fixed address.
-func (c *Config) HasStatic() bool {
+// addressings lists every interface's addressing, by name.
+func (c *Config) addressings() []namedAddressing {
+	var out []namedAddressing
 	for _, it := range c.Interfaces {
-		if it.Mode == ModeStatic {
-			return true
-		}
+		out = append(out, namedAddressing{it.Name, it.Addressing})
 	}
 	for _, b := range c.Bonds {
-		if b.Mode == ModeStatic {
-			return true
-		}
+		out = append(out, namedAddressing{b.Name, b.Addressing})
+	}
+	for _, br := range c.Bridges {
+		out = append(out, namedAddressing{br.Name, br.Addressing})
 	}
 	for _, v := range c.VLANs {
-		if v.Mode == ModeStatic {
+		out = append(out, namedAddressing{v.Name(), v.Addressing})
+	}
+	return out
+}
+
+type namedAddressing struct {
+	Name string
+	Addressing
+}
+
+// HasStatic reports whether any interface uses a fixed address.
+func (c *Config) HasStatic() bool {
+	for _, a := range c.addressings() {
+		if a.Mode == ModeStatic {
 			return true
 		}
 	}
@@ -330,18 +429,8 @@ func (c *Config) HasStatic() bool {
 }
 
 func (c *Config) hasDHCP() bool {
-	for _, it := range c.Interfaces {
-		if it.Mode == ModeDHCP {
-			return true
-		}
-	}
-	for _, b := range c.Bonds {
-		if b.Mode == ModeDHCP {
-			return true
-		}
-	}
-	for _, v := range c.VLANs {
-		if v.Mode == ModeDHCP {
+	for _, a := range c.addressings() {
+		if a.Mode == ModeDHCP {
 			return true
 		}
 	}
@@ -352,28 +441,29 @@ func (c *Config) hasDHCP() bool {
 // UI can say where the server will be after a change.
 func (c *Config) StaticAddresses() []string {
 	var out []string
-	each := func(a Addressing) {
+	for _, a := range c.addressings() {
 		if a.Mode == ModeStatic {
 			if p, err := netip.ParsePrefix(a.Address); err == nil {
 				out = append(out, p.Addr().String())
 			}
 		}
 	}
-	for _, it := range c.Interfaces {
-		each(it.Addressing)
-	}
-	for _, b := range c.Bonds {
-		each(b.Addressing)
-	}
-	for _, v := range c.VLANs {
-		each(v.Addressing)
-	}
 	return out
+}
+
+// AddressingOf returns the addressing of the interface called name.
+func (c *Config) AddressingOf(name string) (Addressing, bool) {
+	for _, a := range c.addressings() {
+		if a.Name == name {
+			return a.Addressing, true
+		}
+	}
+	return Addressing{}, false
 }
 
 // Default is DHCP on every port, which is what a fresh install uses.
 func Default(hostname string, ports []string) Config {
-	c := Config{Hostname: hostname, DNS: []string{}, Search: []string{}, Bonds: []Bond{}, VLANs: []VLAN{}}
+	c := Config{Hostname: hostname, DNS: []string{}, Search: []string{}, Bonds: []Bond{}, VLANs: []VLAN{}, Bridges: []Bridge{}}
 	for _, p := range ports {
 		c.Interfaces = append(c.Interfaces, Interface{Name: p, Addressing: Addressing{Mode: ModeDHCP}})
 	}

@@ -39,6 +39,17 @@ type Manager struct {
 	// DomainDNS returns the domain's DNS servers and name while a domain
 	// runs on this NAS (nil otherwise); they go first in resolv.conf.
 	DomainDNS func() (servers []string, domain string)
+	// BeforeBridges and AfterBridges run around a change that adds or
+	// removes a bridge (and its undo): the domain controller's macvlan
+	// can't stay on a port that becomes a bridge port, so it lets go
+	// before and attaches to the new parent after.
+	BeforeBridges func(ctx context.Context)
+	AfterBridges  func(ctx context.Context)
+	// BridgeSettle is how long EnsureBridge waits for the bridge to get the
+	// server's address back (default 90 s).
+	BridgeSettle time.Duration
+
+	bridgeMu sync.Mutex // one EnsureBridge at a time
 
 	mu    sync.Mutex
 	timer *time.Timer
@@ -58,6 +69,9 @@ type Pending struct {
 	// previous holds the files to restore; nil means the file didn't exist.
 	Previous map[string]*string `json:"previous"`
 	PrevHost string             `json:"previousHostname"`
+	// Bridges: the change adds or removes a bridge, so undoing it moves the
+	// domain controller back too.
+	Bridges bool `json:"bridges,omitempty"`
 }
 
 // LiveInterface is an interface as the kernel sees it right now.
@@ -292,6 +306,8 @@ func (m *Manager) live(ctx context.Context) []LiveInterface {
 			li.Kind = "bond"
 		case a.LinkInfo != nil && a.LinkInfo.InfoKind == "vlan":
 			li.Kind = "vlan"
+		case a.LinkInfo != nil && a.LinkInfo.InfoKind == "bridge" && !strings.HasPrefix(a.IfName, "docker") && !strings.HasPrefix(a.IfName, "br-") && !strings.HasPrefix(a.IfName, "virbr"):
+			li.Kind = "bridge"
 		default:
 			li.Kind = "other" // docker0, veths and the like
 		}
@@ -353,6 +369,12 @@ func (m *Manager) run(ctx context.Context, name string, args ...string) error {
 func (m *Manager) Apply(ctx context.Context, c Config) (*PendingInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	cur := m.Current()
+	// Settings from a page that doesn't know about bridges keep them.
+	if c.Bridges == nil {
+		c.Bridges = cur.Bridges
+	}
+	c.giveBackAddresses(cur)
 	c.Normalize()
 	if err := c.Validate(m.PortNames()); err != nil {
 		return nil, err
@@ -362,6 +384,7 @@ func (m *Manager) Apply(ctx context.Context, c Config) (*PendingInfo, error) {
 	} else if p != nil {
 		return nil, ErrPending
 	}
+	bridges := !sameBridges(cur.Bridges, c.Bridges)
 
 	files := m.withDomain(c, Render(c))
 	prev := map[string]*string{}
@@ -382,6 +405,7 @@ func (m *Manager) Apply(ctx context.Context, c Config) (*PendingInfo, error) {
 		Addresses: c.StaticAddresses(),
 		Previous:  prev,
 		PrevHost:  strings.TrimSpace(m.readFile(HostnamePath)),
+		Bridges:   bridges,
 	}
 	if p.Addresses == nil {
 		p.Addresses = []string{}
@@ -389,6 +413,10 @@ func (m *Manager) Apply(ctx context.Context, c Config) (*PendingInfo, error) {
 	// Record the way back before touching anything.
 	if err := writeJSON(m.pendingFile(), p); err != nil {
 		return nil, err
+	}
+	if bridges {
+		m.beforeBridges(ctx)
+		defer m.afterBridges()
 	}
 	if err := m.switchTo(ctx, files, c.Hostname); err != nil {
 		m.log().Error("new network settings failed; restoring the old ones", "err", err)
@@ -553,6 +581,10 @@ func (m *Manager) revertLocked(ctx context.Context, reason string) error {
 		if content, ok := p.Previous[rel]; ok {
 			files[rel] = content
 		}
+	}
+	if p.Bridges {
+		m.beforeBridges(ctx)
+		defer m.afterBridges()
 	}
 	err = m.switchTo(ctx, files, p.PrevHost)
 	// The old settings are back on disk either way; the change is over.

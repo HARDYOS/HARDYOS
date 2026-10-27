@@ -33,6 +33,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 	"github.com/hardyos/hardyos/daemon/internal/update"
 	"github.com/hardyos/hardyos/daemon/internal/version"
+	"github.com/hardyos/hardyos/daemon/internal/vms"
 )
 
 func main() {
@@ -129,7 +130,8 @@ func main() {
 			Addresses: func(ctx context.Context) []string { return smb.LANAddresses(ctx, sysexec.Exec{}) }}
 		// SFTP for domain accounts: sshd's settings and each person's view of the folders.
 		fsm.SFTP = &sftp.Manager{Runner: sysexec.Exec{}, Log: log}
-		priv.RegisterShares(s, shm, priv.RegisterNFS(s, nfsm), priv.RegisterFiles(s, fsm))
+		shareHooks := []priv.ShareHook{priv.RegisterNFS(s, nfsm), priv.RegisterFiles(s, fsm)}
+		priv.RegisterShares(s, shm, shareHooks...)
 		go nfsm.Watch(ctx)
 		go fsm.Watch(ctx)
 		snaps := &snapshots.Manager{Runner: sysexec.Exec{}, Shares: shm, Log: log}
@@ -142,6 +144,16 @@ func main() {
 			log.Error("file access isn't available", "err", err)
 		}
 		go am.OnStart(ctx)
+		// Virtual machines: libvirt is driven from here only. Adding or
+		// removing the VM bridge takes the domain controller off the port
+		// first and puts it on the new parent after.
+		netm.BeforeBridges = dc.HoldNetwork
+		netm.AfterBridges = dc.ReleaseNetwork
+		vmm := &vms.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log, Network: netm, Library: priv.VMLibrary(shm, shareHooks...)}
+		// Part D (devices, GPUs) sets vmm.Devices to its devices.Manager.
+		priv.RegisterVMs(s, vmm)
+		go vmm.OnStart(ctx)
+		go vmm.Watch(ctx)
 		priv.RegisterBootRepair(s, priv.StorageEnv{Runner: sysexec.Exec{}, Root: os.DirFS("/")}, "/", boot.ConfigPath)
 		if len(updater.Keys()) == 0 {
 			log.Warn("no trusted release key: updates can't be installed until one is added")

@@ -2606,6 +2606,319 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/vms": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Every virtual machine with its state, CPU and memory use, and disks kept from deleted VMs */
+        get: operations["listVMs"];
+        put?: never;
+        /**
+         * Create a VM (a job - downloads, the network bridge, the VirtIO drivers disc, disks, import, start)
+         * @description Administrators only. The spec is checked here and again by the root
+         *     helper, which builds the libvirt definition itself. The first VM on
+         *     the home network (bridge or VLAN network card) puts the server's
+         *     network on a bridge, keeping its address; if the server can't be
+         *     reached that way the change is undone and the job fails.
+         */
+        post: operations["createVM"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/templates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The New VM wizard's templates, with presets and suggested downloads */
+        get: operations["listVMTemplates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** What the server can do for VMs (KVM, firmware, TPM, pools, bridge, ISO library) */
+        get: operations["getVMCapabilities"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/bridge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Put the server's network on a bridge for VMs now (a job; same address, undone if the server becomes unreachable) */
+        post: operations["createVMBridge"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/kept/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Delete disks kept from a deleted VM (a job) */
+        post: operations["deleteVMKeptDisks"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/isos": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The ISO library (the ISOs shared folder) and downloads in progress */
+        get: operations["listVMLibrary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/isos/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Download an installer (.iso) or disk image into the ISO library by link (a job; https only, optional SHA-256) */
+        post: operations["downloadVMImage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/isos/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete a file from the ISO library that no VM has in a drive (a job) */
+        delete: operations["deleteVMImage"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** One VM, with its addresses and disk use */
+        get: operations["getVM"];
+        /** Change a VM's hardware and settings (a job; most changes apply at its next start) */
+        put: operations["updateVM"];
+        post?: never;
+        /** Delete a VM that's off (a job); its disks are deleted or kept */
+        delete: operations["deleteVM"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/{action}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                /** @description stop asks the guest to shut down; force-stop pulls the plug; reset is a hard restart */
+                action: "start" | "stop" | "force-stop" | "restart" | "reset";
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start, shut down, turn off, restart or reset a VM (a job) */
+        post: operations["vmAction"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/logs": {
+        parameters: {
+            query?: {
+                lines?: number;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** The end of the VM's QEMU log */
+        get: operations["getVMLogs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/snapshots": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** The VM's snapshots, newest first */
+        get: operations["listVMSnapshots"];
+        put?: never;
+        /** Snapshot the whole VM (disks, settings, firmware); file systems are frozen first with the guest agent (a job) */
+        post: operations["snapshotVM"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/snapshots/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete one snapshot (a job) */
+        delete: operations["deleteVMSnapshot"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/rollback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Put a VM that's off back to a snapshot (a job; later snapshots and changes are lost) */
+        post: operations["rollbackVM"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/console": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * A one-time pass to a running VM's screen, valid for a minute
+         * @description Open the returned path as a WebSocket (subprotocol "binary"): it
+         *     carries the VM's VNC (RFB) stream for noVNC. The pass works once,
+         *     for this VM only. Opening and closing are audited.
+         */
+        post: operations["openVMConsole"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/console/ws": {
+        parameters: {
+            query: {
+                token: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** The VM's screen as a WebSocket (RFB in binary frames), for a pass from /vms/{id}/console */
+        get: operations["vmConsoleSocket"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -3143,10 +3456,10 @@ export interface components {
         };
         NetworkAddressing: {
             /**
-             * @description member is set by the server for bond members
+             * @description member is set by the server for bond members, bridged for the port or bond under a bridge
              * @enum {string}
              */
-            mode: "dhcp" | "static" | "off" | "member";
+            mode: "dhcp" | "static" | "off" | "member" | "bridged";
             /** @description Static only: CIDR, like 192.168.1.20/24 */
             address?: string;
             /** @description Static only */
@@ -3176,11 +3489,21 @@ export interface components {
             interfaces: components["schemas"]["NetworkInterface"][];
             bonds: components["schemas"]["NetworkBond"][];
             vlans: components["schemas"]["NetworkVLAN"][];
+            /** @description Bridges for virtual machines; leaving it out keeps the current ones */
+            bridges?: components["schemas"]["NetworkBridge"][];
+        };
+        NetworkBridge: components["schemas"]["NetworkAddressing"] & {
+            /** @description br0 to br9 */
+            name: string;
+            /** @description The port or bond it runs over (it takes that one's address) */
+            port: string;
+            /** @description The port's MAC address, kept so DHCP gives the same address */
+            mac?: string;
         };
         LiveInterface: {
             name: string;
             /** @enum {string} */
-            kind: "port" | "bond" | "vlan" | "other";
+            kind: "port" | "bond" | "vlan" | "bridge" | "other";
             mac: string;
             up: boolean;
             /** @description A cable is connected and the link is up */
@@ -4290,6 +4613,314 @@ export interface components {
              * @description The file's modification time in ms since 1970 (File.lastModified)
              */
             modified?: number;
+        };
+        VMCPU: {
+            cores: number;
+            /**
+             * @description Threads per core
+             * @enum {integer}
+             */
+            threads: 1 | 2;
+        };
+        VMMemory: {
+            mb: number;
+            /** @description The guest can give unused memory back and report its use */
+            balloon: boolean;
+        };
+        VMFirmware: {
+            /** @enum {string} */
+            type: "uefi" | "bios";
+            secureBoot: boolean;
+            /** @description A TPM 2.0 (swtpm) */
+            tpm: boolean;
+        };
+        VMDisk: {
+            /** @description disk0 to disk9 */
+            name: string;
+            sizeGB: number;
+            /** @enum {string} */
+            bus: "virtio-scsi" | "virtio-blk" | "sata";
+            import?: {
+                /** @description A disk image in the ISO library */
+                file: string;
+            };
+        };
+        VMMedia: {
+            /**
+             * @description iso: a file from the ISO library; virtio: the VirtIO drivers disc; cloudinit: the generated cloud-init disc
+             * @enum {string}
+             */
+            kind: "iso" | "virtio" | "cloudinit" | "empty";
+            iso?: string;
+        };
+        VMNIC: {
+            /**
+             * @description bridge: on the home network (its own address from the router); nat: behind the server; vlan: a VLAN of the home network
+             * @enum {string}
+             */
+            mode: "bridge" | "nat" | "vlan";
+            vlan?: number;
+            /** @enum {string} */
+            model: "virtio" | "e1000e";
+            /** @description Empty for a new card (one is made up) */
+            mac?: string;
+        };
+        VMCloudInit: {
+            user: string;
+            sshKeys: string[];
+            hostname?: string;
+            /** @description Never sent by the server; set a password with the request's password */
+            passwordHash?: string;
+            installAgent: boolean;
+        };
+        VMAutostart: {
+            enabled: boolean;
+            /** @description Lower starts first */
+            order: number;
+            /** @description Wait after starting this VM before the next */
+            delaySec: number;
+        };
+        /** @description A passed-through device (see the devices API); checked and prepared by the devices code when the VM starts */
+        VMDevice: {
+            /** @enum {string} */
+            kind: "pci" | "usb" | "gpu" | "vgpu";
+            /** @description PCI address (0000:01:00.0) or USB vendor:product / bus-port */
+            id: string;
+            vgpuType?: string;
+            romFile?: string;
+            /** @description The GPU is the VM's main display */
+            primary?: boolean;
+        };
+        VMSpec: {
+            /** @description Short name: 2-32 lowercase letters, digits and dashes */
+            id: string;
+            name: string;
+            description?: string;
+            template: string;
+            /** @enum {string} */
+            os: "windows" | "linux" | "other";
+            pool: string;
+            uuid?: string;
+            cpu: components["schemas"]["VMCPU"];
+            memory: components["schemas"]["VMMemory"];
+            firmware: components["schemas"]["VMFirmware"];
+            disks: components["schemas"]["VMDisk"][];
+            media: components["schemas"]["VMMedia"][];
+            nics: components["schemas"]["VMNIC"][];
+            /** @enum {string} */
+            video: "virtio" | "vga" | "bochs" | "none";
+            guestAgent: boolean;
+            cloudInit?: components["schemas"]["VMCloudInit"];
+            boot: ("disk" | "cdrom" | "network")[];
+            autostart: components["schemas"]["VMAutostart"];
+            devices: components["schemas"]["VMDevice"][];
+            streaming?: {
+                /** @description Publish Sunshine through the VPN for play away from home */
+                remote: boolean;
+            };
+            labels?: {
+                [key: string]: string;
+            };
+        };
+        VM: components["schemas"]["VMSpec"] & {
+            dataset: string;
+            /** @enum {string} */
+            state: "running" | "stopped" | "paused" | "shutting-down" | "crashed" | "suspended" | "unknown";
+            cpuPercent: number;
+            memoryUsedMB: number;
+            addresses: string[];
+            passwordSet: boolean;
+            /** @description Hardware changed while it ran */
+            restartNeeded: boolean;
+            /** @description Bytes each disk uses on the pool */
+            diskUsage: {
+                [key: string]: number;
+            };
+        };
+        VMKeptDisk: {
+            dataset: string;
+            vm: string;
+            pool: string;
+            /** Format: int64 */
+            bytes: number;
+        };
+        VMOverview: {
+            vms: components["schemas"]["VM"][];
+            kept: components["schemas"]["VMKeptDisk"][];
+        };
+        VMPreset: {
+            id: string;
+            name: string;
+            summary: string;
+            cores: number;
+            threads: number;
+            memoryMB: number;
+            diskGB: number;
+        };
+        VMImage: {
+            name: string;
+            /** @enum {string} */
+            kind: "iso" | "disk";
+            /** @description Download links by architecture (x86_64 */
+            urls: {
+                [key: string]: string;
+            } | null;
+            page?: string;
+        };
+        VMTemplate: {
+            id: string;
+            name: string;
+            summary: string;
+            /** @enum {string} */
+            group: "windows" | "linux" | "gaming" | "appliance" | "other";
+            /** @enum {string} */
+            os: "windows" | "linux" | "other";
+            /** @enum {string} */
+            install: "iso" | "image" | "cloud";
+            firmware: components["schemas"]["VMFirmware"];
+            diskBus: string;
+            nicModel: string;
+            nics: number;
+            video: string;
+            virtio: boolean;
+            cloudInit: boolean;
+            balloon: boolean;
+            gpu: boolean;
+            presets: components["schemas"]["VMPreset"][];
+            defaultPreset: string;
+            minMemoryMB: number;
+            minDiskGB: number;
+            images: components["schemas"]["VMImage"][] | null;
+            notes: string[] | null;
+        };
+        VMArch: {
+            arch: string;
+            machine: string;
+            sata?: boolean;
+            cdBus?: string;
+            tpmModel?: string;
+            hyperV?: boolean;
+            smm?: boolean;
+            vmport?: boolean;
+            legacyBios?: boolean;
+            pit?: boolean;
+        };
+        VMCapabilities: {
+            supported: boolean;
+            /** @description Why VMs can't run */
+            problem: string;
+            kvm: boolean;
+            arch: components["schemas"]["VMArch"];
+            cpus: number;
+            memoryMB: number;
+            pools: string[];
+            uefi: boolean;
+            secureBoot: boolean;
+            tpm: boolean;
+            libvirt: string;
+            /** @description The home network's bridge */
+            bridge: string;
+            /** @description The ISOs shared folder's pool */
+            library: string;
+            /** @description The VirtIO drivers disc is downloaded */
+            virtio: boolean;
+            /** @description The devices code's overview (IOMMU */
+            devices: unknown;
+            /** @description Memory of the running VMs */
+            committedMB: number;
+        };
+        VMTask: {
+            id: string;
+            /** @enum {string} */
+            kind: "download" | "import";
+            vm: string;
+            file: string;
+            progress: number;
+            message: string;
+            done: boolean;
+            error: string;
+            /** Format: date-time */
+            started: string;
+            /** Format: date-time */
+            finished: string;
+        };
+        VMLibraryFile: {
+            name: string;
+            /** @enum {string} */
+            kind: "iso" | "disk";
+            /** Format: int64 */
+            size: number;
+            /** Format: date-time */
+            modified: string;
+            /** @description VMs that have it in a drive */
+            usedBy: string[];
+        };
+        VMLibrary: {
+            /** @description Empty until the ISOs shared folder exists */
+            pool: string;
+            path: string;
+            files: components["schemas"]["VMLibraryFile"][];
+            tasks: components["schemas"]["VMTask"][];
+        };
+        VMDownload: {
+            /** @description An https:// link */
+            url: string;
+            /** @description Save as (default from the link; .gz and .bz2 are unpacked) */
+            name?: string;
+            sha256?: string;
+            /** @description Where to make the ISOs shared folder if there's none */
+            pool?: string;
+        };
+        VMCreateRequest: {
+            spec: components["schemas"]["VMSpec"];
+            /** @description The cloud-init user's password (never stored as typed) */
+            password?: string;
+            start?: boolean;
+            /** @description Files to download into the ISO library first */
+            downloads?: components["schemas"]["VMDownload"][];
+        };
+        VMUpdateRequest: {
+            spec: components["schemas"]["VMSpec"];
+            password?: string;
+            /** @description Disks left out of the spec that may be deleted (the VM must be off) */
+            removeDisks?: string[];
+        };
+        VMDeleteRequest: {
+            /** @description The VM's name or display name */
+            confirm: string;
+            keepDisks?: boolean;
+        };
+        VMKeptDeleteRequest: {
+            dataset: string;
+            /** @description The deleted VM's name */
+            confirm: string;
+        };
+        VMSnapshot: {
+            name: string;
+            label: string;
+            /** Format: date-time */
+            created: string;
+            /** Format: int64 */
+            bytes: number;
+            /** @description The guest's file systems were frozen first (or it was off) */
+            consistent: boolean;
+        };
+        VMSnapshotRequest: {
+            label?: string;
+        };
+        VMRollbackRequest: {
+            snapshot: string;
+            confirm: string;
+        };
+        VMConsoleSession: {
+            token: string;
+            /** Format: date-time */
+            expires: string;
+            /** @description The WebSocket to open */
+            path: string;
+        };
+        VMLogs: {
+            logs: string;
         };
     };
     responses: {
@@ -8573,6 +9204,439 @@ export interface operations {
                 content?: never;
             };
             401: components["responses"]["Unauthorized"];
+        };
+    };
+    listVMs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The VMs */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VMOverview"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    createVM: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMCreateRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    listVMTemplates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Templates, in order */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VMTemplate"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    getVMCapabilities: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Capabilities */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VMCapabilities"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    createVMBridge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    deleteVMKeptDisks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMKeptDeleteRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    listVMLibrary: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The library */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VMLibrary"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    downloadVMImage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMDownload"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    deleteVMImage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getVM: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The VM */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VM"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateVM: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMUpdateRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteVM: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMDeleteRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    vmAction: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                /** @description stop asks the guest to shut down; force-stop pulls the plug; reset is a hard restart */
+                action: "start" | "stop" | "force-stop" | "restart" | "reset";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getVMLogs: {
+        parameters: {
+            query?: {
+                lines?: number;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The log */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VMLogs"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listVMSnapshots: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Snapshots */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VMSnapshot"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    snapshotVM: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMSnapshotRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteVMSnapshot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    rollbackVM: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMRollbackRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    openVMConsole: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The pass */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VMConsoleSession"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    vmConsoleSocket: {
+        parameters: {
+            query: {
+                token: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Switching to the WebSocket */
+            101: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
 }
