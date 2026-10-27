@@ -469,6 +469,12 @@ func (s *Service) handleStream(w http.ResponseWriter, r *http.Request, src *Sour
 		replyErr(w, err)
 		return
 	}
+	release, ok := s.slot(src.ID)
+	if !ok {
+		replyError(w, http.StatusTooManyRequests, "busy", "too many transfers from this server at once")
+		return
+	}
+	defer release()
 	q := r.URL.Query()
 	task, snap := q.Get("task"), q.Get("snapshot")
 	if err := replica.ValidTask(task); err != nil {
@@ -583,6 +589,12 @@ func (s *Service) handleSend(w http.ResponseWriter, r *http.Request, src *Source
 		replyErr(w, err)
 		return
 	}
+	release, ok := s.slot(src.ID)
+	if !ok {
+		replyError(w, http.StatusTooManyRequests, "busy", "too many transfers from this server at once")
+		return
+	}
+	defer release()
 	ctx := r.Context()
 	st, rc, err := s.Root.ReplicaSend(ctx, replica.ReplicaSendArgs{Target: t, Snapshot: r.URL.Query().Get("snapshot")})
 	if err != nil {

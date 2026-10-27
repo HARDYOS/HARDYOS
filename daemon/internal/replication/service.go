@@ -99,6 +99,32 @@ type Service struct {
 
 	runMu   sync.Mutex
 	running map[string]string // task id -> job id
+
+	slotMu sync.Mutex
+	slots  map[string]int // source id -> transfers running here
+}
+
+// MaxStreamsPerSource bounds how many transfers one source runs here at
+// once (a run sends one dataset at a time; restores add one).
+const MaxStreamsPerSource = 4
+
+// slot takes one of a source's transfer slots; ok is false when it has
+// them all.
+func (s *Service) slot(source string) (release func(), ok bool) {
+	s.slotMu.Lock()
+	defer s.slotMu.Unlock()
+	if s.slots == nil {
+		s.slots = map[string]int{}
+	}
+	if s.slots[source] >= MaxStreamsPerSource {
+		return nil, false
+	}
+	s.slots[source]++
+	return func() {
+		s.slotMu.Lock()
+		defer s.slotMu.Unlock()
+		s.slots[source]--
+	}, true
 }
 
 func (s *Service) init() {
