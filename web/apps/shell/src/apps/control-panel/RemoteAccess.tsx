@@ -153,6 +153,7 @@ function PublishingCard({ st }: { st: RemoteStatus }) {
   const [apiUrl, setApiUrl] = useState(s.apiUrl);
   const [desktop, setDesktop] = useState(s.desktopName);
   const [mode, setMode] = useState(s.defaultMode);
+  const [shareLinks, setShareLinks] = useState(s.publicShareLinks);
   const [token, setToken] = useState("");
   const save = useMutation({
     mutationFn: (opts: { forget?: boolean }) =>
@@ -166,6 +167,7 @@ function PublishingCard({ st }: { st: RemoteStatus }) {
               cluster: s.cluster,
               desktopName: desktop.trim(),
               defaultMode: mode,
+              publicShareLinks: shareLinks,
               token: opts.forget ? "" : token.trim() || undefined,
             },
           }),
@@ -192,6 +194,12 @@ function PublishingCard({ st }: { st: RemoteStatus }) {
           description="Each app with a web page gets https://<app>.<base domain>; off removes HardyOS's services from NetBird."
           checked={enabled}
           onChange={setEnabled}
+        />
+        <Toggle
+          label="Public share links"
+          description={`Share links open at https://files.${base || "<base domain>"}/s/… for people without NetBird (that address opens share links and nothing else). It is published while a link is active; on keeps it published.`}
+          checked={shareLinks}
+          onChange={setShareLinks}
         />
         <Field label="Base domain" hint="A custom domain in NetBird (Reverse Proxy › Custom Domains), like home.hardynetworks.net." error={!baseOk ? "A domain like home.example.net" : null}>
           {(id) => <TextInput id={id} value={base} placeholder="home.example.net" onChange={(e) => setBase(e.target.value)} />}
@@ -399,7 +407,7 @@ function PublishedCard({ st }: { st: RemoteStatus }) {
                   <Badge tone="neutral">{publishSummary(it.config)}</Badge>
                   {it.published && <Badge tone={s.tone}>{s.label}</Badge>}
                   <span className="app-card__spacer" />
-                  {it.key !== "sso" && (
+                  {it.key !== "sso" && it.key !== "files" && (
                     <Button size="sm" variant="ghost" onClick={() => setEditing(editing === it.key ? null : it.key)} aria-label={`Change ${it.name}`}>
                       {editing === it.key ? "Close" : "Change"}
                     </Button>

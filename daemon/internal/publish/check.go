@@ -206,7 +206,7 @@ func (p *Publisher) Check(ctx context.Context, in Inputs, res Resolver, sso SSOI
 	case out.SupportsPrivate:
 		add("private", "NetBird-only services", "ok", "The proxy cluster can serve apps to NetBird devices only.")
 	default:
-		add("private", "NetBird-only services", "warn", "The proxy cluster "+out.Domain.TargetCluster+" has no Private capability, so apps can only be Public (with sign-in in front). For NetBird-only apps, run a NetBird proxy inside a NetBird client (NetBird's Bring Your Own Proxy with the private option).")
+		add("private", "NetBird-only services", "warn", "The proxy cluster "+out.Domain.TargetCluster+" has no Private capability, so nothing can be NetBird-only: the desktop (NetBird-only unless you choose otherwise) isn't published, and apps can only be Public (with sign-in in front). For NetBird-only apps, run a NetBird proxy inside a NetBird client (NetBird's Bring Your Own Proxy with the private option).")
 	}
 	issuer := ""
 	if sso != nil {

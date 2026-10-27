@@ -14,7 +14,6 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"syscall"
@@ -34,6 +33,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/notify"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/publish"
+	"github.com/hardyos/hardyos/daemon/internal/secretbox"
 	"github.com/hardyos/hardyos/daemon/internal/storage"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 	"github.com/hardyos/hardyos/daemon/internal/tlscert"
@@ -123,16 +123,19 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 	if !live {
 		api.RegisterAppJobs(manager, pc, appStore)
 	}
+	// Secrets hardyd keeps encrypted at rest (the sign-in provider's keys,
+	// the NetBird access token) are sealed with keys from hardyd-priv (the
+	// master key is root's).
+	var secrets secretbox.Source
+	if !live {
+		secrets = &secretbox.PrivSource{Priv: pc}
+	}
 	// Remote access: the NetBird client and publishing through NetBird's
-	// reverse proxy. Secrets kept in the database (the access token) are
-	// sealed with a key next to it. With the sign-in provider (internal/oidc)
-	// integrated: Sealer.Source = the secretbox.PrivSource hardyd uses
-	// (hardyd-priv's secrets.key), OnNamesChanged = handler.OIDC().NamesChanged
-	// and api.Config.SSOIssuer = the provider's Issuer.
+	// reverse proxy. api.New connects it to the sign-in provider (names,
+	// issuer).
 	var remote *publish.Publisher
 	if !live {
-		remote = &publish.Publisher{Store: &publish.Store{DB: db,
-			Sealer: &publish.Sealer{KeyFile: filepath.Join(filepath.Dir(dbPath), "secrets", "hardyd.key")}}}
+		remote = &publish.Publisher{Store: &publish.Store{DB: db, Sealer: &publish.Sealer{Source: secrets}}}
 	}
 	api.RegisterRemoteJobs(manager, pc, remote)
 	// File Manager and share links: files read and written as the person.
@@ -157,7 +160,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		DB: db, Jobs: manager, Events: broker, Priv: pc, Logger: log,
 		Storage: stor, Notify: notifications, Metrics: collector,
 		WebRoot: webRoot, Insecure: httpsAddr == "", Installer: inst, Updates: upd, Backups: bk,
-		Apps: appStore, Files: fileAccess, TrustedProxies: trustedProxies, Remote: remote,
+		Apps: appStore, Files: fileAccess, TrustedProxies: trustedProxies, Secrets: secrets, Remote: remote,
 	})
 
 	go housekeeping(ctx, log, &auth.Sessions{DB: db})
@@ -169,6 +172,9 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		go upd.ConfirmWhenHealthy(ctx, time.Minute)
 		go upd.RunChecks(ctx) // look for new versions on GitHub daily
 		go bk.Run(ctx)        // nightly settings backup
+		if p := handler.OIDC(); p != nil {
+			go p.Start(ctx) // sign-in provider: signing keys on schedule, expired sign-ins removed
+		}
 	}
 
 	var servers []*http.Server

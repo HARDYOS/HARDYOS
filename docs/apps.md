@@ -449,8 +449,8 @@ site. So the proxy does the separating:
 Apps published through NetBird's reverse proxy ([remote-access.md](remote-access.md))
 open at their own address, `https://<app>.<base>`, when the desktop is used
 at its published address: there the browser keeps each app's cookies apart
-by itself, and HardyOS's app gateway signs people in with a round trip to
-the desktop (decision 115). The window proxy below stays for the desktop's
+by itself, and HardyOS's app gateway signs people in through HardyOS's own
+sign-in at `sso.<base>` (decision 115). The window proxy below stays for the desktop's
 home address and servers without publishing.
 
 What's left for apps opened through the window proxy (not at a published

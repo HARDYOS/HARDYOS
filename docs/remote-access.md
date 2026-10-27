@@ -104,7 +104,7 @@ sign-in.
 | Needs | A proxy cluster with the **Private** capability: a NetBird proxy running inside a NetBird client (NetBird's "Bring Your Own Proxy" with the private option). NetBird's shared cloud clusters don't have it | Nothing more |
 
 Choose **NetBird-only** for things only the family's own devices should
-reach (the desktop, admin tools), when your proxy setup allows it. Choose
+reach (the desktop, admin tools); it needs the Private capability above. Choose
 **Public** for things people open from devices without NetBird (a TV, a
 friend's phone): the sign-in in front keeps strangers out before anything
 reaches the server.
@@ -124,22 +124,40 @@ are left to NetBird: HardyOS keeps whatever you set there.
 ### HardyOS sign-in for apps
 
 Apps also ask for a HardyOS sign-in by default: the first time an app's
-address is opened in a browser, it goes to the desktop's address and back
-(signing in to the desktop if needed), and only people who may use the app
-(App Store › the app › Who can use it) get in. Signing out of the desktop
-signs out of the apps, and access changes apply within 30 seconds, open
-WebSockets included.
+address is opened in a browser, it goes to HardyOS's sign-in page at
+`https://sso.<base domain>` and back, and only people who may use the app
+(App Store › the app › Who can use it) get in. Being signed in there once
+is enough for every app (and for NetBird's SSO, when HardyOS is NetBird's
+identity provider). Access changes, a turned-off account or a new password
+apply within 30 seconds, open WebSockets included; signing out of the
+desktop doesn't sign out of apps. HardyOS sign-in takes domain accounts;
+HardyOS's own local accounts only if Control Panel › Sign-in allows them.
 
 Apps with phone or TV clients (Jellyfin's apps, sync clients) can't do
-that round trip: turn **Ask for a HardyOS sign-in too** off for them. The
+that sign-in: turn **Ask for a HardyOS sign-in too** off for them. The
 app's own sign-in (and the sign-in in front, if public) then protects it,
 and HardyOS's "Who can use it" isn't checked at its address.
 
-The desktop has its own sign-in page, so it's published public with no
-sign-in in front by default. NetBird's server must reach HardyOS's sign-in
-provider on the desktop's address, so keep the desktop public once that
-is set up. With a password or PIN in front of the desktop, share links
-(`/s/...`) and the sign-in provider (`/oidc`) still open without it.
+### The desktop
+
+The desktop includes administration (Control Panel, Terminal, storage), so
+it is **NetBird-only** by default: open it from devices with NetBird at
+`https://<desktop>.<base domain>`. Making it public needs an explicit
+confirmation (a red warning in Remote Access); with a password or PIN in
+front of it, share links (`/s/...`) and `/oidc` still open without it.
+Without a proxy cluster with the Private capability the desktop isn't
+published at all (use it at home or at its NetBird address).
+
+### HardyOS sign-in and share links
+
+- `https://sso.<base domain>` is HardyOS's sign-in (Control Panel ›
+  Sign-in), always public with nothing in front: NetBird's server and
+  everyone signing in must reach it.
+- `https://files.<base domain>` opens share links (`/s/...`) and nothing
+  else, for people without NetBird. It's published while at least one share
+  link is active, or always with **Public share links** on; new links show
+  their address there (the first one can take a minute to open while NetBird
+  gets the certificate).
 
 ## Opening published apps
 
@@ -162,7 +180,7 @@ port forward at home isn't needed, and HardyOS doesn't set one up.)
 ## How HardyOS keeps NetBird in step
 
 - HardyOS names its services `hardyos-<tag>-desktop`,
-  `hardyos-<tag>-sso` (HardyOS's own sign-in at `https://sso.<base domain>`,
+  `hardyos-<tag>-files`, `hardyos-<tag>-sso` (HardyOS's own sign-in at `https://sso.<base domain>`,
   always public: NetBird's server and everyone signing in must reach it) and
   `hardyos-<tag>-app-<id>`, where the tag is this server's own. It never
   changes or removes a service without its tag; if another service already
@@ -187,8 +205,8 @@ port forward at home isn't needed, and HardyOS doesn't set one up.)
   this server on TCP port 44200.
 - **"This port only takes requests from NetBird's reverse proxy"**: the
   gateway port was opened directly; use the app's published address.
-- **An app called `sso`** can't use `sso.<base domain>`: that name is
-  HardyOS's sign-in.
+- **An app called `sso` or `files`** can't use that name under the base
+  domain: HardyOS uses them.
 - **The token was refused (401) or isn't allowed (403)**: create a new token
   on a service user with the Network Admin role.
 - **NetBird-only greyed out**: your proxy cluster has no Private

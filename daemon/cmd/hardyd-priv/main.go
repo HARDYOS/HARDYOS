@@ -34,6 +34,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 	"github.com/hardyos/hardyos/daemon/internal/update"
 	"github.com/hardyos/hardyos/daemon/internal/version"
+	"github.com/hardyos/hardyos/daemon/internal/zfs"
 )
 
 func main() {
@@ -116,6 +117,8 @@ func main() {
 		priv.RegisterNetwork(s, netm)
 		priv.RegisterBackup(s, bk)
 		priv.RegisterTerminal(s)
+		// Keys hardyd encrypts its own secrets with (sign-in provider keys).
+		priv.RegisterSecrets(s, zfs.KeyDir)
 		// Kept attached to the LAN and running through network changes and
 		// crashes.
 		priv.RegisterDomain(s, dc)

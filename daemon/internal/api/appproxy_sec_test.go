@@ -426,7 +426,15 @@ func TestAppProxyWebSocketRevocation(t *testing.T) {
 	expectClosed(t, c, "reconfigured")
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		code, _ := get(t, browserOf(e.admin), adminApp+"/", nil)
+		// The job's end drops the listener and the reconcile right after
+		// starts it again: a refused connection in between is that gap,
+		// not an answer, so try again (an answer must be 401).
+		res, err := browserOf(e.admin).Get(adminApp + "/")
+		code := 0
+		if err == nil {
+			code = res.StatusCode
+			res.Body.Close()
+		}
 		if code == 401 {
 			break // the old window session is gone; the listener is back
 		}

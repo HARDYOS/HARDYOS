@@ -46,6 +46,9 @@ type Inputs struct {
 	// Known: Apps is the full list (false when the root helper didn't
 	// answer: apps' services are then left alone).
 	Known bool
+	// ShareLinks: at least one share link is active (files.<base> is
+	// published for it).
+	ShareLinks bool
 }
 
 // Item is one published (or publishable) thing.
@@ -153,7 +156,7 @@ type want struct {
 
 // Items lists what would be published, with the last sync's records, but
 // doesn't talk to NetBird.
-func (p *Publisher) Items(ctx context.Context, apps []App) ([]Item, error) {
+func (p *Publisher) Items(ctx context.Context, in Inputs) ([]Item, error) {
 	s, err := p.Store.Load(ctx)
 	if err != nil {
 		return nil, err
@@ -163,7 +166,7 @@ func (p *Publisher) Items(ctx context.Context, apps []App) ([]Item, error) {
 		return nil, err
 	}
 	var out []Item
-	for _, w := range p.plan(s, rows, apps) {
+	for _, w := range p.plan(s, rows, in.Apps, in.ShareLinks) {
 		out = append(out, w.item)
 	}
 	return out, nil
@@ -171,7 +174,7 @@ func (p *Publisher) Items(ctx context.Context, apps []App) ([]Item, error) {
 
 // plan lists the desktop and every app with what the settings ask for
 // (without the NetBird-side parts of the requests).
-func (p *Publisher) plan(s Settings, rows map[string]*row, apps []App) []want {
+func (p *Publisher) plan(s Settings, rows map[string]*row, apps []App, shareLinks bool) []want {
 	mk := func(key, label, name string) want {
 		r := rows[key]
 		it := Item{Key: key, Label: label, Name: name, Config: resolve(key, r, s)}
@@ -185,7 +188,11 @@ func (p *Publisher) plan(s Settings, rows map[string]*row, apps []App) []want {
 		}
 		return want{item: it}
 	}
-	out := []want{mk(DesktopKey, s.DesktopName, "Desktop"), mk(SSOKey, SSOLabel, "HardyOS sign-in")}
+	files := mk(FilesKey, FilesLabel, "Share links")
+	if !s.PublicShareLinks && !shareLinks {
+		files.item.Config.Mode = ModeOff
+	}
+	out := []want{mk(DesktopKey, s.DesktopName, "Desktop"), mk(SSOKey, SSOLabel, "HardyOS sign-in"), files}
 	sorted := slices.Clone(apps)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
 	for _, a := range sorted {
@@ -209,7 +216,7 @@ func (p *Publisher) Sync(ctx context.Context, in Inputs) (*Result, error) {
 		return nil, err
 	}
 	res := &Result{}
-	plan := p.plan(s, rows, in.Apps)
+	plan := p.plan(s, rows, in.Apps, in.ShareLinks)
 	finish := func(problem string) (*Result, error) {
 		res.Problem = problem
 		for _, w := range plan {
@@ -294,7 +301,8 @@ func (p *Publisher) Sync(ctx context.Context, in Inputs) (*Result, error) {
 			return finish(problem)
 		}
 	}
-	taken := map[string]string{} // label -> key
+	// label -> key; HardyOS's own names are never an app's, even unpublished.
+	taken := map[string]string{SSOLabel: SSOKey, FilesLabel: FilesKey}
 	for i := range plan {
 		w := &plan[i]
 		w.item.Error = ""
@@ -305,7 +313,7 @@ func (p *Publisher) Sync(ctx context.Context, in Inputs) (*Result, error) {
 			w.item.Error = w.item.Label + " can't be a name under " + s.BaseDomain
 			continue
 		}
-		if k, ok := taken[w.item.Label]; ok {
+		if k, ok := taken[w.item.Label]; ok && k != w.item.Key {
 			w.item.Error = w.item.Domain + " is already " + k + "'s address"
 			continue
 		}
@@ -480,6 +488,14 @@ func (p *Publisher) request(s Settings, it Item, r *row, peer *netbird.Peer, ip 
 		}
 	default:
 		return nil, ""
+	}
+	if it.Key == FilesKey {
+		// Share link pages only: everything else on the host is blocked in
+		// NetBird already (the gateway refuses it too).
+		links, rest := target, target
+		lp, rp := "/s/", "/"
+		links.Path, rest.Path, rest.AccessAction = &lp, &rp, "block"
+		req.Targets = []netbird.Target{links, rest}
 	}
 	return req, ""
 }

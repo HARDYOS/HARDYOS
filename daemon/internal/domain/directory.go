@@ -187,6 +187,11 @@ type UserGroups struct {
 	// by the names.
 	DomainSID string   `json:"domainSid"`
 	GroupSIDs []string `json:"groupSids"`
+	// SID and ObjectGUID identify the account itself. The GUID never
+	// changes, not on a rename either: HardyOS's sign-in provider (OIDC)
+	// uses it as the account's stable subject. Empty from an older helper.
+	SID        string `json:"sid"`
+	ObjectGUID string `json:"objectGuid"`
 }
 
 // UserGroups looks up an account's state and groups for sign-in.

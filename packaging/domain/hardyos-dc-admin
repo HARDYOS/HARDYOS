@@ -22,7 +22,7 @@ from samba.dsdb import (
     UF_LOCKOUT,
 )
 from samba.ndr import ndr_unpack
-from samba.dcerpc import security
+from samba.dcerpc import misc, security
 from samba.param import LoadParm
 from samba.samdb import SamDB
 
@@ -34,7 +34,7 @@ PROTECTED_GROUPS = {"dnsadmins", "dnsupdateproxy"}
 USER_ATTRS = [
     "sAMAccountName", "givenName", "sn", "displayName", "mail",
     "userAccountControl", "memberOf", "whenCreated", "lastLogonTimestamp",
-    "objectSid", "pwdLastSet", "lockoutTime", "accountExpires",
+    "objectSid", "pwdLastSet", "lockoutTime", "accountExpires", "objectGUID",
 ]
 GROUP_ATTRS = ["sAMAccountName", "description", "member", "objectSid", "groupType", "isCriticalSystemObject"]
 
@@ -71,6 +71,13 @@ def gen_time(v):
 
 def sid_of(msg):
     return str(ndr_unpack(security.dom_sid, msg["objectSid"][0]))
+
+
+def guid_of(msg):
+    v = msg.get("objectGUID")
+    if v is None or len(v) == 0:
+        return ""
+    return str(ndr_unpack(misc.GUID, v[0])).lower()
 
 
 def rid(msg):
@@ -219,6 +226,11 @@ class Directory:
             "groups": sorted(names, key=str.lower),
             "groupSids": sorted(sids),
             "domainSid": domain_sid,
+            # The account's own identifiers: objectGUID never changes (not on
+            # a rename, not on a move), so HardyOS's sign-in provider uses it
+            # as the stable subject; the SID is the fallback.
+            "sid": sid_of(m),
+            "objectGuid": guid_of(m),
         }
 
     @staticmethod

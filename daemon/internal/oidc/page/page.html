@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+{{- if .Refresh}}
+<meta http-equiv="refresh" content="0;url={{.Refresh}}">
+{{- end}}
+<title>{{.Title}} · HardyOS</title>
+<link rel="stylesheet" href="{{.Base}}/assets/style.css">
+<link rel="icon" href="{{.Base}}/assets/mark.svg" type="image/svg+xml">
+</head>
+<body>
+<main class="card" aria-labelledby="heading">
+  <div class="head">
+    <img src="{{.Base}}/assets/mark.svg" alt="" width="28" height="32">
+    <span class="brand"><span>HARDY</span>OS</span>
+  </div>
+  <h1 id="heading">{{.Heading}}</h1>
+  {{- if .Lead}}<p class="lead">{{.Lead}}</p>{{end}}
+
+  {{- if eq .Kind "login"}}
+  {{- if .AppHost}}<p class="muted small">{{.Client}} is at <span class="host">{{.AppHost}}</span></p>{{end}}
+  {{- if .Error}}
+  <p class="error" role="alert" id="error">{{.Error}}</p>
+  {{- end}}
+  <form method="post" action="{{.Base}}/login" class="form" novalidate>
+    <input type="hidden" name="id" value="{{.ID}}">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label for="username">User name</label>
+    <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false"
+      required value="{{.Username}}" {{if not .Username}}autofocus{{end}}{{if .Error}} aria-describedby="error"{{end}}>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required {{if .Username}}autofocus{{end}}>
+    {{- if .Domain}}
+    <p class="hint">{{if .Notice}}{{.Notice}} {{end}}You can write it as <span class="mono">name</span>, <span class="mono">DOMAIN\name</span> or <span class="mono">name@domain</span>.</p>
+    {{- else if .Notice}}
+    <p class="hint">{{.Notice}}</p>
+    {{- end}}
+    <button type="submit" class="btn">Sign in</button>
+  </form>
+
+  {{- else if eq .Kind "consent"}}
+  <p>{{.Client}}{{if .AppHost}} (<span class="host">{{.AppHost}}</span>){{end}} wants to:</p>
+  <ul class="scopes">
+    {{- range .Scopes}}
+    <li>{{.}}</li>
+    {{- end}}
+  </ul>
+  <p class="muted small">You're asked once; an administrator can remove the app in Control Panel &gt; Sign-in (OIDC).</p>
+  <form method="post" action="{{.Base}}/consent" class="actions">
+    <input type="hidden" name="id" value="{{.ID}}">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <button type="submit" name="decision" value="deny" class="btn secondary">Don't allow</button>
+    <button type="submit" name="decision" value="allow" class="btn">Allow</button>
+  </form>
+
+  {{- else if eq .Kind "logout"}}
+  <form method="post" action="{{.Base}}/logout" class="actions">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="next" value="{{.Next}}">
+    <input type="hidden" name="sub" value="{{.Sub}}">
+    <input type="hidden" name="exp" value="{{.Exp}}">
+    <input type="hidden" name="sig" value="{{.Sig}}">
+    <a class="btn secondary" href="{{.Link}}">{{.LinkText}}</a>
+    <button type="submit" class="btn">Sign out</button>
+  </form>
+
+  {{- else if eq .Kind "bounce"}}
+  <p class="muted">Checking whether you're already signed in… <a href="{{.Link}}">Continue</a></p>
+
+  {{- else}}
+  {{- if .Link}}
+  <p class="actions"><a class="btn" href="{{.Link}}">{{.LinkText}}</a></p>
+  {{- end}}
+  {{- end}}
+</main>
+</body>
+</html>

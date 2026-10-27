@@ -175,6 +175,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request, u 
 	// Sign out every other session; keep this browser signed in with a fresh one.
 	_ = s.sessions.RevokeUser(r.Context(), u.ID)
 	s.proxy.endUser(u.ID)
+	s.endOIDCUser(r.Context(), u.ID)
 	s.startSession(w, r, u)
 	s.record(r, u, "auth.password.change", u.Username, audit.Success, "")
 	w.WriteHeader(http.StatusNoContent)

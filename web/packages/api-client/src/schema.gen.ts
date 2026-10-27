@@ -2779,6 +2779,135 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/oidc": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The sign-in provider's issuer, settings and signing keys (admin) */
+        get: operations["getOidc"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Choose the issuer or let HardyOS accounts sign in to apps (admin) */
+        patch: operations["updateOidc"];
+        trace?: never;
+    };
+    "/oidc/keys/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Sign with the next key now; the current one stays published for 2 days (admin) */
+        post: operations["rotateOidcKeys"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/oidc/presets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Ready-made clients (NetBird) with what to paste where (admin) */
+        get: operations["listOidcPresets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/oidc/clients": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Apps that sign people in through HardyOS (admin) */
+        get: operations["listOidcClients"];
+        put?: never;
+        /** Add a client; a confidential client's secret is in the answer, once (admin) */
+        post: operations["createOidcClient"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/oidc/clients/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** One client (admin) */
+        get: operations["getOidcClient"];
+        put?: never;
+        post?: never;
+        /** Remove a client, its sign-ins, tokens and consents (admin) */
+        delete: operations["deleteOidcClient"];
+        options?: never;
+        head?: never;
+        /** Change a client (all fields); a client made confidential gets a secret, returned once (admin) */
+        patch: operations["updateOidcClient"];
+        trace?: never;
+    };
+    "/oidc/clients/{id}/secret": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Replace a confidential client's secret; the new one is in the answer, once (admin) */
+        post: operations["newOidcClientSecret"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/oidc/clients/{id}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** End every sign-in at a client (its tokens stop working) (admin) */
+        post: operations["revokeOidcClient"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -4361,6 +4490,8 @@ export interface components {
             /** @description "/s/<token>" on this server; shown once */
             url: string;
             token: string;
+            /** @description The link at https://files.<base>/s/<token> (through NetBird's reverse proxy, for people without NetBird) while publishing is on; it can take a minute to open the first time */
+            publicUrl?: string;
         };
         FileShare: {
             /** @description The shared folder's id, or "~home" */
@@ -4527,6 +4658,8 @@ export interface components {
             desktopName: string;
             /** @enum {string} */
             defaultMode: "off" | "netbird" | "public";
+            /** @description files.<base> stays published even with no active share link */
+            publicShareLinks: boolean;
             /** @description This server's tag in its NetBird service names (hardyos-<instance>-...) */
             instance: string;
             hasToken: boolean;
@@ -4541,6 +4674,7 @@ export interface components {
             desktopName?: string;
             /** @enum {string} */
             defaultMode?: "" | "off" | "netbird" | "public";
+            publicShareLinks?: boolean;
             /** @description A NetBird access token (service user, Network Admin). Absent keeps the saved one; empty removes it */
             token?: string;
         };
@@ -4559,7 +4693,7 @@ export interface components {
             default: boolean;
         };
         PublishItem: {
-            /** @description desktop, sso (HardyOS sign-in at sso.<base>, always public) or app:<id> */
+            /** @description desktop (NetBird-only unless an admin confirms public), sso (HardyOS sign-in at sso.<base>, always public), files (share links at files.<base>) or app:<id> */
             key: string;
             /** @description Its name under the base domain */
             label: string;
@@ -4582,6 +4716,8 @@ export interface components {
             hardyosSignIn?: boolean;
             /** @description Password (8+ characters) or PIN (4-12 digits). Absent keeps the saved one */
             secret?: string;
+            /** @description Desktop only: must be true to publish it publicly (it includes administration) */
+            confirmPublic?: boolean;
         };
         AppPublish: components["schemas"]["PublishItem"] & {
             /** @description Publishing is set up */
@@ -4672,6 +4808,87 @@ export interface components {
             groups: components["schemas"]["NetBirdGroup"][];
             /** @description HardyOS's own sign-in provider's issuer, when set up */
             ssoIssuer?: string;
+        };
+        OidcStatus: {
+            /** @description The issuer apps are configured with */
+            issuer: string;
+            /** @description An administrator chose it (else it follows Remote Access) */
+            issuerChosen: boolean;
+            /** @description https://sso.<base>, or https://<desktop>/oidc without a base domain */
+            derivedIssuer: string;
+            discovery: string;
+            localAccounts: boolean;
+            keys: components["schemas"]["OidcKey"][];
+        };
+        OidcKey: {
+            id: string;
+            algorithm: string;
+            /** @enum {string} */
+            state: "next" | "active" | "retired";
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            activatedAt?: string;
+            /** Format: date-time */
+            retiredAt?: string;
+            /** Format: date-time */
+            expiresAt?: string;
+        };
+        OidcClientSpec: {
+            name: string;
+            /**
+             * @description Public clients (browser apps, CLIs) have no secret and must use PKCE
+             * @enum {string}
+             */
+            kind: "confidential" | "public";
+            /** @description Matched exactly; https (http only to localhost, for public clients) */
+            redirectUris: string[];
+            postLogoutRedirectUris?: string[];
+            /** @description DOMAIN\group; empty lets every account in */
+            allowedGroups?: string[];
+            /** @description No consent screen */
+            firstParty?: boolean;
+            preset?: string;
+            disabled?: boolean;
+        };
+        OidcClient: {
+            /** @description The client ID */
+            id: string;
+            name: string;
+            /** @enum {string} */
+            kind: "confidential" | "public";
+            redirectUris: string[];
+            postLogoutRedirectUris: string[];
+            allowedGroups: string[];
+            firstParty: boolean;
+            preset: string;
+            /** @description Set when Remote Access keeps this client (read-only here) */
+            managedBy: string;
+            disabled: boolean;
+            hasSecret: boolean;
+            createdAt: string;
+            updatedAt: string;
+        };
+        OidcClientResult: {
+            client: components["schemas"]["OidcClient"];
+            /** @description Only when a secret was just made: shown once, only a hash is kept */
+            secret?: string;
+        };
+        OidcPresetStep: {
+            where: string;
+            field?: string;
+            /** @description May hold {clientId}, {clientSecret} and {issuer} */
+            value?: string;
+        };
+        OidcPreset: {
+            id: string;
+            name: string;
+            description: string;
+            client: components["schemas"]["OidcClientSpec"];
+            /** @description The app shows the exact redirect URL (starting with this) once it has the client ID: paste it into the client */
+            redirectFromApp?: string;
+            steps: components["schemas"]["OidcPresetStep"][];
+            notes: string[];
         };
     };
     responses: {
@@ -9164,6 +9381,297 @@ export interface operations {
                 content?: never;
             };
             401: components["responses"]["Unauthorized"];
+        };
+    };
+    getOidc: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OidcStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    updateOidc: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description The issuer URL; empty goes back to the one HardyOS works out */
+                    issuer?: string;
+                    /** @description HardyOS (non-domain) accounts may sign in to apps (off by default) */
+                    localAccounts?: boolean;
+                };
+            };
+        };
+        responses: {
+            /** @description Status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OidcStatus"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    rotateOidcKeys: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OidcStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listOidcPresets: {
+        parameters: {
+            query?: {
+                /** @description NetBird's dashboard address (default https://vpn.hardynetworks.net) */
+                netbirdUrl?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Presets */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        presets: components["schemas"]["OidcPreset"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    listOidcClients: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Clients */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        clients: components["schemas"]["OidcClient"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    createOidcClient: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OidcClientSpec"];
+            };
+        };
+        responses: {
+            /** @description The client and its secret */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OidcClientResult"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    getOidcClient: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The client */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OidcClient"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteOidcClient: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    updateOidcClient: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OidcClientSpec"];
+            };
+        };
+        responses: {
+            /** @description The client */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OidcClientResult"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    newOidcClientSecret: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The new secret */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        secret: string;
+                    };
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    revokeOidcClient: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description How many sign-ins were ended */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        revoked: number;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
         };
     };
 }

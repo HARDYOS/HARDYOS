@@ -49,6 +49,10 @@ type DomainAccount struct {
 	// objectSids of the groups in Groups.
 	DomainSID string
 	GroupSIDs []string
+	// SID and ObjectGUID identify the account itself (empty when the
+	// directory didn't say). The sign-in provider's subject is the GUID.
+	SID        string
+	ObjectGUID string
 }
 
 // DomainDirectory answers questions about the domain. hardyd implements it

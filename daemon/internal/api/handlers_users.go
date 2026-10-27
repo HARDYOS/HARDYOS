@@ -107,6 +107,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request, me *au
 	if u.Disabled {
 		_ = s.sessions.RevokeUser(r.Context(), u.ID)
 		s.proxy.endUser(u.ID)
+		s.endOIDCUser(r.Context(), u.ID)
 	}
 	s.record(r, me, "user.update", u.Username, audit.Success, "")
 	writeJSON(w, http.StatusOK, u)
@@ -155,6 +156,7 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request, me 
 	}
 	_ = s.sessions.RevokeUser(r.Context(), id)
 	s.proxy.endUser(id)
+	s.endOIDCUser(r.Context(), id)
 	s.record(r, me, "user.password.reset", u.Username, audit.Success, "")
 	w.WriteHeader(http.StatusNoContent)
 }

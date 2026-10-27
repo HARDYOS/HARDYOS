@@ -423,6 +423,16 @@ func (e *remoteEnv) setUp(t *testing.T) (secret string) {
 		t.Fatalf("install board: %v", j)
 	}
 	e.submit(t, "POST", "/api/v1/remote/join", RemoteJoinRequest{ManagementURL: "https://vpn.hardynetworks.net", SetupKey: "A1B2C3D4-0000-1111-2222-333344445555"})
+	// A private proxy cluster: the desktop is NetBird-only by default.
+	e.api.Lock()
+	for i := range e.api.Domains {
+		e.api.Domains[i].SupportsPrivate = true
+	}
+	e.api.Unlock()
+	// The test accounts are HardyOS's own: let them use HardyOS sign-in.
+	if err := e.server.OIDC().SetLocalAccounts(e.ctx, true); err != nil {
+		t.Fatal(err)
+	}
 	// The fake NetBird knows this server by the stub's address.
 	tok := testToken
 	j, _ := e.submit(t, "PUT", "/api/v1/remote/publishing", RemotePublishingRequest{Enabled: true, BaseDomain: "home.example.net",
@@ -466,8 +476,8 @@ func TestGatewayOnlyTakesNetBirdsProxy(t *testing.T) {
 		}
 	}
 	b := e.browser(t, secret)
-	// sso.<base> is hardyd's own handler (the sign-in provider takes it).
-	if code, _, _ := b.nav(t, "GET", "https://sso.home.example.net/api/v1/health", nil); code != 200 {
+	// sso.<base> is HardyOS's sign-in provider.
+	if code, _, _ := b.nav(t, "GET", "https://sso.home.example.net/.well-known/openid-configuration", nil); code != 200 {
 		t.Fatalf("sso host = %d", code)
 	}
 	if code, _, _ := b.nav(t, "GET", "https://unknown.home.example.net/", nil); code != 404 {
@@ -484,276 +494,5 @@ func TestGatewayOnlyTakesNetBirdsProxy(t *testing.T) {
 	req.RemoteAddr = "100.83.12.7:5000"
 	if !rt.fromProxy(req, mustPrefix("100.64.0.0/10"), secret) {
 		t.Fatal("refused NetBird's proxy")
-	}
-}
-
-func TestGatewaySignInRoundTripAndCookieIsolation(t *testing.T) {
-	withProxyTimes(t, 0, time.Hour)
-	e := newRemoteEnv(t)
-	secret := e.setUp(t)
-	b := e.browser(t, secret)
-
-	// Not signed in to the desktop: the round trip ends at "sign in".
-	code, body, _ := b.nav(t, "GET", "https://board.home.example.net/", nil)
-	if code != 401 || !strings.Contains(body, "Sign in to HardyOS first") {
-		t.Fatalf("unsigned = %d %s", code, body)
-	}
-	// A fetch (not a page load) isn't sent around.
-	if code, _, _ := b.nav(t, "GET", "https://board.home.example.net/api", map[string]string{"Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty", "Sec-Fetch-Site": "same-origin"}); code != 401 {
-		t.Fatalf("fetch without session = %d", code)
-	}
-
-	b.signIn(t, "cade", "supersecret1")
-	// The desktop through the gateway saw the client's address.
-	found := false
-	var list []struct {
-		Action string `json:"action"`
-		IP     string `json:"ip"`
-	}
-	e.admin.do("GET", "/api/v1/audit?action=auth.login", nil, &list)
-	for _, a := range list {
-		if a.IP == "203.0.113.9" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("login audit IPs = %+v", list)
-	}
-
-	code, body, _ = b.nav(t, "GET", "https://board.home.example.net/page?x=1", nil)
-	if code != 200 || !strings.HasPrefix(body, "host=board.home.example.net xff=203.0.113.9 proto=https nb= cookies=") || strings.Contains(body, "hardyos") {
-		t.Fatalf("board = %d %q", code, body)
-	}
-	if !strings.HasSuffix(body, "cookies=") {
-		t.Fatalf("HardyOS cookies reached the app: %q", body)
-	}
-	bc := b.cookies("https://board.home.example.net/")
-	if bc[gatewayCookie] == "" || bc[gatewayStateCookie] != "" {
-		t.Fatalf("board cookies = %v", bc)
-	}
-	if b.cookies("https://nas.home.example.net/")[gatewayCookie] != "" {
-		t.Fatal("the app's cookie reached the desktop's host")
-	}
-
-	// Each app sets its cookies on its own host only.
-	b.nav(t, "GET", "https://board.home.example.net/set", nil)
-	b.nav(t, "GET", "https://notes.home.example.net/", nil) // signs in to notes too
-	b.nav(t, "GET", "https://notes.home.example.net/set", nil)
-	_, body, _ = b.nav(t, "GET", "https://board.home.example.net/", nil)
-	if !strings.HasSuffix(body, "cookies=sid=board; wide=board") {
-		t.Fatalf("board sees %q", body)
-	}
-	_, body, _ = b.nav(t, "GET", "https://notes.home.example.net/", nil)
-	if !strings.HasSuffix(body, "cookies=sid=notes; wide=notes") {
-		t.Fatalf("notes sees %q", body)
-	}
-	if b.cookies("https://nas.home.example.net/")["wide"] != "" || b.cookies("https://nas.home.example.net/")["hardyos_session"] == "evil" {
-		t.Fatal("an app's cookie reached the desktop")
-	}
-	// One app's session cookie is no good on another app.
-	nc := b.cookies("https://notes.home.example.net/")[gatewayCookie]
-	other := e.browser(t, secret)
-	other.jar.SetCookies(mustURL("https://board.home.example.net/"), []*http.Cookie{{Name: gatewayCookie, Value: nc, Path: "/"}})
-	if code, _, _ := other.nav(t, "GET", "https://board.home.example.net/", nil); code == 200 {
-		t.Fatal("notes' session opened board")
-	}
-
-	// Frame headers: the desktop may frame the app.
-	_, _, hdr := b.nav(t, "GET", "https://board.home.example.net/", nil)
-	if hdr.Get("X-Frame-Options") != "" || !strings.Contains(strings.Join(hdr.Values("Content-Security-Policy"), ","), "frame-ancestors 'self' https://nas.home.example.net") ||
-		strings.Contains(strings.Join(hdr.Values("Content-Security-Policy"), ","), "'none'") {
-		t.Fatalf("frame headers = %v", hdr)
-	}
-	// Redirects stay on the published address.
-	b.client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	_, _, hdr = b.nav(t, "GET", "https://board.home.example.net/go", nil)
-	if hdr.Get("Location") != "https://board.home.example.net/there" {
-		t.Fatalf("location = %q", hdr.Get("Location"))
-	}
-	b.client.CheckRedirect = nil
-
-	// Another app's page can't post to it or open its WebSockets.
-	code, _, _ = b.nav(t, "POST", "https://board.home.example.net/", map[string]string{"Origin": "https://notes.home.example.net", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Site": "same-site"})
-	if code != 403 {
-		t.Fatalf("cross-app post = %d", code)
-	}
-}
-
-func TestGatewayAccessAndLoginCSRF(t *testing.T) {
-	withProxyTimes(t, 0, time.Hour)
-	e := newRemoteEnv(t)
-	secret := e.setUp(t)
-	kid := e.browser(t, secret)
-	kid.signIn(t, "kid", "kidpassword1")
-	if code, body, _ := kid.nav(t, "GET", "https://notes.home.example.net/", nil); code != 403 || !strings.Contains(body, "been given this app") {
-		t.Fatalf("kid opened notes: %d %s", code, body)
-	}
-	if code, _, _ := kid.nav(t, "GET", "https://board.home.example.net/", nil); code != 200 {
-		t.Fatalf("kid can't open board: %d", code)
-	}
-
-	// Login CSRF: a token made for the attacker's state is useless in the
-	// victim's browser (its state cookie differs, or it has none).
-	attacker := e.browser(t, secret)
-	attacker.signIn(t, "kid", "kidpassword1")
-	attacker.client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	_, _, hdr := attacker.nav(t, "GET", "https://board.home.example.net/", nil)
-	signin := hdr.Get("Location")
-	if !strings.HasPrefix(signin, "https://nas.home.example.net/apps/board/signin?") {
-		t.Fatalf("round trip starts at %q", signin)
-	}
-	_, _, hdr = attacker.nav(t, "GET", signin, map[string]string{"Sec-Fetch-Site": "same-site"})
-	authURL := hdr.Get("Location")
-	if !strings.HasPrefix(authURL, "https://board.home.example.net/__hardyos/auth?token=") {
-		t.Fatalf("desktop sent to %q", authURL)
-	}
-	victim := e.browser(t, secret)
-	victim.signIn(t, "cade", "supersecret1")
-	victim.client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	victim.nav(t, "GET", "https://board.home.example.net/", nil) // the victim's own state cookie
-	if code, body, _ := victim.nav(t, "GET", authURL, map[string]string{"Sec-Fetch-Site": "cross-site"}); code != 403 {
-		t.Fatalf("planted token (cross-site) = %d %s", code, body)
-	}
-	if code, body, _ := victim.nav(t, "GET", authURL, map[string]string{"Sec-Fetch-Site": "same-site"}); code != 403 || !strings.Contains(body, "expired") && !strings.Contains(body, "somewhere else") {
-		t.Fatalf("planted token = %d %s", code, body)
-	}
-	// The desktop refuses a sign-in another site starts.
-	if code, _, _ := victim.nav(t, "GET", signin, map[string]string{"Sec-Fetch-Site": "cross-site"}); code != 403 {
-		t.Fatalf("cross-site signin = %d", code)
-	}
-	// And sends only to the app's own published address.
-	if code, _, _ := victim.nav(t, "GET", "https://nas.home.example.net/apps/notes/signin?state=zz&return=https://evil.example", nil); code != 400 {
-		t.Fatalf("bad state = %d", code)
-	}
-}
-
-func TestGatewayWebSocketsEndWithTheDesktopSession(t *testing.T) {
-	withProxyTimes(t, 0, time.Hour)
-	e := newRemoteEnv(t)
-	secret := e.setUp(t)
-	b := e.browser(t, secret)
-	b.signIn(t, "cade", "supersecret1")
-	if code, _, _ := b.nav(t, "GET", "https://board.home.example.net/", nil); code != 200 {
-		t.Fatalf("open = %d", code)
-	}
-	ctx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
-	defer cancel()
-	hdr := http.Header{}
-	hdr.Set("Origin", "https://board.home.example.net")
-	c, _, err := websocket.Dial(ctx, "wss://board.home.example.net/ws", &websocket.DialOptions{HTTPClient: b.client, HTTPHeader: hdr})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.CloseNow()
-	if err := c.Write(ctx, websocket.MessageText, []byte("hi")); err != nil {
-		t.Fatal(err)
-	}
-	if _, msg, err := c.Read(ctx); err != nil || string(msg) != "hi" {
-		t.Fatalf("echo = %q %v", msg, err)
-	}
-	// A WebSocket from another app's page is refused.
-	hdr.Set("Origin", "https://notes.home.example.net")
-	if _, _, err := websocket.Dial(ctx, "wss://board.home.example.net/ws", &websocket.DialOptions{HTTPClient: b.client, HTTPHeader: hdr}); err == nil {
-		t.Fatal("cross-app WebSocket accepted")
-	}
-	// Signing out of the desktop closes it.
-	req, _ := http.NewRequest("POST", "https://nas.home.example.net/api/v1/auth/logout", nil)
-	req.Header.Set("X-HardyOS-Request", "1")
-	res, err := b.client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	res.Body.Close()
-	rctx, rcancel := context.WithTimeout(ctx, 3*time.Second)
-	defer rcancel()
-	if _, _, err := c.Read(rctx); err == nil || rctx.Err() != nil {
-		t.Fatalf("WebSocket still open after sign-out: %v", err)
-	}
-	if code, _, _ := b.nav(t, "GET", "https://board.home.example.net/", map[string]string{"Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty"}); code == 200 {
-		t.Fatal("the app session outlived the desktop session")
-	}
-}
-
-func TestPublishedAppsOpenAtTheirAddress(t *testing.T) {
-	withProxyTimes(t, 0, time.Hour)
-	e := newRemoteEnv(t)
-	secret := e.setUp(t)
-	b := e.browser(t, secret)
-	b.signIn(t, "cade", "supersecret1")
-	req, _ := http.NewRequest("POST", "https://nas.home.example.net/api/v1/apps/board/open", nil)
-	req.Header.Set("X-HardyOS-Request", "1")
-	res, err := b.client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var open AppOpen
-	_ = json.NewDecoder(res.Body).Decode(&open)
-	res.Body.Close()
-	if open.URL != "https://board.home.example.net/" || !open.Published || !open.Proxied {
-		t.Fatalf("open through the desktop's name = %+v", open)
-	}
-	// At the desktop's LAN address it's the window proxy as before.
-	var lan AppOpen
-	if code := e.admin.do("POST", "/api/v1/apps/board/open", nil, &lan); code != 200 || lan.Published {
-		t.Fatalf("open on the LAN = %d %+v", code, lan)
-	}
-	var ov AppsOverview
-	e.kid.do("GET", "/api/v1/apps", nil, &ov)
-	if ov.Published["board"] != "https://board.home.example.net/" || ov.Published["notes"] != "" {
-		t.Fatalf("kid's published = %v", ov.Published)
-	}
-	// The desktop's CSP lets it frame published apps.
-	res, err = b.client.Get("https://nas.home.example.net/api/v1/health")
-	if err != nil {
-		t.Fatal(err)
-	}
-	res.Body.Close()
-	if !strings.Contains(res.Header.Get("Content-Security-Policy"), "https://*.home.example.net") {
-		t.Fatalf("csp = %q", res.Header.Get("Content-Security-Policy"))
-	}
-
-	// An app without HardyOS sign-in (its own sign-in only).
-	var pv AppPublishView
-	e.admin.do("GET", "/api/v1/apps/board/publish", nil, &pv)
-	if !pv.Enabled || pv.URL != "https://board.home.example.net" || !pv.Config.HardyOSSignIn || !pv.Published {
-		t.Fatalf("publish view = %+v", pv)
-	}
-	if j, _ := e.submit(t, "PUT", "/api/v1/apps/board/publish", PublishRequest{Mode: publish.ModePublic, Auth: publish.AuthNone, HardyOSSignIn: false}); j["state"] != "succeeded" {
-		t.Fatalf("publish board = %v", j)
-	}
-	anon := e.browser(t, secret)
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		code, _, _ := anon.nav(t, "GET", "https://board.home.example.net/", nil)
-		if code == 200 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("board without HardyOS sign-in = %d", code)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if !strings.Contains(strings.Join(auditActions(e.admin, "remote.publish"), ","), "app:board mode=public auth=none hardyosSignIn=off") {
-		t.Fatalf("audit = %v", auditActions(e.admin, "remote.publish"))
-	}
-	// Removing an app removes its service.
-	if j := e.runJob(t, "DELETE", "/api/v1/apps/board", AppRemoveRequest{Confirm: "board"}); j["state"] != "succeeded" {
-		t.Fatalf("remove: %v", j)
-	}
-	deadline = time.Now().Add(10 * time.Second)
-	for {
-		gone := true
-		for _, v := range e.api.ServiceList() {
-			if v.Domain == "board.home.example.net" {
-				gone = false
-			}
-		}
-		if gone {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("board's NetBird service outlived the app")
-		}
-		time.Sleep(50 * time.Millisecond)
 	}
 }

@@ -39,10 +39,14 @@ export function PublishEditor({
   const [secret, setSecret] = useState("");
   const [signin, setSignin] = useState(item.config.hardyosSignIn);
   const [chosen, setChosen] = useState<string[]>(item.config.groups);
+  const [understood, setUnderstood] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const effective = mode === "" ? item.config.mode : mode;
-  const problem = effective === "public" ? secretProblem(auth, secret, item.config.hasSecret && item.config.auth === auth) : "";
+  const desktopPublic = desktop && effective === "public";
+  const problem =
+    (effective === "public" ? secretProblem(auth, secret, item.config.hasSecret && item.config.auth === auth) : "") ||
+    (desktopPublic && !understood ? "Confirm putting the desktop on the internet" : "");
   const st = serviceStatus(item.status);
 
   async function save() {
@@ -50,6 +54,7 @@ export function PublishEditor({
     setError(null);
     try {
       const body: PublishRequest = { mode, auth, groups: chosen, hardyosSignIn: signin };
+      if (desktopPublic) body.confirmPublic = true;
       if ((auth === "password" || auth === "pin") && secret !== "") body.secret = secret;
       await savePublish(item.key, body);
       setSecret("");
@@ -76,7 +81,7 @@ export function PublishEditor({
         {item.published && <Badge tone={st.tone}>{st.label}</Badge>}
       </div>
       {item.error && <Alert tone="warn">{item.error}</Alert>}
-      <Field label="Published" hint={desktop ? "NetBird's server reaches HardyOS's sign-in through the desktop, so keep it public once HardyOS sign-in (OIDC) is set up." : undefined}>
+      <Field label="Published" hint={desktop ? "NetBird devices only is the safe choice: the desktop includes the Control Panel and everything else an administrator can do." : undefined}>
         {(id) => (
           <Select id={id} value={mode} onChange={(e) => setMode(e.target.value as Mode)} aria-label={`How ${item.name} is published`}>
             {!desktop && <option value="">Like other apps ({item.config.default ? publishSummary(item.config) : "the default"})</option>}
@@ -88,6 +93,16 @@ export function PublishEditor({
           </Select>
         )}
       </Field>
+      {desktopPublic && (
+        <Alert tone="bad" title="The desktop on the internet">
+          The desktop includes administration (Control Panel, Terminal, storage, apps). Public, anyone can reach its sign-in page; only HardyOS's
+          sign-in and its rate limits stand in front of it unless you add a sign-in below. Keep it NetBird-only unless you need it without NetBird.
+          <label className="row small" style={{ gap: 6, marginTop: 8 }}>
+            <input type="checkbox" checked={understood} onChange={(e) => setUnderstood(e.target.checked)} />
+            I understand: put the desktop on the internet
+          </label>
+        </Alert>
+      )}
       {effective === "public" && (
         <>
           <Field label="Sign-in in front" hint="NetBird's proxy asks for this before anything reaches HardyOS.">

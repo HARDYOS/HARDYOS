@@ -158,3 +158,11 @@ export type RemoteCheckStep = S["RemoteCheckStep"];
 export type DNSRecord = S["DNSRecord"];
 export type NetBirdGroup = S["NetBirdGroup"];
 export type NetBirdCluster = S["NetBirdCluster"];
+// Sign-in provider (OIDC), Control Panel > Sign-in (OIDC) (remote access part B)
+export type OidcStatus = S["OidcStatus"];
+export type OidcKey = S["OidcKey"];
+export type OidcClient = S["OidcClient"];
+export type OidcClientSpec = S["OidcClientSpec"];
+export type OidcClientResult = S["OidcClientResult"];
+export type OidcPreset = S["OidcPreset"];
+export type OidcPresetStep = S["OidcPresetStep"];

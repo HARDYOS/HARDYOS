@@ -33,6 +33,9 @@ func newEnv(t *testing.T) *env {
 	t.Cleanup(func() { db.Close() })
 	nb := nbtest.New("nbp_token123")
 	t.Cleanup(nb.Close)
+	for i := range nb.Domains {
+		nb.Domains[i].SupportsPrivate = true // a private proxy: the desktop is NetBird-only by default
+	}
 	st := &Store{DB: db, Sealer: &Sealer{KeyFile: filepath.Join(t.TempDir(), "secrets", "hardyd.key")}}
 	pub := &Publisher{Store: st}
 	e := &env{ctx: ctx, db: db, st: st, nb: nb, pub: pub,
@@ -178,9 +181,13 @@ func TestSyncCreatesKeepsAndRepairs(t *testing.T) {
 	if !jf.PassHostHeader || jf.RewriteRedirect || jf.Private || jf.Auth.BearerAuth == nil || !jf.Auth.BearerAuth.Enabled {
 		t.Fatalf("jellyfin = %+v", jf)
 	}
-	// The desktop is public with its own sign-in page: nothing in front.
-	if desk.Auth.BearerAuth != nil || desk.Auth.PasswordAuth != nil || len(desk.Targets) != 1 {
+	// The desktop is NetBird-only by default (All), nothing else in front.
+	if !desk.Private || len(desk.AccessGroups) != 1 || desk.AccessGroups[0] != "group-all" || desk.Auth.BearerAuth != nil || len(desk.Targets) != 1 {
 		t.Fatalf("desktop = %+v", desk)
+	}
+	// No share link yet: no files.<base>.
+	if byDomain(e.nb, "files.home.example.net") != nil {
+		t.Fatal("files published without a share link")
 	}
 	// HardyOS's sign-in provider: public, nothing in front, always.
 	sso := byDomain(e.nb, "sso.home.example.net")
@@ -346,8 +353,17 @@ func TestPasswordPINAndSSOGroups(t *testing.T) {
 
 func TestNetBirdOnly(t *testing.T) {
 	e := newEnv(t)
+	e.nb.Lock()
+	for i := range e.nb.Domains {
+		e.nb.Domains[i].SupportsPrivate = false
+	}
+	e.nb.Unlock()
 	_ = e.st.SetConfig(e.ctx, AppKey("jellyfin"), ServiceConfig{Mode: ModeNetBird, HardyOSSignIn: true}, nil)
 	res := e.sync(t)
+	// The desktop never goes public on its own when NetBird-only can't be had.
+	if it := item(res, DesktopKey); it.Published || !strings.Contains(it.Error, "Private capability") {
+		t.Fatalf("desktop without a private cluster = %+v", it)
+	}
 	if it := item(res, AppKey("jellyfin")); it.Published || !strings.Contains(it.Error, "Private capability") {
 		t.Fatalf("no private cluster = %+v", it)
 	}
@@ -403,6 +419,28 @@ func TestSyncProblemsLeaveServicesAlone(t *testing.T) {
 	}
 }
 
+func TestShareLinksHost(t *testing.T) {
+	e := newEnv(t)
+	e.in.ShareLinks = true
+	e.sync(t)
+	f := byDomain(e.nb, "files.home.example.net")
+	if f == nil || f.Private || f.Auth.BearerAuth != nil || len(f.Targets) != 2 || *f.Targets[0].Path != "/s/" ||
+		*f.Targets[1].Path != "/" || f.Targets[1].AccessAction != "block" {
+		t.Fatalf("files = %+v", f)
+	}
+	// The last link gone: so is the host, unless public share links are on.
+	e.in.ShareLinks = false
+	if res := e.sync(t); res.Deleted != 1 || byDomain(e.nb, "files.home.example.net") != nil {
+		t.Fatalf("no links = %+v", res)
+	}
+	s, _ := e.st.Load(e.ctx)
+	s.PublicShareLinks = true
+	_, _ = e.st.Save(e.ctx, s)
+	if e.sync(t); byDomain(e.nb, "files.home.example.net") == nil {
+		t.Fatal("public share links on, no host")
+	}
+}
+
 func TestRemoveAll(t *testing.T) {
 	e := newEnv(t)
 	e.sync(t)
@@ -443,7 +481,7 @@ func TestCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !c.Ready || !strings.HasPrefix(stepState(c, "dns"), "ok") || !strings.HasPrefix(stepState(c, "token"), "ok") ||
-		!strings.HasPrefix(stepState(c, "private"), "warn") || !strings.HasPrefix(stepState(c, "sso"), "warn") || !strings.HasPrefix(stepState(c, "peer"), "ok") {
+		!strings.HasPrefix(stepState(c, "private"), "ok") || !strings.HasPrefix(stepState(c, "sso"), "warn") || !strings.HasPrefix(stepState(c, "peer"), "ok") {
 		t.Fatalf("check = %+v", c.Steps)
 	}
 	if c.Record == nil || c.Record.Name != "*.home.example.net" || c.Record.Target != "proxy.example.net" || c.Record.Type != "CNAME" || c.Record.Proxy != "DNS only" {

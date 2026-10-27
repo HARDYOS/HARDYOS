@@ -48,6 +48,15 @@ const SSOKey = "sso"
 // SSOLabel is the provider's name under the base domain.
 const SSOLabel = "sso"
 
+// FilesKey is files.<base>: share link pages (/s/...) for people without
+// NetBird, and nothing else. Public with nothing in front (each link has
+// its own token, password and limits); published while a share link is
+// active or public share links are switched on.
+const FilesKey = "files"
+
+// FilesLabel is its name under the base domain.
+const FilesLabel = "files"
+
 // AppKey is an app's row key.
 func AppKey(id string) string { return "app:" + id }
 
@@ -82,6 +91,9 @@ type Settings struct {
 	// DefaultMode is how apps without their own choice are published:
 	// netbird, public or off.
 	DefaultMode string `json:"defaultMode"`
+	// PublicShareLinks keeps files.<base> published even while no share
+	// link is active.
+	PublicShareLinks bool `json:"publicShareLinks"`
 	// Instance tags this server's services ("hardyos-<instance>-..."), so
 	// two servers on one NetBird account never touch each other's.
 	Instance string `json:"instance"`
@@ -147,6 +159,9 @@ func (s Settings) Validate() error {
 	}
 	if !netbird.ValidDNSLabel(s.DesktopName) {
 		return errors.New("the desktop's name is letters, digits and dashes (like nas)")
+	}
+	if s.DesktopName == SSOLabel || s.DesktopName == FilesLabel {
+		return errors.New(s.DesktopName + " is HardyOS's own name under the base domain: choose another for the desktop")
 	}
 	if s.APIURL != "" {
 		if _, err := netbird.NormalizeBaseURL(s.APIURL); err != nil {
@@ -245,6 +260,16 @@ func (st *Store) setSealed(ctx context.Context, key, value string) error {
 	return st.DB.SetSetting(ctx, key, v)
 }
 
+// SealedSetting reads a sealed setting ("" when unset).
+func (st *Store) SealedSetting(ctx context.Context, key string) (string, error) {
+	return st.sealed(ctx, key)
+}
+
+// SetSealedSetting saves a setting sealed.
+func (st *Store) SetSealedSetting(ctx context.Context, key, value string) error {
+	return st.setSealed(ctx, key, value)
+}
+
 // Token is the NetBird access token ("" when none is saved).
 func (st *Store) Token(ctx context.Context) (string, error) { return st.sealed(ctx, settingToken) }
 
@@ -314,7 +339,7 @@ func (st *Store) rows(ctx context.Context) (map[string]*row, error) {
 
 // resolve fills in what an unset choice means for key.
 func resolve(key string, r *row, s Settings) ServiceConfig {
-	if key == SSOKey {
+	if key == SSOKey || key == FilesKey {
 		return ServiceConfig{Mode: ModePublic, Auth: AuthNone, Groups: []string{}, Default: true}
 	}
 	c := ServiceConfig{HardyOSSignIn: true}
@@ -324,7 +349,9 @@ func resolve(key string, r *row, s Settings) ServiceConfig {
 	if r == nil || r.mode == "" {
 		c.Default = true
 		if key == DesktopKey {
-			c.Mode = ModePublic // NetBird's server must reach HardyOS's sign-in (OIDC)
+			// The desktop has administration in it: NetBird devices only
+			// unless an administrator chooses otherwise.
+			c.Mode = ModeNetBird
 		} else {
 			c.Mode = s.DefaultMode
 		}

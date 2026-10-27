@@ -399,6 +399,83 @@ When the server has a domain, its accounts sign in to the web desktop too
   `group` or `everyone`, compared case-insensitively. `/auth/me` returns
   `source`, `principal` and `groups`.
 
+### Sign-in provider (OIDC)
+
+hardyd is an OpenID Connect provider for other apps (NetBird first; user
+guide: `docs/sign-in.md`), in `internal/oidc`, backed by the same sign-in as
+the desktop:
+
+- **Protocol.** zitadel/oidc's `op` package (OpenID Certified) does the
+  protocol: discovery, JWKS, authorization code, PKCE, refresh, userinfo,
+  introspection, revocation, RP-initiated logout. hardyd implements its
+  storage over its own database (migration 0010), the pages and the policy.
+  Only the code flow with `response_mode=query`; PKCE S256 is required for
+  public clients and the only method accepted from any client; redirect
+  URIs match character for character (every client is the `op` package's
+  web type, so not even localhost ports vary); an unknown client or
+  redirect URI is answered with an error page, never a redirect.
+- **Issuer and routing.** `https://sso.<base>` once Remote Access has a base
+  domain (`oidc.Names`; until part A's settings exist, the
+  `remote.base_domain` setting), else `https://<hostname>/oidc`; an
+  administrator may choose one (`oidc.issuer`). `api.Server.ServeHTTP` hands
+  every request for the issuer's host (with the `/oidc` prefix when the
+  issuer is on the desktop's host) to the provider before anything else, so
+  on `sso.<base>` nothing of the desktop answers, and the provider's
+  responses carry their own headers (`default-src 'none'` and no scripts,
+  `frame-ancestors 'none'`, `no-referrer`). CORS on the token endpoints
+  only for origins of registered redirect URIs.
+- **Sign-in pages.** Server-rendered (`html/template`), no JavaScript, Plus
+  Jakarta Sans embedded. `GET /login?id=` binds the sign-in request to the
+  browser that first opens it (a random `__Host-hardyos_oidc_b` cookie, its
+  hash on the request); every form carries an HMAC of request and browser,
+  and posts must be same-origin; the code is handed out
+  (`/authorize/callback`) only to that browser. A post's next step is a
+  meta refresh page (browsers apply `form-action` to redirects after a
+  post). Passwords go through `auth.SignIn` (`AuthenticateDomain` while
+  local accounts are off: a local name is refused unchecked, like a wrong
+  password) with the desktop's limiter and keys.
+- **Sessions.** A sign-in starts the provider's own browser session
+  (`oidc_browser_sessions`, hashed, `__Host-hardyos_sso`, SameSite=Lax,
+  12 hours). On the desktop's host the desktop session is reused
+  (`peekSession`, no sliding); its SameSite=Strict cookie doesn't come
+  along on a cross-site arrival, so the login page reloads itself once
+  first. `prompt=none|login|consent` and `max_age` are honoured.
+- **Subjects and claims.** A domain account's `sub` is its objectGUID
+  (`hardyos-dc-admin user.groups` returns `objectGuid` and `sid`), looked up
+  at every interactive sign-in: a different GUID behind the same name
+  revokes the old person's grants and consents. Local accounts get a random
+  subject. Claims: `name`, `preferred_username`, `email` (`email_verified`;
+  the UPN, unverified, without one), `groups` (`NETBIOS\group`) and
+  `hardyos_admin`; ID tokens carry them (Dex reads them from there), and
+  JWT access tokens carry groups, role and names (NetBird's JWT group sync).
+- **Tokens.** Codes are single-use for 60 seconds; a used code's row stays
+  10 minutes so a replay revokes what it gave. Each exchange makes a grant;
+  access tokens (JWT, 15 minutes, `jti` recorded) and refresh tokens
+  (hashed, rotated on every use, 14 days idle, 30 days per grant) belong to
+  it. A refresh token used twice revokes the grant. Refresh, userinfo and
+  introspection load the account again (`LoadUser`: turned off, gone from
+  the domain, groups refreshed every 10 minutes) and check the client's
+  groups and the local-accounts setting; a failure revokes the grant.
+  Password changes, resets and turning an account off end its provider
+  sessions and grants (`Provider.EndUser`).
+- **Clients.** `oidc_clients`: confidential (secret of 256 random bits,
+  stored as SHA-256, shown once) or public; first-party clients skip the
+  consent screen, others ask once per person (`oidc_consents`). Presets for
+  NetBird (embedded IdP connector) and NetBird as the only IdP (dashboard,
+  CLI and reverse proxy callback). `Clients.Ensure(ctx, key, name,
+  redirectURIs, groups)` keeps a client for another part of HardyOS (Remote
+  Access): created once with a secret it returns then, updated in place
+  later, read-only in Control Panel; `EnsuredSecret` and `Forget` complete it.
+- **Keys.** RS256 (2048-bit). States `next` (published a day ahead),
+  `active` (signs, 30 days), `retired` (published 2 more days). The private
+  key is PKCS#8 sealed with AES-256-GCM (`internal/secretbox`, AAD = the
+  key's row) under a key hardyd-priv derives per purpose
+  (`secrets.key {purpose}`: HMAC-SHA256 of a root-only 32-byte master key,
+  `/var/lib/hardyos/keys/_hardyd-secrets.key`, made on first use). The
+  master key is in the keys folder, so only password-protected backups with
+  keys carry it; restored without it, the keys can't be opened, are retired
+  at once and replaced (audited `oidc.keys.replace`).
+
 ## Shared folders
 
 Folders on the data pools for the family's files and for apps (user and
@@ -1195,7 +1272,7 @@ User guide: [remote-access.md](remote-access.md); contract:
                         │ X-Hardyos-Gateway: <secret>, X-Forwarded-For
                         ▼
               hardyd app gateway  <NetBird address>:44200 (TLS, desktop cert)
-                 ├─ <desktop>.<base>, sso.<base> ──► hardyd's own handler (real client address)
+                 ├─ <desktop>.<base>, sso.<base>, files.<base> (/s/ only) ──► hardyd's own handler (real client address)
                  └─ <app>.<base> ──────► 127.0.0.1:<app's web port>
 ```
 
@@ -1218,8 +1295,11 @@ User guide: [remote-access.md](remote-access.md); contract:
   `secrets.key` gives for purpose `remote-access` (`Sealer.Source`;
   without it, a 0600 key file outside the database, for development). The sync lists NetBird's services and only ever
   touches those named `hardyos-<instance>-…`: one per published thing
-  (the desktop, `sso.<base>` for HardyOS's sign-in provider, always public
-  with nothing in front, and each app),
+  (the desktop, NetBird-only unless an administrator confirms public;
+  `sso.<base>` for HardyOS's sign-in provider, always public with nothing
+  in front; `files.<base>` for share links while one is active or public
+  share links are on, its targets blocking everything but `/s/`; and each
+  app),
   target = this server's peer (looked up by its NetBird address), HTTPS to
   port 44200 with `skip_tls_verify` (the hop is inside WireGuard),
   `pass_host_header`, and the secret as a custom header. NetBird-only =
@@ -1252,14 +1332,18 @@ User guide: [remote-access.md](remote-access.md); contract:
   WebSocket tracking and closing, frame headers allowing the desktop's
   published origin) without cookie renaming: cookies lose `Domain` (no app
   can set them for its siblings) and `hardyos_*` ones are dropped both
-  ways. Sign-in is a round trip: the app host sets
-  `__Host-hardyos_gw_state` and redirects to
-  `<desktop>/apps/<id>/signin?state=<sha256>`; the desktop (its session,
-  `mayUse`, not cross-site) mints a one-minute single-use token bound to
-  that hash and redirects to the app's published `/__hardyos/auth`, which
-  needs the matching state cookie and sets `__Host-hardyos_gw` (HttpOnly,
-  Secure, SameSite=Lax). Gateway sessions live with the window proxy's
-  (same sign-out, account and access revocation; app jobs drop them). Per
+  ways. Sign-in goes through HardyOS's own provider (`appgateway_signin.go`):
+  every app host is a redirect URI of one managed client
+  (`Clients.Ensure("remote-gateway")`, its secret sealed in
+  `remote.gateway_client`); the app host sets `__Host-hardyos_gw_state`
+  and redirects to `https://sso.<base>/authorize` (code, PKCE, nonce); its
+  `/__hardyos/callback` needs the matching state cookie, exchanges the
+  code in-process, checks the ID token's issuer, audience, expiry and nonce,
+  maps the subject to the account (`Provider.UserForSubject`), checks
+  `mayUse` and sets `__Host-hardyos_gw` (HttpOnly, Secure, SameSite=Lax).
+  Gateway sessions live with the window proxy's (account and access
+  revocation every 30 s, app jobs drop them). `files.<base>` routes only
+  `/s/...` to hardyd's share link pages. Per
   app, "HardyOS sign-in" can be off for apps with native clients.
 - **Opening.** `POST /apps/{id}/open` from the desktop's published host
   answers `https://<app>.<base>/` (`published: true`); elsewhere the

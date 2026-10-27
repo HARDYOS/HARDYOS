@@ -12,25 +12,22 @@ package api
 //     secret (so only NetBird's proxy, for a service HardyOS made, gets
 //     through; NetBird doesn't say which peers are its proxies), and takes
 //     the client's address from the proxy's X-Forwarded-For;
-//   - routes by Host: <desktop>.<base> to the desktop (hardyd's own
-//     handler, so its sign-in, rate limits and audit see the real client),
+//   - routes by Host: <desktop>.<base>, sso.<base> and files.<base> to
+//     hardyd's own handler (so sign-in, rate limits and audit see the real
+//     client),
 //     <app id>.<base> to the app's web port on 127.0.0.1;
 //   - for apps, keeps what the window proxy does (access checks every 30
 //     seconds, frame headers for the desktop, WebSocket tracking and
 //     closing, HardyOS cookies never forwarded) with one difference: each
 //     app has its own host, so its cookies are its own and aren't renamed.
-//     Sign-in is a round trip to the desktop: the app host sets a
-//     host-only state cookie and sends the browser to
-//     <desktop>/apps/<id>/signin, which (with the desktop session) mints a
-//     single-use token bound to that state and sends the browser back to
-//     <app>/__hardyos/auth; the gateway checks the state cookie and sets the
-//     app host's own session cookie (__Host-, HttpOnly, Secure, Lax).
+//     Sign-in goes through HardyOS's own sign-in provider at sso.<base>
+//     (appgateway_signin.go), then the app host's own session cookie
+//     (__Host-, HttpOnly, Secure, Lax) is set;
+//   - files.<base> serves share link pages (/s/...) and nothing else.
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -46,7 +43,6 @@ import (
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/apps"
-	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/clientip"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
@@ -105,6 +101,9 @@ type remoteRuntime struct {
 	problem     string
 	last        *RemoteSyncInfo
 	kick        chan struct{}
+	// client is the sign-in provider's client for app hosts.
+	client     *gatewayClient
+	clientURIs []string
 }
 
 func (rt *remoteRuntime) info() (*RemoteSyncInfo, RemoteGatewayInfo) {
@@ -148,6 +147,17 @@ func (rt *remoteRuntime) publishedApps() map[string]string {
 		out[id] = "https://" + r.host + "/"
 	}
 	return out
+}
+
+// filesURL is where share links open for people without NetBird
+// (https://files.<base>), "" while publishing is off.
+func (rt *remoteRuntime) filesURL() string {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.base == "" {
+		return ""
+	}
+	return "https://" + publish.FilesLabel + "." + rt.base
 }
 
 func (rt *remoteRuntime) trigger() {
@@ -234,7 +244,7 @@ func finishedRemoteJob(e events.Event) bool {
 // sync repairs NetBird's services and refreshes the gateway.
 func (rt *remoteRuntime) sync(ctx context.Context) {
 	pub := rt.s.cfg.Remote
-	in, st, list := remoteInputs(ctx, rt.s.cfg.Priv)
+	in, st, list := remoteInputs(ctx, rt.s.cfg.Priv, rt.s.cfg.DB)
 	sctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	res, err := pub.Sync(sctx, in)
 	cancel()
@@ -254,30 +264,28 @@ func (rt *remoteRuntime) sync(ctx context.Context) {
 	rt.mu.Lock()
 	rt.last = info
 	rt.mu.Unlock()
-	rt.apply(ctx, st, list)
+	rt.apply(ctx, in, st, list)
 }
 
 // refresh re-reads the NetBird address and the settings without talking
 // to NetBird.
 func (rt *remoteRuntime) refresh(ctx context.Context) {
-	_, st, list := remoteInputs(ctx, rt.s.cfg.Priv)
-	rt.apply(ctx, st, list)
+	in, st, list := remoteInputs(ctx, rt.s.cfg.Priv, rt.s.cfg.DB)
+	rt.apply(ctx, in, st, list)
 }
 
 // apply builds the gateway's routes and listens where it should.
-func (rt *remoteRuntime) apply(ctx context.Context, st *netbird.ClientStatus, list []apps.App) {
+func (rt *remoteRuntime) apply(ctx context.Context, in publish.Inputs, st *netbird.ClientStatus, list []apps.App) {
 	pub := rt.s.cfg.Remote
 	set, err := pub.Store.Load(ctx)
 	if err != nil {
 		return
 	}
-	var appList []publish.App
 	web := map[string]apps.App{}
 	for _, a := range list {
-		appList = append(appList, publish.App{ID: a.ID, Name: a.Name})
 		web[a.ID] = a
 	}
-	items, err := pub.Items(ctx, appList)
+	items, err := pub.Items(ctx, in)
 	if err != nil {
 		return
 	}
@@ -293,8 +301,9 @@ func (rt *remoteRuntime) apply(ctx context.Context, st *netbird.ClientStatus, li
 				continue
 			}
 			host := strings.ToLower(it.Domain)
-			if it.Key == publish.DesktopKey || it.Key == publish.SSOKey {
-				// hardyd's own handler (the sign-in provider takes its host).
+			if it.Key == publish.DesktopKey || it.Key == publish.SSOKey || it.Key == publish.FilesKey {
+				// hardyd's own handler (the sign-in provider takes its host;
+				// files.<base> serves share link pages only).
 				routes[host] = &gwRoute{key: it.Key, host: host}
 				if it.Key == publish.DesktopKey {
 					desktopHost = host
@@ -309,6 +318,13 @@ func (rt *remoteRuntime) apply(ctx context.Context, st *netbird.ClientStatus, li
 			routes[host], byApp[a.ID] = r, r
 		}
 	}
+	var signinHosts []string
+	for _, r := range byApp {
+		if r.signin {
+			signinHosts = append(signinHosts, r.host)
+		}
+	}
+	rt.ensureClient(ctx, signinHosts)
 	rt.mu.Lock()
 	opts := rt.opts
 	// Keep proxies whose route didn't change (open connections).
@@ -420,15 +436,20 @@ func (rt *remoteRuntime) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		proxyPage(w, http.StatusNotFound, "Nothing is published here", "No HardyOS app or desktop has this address.")
 		return
 	}
+	if route.key == publish.FilesKey && !strings.HasPrefix(r.URL.Path, "/s/") {
+		proxyPage(w, http.StatusNotFound, "Nothing here", "This address only opens share links.")
+		return
+	}
 	if route.appID == "" {
-		// The desktop: hardyd's own handler, seeing the real client.
+		// The desktop, the sign-in provider and share links: hardyd's own
+		// handler, seeing the real client.
 		r2 := r.Clone(r.Context())
 		r2.RemoteAddr = net.JoinHostPort(client, "0")
 		r2.Header.Del("X-Forwarded-For")
 		rt.s.ServeHTTP(w, r2)
 		return
 	}
-	rt.s.proxy.serveGateway(w, r, rt.proxyFor(route, desktopHost), desktopHost)
+	rt.serveApp(w, r, rt.proxyFor(route, desktopHost))
 }
 
 // proxyFor makes (once) the reverse proxy for an app route.
@@ -553,19 +574,16 @@ func hostOnlyCookie(line string) (string, bool) {
 	return b.String(), true
 }
 
-func stateHash(state string) string {
-	sum := sha256.Sum256([]byte(state))
-	return hex.EncodeToString(sum[:])
-}
-
-// serveGateway serves one request to a published app.
-func (p *appProxy) serveGateway(w http.ResponseWriter, r *http.Request, route *gwRoute, desktopHost string) {
-	if why := crossSiteRequest(r, "https://"+r.Host); why != "" {
-		proxyPage(w, http.StatusForbidden, "Blocked a request from another page", why)
+// serveApp serves one request to a published app.
+func (rt *remoteRuntime) serveApp(w http.ResponseWriter, r *http.Request, route *gwRoute) {
+	p := rt.s.proxy
+	if r.URL.Path == gatewayCallbackPath && route.signin {
+		// The sign-in provider's redirect back (a navigation from sso.<base>).
+		rt.gatewayCallback(w, r, route)
 		return
 	}
-	if r.URL.Path == proxyAuthPath {
-		p.gatewayAuth(w, r, route)
+	if why := crossSiteRequest(r, "https://"+r.Host); why != "" {
+		proxyPage(w, http.StatusForbidden, "Blocked a request from another page", why)
 		return
 	}
 	var ss *proxySession
@@ -573,7 +591,7 @@ func (p *appProxy) serveGateway(w http.ResponseWriter, r *http.Request, route *g
 	if route.signin {
 		ss, key = p.gatewaySession(r, route.appID)
 		if ss == nil {
-			p.gatewayStart(w, r, route, desktopHost)
+			rt.gatewayStart(w, r, route)
 			return
 		}
 		if !p.recheck(r, ss) {
@@ -607,30 +625,9 @@ func isNavigation(r *http.Request) bool {
 	return strings.Contains(r.Header.Get("Accept"), "text/html")
 }
 
-// gatewayStart sends a browser without a session to the desktop to sign
-// in, remembering a state only this browser (this app host) holds.
-func (p *appProxy) gatewayStart(w http.ResponseWriter, r *http.Request, route *gwRoute, desktopHost string) {
-	if !isNavigation(r) {
-		proxyPage(w, http.StatusUnauthorized, "Sign in to HardyOS first", "Open this app from the HardyOS desktop or its address.")
-		return
-	}
-	if desktopHost == "" {
-		proxyPage(w, http.StatusServiceUnavailable, "HardyOS sign-in isn't published",
-			"Apps sign in through the HardyOS desktop's published address. Publish the desktop in Control Panel › Remote Access.")
-		return
-	}
-	state := randomToken()
-	http.SetCookie(w, &http.Cookie{Name: gatewayStateCookie, Value: state, Path: "/", MaxAge: 600,
-		HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
-	q := url.Values{"state": {stateHash(state)}, "return": {safeNext(r.URL.RequestURI())}}
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	http.Redirect(w, r, "https://"+desktopHost+"/apps/"+route.appID+"/signin?"+q.Encode(), http.StatusSeeOther)
-}
-
 func safeNext(next string) string {
 	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || strings.Contains(next, `\`) ||
-		strings.HasPrefix(next, proxyAuthPath) || len(next) > 2048 {
+		strings.HasPrefix(next, gatewayCallbackPath) || len(next) > 2048 {
 		return "/"
 	}
 	return next
@@ -649,129 +646,4 @@ func (p *appProxy) gatewaySession(r *http.Request, appID string) (*proxySession,
 		return nil, ""
 	}
 	return ss, c.Value
-}
-
-// mintGateway makes a single-use sign-in token for an app host, bound to
-// the state the app host gave the browser.
-func (p *appProxy) mintGateway(appID string, userID int64, desktopToken, state, next string) string {
-	tok := randomToken()
-	now := time.Now()
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for k, t := range p.tokens {
-		if now.After(t.expires) {
-			delete(p.tokens, k)
-		}
-	}
-	p.tokens[tok] = proxyToken{appID: appID, userID: userID, desktopToken: desktopToken, next: next,
-		expires: now.Add(proxyTokenTTL), gateway: true, state: state}
-	return tok
-}
-
-// gatewayAuth swaps a token from the desktop for the app host's session.
-func (p *appProxy) gatewayAuth(w http.ResponseWriter, r *http.Request, route *gwRoute) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		proxyPage(w, http.StatusMethodNotAllowed, "This link has expired", "Open the app again.")
-		return
-	}
-	dest := strings.ToLower(r.Header.Get("Sec-Fetch-Dest"))
-	site := strings.ToLower(r.Header.Get("Sec-Fetch-Site"))
-	if (dest != "" && dest != "iframe" && dest != "document") || (site != "" && site != "same-site" && site != "none" && site != "same-origin") {
-		proxyPage(w, http.StatusForbidden, "Open this app from its address", "This sign-in link only works as a page or window.")
-		return
-	}
-	tok := r.URL.Query().Get("token")
-	now := time.Now()
-	p.mu.Lock()
-	t, ok := p.tokens[tok]
-	delete(p.tokens, tok)
-	p.mu.Unlock()
-	if !ok || !t.gateway || now.After(t.expires) || t.appID != route.appID {
-		proxyPage(w, http.StatusForbidden, "This link has expired", "Open the app again.")
-		return
-	}
-	c, err := r.Cookie(gatewayStateCookie)
-	if err != nil || !sameSecret(stateHash(c.Value), t.state) {
-		proxyPage(w, http.StatusForbidden, "This sign-in started somewhere else",
-			"Open the app again in this browser.")
-		return
-	}
-	key := randomToken()
-	p.mu.Lock()
-	p.sessions[key] = &proxySession{appID: t.appID, userID: t.userID, desktopToken: t.desktopToken, gateway: true,
-		expires: now.Add(proxySessionTTL), checked: now}
-	p.mu.Unlock()
-	http.SetCookie(w, &http.Cookie{Name: gatewayCookie, Value: key, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
-	clearGatewayCookie(w, gatewayStateCookie)
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	http.Redirect(w, r, safeNext(t.next), http.StatusSeeOther)
-}
-
-// handleGatewaySignin is the desktop's half of an app host's sign-in: with
-// the desktop session it mints a token for the app host and sends the
-// browser back there. The address it sends to is the app's published one,
-// never one from the request.
-func (s *Server) handleGatewaySignin(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if apps.ValidID(id) != nil {
-		proxyPage(w, http.StatusNotFound, "No such app", "")
-		return
-	}
-	s.remote.mu.Lock()
-	route := s.remote.byApp[id]
-	desktop := s.remote.desktopHost
-	s.remote.mu.Unlock()
-	if route == nil || !route.signin || !strings.EqualFold(hostOnly(r.Host), desktop) {
-		proxyPage(w, http.StatusNotFound, "This app isn't published", "Open it from the HardyOS desktop.")
-		return
-	}
-	if strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site") {
-		proxyPage(w, http.StatusForbidden, "Open the app from its address", "Another site can't start a HardyOS sign-in.")
-		return
-	}
-	state := r.URL.Query().Get("state")
-	if len(state) != 64 || strings.Trim(state, "0123456789abcdef") != "" {
-		proxyPage(w, http.StatusBadRequest, "This link is broken", "Open the app again.")
-		return
-	}
-	token := sessionToken(r)
-	info, err := s.sessions.Validate(r.Context(), token)
-	if err != nil {
-		w.Header().Set("Cache-Control", "no-store")
-		signinPage(w, "https://"+desktop+"/")
-		return
-	}
-	u, err := s.sessionUser(r, token, info.UserID)
-	if err != nil {
-		signinPage(w, "https://"+desktop+"/")
-		return
-	}
-	may, err := s.mayUse(r.Context(), token, u, id)
-	if err != nil || !may {
-		s.record(r, u, "apps.open", id, audit.Denied, "published address")
-		proxyPage(w, http.StatusForbidden, "You haven't been given this app", "Ask an administrator for access.")
-		return
-	}
-	next := safeNext(r.URL.Query().Get("return"))
-	tok := s.proxy.mintGateway(id, u.ID, token, state, next)
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	http.Redirect(w, r, "https://"+route.host+proxyAuthPath+"?token="+tok, http.StatusSeeOther)
-}
-
-// signinPage asks the person to sign in to the desktop first.
-func signinPage(w http.ResponseWriter, desktop string) {
-	h := w.Header()
-	h.Set("Content-Type", "text/html; charset=utf-8")
-	h.Set("Cache-Control", "no-store")
-	h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
-	h.Set("X-Content-Type-Options", "nosniff")
-	w.WriteHeader(http.StatusUnauthorized)
-	_, _ = fmt.Fprintf(w, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in to HardyOS</title>
-<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0B0F19;color:#E6EAF2;font:15px/1.5 "Plus Jakarta Sans",system-ui,sans-serif}
-main{max-width:420px;padding:28px 32px;border-radius:16px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12)}
-h1{margin:0 0 8px;font-size:18px}p{margin:0 0 16px;color:#A7B0C2}a{display:inline-block;padding:9px 16px;border-radius:10px;background:linear-gradient(90deg,#00F0FF,#8B5CFF);color:#05060A;font-weight:600;text-decoration:none}</style></head>
-<body><main><h1>Sign in to HardyOS first</h1><p>This app uses your HardyOS sign-in. Sign in on the desktop, then open the app again.</p><a href="%s" target="_top" rel="noopener">Open the HardyOS desktop</a></main></body></html>`,
-		strings.ReplaceAll(desktop, `"`, ""))
 }

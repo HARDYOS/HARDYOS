@@ -19,6 +19,7 @@ const notJoined: RemoteStatus = {
     cluster: "",
     desktopName: "nas",
     defaultMode: "netbird",
+    publicShareLinks: false,
     instance: "",
     hasToken: false,
     tokenUnreadable: false,
@@ -234,6 +235,21 @@ describe("PublishEditor", () => {
     renderIn(<PublishEditor item={jellyfin} supportsPrivate={false} />);
     const opt = screen.getByRole("option", { name: /NetBird devices only/ }) as HTMLOptionElement;
     expect(opt.disabled).toBe(true);
+  });
+
+  it("asks before putting the desktop on the internet", async () => {
+    const calls: Call[] = [];
+    serve(calls, joined);
+    const desk = { ...joined.items[0]!, config: { ...joined.items[0]!.config, mode: "netbird" as const } };
+    renderIn(<PublishEditor item={desk} />);
+    fireEvent.change(screen.getByLabelText("How Desktop is published"), { target: { value: "public" } });
+    expect(screen.getByText("The desktop on the internet")).toBeTruthy();
+    const save = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: /put the desktop on the internet/ }));
+    fireEvent.click(save);
+    await waitFor(() => expect(calls.some((c) => c.path === "/remote/desktop")).toBe(true));
+    expect(calls.find((c) => c.path === "/remote/desktop")?.body).toMatchObject({ mode: "public", confirmPublic: true });
   });
 
   it("publishes the desktop through its own endpoint", async () => {

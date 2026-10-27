@@ -122,10 +122,12 @@ type proxyToken struct {
 	desktopToken string
 	next         string
 	expires      time.Time
-	// gateway: for a published app's host (appgateway.go), bound to the
-	// state cookie whose hash is state; never good on a window proxy port.
-	gateway bool
-	state   string
+	// gateway: a published app host's sign-in in progress
+	// (appgateway_signin.go), with its PKCE verifier and nonce; never good
+	// on a window proxy port.
+	gateway  bool
+	verifier string
+	nonce    string
 }
 
 type proxySession struct {
@@ -134,8 +136,10 @@ type proxySession struct {
 	desktopToken string
 	expires      time.Time
 	checked      time.Time
-	// gateway: a published app host's session (appgateway.go).
+	// gateway: a published app host's session (appgateway.go), signed in
+	// through HardyOS's sign-in provider (sso: no desktop session behind it).
 	gateway bool
+	sso     bool
 	// conns are the session's hijacked connections (WebSockets).
 	conns map[*trackedConn]struct{}
 }
@@ -671,6 +675,21 @@ func (p *appProxy) recheck(r *http.Request, ss *proxySession) bool {
 func (p *appProxy) verify(r *http.Request, ss *proxySession) bool {
 	s := p.s
 	ctx := r.Context()
+	if ss.sso {
+		// Signed in through the sign-in provider: the account (with the
+		// desktop's domain refresh) and the app's access list.
+		u, err := s.sessionUser(r, "", ss.userID)
+		if err != nil {
+			return false
+		}
+		if may, err := s.mayUse(ctx, "", u, ss.appID); err != nil || !may {
+			return false
+		}
+		p.mu.Lock()
+		ss.checked = time.Now()
+		p.mu.Unlock()
+		return true
+	}
 	info, err := s.peekSession(ctx, ss.desktopToken)
 	if err != nil || info.UserID != ss.userID {
 		return false

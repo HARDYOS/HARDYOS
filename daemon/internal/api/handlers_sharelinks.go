@@ -22,6 +22,9 @@ type ShareLinkCreated struct {
 	// URL is the link's path on this server ("/s/<token>").
 	URL   string `json:"url"`
 	Token string `json:"token"`
+	// PublicURL is the link at files.<base> (through NetBird's reverse
+	// proxy, for people without NetBird) while publishing is on.
+	PublicURL string `json:"publicUrl,omitempty"`
 }
 
 func (s *Server) shareLinkRoutes() {
@@ -156,7 +159,12 @@ func (s *Server) handleShareLinkCreate(w http.ResponseWriter, r *http.Request, u
 		detail += ", zips up to " + strconv.FormatInt(l.MaxZipBytes, 10) + " bytes"
 	}
 	s.record(r, u, "sharelink.create", target, audit.Success, "link #"+strconv.FormatInt(l.ID, 10)+": "+detail)
-	writeJSON(w, http.StatusCreated, ShareLinkCreated{Link: l, URL: "/s/" + token, Token: token})
+	out := ShareLinkCreated{Link: l, URL: "/s/" + token, Token: token}
+	if base := s.remote.filesURL(); base != "" {
+		out.PublicURL = base + "/s/" + token
+		s.remote.trigger() // files.<base> is published while a link is active
+	}
+	writeJSON(w, http.StatusCreated, out)
 }
 
 func (s *Server) handleShareLinkRevoke(w http.ResponseWriter, r *http.Request, u *auth.User) {
@@ -175,6 +183,7 @@ func (s *Server) handleShareLinkRevoke(w http.ResponseWriter, r *http.Request, u
 		return
 	}
 	s.record(r, u, "sharelink.revoke", l.Share+"/"+l.Path, audit.Success, "link #"+strconv.FormatInt(l.ID, 10)+" of "+l.CreatedBy)
+	s.remote.trigger() // the last active link gone: files.<base> goes too
 	writeJSON(w, http.StatusOK, l)
 }
 

@@ -24,6 +24,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/netbird"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/publish"
+	"github.com/hardyos/hardyos/daemon/internal/store"
 )
 
 // Remote access job kinds.
@@ -38,8 +39,9 @@ const (
 
 // remoteInputs asks the root helper for this server's NetBird state and
 // installed apps with a web page.
-func remoteInputs(ctx context.Context, pc *priv.Client) (publish.Inputs, *netbird.ClientStatus, []apps.App) {
+func remoteInputs(ctx context.Context, pc *priv.Client, db *store.DB) (publish.Inputs, *netbird.ClientStatus, []apps.App) {
 	var in publish.Inputs
+	in.ShareLinks = activeShareLinks(ctx, db)
 	st := &netbird.ClientStatus{State: "unknown"}
 	if pc == nil {
 		return in, st, nil
@@ -65,6 +67,18 @@ func remoteInputs(ctx context.Context, pc *priv.Client) (publish.Inputs, *netbir
 		}
 	}
 	return in, st, list
+}
+
+// activeShareLinks reports whether any share link can still be opened
+// (files.<base> is published for them).
+func activeShareLinks(ctx context.Context, db *store.DB) bool {
+	if db == nil {
+		return false
+	}
+	var n int
+	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM share_links WHERE revoked = 0 AND expires_at > ?
+		AND (max_downloads = 0 OR download_count < max_downloads)`, store.Now()).Scan(&n)
+	return err == nil && n > 0
 }
 
 type remoteJoinParams struct {
@@ -101,6 +115,13 @@ type remoteDomainParams struct {
 	Cluster string `json:"cluster,omitempty"`
 }
 
+func dbOf(pub *publish.Publisher) *store.DB {
+	if pub == nil || pub.Store == nil {
+		return nil
+	}
+	return pub.Store.DB
+}
+
 var errSecretLost = errors.New("the secret was lost (HardyOS restarted); try again")
 
 // RegisterRemoteJobs adds the remote access job kinds. pub may be nil
@@ -112,7 +133,7 @@ func RegisterRemoteJobs(m *jobs.Manager, pc *priv.Client, pub *publish.Publisher
 			return nil, errors.New("publishing isn't available")
 		}
 		jc.Progress(50, "Updating NetBird's services")
-		in, _, _ := remoteInputs(jc, pc)
+		in, _, _ := remoteInputs(jc, pc, dbOf(pub))
 		ctx, cancel := context.WithTimeout(jc, 3*time.Minute)
 		defer cancel()
 		return pub.Sync(ctx, in)
@@ -143,7 +164,7 @@ func RegisterRemoteJobs(m *jobs.Manager, pc *priv.Client, pub *publish.Publisher
 		var notes []string
 		if pub != nil {
 			jc.Progress(20, "Removing HardyOS's services from NetBird")
-			in, _, _ := remoteInputs(jc, pc)
+			in, _, _ := remoteInputs(jc, pc, dbOf(pub))
 			if s, _ := pub.Store.Load(jc); s.Instance != "" && pub.Store.HasToken(jc) {
 				if n, err := pub.RemoveAll(jc, in); err != nil {
 					notes = append(notes, "couldn't remove HardyOS's services from NetBird ("+err.Error()+"): remove the services named "+publish.ServicePrefix(s)+"… in NetBird's dashboard")
@@ -228,7 +249,7 @@ func RegisterRemoteJobs(m *jobs.Manager, pc *priv.Client, pub *publish.Publisher
 		if err := jc.Params(&p); err != nil {
 			return nil, err
 		}
-		in, _, _ := remoteInputs(jc, pc)
+		in, _, _ := remoteInputs(jc, pc, dbOf(pub))
 		ctx, cancel := context.WithTimeout(jc, time.Minute)
 		defer cancel()
 		var err error
@@ -256,9 +277,6 @@ func (s *Server) remoteRoutes() {
 	m.Handle("PUT /api/v1/remote/desktop", s.admin(s.handleRemoteService))
 	m.Handle("GET /api/v1/apps/{id}/publish", s.admin(s.handleAppPublish))
 	m.Handle("PUT /api/v1/apps/{id}/publish", s.admin(s.handleRemoteService))
-	// The sign-in round trip for published apps (on the desktop's own
-	// address, outside /api: it's a page load).
-	m.HandleFunc("GET /apps/{id}/signin", s.handleGatewaySignin)
 }
 
 // RemoteSettingsView is the publishing settings as the API shows them:
@@ -300,7 +318,7 @@ type RemoteGatewayInfo struct {
 }
 
 func (s *Server) handleRemote(w http.ResponseWriter, r *http.Request, _ *auth.User) {
-	in, st, _ := remoteInputs(r.Context(), s.cfg.Priv)
+	in, st, _ := remoteInputs(r.Context(), s.cfg.Priv, s.cfg.DB)
 	out := RemoteStatus{Client: st, DefaultManagementURL: netbird.DefaultManagementURL, Items: []publish.Item{}}
 	pub := s.cfg.Remote
 	out.Available = pub != nil
@@ -317,7 +335,7 @@ func (s *Server) handleRemote(w http.ResponseWriter, r *http.Request, _ *auth.Us
 			}
 		}
 		out.Settings = view
-		if items, err := pub.Items(r.Context(), in.Apps); err == nil {
+		if items, err := pub.Items(r.Context(), in); err == nil {
 			out.Items = items
 		}
 		out.LastSync, out.Gateway = s.remote.info()
@@ -390,13 +408,15 @@ func (s *Server) handleRemoteLeave(w http.ResponseWriter, r *http.Request, u *au
 // RemotePublishingRequest changes the publishing settings. Token: absent
 // keeps the saved one, "" forgets it, anything else replaces it.
 type RemotePublishingRequest struct {
-	Enabled     bool    `json:"enabled"`
-	BaseDomain  string  `json:"baseDomain"`
-	APIURL      string  `json:"apiUrl"`
-	Cluster     string  `json:"cluster"`
-	DesktopName string  `json:"desktopName"`
-	DefaultMode string  `json:"defaultMode"`
-	Token       *string `json:"token,omitempty"`
+	Enabled     bool   `json:"enabled"`
+	BaseDomain  string `json:"baseDomain"`
+	APIURL      string `json:"apiUrl"`
+	Cluster     string `json:"cluster"`
+	DesktopName string `json:"desktopName"`
+	DefaultMode string `json:"defaultMode"`
+	// PublicShareLinks keeps files.<base> published with no active link.
+	PublicShareLinks bool    `json:"publicShareLinks"`
+	Token            *string `json:"token,omitempty"`
 }
 
 func (s *Server) remoteAvailable(w http.ResponseWriter) (*publish.Publisher, bool) {
@@ -423,14 +443,15 @@ func (s *Server) handleRemotePublishing(w http.ResponseWriter, r *http.Request, 
 	}
 	set := publish.Settings{Enabled: req.Enabled, BaseDomain: strings.ToLower(strings.TrimSpace(req.BaseDomain)), APIURL: strings.TrimSpace(req.APIURL),
 		Cluster: strings.ToLower(strings.TrimSpace(req.Cluster)), DesktopName: strings.ToLower(strings.TrimSpace(req.DesktopName)),
-		DefaultMode: req.DefaultMode, Instance: cur.Instance}
+		DefaultMode: req.DefaultMode, PublicShareLinks: req.PublicShareLinks, Instance: cur.Instance}
 	set.Defaults()
 	if err := set.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
 	p := remoteSettingsParams{Settings: set}
-	detail := "enabled=" + boolWord(set.Enabled) + " base=" + set.BaseDomain + " desktop=" + set.DesktopName + " default=" + set.DefaultMode
+	detail := "enabled=" + boolWord(set.Enabled) + " base=" + set.BaseDomain + " desktop=" + set.DesktopName + " default=" + set.DefaultMode +
+		" publicShareLinks=" + boolWord(set.PublicShareLinks)
 	if req.Token != nil {
 		tok := strings.TrimSpace(*req.Token)
 		if len(tok) > 512 || strings.ContainsAny(tok, " \r\n\t") {
@@ -463,7 +484,7 @@ func (s *Server) handleRemoteCheck(w http.ResponseWriter, r *http.Request, _ *au
 	if !ok {
 		return
 	}
-	in, _, _ := remoteInputs(r.Context(), s.cfg.Priv)
+	in, _, _ := remoteInputs(r.Context(), s.cfg.Priv, s.cfg.DB)
 	res := s.cfg.Resolver
 	if res == nil {
 		res = publish.DefaultResolver
@@ -516,6 +537,9 @@ type PublishRequest struct {
 	Groups        []string `json:"groups"`
 	HardyOSSignIn bool     `json:"hardyosSignIn"`
 	Secret        *string  `json:"secret,omitempty"`
+	// ConfirmPublic must be true to publish the desktop publicly: it has
+	// administration in it.
+	ConfirmPublic bool `json:"confirmPublic,omitempty"`
 }
 
 func (s *Server) handleRemoteService(w http.ResponseWriter, r *http.Request, u *auth.User) {
@@ -539,7 +563,12 @@ func (s *Server) handleRemoteService(w http.ResponseWriter, r *http.Request, u *
 		return
 	}
 	if key == publish.DesktopKey && req.Mode == "" {
-		req.Mode = publish.ModePublic
+		req.Mode = publish.ModeNetBird
+	}
+	if key == publish.DesktopKey && req.Mode == publish.ModePublic && !req.ConfirmPublic {
+		writeError(w, http.StatusBadRequest, "confirm_required",
+			"the desktop includes administration: confirm (confirmPublic) to put it on the internet")
+		return
 	}
 	if err := publish.ValidateConfig(publish.ServiceConfig{Mode: req.Mode, Auth: req.Auth, Groups: req.Groups}, req.Secret); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
@@ -583,7 +612,7 @@ func (s *Server) handleAppPublish(w http.ResponseWriter, r *http.Request, _ *aut
 		writeError(w, http.StatusBadRequest, "invalid", a.Name+" has no web page to publish")
 		return
 	}
-	items, err := pub.Items(r.Context(), []publish.App{{ID: a.ID, Name: a.Name}})
+	items, err := pub.Items(r.Context(), publish.Inputs{Apps: []publish.App{{ID: a.ID, Name: a.Name}}})
 	if err != nil {
 		internalError(s, w, err)
 		return
