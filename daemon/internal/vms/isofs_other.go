@@ -16,4 +16,5 @@ func createTemp(*Folder, string) (*os.File, error) { return nil, errNotLinux }
 func renameInto(*Folder, string, string) error     { return errNotLinux }
 func removeFile(*Folder, string) error             { return errNotLinux }
 
-func chownLike(string, os.FileInfo) {}
+func copyTree(string, string) error    { return errNotLinux }
+func verifyPath(*Folder, string) error { return errNotLinux }

@@ -221,18 +221,19 @@ type vmShares struct {
 	hooks []ShareHook
 }
 
-func (v vmShares) Lookup(ctx context.Context, id string) (string, string, uint64, error) {
+func (v vmShares) Lookup(ctx context.Context, id string) (vms.LibraryShare, error) {
 	sh, err := v.m.Get(ctx, id)
 	if errors.Is(err, shares.ErrNotFound) {
-		return "", "", 0, os.ErrNotExist
+		return vms.LibraryShare{}, os.ErrNotExist
 	}
 	if err != nil {
-		return "", "", 0, err
+		return vms.LibraryShare{}, err
 	}
-	if !sh.Usable() {
-		return sh.Pool, sh.Path, 0, nil
+	l := vms.LibraryShare{Pool: sh.Pool, Path: sh.Path, NFS: sh.Services.NFS.Enabled}
+	if sh.Usable() {
+		l.Dev = sh.RootDev
 	}
-	return sh.Pool, sh.Path, sh.RootDev, nil
+	return l, nil
 }
 
 func (v vmShares) CreateLibrary(ctx context.Context, pool string) error {

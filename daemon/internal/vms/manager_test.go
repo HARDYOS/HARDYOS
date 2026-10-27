@@ -51,7 +51,7 @@ func TestCreateLinuxVM(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"zfs create -o org.hardyos:vm=web -o canmount=on -o devices=off -o setuid=off -o exec=off tank/vms/web",
+		"zfs create -o org.hardyos:vm=web -o canmount=on -o devices=off -o setuid=off -o exec=off -o quota=45097156608 tank/vms/web",
 		"zfs create -s -V 32G -o volblocksize=16K -o org.hardyos:vm=web tank/vms/web/disk0",
 		"xorriso -as mkisofs -quiet -volid cidata -joliet -rock -output /mnt/tank/vms/web/cloud-init.iso.new /mnt/tank/vms/web/cloud-init",
 		"virsh -c qemu:///system -q define --validate /run/hardyos/vms/web.xml",
@@ -308,7 +308,11 @@ func TestUpdate(t *testing.T) {
 	if _, err := e.m.Stop(ctx, StopArgs{ID: "web", Force: true}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.m.Update(ctx, UpdateArgs{Spec: s3, RemoveDisks: []string{"disk1"}}); err != nil {
+	// Deleting a disk needs the VM's name typed.
+	if _, err := e.m.Update(ctx, UpdateArgs{Spec: s3, RemoveDisks: []string{"disk1"}}); err == nil || !strings.Contains(err.Error(), "type the VM's name") {
+		t.Fatalf("remove without confirming: %v", err)
+	}
+	if _, err := e.m.Update(ctx, UpdateArgs{Spec: s3, RemoveDisks: []string{"disk1"}, Confirm: "web"}); err != nil {
 		t.Fatal(err)
 	}
 	if !e.sim.has("zfs destroy -r tank/vms/web/disk1") {
@@ -378,7 +382,10 @@ func TestSnapshotsAndRollback(t *testing.T) {
 			t.Errorf("missing %q", want)
 		}
 	}
-	if err := e.m.DeleteSnapshot(ctx, DeleteSnapshotArgs{ID: "web", Snapshot: snap2.Name}); err != nil {
+	if err := e.m.DeleteSnapshot(ctx, DeleteSnapshotArgs{ID: "web", Snapshot: snap2.Name}); err == nil || !strings.Contains(err.Error(), "to confirm") {
+		t.Fatalf("snapshot deleted without confirming: %v", err)
+	}
+	if err := e.m.DeleteSnapshot(ctx, DeleteSnapshotArgs{ID: "web", Snapshot: snap2.Name, Confirm: "web"}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -507,10 +514,23 @@ func TestImportDisk(t *testing.T) {
 	if !st.Done || st.Error != "" || st.Progress != 100 {
 		t.Fatalf("task = %+v", st)
 	}
-	calls := strings.Join(e.stream.calls, "\n")
-	if !strings.Contains(calls, "qemu-img info --output=json /dev/fd/3") ||
-		!strings.Contains(calls, "qemu-img convert -p -n -f qcow2 -O raw -W /dev/fd/3 /dev/zvol/tank/vms/web/disk0") {
-		t.Fatalf("calls:\n%s", calls)
+	// qemu-img only saw the private copy (not the share), and wrote the
+	// zvol's real device; the copy is gone afterwards.
+	if len(e.stream.jobs) != 2 {
+		t.Fatalf("jobs = %+v", e.stream.jobs)
+	}
+	info, conv := e.stream.jobs[0], e.stream.jobs[1]
+	if !strings.HasPrefix(info.Image, "/mnt/tank/vms/web/import-") || info.Target != "" || conv.Image != info.Image {
+		t.Fatalf("jobs = %+v", e.stream.jobs)
+	}
+	if strings.Join(info.Args, " ") != "info --output=json "+imageSpec("", info.Image) {
+		t.Fatalf("info = %v", info.Args)
+	}
+	if strings.Join(conv.Args, " ") != `convert -p -n -W -O raw json:{"backing":null,"driver":"qcow2","file":{"driver":"file","filename":"`+info.Image+`"}} /dev/zvol/tank/vms/web/disk0` {
+		t.Fatalf("convert = %v", conv.Args)
+	}
+	if _, err := os.Stat(filepath.Join(e.root, info.Image)); !os.IsNotExist(err) {
+		t.Fatalf("the private copy is still there: %v", err)
 	}
 	// The 40 GB image grew the 32 GB disk.
 	if !e.sim.has("zfs set volsize=40G tank/vms/web/disk0") {

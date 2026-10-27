@@ -379,6 +379,10 @@ func (m *Manager) client() *http.Client {
 		return m.HTTP
 	}
 	allowLocal := m.AllowLocalDownloads
+	onLink := m.onLink
+	if onLink == nil {
+		onLink = hostPrefixes
+	}
 	d := &net.Dialer{Timeout: 30 * time.Second, Control: func(_, address string, _ syscall.RawConn) error {
 		host, _, err := net.SplitHostPort(address)
 		if err != nil {
@@ -388,15 +392,22 @@ func (m *Manager) client() *http.Client {
 		if err != nil {
 			return err
 		}
-		if !allowLocal && localAddr(ip) {
+		if !allowLocal && (localAddr(ip) || onPrefixes(ip, onLink())) {
 			return fmt.Errorf("%s is on this server or its own network; downloads only come from the internet", ip)
 		}
 		return nil
 	}}
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		c, err := d.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return &idleConn{Conn: c, idle: downloadIdle}, nil
+	}
 	tr := &http.Transport{
 		// No proxy: the guard must see the address actually connected to.
 		Proxy:                 nil,
-		DialContext:           d.DialContext,
+		DialContext:           dial,
 		TLSHandshakeTimeout:   30 * time.Second,
 		ResponseHeaderTimeout: 2 * time.Minute,
 		MaxIdleConns:          4,
@@ -412,12 +423,91 @@ func (m *Manager) client() *http.Client {
 	}}
 }
 
-var cgnat = netip.MustParsePrefix("100.64.0.0/10")
+// downloadIdle ends a download that gets no data for this long.
+var downloadIdle = 2 * time.Minute
+
+// idleConn gives every read and write a fresh deadline, so a server that
+// stops sending can't hold a download (and its task slot) forever.
+type idleConn struct {
+	net.Conn
+	idle time.Duration
+}
+
+func (c *idleConn) Read(p []byte) (int, error) {
+	_ = c.Conn.SetReadDeadline(time.Now().Add(c.idle))
+	return c.Conn.Read(p)
+}
+
+func (c *idleConn) Write(p []byte) (int, error) {
+	_ = c.Conn.SetWriteDeadline(time.Now().Add(c.idle))
+	return c.Conn.Write(p)
+}
+
+// notInternet are ranges that aren't somewhere on the internet, or that
+// lead back to local addresses (translation and tunnelling prefixes).
+var notInternet = func() []netip.Prefix {
+	var l []netip.Prefix
+	for _, s := range []string{
+		"100.64.0.0/10",   // carrier-grade NAT
+		"192.0.0.0/24",    // IETF protocol assignments
+		"192.0.2.0/24",    // documentation
+		"198.18.0.0/15",   // benchmarking
+		"198.51.100.0/24", // documentation
+		"203.0.113.0/24",  // documentation
+		"240.0.0.0/4",     // reserved, and broadcast
+		"::/96",           // IPv4-compatible
+		"64:ff9b::/96",    // NAT64 (to any IPv4 address, local ones too)
+		"64:ff9b:1::/48",  // local-use NAT64
+		"100::/64",        // discard
+		"2001::/32",       // Teredo
+		"2001:db8::/32",   // documentation
+		"2002::/16",       // 6to4 (to any IPv4 address)
+	} {
+		l = append(l, netip.MustParsePrefix(s))
+	}
+	return l
+}()
 
 func localAddr(ip netip.Addr) bool {
 	ip = ip.Unmap()
-	return !ip.IsValid() || ip.IsUnspecified() || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsMulticast() || ip.IsLinkLocalMulticast() || cgnat.Contains(ip) || (ip.Is4() && ip.As4()[0] == 0)
+	if !ip.IsValid() || ip.IsUnspecified() || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsMulticast() || ip.IsLinkLocalMulticast() || (ip.Is4() && ip.As4()[0] == 0) {
+		return true
+	}
+	return onPrefixes(ip, notInternet)
+}
+
+func onPrefixes(ip netip.Addr, l []netip.Prefix) bool {
+	ip = ip.Unmap()
+	for _, p := range l {
+		if p.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// hostPrefixes are the server's own addresses and the networks they're on
+// (a public address on the LAN is still the server's own network).
+func hostPrefixes() []netip.Prefix {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	var l []netip.Prefix
+	for _, a := range addrs {
+		n, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip, ok := netip.AddrFromSlice(n.IP)
+		if !ok {
+			continue
+		}
+		bits, _ := n.Mask.Size()
+		l = append(l, netip.PrefixFrom(ip.Unmap(), bits).Masked())
+	}
+	return l
 }
 
 // ---- background tasks --------------------------------------------------------
@@ -538,8 +628,17 @@ type ShareLibrary struct {
 
 // ShareStore is what ShareLibrary needs from shares.Manager.
 type ShareStore interface {
-	Lookup(ctx context.Context, id string) (pool, path string, dev uint64, err error)
+	// Lookup finds a shared folder (os.ErrNotExist when there's none); Dev
+	// is 0 when it isn't usable (not mounted).
+	Lookup(ctx context.Context, id string) (LibraryShare, error)
 	CreateLibrary(ctx context.Context, pool string) error
+}
+
+// LibraryShare is the ISOs shared folder as the shares code sees it.
+type LibraryShare struct {
+	Pool, Path string
+	Dev        uint64
+	NFS        bool
 }
 
 // LibraryShareID is the ISOs shared folder's id.
@@ -547,12 +646,12 @@ const LibraryShareID = "isos"
 
 // Folder implements Library.
 func (l ShareLibrary) Folder(ctx context.Context, pool string, create bool) (*Folder, error) {
-	p, dir, dev, err := l.Shares.Lookup(ctx, LibraryShareID)
+	sh, err := l.Shares.Lookup(ctx, LibraryShareID)
 	if err == nil {
-		if dev == 0 {
+		if sh.Dev == 0 {
 			return nil, errors.New("the ISOs shared folder isn't mounted (is its pool imported and unlocked?)")
 		}
-		return &Folder{Pool: p, Path: dir, Dev: dev}, nil
+		return &Folder{Pool: sh.Pool, Path: sh.Path, Dev: sh.Dev, NFS: sh.NFS}, nil
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -563,12 +662,12 @@ func (l ShareLibrary) Folder(ctx context.Context, pool string, create bool) (*Fo
 	if err := l.Shares.CreateLibrary(ctx, pool); err != nil {
 		return nil, err
 	}
-	p, dir, dev, err = l.Shares.Lookup(ctx, LibraryShareID)
+	sh, err = l.Shares.Lookup(ctx, LibraryShareID)
 	if err != nil {
 		return nil, err
 	}
-	if dev == 0 {
+	if sh.Dev == 0 {
 		return nil, errors.New("the new ISOs shared folder isn't mounted")
 	}
-	return &Folder{Pool: p, Path: dir, Dev: dev}, nil
+	return &Folder{Pool: sh.Pool, Path: sh.Path, Dev: sh.Dev, NFS: sh.NFS}, nil
 }

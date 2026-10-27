@@ -30,6 +30,14 @@ type sim struct {
 	domains  map[string]*simDomain
 	defined  map[string]string // name -> last XML
 	fail     map[string]string // command prefix -> stderr (exit 1)
+
+	available int64            // the pool's free space
+	secmodels []string         // libvirt's security drivers
+	filters   bool             // clean-traffic exists
+	vlans     map[string][]int // tap -> VLANs
+	pvid      map[string]int   // tap -> untagged PVID
+	filtering int              // the bridge's vlan_filtering
+	vlanAdd   string           // a VLAN `bridge vlan add` ignores (fails silently)
 }
 
 type simDomain struct {
@@ -39,7 +47,9 @@ type simDomain struct {
 
 func newSim(t *testing.T, root string) *sim {
 	s := &sim{t: t, root: root, stdin: map[string][]byte{}, datasets: map[string]map[string]string{}, snaps: map[string]map[string]string{},
-		domains: map[string]*simDomain{}, defined: map[string]string{}, fail: map[string]string{}}
+		domains: map[string]*simDomain{}, defined: map[string]string{}, fail: map[string]string{},
+		available: 10 << 40, secmodels: []string{"apparmor", "dac"}, filters: true,
+		vlans: map[string][]int{}, pvid: map[string]int{}, filtering: 1}
 	s.datasets["tank"] = map[string]string{"type": "filesystem", "mountpoint": "/mnt/tank"}
 	s.datasets["tank/vms"] = map[string]string{"type": "filesystem", "mountpoint": "/mnt/tank/vms"}
 	return s
@@ -87,10 +97,64 @@ func (s *sim) Run(_ context.Context, stdin []byte, name string, args ...string) 
 		return s.virsh(args[3:]) // -c qemu:///system -q
 	case "openssl":
 		return ok("$6$saltsalt$" + strings.Repeat("a", 86) + "\n")
-	case "xorriso", "iptables", "bridge":
+	case "xorriso":
+		for i, a := range args {
+			if a == "-output" {
+				_ = os.WriteFile(filepath.Join(s.root, args[i+1]), []byte("seed"), 0o644)
+			}
+		}
 		return ok("")
+	case "iptables", "ip6tables":
+		return ok("")
+	case "bridge":
+		return s.bridge(args)
+	case "ip":
+		// ip -j -d link show dev br0
+		return ok(fmt.Sprintf(`[{"ifname":%q,"linkinfo":{"info_kind":"bridge","info_data":{"vlan_filtering":%d}}}]`, args[len(args)-1], s.filtering))
 	}
 	return bad("sim: unexpected command " + line)
+}
+
+// bridge pretends to be iproute2's bridge vlan.
+func (s *sim) bridge(args []string) (sysexec.Result, error) {
+	if len(args) >= 5 && args[0] == "-j" && args[1] == "vlan" && args[2] == "show" {
+		tap := args[4]
+		var vl []string
+		for _, v := range s.vlans[tap] {
+			flags := `[]`
+			if s.pvid[tap] == v {
+				flags = `["PVID","Egress Untagged"]`
+			}
+			vl = append(vl, fmt.Sprintf(`{"vlan":%d,"flags":%s}`, v, flags))
+		}
+		return ok(fmt.Sprintf(`[{"ifname":%q,"vlans":[%s]}]`, tap, strings.Join(vl, ",")))
+	}
+	if len(args) >= 6 && args[0] == "vlan" {
+		tap := args[3]
+		vid := 0
+		fmt.Sscan(args[5], &vid)
+		switch args[1] {
+		case "del":
+			var keep []int
+			for _, v := range s.vlans[tap] {
+				if v != vid {
+					keep = append(keep, v)
+				}
+			}
+			s.vlans[tap] = keep
+			if s.pvid[tap] == vid {
+				delete(s.pvid, tap)
+			}
+		case "add":
+			if args[5] == s.vlanAdd {
+				return ok("")
+			}
+			s.vlans[tap] = append(s.vlans[tap], vid)
+			s.pvid[tap] = vid
+		}
+		return ok("")
+	}
+	return bad("sim: bridge " + strings.Join(args, " "))
 }
 
 func (s *sim) zfs(args []string) (sysexec.Result, error) {
@@ -98,13 +162,23 @@ func (s *sim) zfs(args []string) (sysexec.Result, error) {
 	case "list":
 		return s.zfsList(args[1:])
 	case "get":
-		// get -H -p -o value mountpoint DS
+		// get -H -p -o value PROP DS
 		ds := args[len(args)-1]
+		prop := args[len(args)-2]
+		if prop == "available" {
+			return ok(fmt.Sprintf("%d\n", s.available))
+		}
 		p, okd := s.datasets[ds]
 		if !okd {
 			return bad("cannot open '" + ds + "': dataset does not exist")
 		}
-		return ok(p["mountpoint"] + "\n")
+		if prop == "mountpoint" {
+			return ok(p["mountpoint"] + "\n")
+		}
+		if v, okv := p[prop]; okv {
+			return ok(v + "\n")
+		}
+		return ok("-\n")
 	case "create":
 		props := map[string]string{"type": "filesystem"}
 		var ds string
@@ -318,7 +392,39 @@ func (s *sim) virsh(args []string) (sysexec.Result, error) {
 			return bad("error: failed to get domain")
 		}
 		d.state = "running"
+		if len(args) > 2 && args[2] == "--paused" {
+			d.state = "paused"
+		}
+		// The NICs' taps join the bridge on VLAN 1.
+		x := s.defined[args[1]]
+		for _, part := range strings.Split(x, "<target dev=\"")[1:] {
+			tap, _, _ := strings.Cut(part, "\"")
+			if strings.HasPrefix(tap, "hv") {
+				s.vlans[tap] = []int{1}
+				s.pvid[tap] = 1
+			}
+		}
 		return ok("")
+	case "resume":
+		if d := s.domains[args[1]]; d != nil {
+			d.state = "running"
+		}
+		return ok("")
+	case "capabilities":
+		var b strings.Builder
+		b.WriteString("<capabilities><host>")
+		for _, m := range s.secmodels {
+			fmt.Fprintf(&b, "<secmodel><model>%s</model><doi>0</doi></secmodel>", m)
+		}
+		b.WriteString("</host></capabilities>")
+		return ok(b.String())
+	case "nwfilter-list":
+		if !s.filters {
+			return ok(" 11111111-2222-3333-4444-555555555555   allow-arp\n")
+		}
+		return ok(" 11111111-2222-3333-4444-555555555555   allow-arp\n 11111111-2222-3333-4444-555555555556   clean-traffic\n")
+	case "net-dumpxml":
+		return ok(`<network><name>default</name><bridge name="virbr0" stp="on"/></network>`)
 	case "destroy":
 		if d := s.domains[args[1]]; d != nil {
 			if d.state != "running" && d.state != "paused" {
@@ -332,7 +438,7 @@ func (s *sim) virsh(args []string) (sysexec.Result, error) {
 			d.state = "in shutdown"
 		}
 		return ok("")
-	case "reboot", "reset", "resume", "domfsfreeze", "domfsthaw":
+	case "reboot", "reset", "domfsfreeze", "domfsthaw":
 		return ok("")
 	case "undefine":
 		delete(s.domains, args[1])
@@ -378,6 +484,7 @@ func between(s, a, b string) string {
 type fakeLibrary struct {
 	dir     string
 	created string
+	nfs     bool
 }
 
 func devOf(t *testing.T, p string) uint64 {
@@ -400,7 +507,7 @@ func (l *fakeLibrary) Folder(_ context.Context, pool string, create bool) (*Fold
 		l.created = pool
 	}
 	fi, _ := os.Stat(l.dir)
-	return &Folder{Pool: "tank", Path: l.dir, Dev: uint64(fi.Sys().(*syscall.Stat_t).Dev)}, nil
+	return &Folder{Pool: "tank", Path: l.dir, Dev: uint64(fi.Sys().(*syscall.Stat_t).Dev), NFS: l.nfs}, nil
 }
 
 // fakeBridge is the network's bridge.
@@ -458,28 +565,28 @@ func (d *fakeDevices) log() string {
 type fakeStream struct {
 	mu    sync.Mutex
 	calls []string
+	jobs  []ImgJob
 	info  string
 }
 
-func (f *fakeStream) RunWithFile(_ context.Context, _ *os.File, name string, args ...string) ([]byte, error) {
+func (f *fakeStream) QemuImg(_ context.Context, j ImgJob) ([]byte, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = append(f.calls, name+" "+strings.Join(args, " "))
-	return []byte(f.info), nil
-}
-
-func (f *fakeStream) Progress(_ context.Context, _ *os.File, on func(float64), name string, args ...string) error {
-	f.mu.Lock()
-	f.calls = append(f.calls, name+" "+strings.Join(args, " "))
+	f.calls = append(f.calls, "qemu-img "+strings.Join(j.Args, " "))
+	f.jobs = append(f.jobs, j)
 	f.mu.Unlock()
-	on(50)
-	on(100)
-	return nil
+	if j.Args[0] == "info" {
+		return []byte(f.info), nil
+	}
+	if j.OnPct != nil {
+		j.OnPct(50)
+		j.OnPct(100)
+	}
+	return nil, nil
 }
 
-func (f *fakeStream) Pipe(_ context.Context, in io.Reader, out io.Writer, on func(int64), name string, args ...string) error {
+func (f *fakeStream) Unpack(_ context.Context, in io.Reader, out io.Writer, on func(int64)) error {
 	f.mu.Lock()
-	f.calls = append(f.calls, name+" "+strings.Join(args, " "))
+	f.calls = append(f.calls, "xz")
 	f.mu.Unlock()
 	n, err := io.Copy(out, in)
 	on(n)
@@ -487,15 +594,16 @@ func (f *fakeStream) Pipe(_ context.Context, in io.Reader, out io.Writer, on fun
 }
 
 type testEnv struct {
-	m       *Manager
-	sim     *sim
-	lib     *fakeLibrary
-	bridge  *fakeBridge
-	devs    *fakeDevices
-	stream  *fakeStream
-	root    string
-	isoDir  string
-	granted []string
+	m        *Manager
+	sim      *sim
+	lib      *fakeLibrary
+	bridge   *fakeBridge
+	devs     *fakeDevices
+	stream   *fakeStream
+	root     string
+	isoDir   string
+	granted  []string
+	verified []string
 }
 
 func newEnv(t *testing.T) *testEnv {
@@ -514,6 +622,11 @@ func newEnv(t *testing.T) *testEnv {
 		e.granted = append(e.granted, name)
 		return nil
 	}
+	e.m.verify = func(f *Folder, name string) error {
+		e.verified = append(e.verified, name)
+		return nil
+	}
+	e.m.ImportGID = func() (int, error) { return os.Getgid(), nil }
 	// The host: 8 CPUs, 32 GB, Secure Boot firmware and swtpm.
 	write(t, filepath.Join(root, "proc/cpuinfo"), strings.Repeat("processor\t: 0\n\n", 16))
 	write(t, filepath.Join(root, "proc/meminfo"), "MemTotal:       32768000 kB\n")

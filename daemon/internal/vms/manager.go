@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -43,6 +44,8 @@ type Folder struct {
 	Pool string
 	Path string
 	Dev  uint64
+	// NFS: the folder is shared over NFS (VM discs aren't used from it).
+	NFS bool
 }
 
 // Library finds (and creates) the ISOs shared folder.
@@ -90,14 +93,21 @@ type Manager struct {
 	Now func() time.Time
 	// DevicesInfo adds part D's device overview to capabilities (optional).
 	DevicesInfo func(ctx context.Context) (any, error)
+	// ImportUser runs qemu-img and xz for imports (default hardyos-import);
+	// ImportGID replaces looking its group up (tests).
+	ImportUser string
+	ImportGID  func() (int, error)
 
 	// grant replaces grantQEMU in tests (some test file systems have no
-	// POSIX ACLs).
-	grant func(f *Folder, name string, uid uint32) error
+	// POSIX ACLs); verify replaces verifyPath.
+	grant  func(f *Folder, name string, uid uint32) error
+	verify func(f *Folder, name string) error
+	// onLink replaces hostPrefixes (tests).
+	onLink func() []netip.Prefix
 
 	mu     sync.Mutex // creates, deletes and renames
 	vmMu   sync.Mutex
-	vmLock map[string]*sync.Mutex
+	vmLock map[string]*vmLockEntry
 
 	tokens tokenTable
 	tasks  taskTable
@@ -142,19 +152,52 @@ func (m *Manager) arch() ArchInfo {
 	return a
 }
 
+// vmLockEntry is one VM's lock and how many hold or wait for it.
+type vmLockEntry struct {
+	mu    sync.Mutex
+	users int
+}
+
+// lock serializes changes to one VM. Callers check the id first (ValidID),
+// and the entry goes when nobody holds or waits for it, so ids hardyd
+// makes up don't pile up.
 func (m *Manager) lock(id string) func() {
 	m.vmMu.Lock()
 	if m.vmLock == nil {
-		m.vmLock = map[string]*sync.Mutex{}
+		m.vmLock = map[string]*vmLockEntry{}
 	}
 	l, ok := m.vmLock[id]
 	if !ok {
-		l = &sync.Mutex{}
+		l = &vmLockEntry{}
 		m.vmLock[id] = l
 	}
+	l.users++
 	m.vmMu.Unlock()
-	l.Lock()
-	return l.Unlock
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		m.vmMu.Lock()
+		l.users--
+		if l.users == 0 {
+			delete(m.vmLock, id)
+		}
+		m.vmMu.Unlock()
+	}
+}
+
+// lockValid checks a VM id and takes its lock.
+func (m *Manager) lockValid(id string) (func(), error) {
+	if ValidID(id) != nil {
+		return nil, ErrNotFound
+	}
+	return m.lock(id), nil
+}
+
+// lockCount is how many VM locks exist (tests).
+func (m *Manager) lockCount() int {
+	m.vmMu.Lock()
+	defer m.vmMu.Unlock()
+	return len(m.vmLock)
 }
 
 func (m *Manager) run(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -237,6 +280,7 @@ func (m *Manager) all(ctx context.Context) ([]*stored, error) {
 	}
 	sort.Strings(names)
 	seen := map[string]bool{}
+	seenUUID := map[string]string{}
 	for _, name := range names {
 		st, err := m.read(name, ds[name])
 		if err != nil {
@@ -247,7 +291,12 @@ func (m *Manager) all(ctx context.Context) ([]*stored, error) {
 			m.log().Warn("vms: two pools have a VM with the same name; using the first", "id", st.spec.ID, "dataset", name)
 			continue
 		}
+		if other, dup := seenUUID[st.spec.UUID]; dup {
+			m.log().Warn("vms: skipping a VM with the same UUID as another", "id", st.spec.ID, "dataset", name, "uuid", st.spec.UUID, "other", other)
+			continue
+		}
 		seen[st.spec.ID] = true
+		seenUUID[st.spec.UUID] = st.spec.ID
 		out = append(out, st)
 	}
 	return out, nil
@@ -274,7 +323,27 @@ func (m *Manager) read(dataset, mountpoint string) (*stored, error) {
 		return nil, fmt.Errorf("%s describes %s on %s, not this dataset", specFile, s.ID, s.Pool)
 	}
 	s.Normalize()
+	if err := m.checkStored(&s); err != nil {
+		return nil, fmt.Errorf("%s: %w", specFile, err)
+	}
 	return &stored{spec: s, dataset: dataset, dir: mountpoint, dev: dev}, nil
+}
+
+// checkStored checks a spec read from a pool as strictly as one from
+// hardyd (a pool can come from another server, or a snapshot from before
+// a check existed), except for limits of this server (memory, CPUs, which
+// pools are imported, firmware packages): those stop the VM from
+// starting, not from being listed.
+func (m *Manager) checkStored(s *Spec) error {
+	if !uuidRE.MatchString(s.UUID) {
+		return fmt.Errorf("the VM's UUID %q isn't valid", s.UUID)
+	}
+	for i, n := range s.NICs {
+		if n.MAC == "" {
+			return fmt.Errorf("network card %d has no MAC address", i+1)
+		}
+	}
+	return s.Validate(Host{Arch: m.arch(), TPM: true, SecureBoot: true})
 }
 
 func (m *Manager) find(ctx context.Context, id string) (*stored, error) {
@@ -446,6 +515,12 @@ type Capabilities struct {
 	Devices any `json:"devices"`
 	// Committed is the memory of running VMs, for the overcommit hint.
 	CommittedMB int `json:"committedMB"`
+	// Security is how libvirt confines QEMU (apparmor, or "" when it
+	// doesn't, which makes VMs unsupported).
+	Security string `json:"security"`
+	// SpoofingFilter: libvirt's clean-traffic filter is there for cards
+	// on the home network.
+	SpoofingFilter bool `json:"spoofingFilter"`
 }
 
 // Capabilities reports what this server can do for VMs.
@@ -470,6 +545,16 @@ func (m *Manager) Capabilities(ctx context.Context) *Capabilities {
 			c.Libvirt = "running"
 		}
 	}
+	var models []string
+	if c.Libvirt != "" {
+		models, _ = m.securityModels(ctx)
+		for _, s := range models {
+			if s == SecurityModel {
+				c.Security = s
+			}
+		}
+		c.SpoofingFilter = m.hasFilter(ctx)
+	}
 	switch {
 	case !ok:
 		c.Problem = "virtual machines aren't supported on this server's processor architecture yet"
@@ -477,6 +562,8 @@ func (m *Manager) Capabilities(ctx context.Context) *Capabilities {
 		c.Problem = "the processor's virtualization (Intel VT-x or AMD-V) is off or missing: turn it on in the server's BIOS/UEFI setup"
 	case c.Libvirt == "":
 		c.Problem = "the virtualization service (libvirt) isn't running"
+	case c.Security == "":
+		c.Problem = noConfinement(models)
 	}
 	c.Supported = c.Problem == ""
 	if m.Network != nil {
@@ -627,6 +714,9 @@ func (m *Manager) kept(ctx context.Context) []KeptDisk {
 type CreateArgs struct {
 	Spec     Spec   `json:"spec"`
 	Password string `json:"password,omitempty"`
+	// AllowOvercommit makes the VM even when its disks are bigger than
+	// the pool's free space (they're thin).
+	AllowOvercommit bool `json:"allowOvercommit,omitempty"`
 }
 
 // Result is a change's outcome with anything worth telling the person.
@@ -713,6 +803,9 @@ func (m *Manager) checkMedia(ctx context.Context, s *Spec) error {
 	if f == nil {
 		return Problems{"there's no ISOs shared folder yet: download a disc or copy one into it first"}
 	}
+	if f.NFS && (len(s.Files()) > 0 || s.NeedsVirtio()) {
+		return Problems{nfsDiscs}
+	}
 	for _, name := range files {
 		file, err := openFile(f, name)
 		if err != nil {
@@ -767,6 +860,9 @@ func (m *Manager) Create(ctx context.Context, a CreateArgs) (*Result, error) {
 	if s.NeedsBridge() && (m.Network == nil || m.Network.BridgeName() == "") {
 		return nil, Problems{"the home network's bridge isn't set up yet"}
 	}
+	if err := m.checkSpace(ctx, s.Pool, diskBytes(&s), a.AllowOvercommit); err != nil {
+		return nil, err
+	}
 
 	cleanup := func() {
 		if _, err := m.zfs(context.Background(), "destroy", "-r", ds); err != nil {
@@ -779,7 +875,8 @@ func (m *Manager) Create(ctx context.Context, a CreateArgs) (*Result, error) {
 			return nil, fmt.Errorf("creating %s: %w", parent, err)
 		}
 	}
-	if _, err := m.zfs(ctx, "create", "-o", PropVM+"="+s.ID, "-o", "canmount=on", "-o", "devices=off", "-o", "setuid=off", "-o", "exec=off", ds); err != nil {
+	if _, err := m.zfs(ctx, "create", "-o", PropVM+"="+s.ID, "-o", "canmount=on", "-o", "devices=off", "-o", "setuid=off", "-o", "exec=off",
+		"-o", "quota="+strconv.FormatInt(quotaBytes(&s), 10), ds); err != nil {
 		return nil, fmt.Errorf("creating the VM's dataset: %w", err)
 	}
 	st, err := m.mounted(ctx, ds)
@@ -848,17 +945,24 @@ func (m *Manager) createDisk(ctx context.Context, s *Spec, d Disk) error {
 }
 
 // UpdateArgs replaces a VM's spec. Disks missing from the new spec are
-// destroyed only when named in RemoveDisks (and the VM is off).
+// destroyed only when named in RemoveDisks, with the VM's name typed in
+// Confirm (and the VM is off).
 type UpdateArgs struct {
 	Spec        Spec     `json:"spec"`
 	Password    string   `json:"password,omitempty"`
 	RemoveDisks []string `json:"removeDisks,omitempty"`
+	Confirm     string   `json:"confirm,omitempty"`
+	// AllowOvercommit: see CreateArgs.
+	AllowOvercommit bool `json:"allowOvercommit,omitempty"`
 }
 
 // Update changes a VM. Most hardware changes apply at the next start.
 func (m *Manager) Update(ctx context.Context, a UpdateArgs) (*Result, error) {
 	id := a.Spec.ID
-	unlock := m.lock(id)
+	unlock, err := m.lockValid(id)
+	if err != nil {
+		return nil, err
+	}
 	defer unlock()
 	st, err := m.find(ctx, id)
 	if err != nil {
@@ -925,6 +1029,14 @@ func (m *Manager) Update(ctx context.Context, a UpdateArgs) (*Result, error) {
 		}
 		remove = append(remove, d.Name)
 	}
+	if len(remove) > 0 && !Confirms(a.Confirm, &prev) {
+		p = append(p, fmt.Sprintf("type the VM's name (%s) to confirm deleting %s", prev.Name, strings.Join(remove, ", ")))
+	}
+	for _, name := range a.RemoveDisks {
+		if !slices.Contains(remove, name) {
+			p = append(p, fmt.Sprintf("%s isn't a disk being removed", name))
+		}
+	}
 	if len(p) > 0 {
 		return nil, p
 	}
@@ -938,6 +1050,22 @@ func (m *Manager) Update(ctx context.Context, a UpdateArgs) (*Result, error) {
 	}
 	if s.NeedsBridge() && (m.Network == nil || m.Network.BridgeName() == "") {
 		return nil, Problems{"the home network's bridge isn't set up yet"}
+	}
+	var more int64
+	for _, d := range add {
+		more += int64(d.SizeGB) << 30
+	}
+	for _, d := range grow {
+		more += int64(d.SizeGB-old[d.Name].SizeGB) << 30
+	}
+	if err := m.checkSpace(ctx, s.Pool, more, a.AllowOvercommit); err != nil {
+		return nil, err
+	}
+	// The space limit grows before the disks do, and shrinks after.
+	if more > 0 {
+		if err := m.setQuota(ctx, st.dataset, &s, 0); err != nil {
+			return nil, err
+		}
 	}
 	for _, d := range add {
 		if err := m.createDisk(ctx, &s, d); err != nil {
@@ -963,6 +1091,11 @@ func (m *Manager) Update(ctx context.Context, a UpdateArgs) (*Result, error) {
 	st.spec = s
 	if err := m.saveSpec(st); err != nil {
 		return nil, err
+	}
+	if more <= 0 && len(remove) > 0 {
+		if err := m.setQuota(ctx, st.dataset, &s, 0); err != nil {
+			m.log().Warn("vms: lowering the VM's space limit", "id", id, "err", err)
+		}
 	}
 	if s.CloudInit != nil && !sameCloudInit(prev.CloudInit, s.CloudInit) {
 		if err := m.writeSeed(ctx, st); err != nil {
@@ -1021,7 +1154,10 @@ func Confirms(typed string, s *Spec) bool {
 
 // Delete removes a VM. It must be off.
 func (m *Manager) Delete(ctx context.Context, a DeleteArgs) error {
-	unlock := m.lock(a.ID)
+	unlock, err := m.lockValid(a.ID)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	st, err := m.find(ctx, a.ID)
 	if err != nil {

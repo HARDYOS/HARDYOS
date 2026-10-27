@@ -3,7 +3,9 @@ package vms
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"time"
 
@@ -101,6 +103,32 @@ func openFile(f *Folder, name string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), name), nil
 }
 
+// verifyPath checks that the path libvirt hands QEMU for a disc in the
+// library is, right now, the file checked through the folder's descriptor:
+// a regular file, not a link, the same device and inode, in the folder's
+// own mount (decision 140).
+func verifyPath(f *Folder, name string) error {
+	file, err := openFile(f, name)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	var want, dir, got unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &want); err != nil {
+		return err
+	}
+	if err := unix.Lstat(f.Path, &dir); err != nil || dir.Mode&unix.S_IFMT != unix.S_IFDIR || dir.Dev != f.Dev {
+		return errors.New("the ISOs shared folder moved; try again")
+	}
+	if err := unix.Lstat(filepath.Join(f.Path, name), &got); err != nil {
+		return fmt.Errorf("%s changed in the ISOs shared folder; try again: %w", name, err)
+	}
+	if got.Mode&unix.S_IFMT != unix.S_IFREG || got.Dev != want.Dev || got.Ino != want.Ino {
+		return fmt.Errorf("%s changed in the ISOs shared folder (it was replaced or became a link); try again", name)
+	}
+	return nil
+}
+
 // grantQEMU lets QEMU's user read a disc in the library (and pass through
 // the folder to it).
 func grantQEMU(f *Folder, name string, uid uint32) error {
@@ -177,10 +205,145 @@ func removeFile(f *Folder, name string) error {
 	return unix.Unlinkat(root, name, 0)
 }
 
-// chownLike gives target the owner of info's file (TPM state belongs to
-// swtpm's user).
-func chownLike(target string, info os.FileInfo) {
-	if st, ok := info.Sys().(*unix.Stat_t); ok {
-		_ = os.Lchown(target, int(st.Uid), int(st.Gid))
+// TPM state limits: swtpm keeps a few small files.
+const (
+	maxTreeDepth   = 4
+	maxTreeEntries = 256
+	maxTreeFile    = 64 << 20
+)
+
+// copyTree copies a small tree of plain files and folders from src to a
+// new folder dst, keeping modes and owners (TPM state belongs to swtpm's
+// user, who can change it under us). Everything goes through descriptors:
+// names are opened beneath their folder without following links, links
+// and special files are skipped, owners and modes are set on the
+// descriptors of the copies.
+func copyTree(src, dst string) error {
+	sfd, err := unix.Open(src, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
 	}
+	defer unix.Close(sfd)
+	if err := unix.Mkdir(dst, 0o700); err != nil {
+		return err
+	}
+	dfd, err := unix.Open(dst, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(dfd)
+	budget := maxTreeEntries
+	if err := copyDirFD(sfd, dfd, 0, &budget); err != nil {
+		return err
+	}
+	return sameOwnerMode(sfd, dfd)
+}
+
+func sameOwnerMode(from, to int) error {
+	var st unix.Stat_t
+	if err := unix.Fstat(from, &st); err != nil {
+		return err
+	}
+	if err := unix.Fchown(to, int(st.Uid), int(st.Gid)); err != nil {
+		return err
+	}
+	return unix.Fchmod(to, st.Mode&0o777)
+}
+
+func openBeneath(dirfd int, name string, flags int, mode uint32) (int, error) {
+	how := &unix.OpenHow{
+		Flags:   uint64(flags | unix.O_NOFOLLOW | unix.O_CLOEXEC),
+		Mode:    uint64(mode),
+		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_XDEV,
+	}
+	for {
+		fd, err := unix.Openat2(dirfd, name, how)
+		if err == unix.EINTR || err == unix.EAGAIN {
+			continue
+		}
+		return fd, err
+	}
+}
+
+func copyDirFD(sfd, dfd, depth int, budget *int) error {
+	dup, err := unix.Dup(sfd)
+	if err != nil {
+		return err
+	}
+	dir := os.NewFile(uintptr(dup), "tpm")
+	names, err := dir.Readdirnames(-1)
+	dir.Close()
+	if err != nil {
+		return err
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if *budget--; *budget < 0 {
+			return errors.New("the TPM state has too many files")
+		}
+		fd, err := openBeneath(sfd, name, unix.O_RDONLY|unix.O_NONBLOCK, 0)
+		if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.EXDEV) || errors.Is(err, unix.ENXIO) {
+			continue // a link, a mount, a socket
+		}
+		if err != nil {
+			return err
+		}
+		err = copyEntryFD(fd, dfd, name, depth, budget)
+		unix.Close(fd)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func copyEntryFD(fd, dfd int, name string, depth int, budget *int) error {
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return err
+	}
+	switch st.Mode & unix.S_IFMT {
+	case unix.S_IFDIR:
+		if depth+1 > maxTreeDepth {
+			return errors.New("the TPM state has too many levels of folders")
+		}
+		if err := unix.Mkdirat(dfd, name, 0o700); err != nil {
+			return err
+		}
+		cfd, err := openBeneath(dfd, name, unix.O_RDONLY|unix.O_DIRECTORY, 0)
+		if err != nil {
+			return err
+		}
+		defer unix.Close(cfd)
+		if err := copyDirFD(fd, cfd, depth+1, budget); err != nil {
+			return err
+		}
+		return sameOwnerMode(fd, cfd)
+	case unix.S_IFREG:
+		if st.Size > maxTreeFile {
+			return fmt.Errorf("%s in the TPM state is too big", name)
+		}
+		if err := unix.SetNonblock(fd, false); err != nil {
+			return err
+		}
+		wfd, err := openBeneath(dfd, name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL, 0o600)
+		if err != nil {
+			return err
+		}
+		in := os.NewFile(uintptr(fd), name)
+		out := os.NewFile(uintptr(wfd), name)
+		defer out.Close()
+		n, err := io.Copy(out, io.LimitReader(in, maxTreeFile+1))
+		if err != nil {
+			return err
+		}
+		if n > maxTreeFile {
+			return fmt.Errorf("%s in the TPM state is too big", name)
+		}
+		if err := out.Sync(); err != nil {
+			return err
+		}
+		return sameOwnerMode(fd, wfd)
+	}
+	return nil // fifos, devices
 }

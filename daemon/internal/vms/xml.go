@@ -29,7 +29,15 @@ type Paths struct {
 	Bridge string
 	// NATNetwork is libvirt's NAT network (default).
 	NATNetwork string
+	// ROMDir is the only folder device fragments may name ROM files in
+	// (default RomRunDir).
+	ROMDir string
 }
+
+// RomRunDir is where part D puts the QEMU-readable copies of GPU ROM
+// files at VM start; fragments may name ROM files only directly in it.
+// TODO(merge devices-sec): use devices.RomRunDir once that branch is in.
+const RomRunDir = "/run/hardyos-roms"
 
 type domainXML struct {
 	XMLName       xml.Name    `xml:"domain"`
@@ -242,12 +250,17 @@ type aliasXML struct {
 }
 
 type interfaceXML struct {
-	Type   string          `xml:"type,attr"`
-	MAC    macXML          `xml:"mac"`
-	Source ifaceSourceXML  `xml:"source"`
-	Target *ifaceTargetXML `xml:"target"`
-	Model  modelXML        `xml:"model"`
-	Boot   *bootOrderXML   `xml:"boot"`
+	Type      string          `xml:"type,attr"`
+	MAC       macXML          `xml:"mac"`
+	Source    ifaceSourceXML  `xml:"source"`
+	Target    *ifaceTargetXML `xml:"target"`
+	Model     modelXML        `xml:"model"`
+	FilterRef *filterRefXML   `xml:"filterref"`
+	Boot      *bootOrderXML   `xml:"boot"`
+}
+
+type filterRefXML struct {
+	Filter string `xml:"filter,attr"`
 }
 
 type macXML struct {
@@ -538,6 +551,11 @@ func DomainXML(s *Spec, a ArchInfo, p Paths, devs []devices.Prepared) ([]byte, e
 			}
 			ifc.Type = "bridge"
 			ifc.Source.Bridge = p.Bridge
+			// On the home network a card may only use its own MAC and the
+			// IP address it was given (decision 137), unless it's a router.
+			if !n.AllowSpoofing {
+				ifc.FilterRef = &filterRefXML{Filter: CleanTraffic}
+			}
 		}
 		ifc.Target = &ifaceTargetXML{Dev: tapName(s.UUID, i)}
 		dv.Interfaces = append(dv.Interfaces, ifc)
@@ -571,9 +589,13 @@ func DomainXML(s *Spec, a ArchInfo, p Paths, devs []devices.Prepared) ([]byte, e
 	}
 	dv.RNG = rngXML{Model: "virtio", Backend: rngBackendXML{Model: "random", Value: "/dev/urandom"}}
 
+	romDir := p.ROMDir
+	if romDir == "" {
+		romDir = RomRunDir
+	}
 	var extra strings.Builder
 	for _, pd := range devs {
-		frag, err := checkFragment(pd.XML)
+		frag, err := checkFragment(pd.XML, romDir)
 		if err != nil {
 			return nil, fmt.Errorf("device %s: %w", pd.Device.ID, err)
 		}
@@ -596,6 +618,25 @@ func DomainXML(s *Spec, a ArchInfo, p Paths, devs []devices.Prepared) ([]byte, e
 // fragmentRoots are the elements a device fragment may be.
 var fragmentRoots = map[string]bool{"hostdev": true}
 
+// fragmentElements are the elements a <hostdev> may hold, and the
+// attributes each may have.
+var fragmentElements = map[string]map[string]bool{
+	"hostdev": {"mode": true, "type": true, "managed": true, "model": true, "display": true, "ramfb": true},
+	"driver":  {"name": true},
+	"source":  {"startupPolicy": true},
+	"address": {"domain": true, "bus": true, "slot": true, "function": true, "uuid": true, "device": true, "type": true},
+	"vendor":  {"id": true},
+	"product": {"id": true},
+	"rom":     {"file": true, "bar": true, "enabled": true},
+	"boot":    {"order": true},
+	"alias":   {"name": true},
+}
+
+// hostdevTypes are the passthrough kinds a fragment may be (decision 139):
+// never mode='capabilities' (host block devices, character devices,
+// network interfaces) or SCSI.
+var hostdevTypes = map[string]bool{"pci": true, "usb": true, "mdev": true}
+
 // MaxHostdevs bounds the <hostdev> elements one device brings (a GPU's
 // functions).
 const MaxHostdevs = 8
@@ -604,10 +645,11 @@ const MaxHostdevs = 8
 // <hostdev> elements (with whatever inside them; a GPU brings one per
 // function), so a fragment can't add emulators, command lines or other
 // devices to the domain. It's re-indented to sit inside <devices>.
-func checkFragment(frag string) (string, error) {
+func checkFragment(frag, romDir string) (string, error) {
 	dec := xml.NewDecoder(strings.NewReader(frag))
 	depth := 0
 	roots := 0
+	romDir = filepath.Clean(romDir)
 	for {
 		tok, err := dec.Token()
 		if err == io.EOF {
@@ -630,6 +672,29 @@ func checkFragment(frag string) (string, error) {
 			for _, at := range t.Attr {
 				if at.Name.Space != "" {
 					return "", errors.New("its XML may not use namespaced attributes")
+				}
+			}
+			allowed, known := fragmentElements[t.Name.Local]
+			if !known || (t.Name.Local == "hostdev") != (depth == 0) {
+				return "", fmt.Errorf("its XML may not have <%s> there", t.Name.Local)
+			}
+			attrs := map[string]string{}
+			for _, at := range t.Attr {
+				if !allowed[at.Name.Local] {
+					return "", fmt.Errorf("<%s> may not have %s=", t.Name.Local, at.Name.Local)
+				}
+				attrs[at.Name.Local] = at.Value
+			}
+			switch t.Name.Local {
+			case "hostdev":
+				if attrs["mode"] != "subsystem" || !hostdevTypes[attrs["type"]] {
+					return "", fmt.Errorf("a <hostdev> must be a PCI, USB or mdev subsystem device, not mode=%q type=%q", attrs["mode"], attrs["type"])
+				}
+			case "rom":
+				if f, ok := attrs["file"]; ok {
+					if !filepath.IsAbs(f) || filepath.Clean(f) != f || filepath.Dir(f) != romDir {
+						return "", fmt.Errorf("a ROM file must be in %s", romDir)
+					}
 				}
 			}
 			depth++

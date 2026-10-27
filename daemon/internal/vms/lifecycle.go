@@ -171,7 +171,10 @@ func (m *Manager) setRunning(id string, r bool) {
 // domain defined afresh from the spec (a new boot environment has no
 // libvirt definitions of its own).
 func (m *Manager) Start(ctx context.Context, id string) (*Result, error) {
-	unlock := m.lock(id)
+	unlock, err := m.lockValid(id)
+	if err != nil {
+		return nil, err
+	}
 	defer unlock()
 	st, err := m.find(ctx, id)
 	if err != nil {
@@ -182,6 +185,11 @@ func (m *Manager) Start(ctx context.Context, id string) (*Result, error) {
 		v, err := m.Get(ctx, id)
 		return &Result{VM: v, Warnings: []string{}}, err
 	case "paused":
+		// A VM paused before its VLANs were checked (a start that was cut
+		// short) only runs once they are.
+		if err := m.tagVLANs(ctx, &st.spec); err != nil {
+			return nil, fmt.Errorf("the VM's VLAN couldn't be set, so it stays paused: %w", err)
+		}
 		if _, err := m.virsh(ctx, "resume", id); err != nil {
 			return nil, err
 		}
@@ -191,6 +199,12 @@ func (m *Manager) Start(ctx context.Context, id string) (*Result, error) {
 	s := &st.spec
 	if err := s.Validate(m.host(ctx)); err != nil {
 		return nil, fmt.Errorf("the VM's settings need fixing first: %w", err)
+	}
+	if err := m.confined(ctx); err != nil {
+		return nil, err
+	}
+	if s.NeedsFilter() && !m.hasFilter(ctx) {
+		return nil, Problems{"the network filter that stops VMs on the home network from using other computers' addresses (libvirt's clean-traffic) isn't installed; turn on \"allow address spoofing\" for the VM's network cards, or reinstall HardyOS's virtualization packages"}
 	}
 	warnings := m.memoryWarnings(ctx, s, false)
 	if s.NeedsBridge() && (m.Network == nil || m.Network.BridgeName() == "") {
@@ -208,10 +222,13 @@ func (m *Manager) Start(ctx context.Context, id string) (*Result, error) {
 		}
 	}
 	if s.CloudInit != nil {
-		if _, err := os.Stat(filepath.Join(m.sys(st.dir), seedFile)); err != nil {
+		seed := filepath.Join(m.sys(st.dir), seedFile)
+		if _, err := os.Lstat(seed); err != nil {
 			if err := m.writeSeed(ctx, st); err != nil {
 				return nil, err
 			}
+		} else if err := m.ownSeed(seed); err != nil {
+			return nil, err
 		}
 	}
 	if s.Firmware.TPM {
@@ -253,25 +270,61 @@ func (m *Manager) Start(ctx context.Context, id string) (*Result, error) {
 		release()
 		return nil, err
 	}
+	// The definition kept for when the VM is off has no devices in it, so
+	// devices never stay bound to a VM that isn't running.
+	undefineDevices := func() {
+		if len(prepared) > 0 {
+			if err := m.define(context.Background(), st, nil); err != nil {
+				m.log().Warn("vms: redefining without devices", "id", id, "err", err)
+			}
+		}
+	}
 	if s.NeedsBridge() {
 		m.allowBridged(ctx)
 	}
-	if _, err := m.virsh(ctx, "start", id); err != nil {
+	if s.NeedsNAT() {
+		if err := m.guardNAT(ctx); err != nil {
+			undefineDevices()
+			release()
+			return nil, fmt.Errorf("closing the server to VMs on the private network: %w", err)
+		}
+	}
+	// The discs are checked once more just before QEMU opens them: each
+	// path must still be the file that was checked and granted.
+	if err := m.verifyMedia(ctx, s); err != nil {
+		undefineDevices()
+		release()
+		return nil, err
+	}
+	// A VM with VLAN cards starts paused: it only runs once its ports are
+	// on their VLANs and checked, and is turned off if they can't be.
+	vlans := s.HasVLAN()
+	startArgs := []string{"start", id}
+	if vlans {
+		startArgs = append(startArgs, "--paused")
+	}
+	if _, err := m.virsh(ctx, startArgs...); err != nil {
+		undefineDevices()
 		release()
 		return nil, fmt.Errorf("starting %s: %w", s.Name, err)
 	}
-	m.setRunning(id, true)
-	if err := m.tagVLANs(ctx, s); err != nil {
-		m.log().Warn("vms: setting VLANs", "id", id, "err", err)
-		warnings = append(warnings, "The VM's VLAN couldn't be set: "+err.Error())
-	}
-	// The definition kept for when the VM is off has no devices in it, so
-	// devices never stay bound to a VM that isn't running.
-	if len(prepared) > 0 {
-		if err := m.define(ctx, st, nil); err != nil {
-			m.log().Warn("vms: redefining without devices", "id", id, "err", err)
+	if vlans {
+		err := m.tagVLANs(ctx, s)
+		if err == nil {
+			_, err = m.virsh(ctx, "resume", id)
+		}
+		if err != nil {
+			m.log().Warn("vms: the VM's VLANs couldn't be set; turning it off", "id", id, "err", err)
+			if _, derr := m.virsh(context.Background(), "destroy", id); derr != nil && !notRunning(derr) {
+				m.log().Error("vms: turning off a VM whose VLANs failed", "id", id, "err", derr)
+			}
+			undefineDevices()
+			release()
+			return nil, fmt.Errorf("%s didn't start: its VLAN couldn't be set (%v)", s.Name, err)
 		}
 	}
+	m.setRunning(id, true)
+	undefineDevices()
 	m.log().Info("vms: started", "id", id)
 	v, err := m.Get(ctx, id)
 	if err != nil {
@@ -309,24 +362,41 @@ func (m *Manager) grantMedia(ctx context.Context, s *Spec) error {
 	return nil
 }
 
-// tagVLANs puts each VLAN NIC's port on its VLAN (the bridge is
-// VLAN-aware; other ports stay untagged on VLAN 1).
-func (m *Manager) tagVLANs(ctx context.Context, s *Spec) error {
-	for i, n := range s.NICs {
-		if n.Mode != NICVLAN {
-			continue
-		}
-		tap := tapName(s.UUID, i)
-		vid := strconv.Itoa(n.VLAN)
-		if _, err := m.run(ctx, "bridge", "vlan", "del", "dev", tap, "vid", "1"); err != nil {
-			m.log().Debug("vms: removing VLAN 1 from a port", "port", tap, "err", err)
-		}
-		if _, err := m.run(ctx, "bridge", "vlan", "add", "dev", tap, "vid", vid, "pvid", "untagged"); err != nil {
+// verifyMedia checks, just before the VM starts, that every disc's path is
+// still the file grantMedia checked. libvirt opens discs by path, and a
+// share writer could swap one for a link in between; QEMU's AppArmor
+// profile (only the paths libvirt was given) and user are what's left
+// for the moment after this check.
+func (m *Manager) verifyMedia(ctx context.Context, s *Spec) error {
+	files := s.Files()
+	if s.NeedsVirtio() {
+		files = append(files, VirtioFile)
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	f, err := m.folder(ctx, "", false)
+	if err != nil || f == nil {
+		return errors.New("the ISOs shared folder isn't available")
+	}
+	if f.NFS {
+		return Problems{nfsDiscs}
+	}
+	verify := verifyPath
+	if m.verify != nil {
+		verify = m.verify
+	}
+	for _, name := range files {
+		if err := verify(f, name); err != nil {
 			return err
 		}
 	}
 	return nil
 }
+
+// nfsDiscs: NFS clients can do anything with files (their root isn't
+// checked by HardyOS), so VMs don't use discs from a folder shared so.
+const nfsDiscs = "the ISOs shared folder is shared over NFS; turn NFS off for it (Control Panel > Shared folders) to use its discs in VMs"
 
 // allowBridged makes sure bridged VM traffic is forwarded: Docker sets
 // the firewall's FORWARD policy to drop, and with br_netfilter loaded that
@@ -359,7 +429,10 @@ type StopArgs struct {
 // off at once with Force. A graceful stop returns once asked; the VM's
 // devices go back when it's off (Watch).
 func (m *Manager) Stop(ctx context.Context, a StopArgs) (*VM, error) {
-	unlock := m.lock(a.ID)
+	unlock, err := m.lockValid(a.ID)
+	if err != nil {
+		return nil, err
+	}
 	defer unlock()
 	st, err := m.find(ctx, a.ID)
 	if err != nil {
@@ -409,12 +482,14 @@ func (m *Manager) Restart(ctx context.Context, a RestartArgs) (*Result, error) {
 		}
 		return m.Start(ctx, a.ID)
 	}
-	unlock := m.lock(a.ID)
+	unlock, err := m.lockValid(a.ID)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := m.find(ctx, a.ID); err != nil {
 		unlock()
 		return nil, err
 	}
-	var err error
 	if a.Force {
 		_, err = m.virsh(ctx, "reset", a.ID)
 	} else {
@@ -454,14 +529,21 @@ func (m *Manager) afterStop(ctx context.Context, st *stored) {
 }
 
 // libvirt keeps swtpm's state in the boot environment; the copy on the
-// pool is the one that lasts (updates, snapshots, rollbacks).
-func (m *Manager) libvirtTPM(uuid string) string {
-	return m.sys(filepath.Join("/var/lib/libvirt/swtpm", uuid))
+// pool is the one that lasts (updates, snapshots, rollbacks). Only a real
+// UUID names a folder there.
+func (m *Manager) libvirtTPM(uuid string) (string, error) {
+	if !uuidRE.MatchString(uuid) {
+		return "", fmt.Errorf("the VM's UUID %q isn't valid", uuid)
+	}
+	return m.sys(filepath.Join("/var/lib/libvirt/swtpm", uuid)), nil
 }
 
 func (m *Manager) saveTPM(st *stored) error {
-	src := m.libvirtTPM(st.spec.UUID)
-	if _, err := os.Stat(src); errors.Is(err, fs.ErrNotExist) {
+	src, err := m.libvirtTPM(st.spec.UUID)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(src); errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	dst := filepath.Join(m.sys(st.dir), tpmDir)
@@ -478,51 +560,20 @@ func (m *Manager) saveTPM(st *stored) error {
 // environment) or after a rollback.
 func (m *Manager) restoreTPM(st *stored) error {
 	src := filepath.Join(m.sys(st.dir), tpmDir)
-	if _, err := os.Stat(src); errors.Is(err, fs.ErrNotExist) {
+	if _, err := os.Lstat(src); errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
-	dst := m.libvirtTPM(st.spec.UUID)
-	if _, err := os.Stat(dst); err == nil {
+	dst, err := m.libvirtTPM(st.spec.UUID)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(dst); err == nil {
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o711); err != nil {
 		return err
 	}
 	return copyTree(src, dst)
-}
-
-// copyTree copies a small tree of plain files and folders, keeping modes
-// and owners. Links and special files are skipped.
-func copyTree(src, dst string) error {
-	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, _ := filepath.Rel(src, p)
-		target := filepath.Join(dst, rel)
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		switch {
-		case d.IsDir():
-			if err := os.MkdirAll(target, info.Mode().Perm()); err != nil {
-				return err
-			}
-		case info.Mode().IsRegular():
-			b, err := os.ReadFile(p)
-			if err != nil {
-				return err
-			}
-			if err := os.WriteFile(target, b, info.Mode().Perm()); err != nil {
-				return err
-			}
-		default:
-			return nil
-		}
-		chownLike(target, info)
-		return os.Chmod(target, info.Mode().Perm())
-	})
 }
 
 // addresses asks the guest agent, then the neighbour table, for the VM's
@@ -608,7 +659,7 @@ func (m *Manager) check(ctx context.Context, refreshAddrs bool) {
 		}
 	}
 	for id, s := range stats {
-		if s.State == "running" {
+		if s.State == "running" && ValidID(id) == nil {
 			running = append(running, id)
 			if m.running == nil {
 				m.running = map[string]bool{}
@@ -618,6 +669,9 @@ func (m *Manager) check(ctx context.Context, refreshAddrs bool) {
 	}
 	m.statsMu.Unlock()
 	for _, id := range stopped {
+		if ValidID(id) != nil {
+			continue
+		}
 		unlock := m.lock(id)
 		if st, err := m.find(ctx, id); err == nil && m.state(ctx, id) != "running" {
 			m.log().Info("vms: stopped", "id", id)
@@ -668,7 +722,13 @@ func (m *Manager) OnStart(ctx context.Context) {
 			continue
 		}
 		if err := m.define(ctx, st, nil); err != nil {
+			// Not handed to libvirt, so nothing of it is touched (its TPM
+			// state, devices) and it doesn't start.
 			m.log().Warn("vms: defining a VM at start", "id", st.spec.ID, "err", err)
+			continue
+		}
+		if err := m.setQuota(ctx, st.dataset, &st.spec, 0); err != nil {
+			m.log().Warn("vms: setting the VM's space limit", "id", st.spec.ID, "err", err)
 		}
 		m.afterStop(ctx, st)
 		if st.spec.Autostart.Enabled {

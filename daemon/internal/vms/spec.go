@@ -121,6 +121,11 @@ type NIC struct {
 	VLAN  int    `json:"vlan,omitempty"`
 	Model string `json:"model"` // virtio or e1000e
 	MAC   string `json:"mac,omitempty"`
+	// AllowSpoofing turns off the filter that keeps a card on the home
+	// network to its own MAC and IP addresses (libvirt's clean-traffic).
+	// Routers and firewalls (OPNsense) need it off; everything else
+	// should keep it.
+	AllowSpoofing bool `json:"allowSpoofing,omitempty"`
 }
 
 // CloudInit sets up a Linux cloud image on first boot.
@@ -210,6 +215,7 @@ var (
 	usbIDRE    = regexp.MustCompile(`^([0-9a-f]{4}:[0-9a-f]{4}|[0-9]{1,3}-[0-9]{1,3}(\.[0-9]{1,3}){0,6})$`)
 	vgpuTypeRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 	romRE      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.(rom|bin)$`)
+	ifnameRE   = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
 )
 
 // ImageExtensions are the disk image formats an import accepts.
@@ -310,6 +316,9 @@ func (s *Spec) Normalize() {
 		}
 		if s.NICs[i].Mode != NICVLAN {
 			s.NICs[i].VLAN = 0
+		}
+		if s.NICs[i].Mode == NICNAT {
+			s.NICs[i].AllowSpoofing = false
 		}
 	}
 	if s.Boot == nil {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // cloud-init's NoCloud data source: a small disc labelled "cidata" with
@@ -88,12 +89,31 @@ func (m *Manager) writeSeed(ctx context.Context, st *stored) error {
 		"-output", tmp, filepath.Join(st.dir, "cloud-init")); err != nil {
 		return fmt.Errorf("making the cloud-init disc: %w", err)
 	}
-	// QEMU reads the seed as its own user; the password in it is hashed.
-	if err := os.Chmod(m.sys(tmp), 0o644); err != nil && !os.IsNotExist(err) {
+	// Only QEMU (and root) can read the seed: it has the user's password
+	// hash and SSH keys.
+	if err := m.ownSeed(m.sys(tmp)); err != nil {
+		_ = os.Remove(m.sys(tmp))
 		return err
 	}
-	if err := os.Rename(m.sys(tmp), filepath.Join(m.sys(st.dir), seedFile)); err != nil && !os.IsNotExist(err) {
+	return os.Rename(m.sys(tmp), filepath.Join(m.sys(st.dir), seedFile))
+}
+
+// ownSeed makes the seed QEMU's own, mode 0600 (decision 141).
+func (m *Manager) ownSeed(path string) error {
+	uid, err := m.qemuUID()
+	if err != nil {
 		return err
 	}
-	return nil
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return fmt.Errorf("the cloud-init disc %s isn't a file", path)
+	}
+	if err := f.Chown(int(uid), -1); err != nil {
+		return err
+	}
+	return f.Chmod(0o600)
 }

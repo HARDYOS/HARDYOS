@@ -53,7 +53,7 @@ func fromTemplate(t *testing.T, id, tmpl string) *Spec {
 		Video:    tp.Video, GuestAgent: true,
 	}
 	for i := 0; i < tp.NICs; i++ {
-		s.NICs = append(s.NICs, NIC{Mode: NICBridge, Model: tp.NICModel, MAC: []string{"52:54:00:12:34:56", "52:54:00:12:34:57"}[i]})
+		s.NICs = append(s.NICs, NIC{Mode: NICBridge, Model: tp.NICModel, AllowSpoofing: tp.AllowSpoofing, MAC: []string{"52:54:00:12:34:56", "52:54:00:12:34:57"}[i]})
 	}
 	if tp.Virtio {
 		s.Media = append(s.Media, Media{Kind: MediaVirtio})

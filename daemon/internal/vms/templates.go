@@ -19,8 +19,11 @@ type Template struct {
 	DiskBus  string   `json:"diskBus"`
 	NICModel string   `json:"nicModel"`
 	// NICs is how many network cards to add (routers want two).
-	NICs  int    `json:"nics"`
-	Video string `json:"video"`
+	NICs int `json:"nics"`
+	// AllowSpoofing turns the home network's anti-spoofing filter off for
+	// the template's cards (routers forward other computers' traffic).
+	AllowSpoofing bool   `json:"allowSpoofing"`
+	Video         string `json:"video"`
 	// Virtio attaches the VirtIO drivers disc (Windows).
 	Virtio    bool `json:"virtio"`
 	CloudInit bool `json:"cloudInit"`
@@ -178,7 +181,7 @@ var Templates = []Template{
 		ID: "opnsense", Name: "OPNsense or pfSense", Summary: "A firewall and router, with a WAN and a LAN port.",
 		Group: "appliance", OS: "other", Install: "iso",
 		Firmware: Firmware{Type: FirmwareUEFI},
-		DiskBus:  BusVirtioSCSI, NICModel: "virtio", NICs: 2, Video: "vga",
+		DiskBus:  BusVirtioSCSI, NICModel: "virtio", NICs: 2, AllowSpoofing: true, Video: "vga",
 		Presets: presets(
 			Preset{Summary: "Home internet up to 1 Gbit/s", Cores: 2, Threads: 1, MemoryMB: 2048, DiskGB: 16},
 			Preset{Summary: "With VPNs and intrusion detection", Cores: 4, Threads: 1, MemoryMB: 4096, DiskGB: 32},
