@@ -177,6 +177,42 @@ jobs:
           sudo docker ps -a --filter label=org.hardyos.app
           for c in $(sudo docker ps -aq --filter label=org.hardyos.app); do sudo docker logs --tail 80 "$c" 2>&1; done
 
+  office:
+    name: Office (OnlyOffice Document Server)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache: false
+      - name: start the Document Server pinned in the catalog (own network, no published port, the app's Compose labels)
+        run: |
+          image=$(sed -n 's/^ *image: *//p' apps/catalog/onlyoffice/compose.yaml)
+          echo "image: $image"
+          secret=$(openssl rand -hex 32)
+          echo "OFFICE_JWT_SECRET=$secret" >> "$GITHUB_ENV"
+          docker network create hardyos-onlyoffice_default
+          docker run -d --name ds --network hardyos-onlyoffice_default \
+            --label com.docker.compose.project=hardyos-onlyoffice --label com.docker.compose.service=documentserver \
+            -e JWT_ENABLED=true -e JWT_SECRET="$secret" -e JWT_HEADER=Authorization -e JWT_IN_BODY=false \
+            -e PLUGINS_ENABLED=false -e WOPI_ENABLED=false -e ALLOW_PRIVATE_IP_ADDRESS=false -e ALLOW_META_IP_ADDRESS=false \
+            --add-host host.docker.internal:host-gateway --security-opt no-new-privileges:true "$image"
+      - name: build test binary
+        working-directory: daemon
+        run: go test -c -o "$RUNNER_TEMP/office.test" ./internal/office
+      - name: firewall rules, one-time download, convert, signed commands and save back through a signed callback with the real Document Server
+        run: |
+          sudo HARDYOS_OFFICE_INTEGRATION=1 OFFICE_JWT_SECRET="$OFFICE_JWT_SECRET" \
+            OFFICE_CALLBACK_BASE=http://host.docker.internal:44251 OFFICE_DS_CONTAINER=ds \
+            "$RUNNER_TEMP/office.test" -test.run TestDocumentServerIntegration -test.v -test.timeout 15m
+      - name: Document Server logs
+        if: failure()
+        run: |
+          docker ps -a
+          docker logs --tail 120 ds 2>&1 || true
+          docker exec ds sh -c 'tail -60 /var/log/onlyoffice/documentserver/docservice/out.log' || true
+
   photos:
     name: Photos (Immich)
     runs-on: ubuntu-24.04

@@ -1,0 +1,46 @@
+# OnlyOffice Document Server (Community Edition) for HardyOS's office suite
+# (docs/office.md, decisions 250-262). Enabled from Control Panel > Office,
+# which sets JWT_SECRET; the App Store doesn't install it on its own.
+#
+# - No published port: hardyd reaches it at its container address, and
+#   hardyd-priv's office.dsnet rules let only hardyd's uid connect to it,
+#   let it reach the server only on hardyd's internal listener (44251) and
+#   keep it off private addresses (decision 266). Browsers reach it through
+#   hardyd's proxy.
+# - JWT on every way in and out (browser, requests to it, callbacks), with
+#   the secret HardyOS generated and keeps sealed.
+# - Plugins off (they load code from outside), WOPI off, private and
+#   metadata addresses refused for anything the editor fetches by URL.
+# - The image is the multi-arch index (amd64 and arm64), pinned by digest.
+# - Runs as root inside: the image starts its own PostgreSQL, RabbitMQ,
+#   Redis and nginx under supervisord and doesn't support another user.
+services:
+  documentserver:
+    image: docker.io/onlyoffice/documentserver:9.4.0.1@sha256:3ab6ebc7c605e5a32b7ae3ff19daed4925090245acc8100ce2230bd766c88212
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      JWT_ENABLED: "true"
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_HEADER: Authorization
+      JWT_IN_BODY: "false"
+      PLUGINS_ENABLED: "false"
+      WOPI_ENABLED: "false"
+      ALLOW_PRIVATE_IP_ADDRESS: "false"
+      ALLOW_META_IP_ADDRESS: "false"
+      USE_UNAUTHORIZED_STORAGE: "false"
+      GENERATE_FONTS: "true"
+      TZ: ${HARDY_TZ}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${HARDY_APP_DATA}/data:/var/www/onlyoffice/Data
+      - ${HARDY_APP_DATA}/lib:/var/lib/onlyoffice
+      - ${HARDY_APP_DATA}/logs:/var/log/onlyoffice
+      - ${HARDY_SHARE_FONTS}:/usr/share/fonts/truetype/custom:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost/healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s

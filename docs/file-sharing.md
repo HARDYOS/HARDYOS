@@ -321,6 +321,9 @@ administrators can share anything.
   Names starting with a dot (like `.htaccess`) aren't accepted, and a file
   that fails or doesn't fit is deleted at once, not kept in the recycle
   bin.
+- **People can** (with the office suite on, for documents and folders):
+  **View only**, or **Edit in their browser**, chosen on purpose; edits are
+  saved as you. See [office.md](office.md#share-links-for-editing).
 - **Download limit**: the link stops after that many downloads. Each file
   downloaded counts once: a download that is resumed, or a video that
   skips ahead, within 6 hours doesn't count again. Every "Download all"

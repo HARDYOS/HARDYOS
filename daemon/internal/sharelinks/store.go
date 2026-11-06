@@ -84,6 +84,10 @@ type Link struct {
 	UploadedBytes  int64 `json:"uploadedBytes"`
 	// MaxZipBytes caps one "download all" zip of a folder link.
 	MaxZipBytes int64 `json:"maxZipBytes"`
+	// Access is what the link lets people do with office documents:
+	// "view" (open read only) or "edit" (edit in the browser, saved as the
+	// link's creator; decision 256).
+	Access string `json:"access"`
 
 	passwordHash string
 }
@@ -141,7 +145,15 @@ type Request struct {
 	// MaxZipBytes: the most one zip of a folder link holds; 0 means
 	// DefaultZipBytes, at most MaxZipBytes.
 	MaxZipBytes int64 `json:"maxZipBytes,omitempty"`
+	// Access: "view" (default) or "edit". Edit must be asked for by name.
+	Access string `json:"access,omitempty"`
 }
+
+// Link access levels.
+const (
+	AccessView = "view"
+	AccessEdit = "edit"
+)
 
 // Validate checks a request and cleans its path. dir says whether the path
 // is a folder (known only after asking files.Access).
@@ -183,6 +195,13 @@ func (q *Request) Validate() []string {
 	}
 	if q.MaxZipBytes < 1_000_000 || q.MaxZipBytes > MaxZipBytes {
 		probs = append(probs, "The folder download limit is from 1 MB to 1 TB.")
+	}
+	switch q.Access {
+	case "":
+		q.Access = AccessView
+	case AccessView, AccessEdit:
+	default:
+		probs = append(probs, "A link lets people view or edit.")
 	}
 	return probs
 }
@@ -295,12 +314,16 @@ func (s *Store) Create(ctx context.Context, q Request, dir bool, owner Owner) (*
 	if zipMax <= 0 {
 		zipMax = DefaultZipBytes
 	}
+	access := q.Access
+	if access != AccessEdit {
+		access = AccessView
+	}
 	res, err := s.DB.ExecContext(ctx, `INSERT INTO share_links
 		(token_hash, share, path, is_dir, created_by, created_by_name, created_at, expires_at, password_hash, allow_upload, max_downloads,
-		 max_upload_bytes, max_zip_bytes)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 max_upload_bytes, max_zip_bytes, access)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		HashToken(token), q.Share, q.Path, b2i(dir), owner.ID, owner.Principal, store.FormatTime(now), store.FormatTime(exp),
-		hash, b2i(q.AllowUpload), q.MaxDownloads, budget, zipMax)
+		hash, b2i(q.AllowUpload), q.MaxDownloads, budget, zipMax, access)
 	if err != nil {
 		return nil, "", err
 	}
@@ -310,7 +333,7 @@ func (s *Store) Create(ctx context.Context, q Request, dir bool, owner Owner) (*
 }
 
 const linkCols = `id, share, path, is_dir, created_by, created_by_name, created_at, expires_at, password_hash, allow_upload, max_downloads, download_count, last_used_at, revoked,
-	max_upload_bytes, uploaded_bytes, max_zip_bytes`
+	max_upload_bytes, uploaded_bytes, max_zip_bytes, access`
 
 func (s *Store) scan(row interface{ Scan(...any) error }) (*Link, error) {
 	var l Link
@@ -318,7 +341,7 @@ func (s *Store) scan(row interface{ Scan(...any) error }) (*Link, error) {
 	var created, expires, used string
 	if err := row.Scan(&l.ID, &l.Share, &l.Path, &dir, &l.CreatedByID, &l.CreatedBy, &created, &expires,
 		&l.passwordHash, &upload, &l.MaxDownloads, &l.DownloadCount, &used, &revoked,
-		&l.MaxUploadBytes, &l.UploadedBytes, &l.MaxZipBytes); err != nil {
+		&l.MaxUploadBytes, &l.UploadedBytes, &l.MaxZipBytes, &l.Access); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}

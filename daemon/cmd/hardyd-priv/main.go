@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/hardyos/hardyos/daemon/internal/rootfile"
@@ -22,6 +23,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/cloudbackup"
 	"github.com/hardyos/hardyos/daemon/internal/devices"
 	"github.com/hardyos/hardyos/daemon/internal/domain"
+	"github.com/hardyos/hardyos/daemon/internal/dsnet"
 	"github.com/hardyos/hardyos/daemon/internal/fileworker"
 	"github.com/hardyos/hardyos/daemon/internal/gpu"
 	"github.com/hardyos/hardyos/daemon/internal/hw"
@@ -180,6 +182,13 @@ func main() {
 		go snaps.Run(ctx)
 		am := &apps.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log, Shares: shm}
 		priv.RegisterApps(s, am)
+		// The office suite's Document Server: its address and firewall rules.
+		priv.RegisterOffice(s, &dsnet.Manager{Runner: sysexec.Exec{}, HardydUID: func() (int, error) {
+			if hardydUID < 0 {
+				return 0, errors.New("the hardyd user doesn't exist")
+			}
+			return hardydUID, nil
+		}})
 		// Remote access: the NetBird client (off until the server joins a
 		// NetBird network; back on after an update if it had joined).
 		nbm := &netbird.Manager{Runner: sysexec.Exec{}, Root: "/"}

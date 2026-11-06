@@ -1747,6 +1747,108 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/office": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The office suite's state (administrators also get settings, the app and open documents) */
+        get: operations["getOffice"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/office/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Change Control Panel › Office's settings (a job, audited) */
+        put: operations["setOfficeSettings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/office/enable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Turn the office suite on (installs or reconfigures the Document Server app; a job) */
+        post: operations["enableOffice"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/office/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Turn the office suite off (stops the Document Server; its data is kept; a job) */
+        post: operations["disableOffice"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/office/open": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Open a file in the editor, as the signed-in person */
+        post: operations["openOfficeDocument"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/office/new": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Make an empty document, spreadsheet or presentation (never over an existing file) */
+        post: operations["newOfficeDocument"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/files/shares": {
         parameters: {
             query?: never;
@@ -6608,7 +6710,16 @@ export interface components {
              * @description The most one "download all" zip of a folder link holds (bytes)
              */
             maxZipBytes: number;
+            access: components["schemas"]["ShareLinkAccess"];
         };
+        /**
+         * @description What visitors may do with office documents in the link: view (open
+         *     them read only in the browser editor) or edit (edit in the browser;
+         *     saves are written as the link's creator, who must still be allowed
+         *     to change the file). Edit must be asked for explicitly (decision 256).
+         * @enum {string}
+         */
+        ShareLinkAccess: "view" | "edit";
         ShareLinkRequest: {
             share: string;
             path: string;
@@ -6630,6 +6741,7 @@ export interface components {
              * @description Folder links: the most one "download all" zip holds, 1 MB to 1 TB; 0 or left out for 20 GB
              */
             maxZipBytes?: number;
+            access?: components["schemas"]["ShareLinkAccess"];
         };
         ShareLinkCreated: {
             link: components["schemas"]["ShareLink"];
@@ -6638,6 +6750,114 @@ export interface components {
             token: string;
             /** @description The link at https://files.<base>/s/<token> (through NetBird's reverse proxy, for people without NetBird) while publishing is on; it can take a minute to open the first time */
             publicUrl?: string;
+        };
+        OfficeFormat: {
+            /** @description File extension without the dot, e.g. docx */
+            ext: string;
+            /** @enum {string} */
+            documentType: "word" | "cell" | "slide";
+            /** @description The editor saves it back in this format */
+            editable: boolean;
+            /** @description Formatting the editor doesn't support is lost on save (ODF */
+            lossy: boolean;
+        };
+        OfficeSettings: {
+            enabled: boolean;
+            /** @description The largest document opened or saved */
+            maxFileMB: number;
+            /** @description Shared folder with extra fonts (read only into the Document Server); "" for none */
+            fontsShare: string;
+        };
+        OfficeSessionView: {
+            share: string;
+            /** @description The folder: a shared folder id, or "Home of alice" (every person has their own Home) */
+            place: string;
+            path: string;
+            /** @description Names of the people in it now */
+            editors: string[];
+            /** Format: date-time */
+            opened: string;
+            saves: number;
+            /** @enum {string} */
+            state: "open" | "closed" | "error";
+            error?: string;
+        };
+        OfficeFontsChoice: {
+            id: string;
+            name: string;
+        };
+        OfficeListenerState: {
+            /** @description The editor's own origin, https://<server>:<port> */
+            officePort: number;
+            /** @description That origin is listening */
+            office: boolean;
+            /** @description Where the Document Server reaches hardyd (empty until Docker is up) */
+            internal: string;
+        };
+        OfficeStatus: {
+            enabled: boolean;
+            /** @description Documents open now (on */
+            ready: boolean;
+            /** @description People editing at once that the free Document Server allows (20) */
+            editorLimit: number;
+            activeEditors: number;
+            openDocuments: number;
+            maxFileMB: number;
+            formats: components["schemas"]["OfficeFormat"][];
+            settings?: components["schemas"]["OfficeSettings"];
+            /** @description The Document Server app is installed (administrators) */
+            installed: boolean;
+            appState?: string;
+            version?: string;
+            problem?: string;
+            sessions?: components["schemas"]["OfficeSessionView"][];
+            fontsChoices?: components["schemas"]["OfficeFontsChoice"][];
+            listeners?: components["schemas"]["OfficeListenerState"];
+            /** @description The pool apps live on */
+            enginePool?: string;
+            /** @description While no app is installed: the pools apps can go on */
+            pools?: string[];
+        };
+        OfficeSettingsRequest: {
+            maxFileMB: number;
+            /** @description Shared folder id, or "" for none; left out keeps it */
+            fontsShare?: string;
+        };
+        OfficeEnableRequest: {
+            /** @description The pool for Docker and apps */
+            pool?: string;
+            fontsShare?: string;
+        };
+        OfficeDisableRequest: {
+            /** @description Needed while people are editing: what they haven't saved is lost */
+            confirm?: boolean;
+        };
+        OfficeOpenRequest: {
+            share: string;
+            path: string;
+            /**
+             * @description edit (default; read only when the person can't change the file) or view
+             * @enum {string}
+             */
+            mode?: "edit" | "view";
+        };
+        OfficeOpened: {
+            /** @description The editor window's address on the office origin, with a one-minute single-use ticket */
+            url: string;
+            /** @enum {string} */
+            mode: "edit" | "view";
+            title: string;
+            /** @description Why it opened read only when editing was asked for */
+            viewReason?: string;
+        };
+        OfficeNewRequest: {
+            share: string;
+            /** @description The folder it goes in */
+            dir?: string;
+            /** @enum {string} */
+            kind: "document" | "spreadsheet" | "presentation";
+            /** @description The extension is added when missing */
+            name?: string;
         };
         FileShare: {
             /** @description The shared folder's id, or "~home" */
@@ -11068,6 +11288,143 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    getOffice: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description State */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OfficeStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    setOfficeSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OfficeSettingsRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    enableOffice: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OfficeEnableRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    disableOffice: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OfficeDisableRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    openOfficeDocument: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OfficeOpenRequest"];
+            };
+        };
+        responses: {
+            /** @description Where the editor window goes */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OfficeOpened"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["Invalid"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    newOfficeDocument: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OfficeNewRequest"];
+            };
+        };
+        responses: {
+            /** @description The new file */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileEntry"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
         };
     };
     listFileShares: {

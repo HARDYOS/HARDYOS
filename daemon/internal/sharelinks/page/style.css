@@ -82,3 +82,5 @@ input[type="file"]::file-selector-button {
   font: inherit; font-weight: 600; color: var(--text); background: rgba(255, 255, 255, 0.07);
   border: 1px solid var(--border); border-radius: 9px; padding: 7px 12px; margin-right: 10px; cursor: pointer;
 }
+.row-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+a.open { margin-left: 8px; font-size: 13px; padding: 1px 8px; border-radius: 999px; border: 1px solid rgba(34, 211, 238, 0.4); }

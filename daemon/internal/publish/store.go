@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/hardyos/hardyos/daemon/internal/netbird"
+	"github.com/hardyos/hardyos/daemon/internal/ports"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 )
 
@@ -84,7 +85,7 @@ func GatewayValue(secret, host string) string {
 }
 
 // DefaultGatewayPort is the gateway's port on the NetBird address.
-const DefaultGatewayPort = 44200
+const DefaultGatewayPort = ports.AppGateway
 
 // Settings are the publishing settings.
 type Settings struct {
