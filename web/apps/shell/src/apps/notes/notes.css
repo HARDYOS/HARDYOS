@@ -1,0 +1,226 @@
+/* Notes: a list of notes on the left, the note on the right. */
+.notes {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.notes-book {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  flex: 1;
+  min-height: 0;
+}
+.notes-side {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--hos-surface-border);
+  background: var(--hos-surface);
+}
+.notes-side__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px;
+}
+.notes-where {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--hos-surface-border);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+}
+.notes-where:hover {
+  background: var(--hos-accent-soft);
+}
+.notes-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 10px 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--hos-surface-border);
+}
+.notes-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  outline: none;
+}
+.notes-list {
+  flex: 1;
+  overflow: auto;
+  padding: 0 6px 10px;
+}
+.notes-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.notes-item:hover {
+  background: var(--hos-surface);
+}
+.notes-item.is-active {
+  background: var(--hos-accent-soft);
+}
+.notes-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.notes-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--hos-surface-border);
+}
+.notes-spacer {
+  flex: 1;
+}
+.notes-state--conflict,
+.notes-state--error {
+  color: var(--hos-bad, #f87171);
+}
+.notes-state--saved {
+  color: var(--hos-text-muted, #a3acbd);
+}
+.notes-pad {
+  padding: 10px 12px;
+}
+.notes-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  max-width: 100%;
+}
+.notes-panes {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+}
+.notes-panes--split {
+  grid-template-columns: 1fr 1fr;
+}
+.notes-text {
+  resize: none;
+  border: 0;
+  border-right: 1px solid var(--hos-surface-border);
+  padding: 16px;
+  background: transparent;
+  color: inherit;
+  font: 14px/1.6 "JetBrains Mono", ui-monospace, monospace;
+  outline: none;
+  min-height: 0;
+}
+.notes-preview {
+  overflow: auto;
+  padding: 16px 22px;
+  min-height: 0;
+}
+.notes-md {
+  line-height: 1.6;
+  max-width: 760px;
+}
+.notes-md h2 {
+  font-size: 22px;
+  margin: 0 0 10px;
+}
+.notes-md h3 {
+  font-size: 18px;
+  margin: 18px 0 8px;
+}
+.notes-md h4,
+.notes-md h5,
+.notes-md h6 {
+  font-size: 15px;
+  margin: 14px 0 6px;
+}
+.notes-md p,
+.notes-md ul,
+.notes-md ol,
+.notes-md blockquote,
+.notes-md pre {
+  margin: 0 0 12px;
+}
+.notes-md code {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.92em;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--hos-surface);
+}
+.notes-md pre {
+  padding: 12px;
+  border-radius: 10px;
+  background: var(--hos-surface);
+  overflow: auto;
+}
+.notes-md pre code {
+  padding: 0;
+  background: none;
+}
+.notes-md blockquote {
+  padding-left: 12px;
+  border-left: 3px solid var(--hos-accent);
+  color: var(--hos-text-muted, #a3acbd);
+}
+.notes-md a {
+  color: var(--hos-accent);
+}
+.notes-task {
+  list-style: none;
+  margin-left: -20px;
+}
+.notes-task input {
+  margin-right: 8px;
+}
+.notes-wiki {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--hos-accent);
+  font: inherit;
+  text-decoration: underline dotted;
+  cursor: pointer;
+}
+@container (max-width: 700px) {
+  .notes-book {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 700px) {
+  .notes-book {
+    grid-template-columns: 1fr;
+  }
+  .notes-side {
+    max-height: 40%;
+  }
+  .notes-panes--split {
+    grid-template-columns: 1fr;
+  }
+}

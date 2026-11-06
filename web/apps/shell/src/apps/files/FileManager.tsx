@@ -3,11 +3,12 @@ import { useQueryClient } from "@tanstack/react-query";
 import { type DragEvent, type KeyboardEvent, type MouseEvent, type ReactNode, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ApiFailure, errorMessage } from "../../api";
 import { bytes, dateTime, relativeTime } from "../../format";
-import { RefreshIcon, SearchIcon, TrashIcon, UploadIcon, EditIcon, InfoIcon } from "../../icons";
+import { DocumentIcon, RefreshIcon, SearchIcon, TrashIcon, UploadIcon, EditIcon, InfoIcon } from "../../icons";
+import { editorWindowId, opensInEditor, useOffice } from "../office/officeApi";
 import { type AppProps, useShell } from "../../shell";
 import { Alert, Badge, Button, EmptyState, Loading } from "../../ui";
 import { toast } from "../../ui/toasts";
-import { DeleteDialog, FolderPicker, NameDialog, PropertiesDialog, ShareLinkDialog } from "./dialogs";
+import { DeleteDialog, FolderPicker, NameDialog, NewDocumentDialog, PropertiesDialog, ShareLinkDialog } from "./dialogs";
 import { listingKey, mkdir, remove, rename, transfer, useFileShares, useListing } from "./fileApi";
 import "./files.css";
 import {
@@ -52,15 +53,24 @@ function store(key: string, v: string) {
   }
 }
 
+/** Opens a document in its editor window (one window per file). */
+export type OpenDocument = (share: string, path: string, name: string, mode: "edit" | "view") => void;
+
 export default function FileManager({ args }: AppProps) {
   const shell = useShell();
+  const openDoc: OpenDocument = (share, path, name, mode) =>
+    shell.openApp(editorWindowId(share, path), { share, path, mode, title: mode === "view" ? `${name} (read only)` : name });
   return (
-    <FileManagerView isAdmin={shell.user.role === "admin"} initial={args?.share ? { kind: "folder", share: args.share, path: args.path ?? "" } : undefined} />
+    <FileManagerView
+      isAdmin={shell.user.role === "admin"}
+      openDoc={openDoc}
+      initial={args?.share ? { kind: "folder", share: args.share, path: args.path ?? "" } : undefined}
+    />
   );
 }
 
 /** The File Manager without the desktop around it (tests render this). */
-export function FileManagerView({ isAdmin, initial }: { isAdmin: boolean; initial?: Place }) {
+export function FileManagerView({ isAdmin, initial, openDoc }: { isAdmin: boolean; initial?: Place; openDoc?: OpenDocument }) {
   const shares = useFileShares();
   const [place, setPlace] = useState<Place | undefined>(initial);
   const uploads = useUploads();
@@ -113,7 +123,16 @@ export function FileManagerView({ isAdmin, initial }: { isAdmin: boolean; initia
     );
   else if (place?.kind === "folder" && current)
     main = (
-      <FolderView key={current.id} share={current} path={place.path} shares={list} isAdmin={isAdmin} onNavigate={(p) => go(current.id, p)} uploads={uploads} />
+      <FolderView
+        key={current.id}
+        share={current}
+        path={place.path}
+        shares={list}
+        isAdmin={isAdmin}
+        onNavigate={(p) => go(current.id, p)}
+        uploads={uploads}
+        openDoc={openDoc}
+      />
     );
 
   return (
@@ -173,7 +192,8 @@ type Dialog =
   | { kind: "move" | "copy"; paths: string[] }
   | { kind: "delete"; entries: FileEntry[] }
   | { kind: "props"; entry: FileEntry }
-  | { kind: "link"; entry: FileEntry };
+  | { kind: "link"; entry: FileEntry }
+  | { kind: "newdoc" };
 
 interface Menu {
   x: number;
@@ -187,6 +207,7 @@ function FolderView({
   isAdmin,
   onNavigate,
   uploads,
+  openDoc,
 }: {
   share: FileShare;
   path: string;
@@ -194,8 +215,11 @@ function FolderView({
   isAdmin: boolean;
   onNavigate: (path: string) => void;
   uploads: ReturnType<typeof useUploads>;
+  openDoc?: OpenDocument;
 }) {
   const q = useListing(share.id, path);
+  const office = useOffice();
+  const isDoc = (e: FileEntry) => !!openDoc && opensInEditor(office.data, e);
   const qc = useQueryClient();
   const [view, setView] = useState<ViewMode>(() => stored("hardyos.files.view", "list", ["list", "grid"] as const));
   const [sort, setSort] = useState<Sort>(() => ({
@@ -253,6 +277,7 @@ function FolderView({
 
   function open(e: FileEntry) {
     if (e.dir) onNavigate(e.path);
+    else if (isDoc(e)) openDoc?.(share.id, e.path, e.name, "edit");
     else if (previewable(e)) setPreview(previews.indexOf(e));
     else download([e]);
   }
@@ -282,6 +307,7 @@ function FolderView({
   }
 
   const canWrite = share.writable;
+  const canNewDoc = canWrite && !!openDoc && !!office.data?.enabled && !!office.data.ready;
   const canShare = (e: FileEntry) => e.writable || isAdmin;
 
   function startUpload(files: File[]) {
@@ -418,7 +444,10 @@ function FolderView({
 
   // The actions that make sense for what's selected (toolbar and right-click menu share them).
   const actions: { id: string; label: string; icon: ReactNode; run: () => void; danger?: boolean }[] = [];
-  if (one)
+  if (one && isDoc(one)) {
+    actions.push({ id: "open", label: "Open in editor", icon: <DocumentIcon size={16} />, run: () => open(one) });
+    actions.push({ id: "view", label: "Open read only", icon: <EyeIcon size={16} />, run: () => openDoc?.(share.id, one.path, one.name, "view") });
+  } else if (one)
     actions.push({
       id: "open",
       label: one.dir ? "Open" : previewable(one) ? "Preview" : "Download",
@@ -532,6 +561,12 @@ function FolderView({
                   <NewFolderIcon size={16} />
                   <span className="fm-btn-label">New folder</span>
                 </Button>
+                {canNewDoc && (
+                  <Button size="sm" onClick={() => setDialog({ kind: "newdoc" })} aria-label="New document" title="New document, spreadsheet or presentation">
+                    <DocumentIcon size={16} />
+                    <span className="fm-btn-label">New document</span>
+                  </Button>
+                )}
                 <Button size="sm" variant="primary" onClick={() => fileInput.current?.click()} aria-label="Upload" title="Upload files">
                   <UploadIcon size={16} />
                   <span className="fm-btn-label">Upload</span>
@@ -688,6 +723,7 @@ function FolderView({
           {selected.length === 0 ? (
             <>
               <MenuItem icon={<NewFolderIcon size={16} />} label="New folder" onClick={() => setDialog({ kind: "mkdir" })} />
+              {canNewDoc && <MenuItem icon={<DocumentIcon size={16} />} label="New document…" onClick={() => setDialog({ kind: "newdoc" })} />}
               <MenuItem icon={<UploadIcon size={16} />} label="Upload files" onClick={() => fileInput.current?.click()} />
             </>
           ) : (
@@ -779,7 +815,20 @@ function FolderView({
         />
       )}
       {dialog?.kind === "props" && <PropertiesDialog entry={dialog.entry} shareName={shareName} onClose={() => setDialog(null)} />}
-      {dialog?.kind === "link" && <ShareLinkDialog share={share.id} entry={dialog.entry} onClose={() => setDialog(null)} />}
+      {dialog?.kind === "link" && <ShareLinkDialog share={share.id} entry={dialog.entry} office={office.data} onClose={() => setDialog(null)} />}
+      {dialog?.kind === "newdoc" && (
+        <NewDocumentDialog
+          share={share.id}
+          dir={path}
+          taken={names}
+          onClose={() => setDialog(null)}
+          onCreated={(e) => {
+            refresh();
+            setSel({ selected: new Set([e.path]), anchor: e.path, focus: e.path });
+            openDoc?.(share.id, e.path, e.name, "edit");
+          }}
+        />
+      )}
     </div>
   );
 }

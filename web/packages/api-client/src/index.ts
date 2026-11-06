@@ -177,6 +177,13 @@ export type CustomAppRequest = S["CustomAppRequest"];
 export type ShareLink = S["ShareLink"];
 export type ShareLinkRequest = S["ShareLinkRequest"];
 export type ShareLinkCreated = S["ShareLinkCreated"];
+export type ShareLinkAccess = S["ShareLinkAccess"];
+export type OfficeStatus = S["OfficeStatus"];
+export type OfficeFormat = S["OfficeFormat"];
+export type OfficeSettings = S["OfficeSettings"];
+export type OfficeSessionView = S["OfficeSessionView"];
+export type OfficeOpened = S["OfficeOpened"];
+export type OfficeNewRequest = S["OfficeNewRequest"];
 // Files API as the File Manager consumes it (owned by part C)
 export type FileShare = S["FileShare"];
 export type FileEntry = S["FileEntry"];
@@ -293,3 +300,10 @@ export type ReplicationPairing = S["ReplicationPairing"];
 export type ReplicationPairingCode = S["ReplicationPairingCode"];
 export type ReplicationSource = S["ReplicationSource"];
 export type ReplicationReceive = S["ReplicationReceive"];
+// Photos: Immich set up by HardyOS (phase 7 part C)
+export type PhotosInfo = S["PhotosInfo"];
+export type PhotosSettings = S["PhotosSettings"];
+export type PhotosLibrary = S["PhotosLibrary"];
+export type PhotosFamily = S["PhotosFamily"];
+export type PhotosStatus = S["PhotosStatus"];
+export type PhotosView = S["PhotosView"];

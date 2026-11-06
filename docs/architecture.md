@@ -1103,7 +1103,9 @@ them on (`settings.json`: `sftpEnabled`, `webdavEnabled`) and per folder
   `HOME\...`, local groups never contain a backslash) and by the name typed
   (`Match User *\*,*@*`), with unquoted patterns that every sshd parses
   the same; both blocks set `AllowGroups hardyos-sftp`,
-  `ChrootDirectory /srv/hardyos/sftp/%U`, `ForceCommand internal-sftp -d /`,
+  `ChrootDirectory /srv/hardyos/sftp/%U`, `ForceCommand internal-sftp -d / -P symlink,hardlink`
+  (no links can be made: Immich and other apps would follow them out of a
+  shared folder, decision 286),
   `DisableForwarding yes` (and each forwarding switch), `PermitTTY no`,
   `PermitUserRC no`, `PubkeyAuthentication no`, `AuthorizedKeysFile none`,
   `AuthenticationMethods password`; the file ends with `Match all`. With
@@ -1111,7 +1113,7 @@ them on (`settings.json`: `sftpEnabled`, `webdavEnabled`) and per folder
   for the same matches. Local accounts' SSH is untouched. Order on
   every apply (decision 109): views, group, drop-in (`sshd -t`, reload),
   then `sshd -T -C user=<first planned account's NSS name>,host=x,addr=127.0.0.1`
-  must show `forcecommand internal-sftp -d /`, `chrootdirectory <root>/%U`,
+  must show `forcecommand internal-sftp -d / -P symlink,hardlink`, `chrootdirectory <root>/%U`,
   `disableforwarding yes`, `allowgroups hardyos-sftp` (only),
   `authenticationmethods password`, `pubkeyauthentication no`,
   `permittty no` and the forwarding switches off (`sftp.CheckEffective`);
@@ -1838,6 +1840,255 @@ User guide: [mail.md](mail.md); decisions 239-249.
   store, account sync, SES and Cloudflare (httptest); an API test with a
   root helper writing into a temp folder; and `scripts/mail-integration.sh`
   (CI job `mail`): the real programs in a Debian 13 container.
+
+## Office
+
+Documents open in OnlyOffice Document Server Community Edition (phase 7
+part B; user notes in [office.md](office.md); decisions 250-262, security
+review 263-269 and 297-302).
+
+```
+browser (desktop window, or a share link page)
+   │  https://<server>:44250            (office origin: editor page + proxy)
+   │  https://files.<base>/s/-/ds/...   (share links from the internet, via the app gateway)
+   ▼
+hardyd ── /s/-/ds/* ──▶ Document Server  <container address>:80  (catalog app "onlyoffice", no published port)
+   ▲                          │
+   │  http://host.docker.internal:44251   (internal listener on docker0)
+   └─ GET /office/file/<one-time token>   ◀┘  document to open
+      POST /office/callback/<key>         ◀┘  who's editing; saves
+             │
+             └─ files.Service as the participant (file worker, kernel permissions)
+```
+
+- **Engine.** The catalog app `onlyoffice` (image pinned by digest, the
+  multi-arch index), installed, reconfigured and stopped by the jobs
+  `office.enable` / `office.disable` / `office.settings` (lock
+  `app:onlyoffice`), never by the App Store's install (refused,
+  `managed_app`). It publishes no port. hardyd-priv's `office.dsnet` op
+  finds it by its Compose labels and keeps iptables chains in step: only
+  hardyd's uid may connect to it (host-network apps and other processes
+  can't), it may reach the server only at the docker0 gateway on 44251, and
+  nothing it sends on reaches private, link-local, CGNAT, loopback,
+  multicast or reserved addresses; hardyd learns its address from the op.
+  JWT on for browser, inbox and outbox; plugins, WOPI and macros off; an
+  optional fonts share bound read only.
+- **Secret.** 32 random bytes as hex, made by hardyd, sealed with secretbox
+  (purpose `office`, AAD `settings:office.secret`) in the settings table, and
+  handed to the app as its `JWT_SECRET` setting (root-only `app.env`).
+- **Settings and state** (`internal/office`): `office.settings` in the
+  settings table; migration `0050_office.sql`: `office_sessions` (one
+  version of one file open under a document key; its `location`, the share
+  id or `~home:<principal>` because every person's home is their own; the
+  version on disk it expects; who the Document Server last listed and when),
+  `office_participants` (each opening: a random id the Document
+  Server reports back as the user id, the HardyOS account or share link, the
+  display name, edit or view, the client address, when last listed and when
+  they left), `office_callbacks` (callbacks acted on), and
+  `share_links.access`.
+- **Opening** (`POST /office/open`, `Service.Open`). The file is checked as
+  the person (`files.Access.Stat`): a format the editor opens, not too big;
+  edit only if they may write it, the format saves and fewer than 20 people
+  are editing (counted from the Document Server's status-1 callbacks), else
+  view with the reason. People opening a file while its session is open get
+  its key (co-editing); a session nobody is in is closed when the file
+  changed. At most 5 people edit through one share link and 30 openings come
+  from one address in 10 minutes. The key is an HMAC of location, path,
+  size, mtime and a nonce under a
+  key derived from the secret. The config (document URL, callback URL,
+  user id and display name, mode, permissions, customization) is signed
+  (HS256, 15-minute `exp`). The desktop gets
+  `https://<host>:44250/s/-/office/editor?t=<ticket>`: a one-minute
+  single-use ticket bound to the desktop session (its cookie, sent to the
+  same host on another port, must match); the editor page is served there
+  with the config, a gate cookie and a CSP allowing only its own scripts and
+  frames and framing only by the desktop's origin.
+- **Proxy** (`office.Proxy`). Only the editor's paths under `/s/-/ds/`
+  (an allowlist: `/web-apps/`, `/sdkjs/`, `/fonts/`, `/doc/`,
+  `/cache/files/`, `/upload/`, `/downloadfile/`, `/printfile/`,
+  `/dictionaries/`, `/downloadas/`, `/savefile/`, after an optional version
+  segment, checked on the escaped path with encoded slashes, backslashes and
+  dots, double slashes and unclean paths refused) go to the Document Server,
+  exactly as checked, with the prefix stripped and `X-Forwarded-Host:
+  <host>/s/-/ds` (OnlyOffice's virtual-path setup), only with a valid gate
+  cookie (HMAC over host and expiry, 12 h, per-process key), never with
+  HardyOS's cookies or Authorization, and with Set-Cookie and framing
+  headers replaced (`frame-ancestors 'self'`). Files from the cache and
+  uploads are attachments with a `sandbox` CSP when opened as a page. It's served on the
+  office origin and, through the app gateway, on `files.<base>`; on the
+  desktop's own origin `/s/-/ds/` is a 404, so the Document Server's scripts
+  never run there.
+- **Internal listener** (`office.InternalHandler`, plain HTTP on the
+  docker0 address, port 44251): only the Document Server container's
+  address; refused callbacks audited at most 20 a minute;
+  `GET /office/file/<token>`: a 256-bit token made for one participant of
+  one session, 15 minutes, one completed transfer, read as that participant
+  (`Identity`) through `files.Access.Open`; `POST /office/callback/<key>`.
+- **Callbacks** (`ParseCallback`, `HandleCallback`). The JWT (header or
+  body) must verify (HS256 only, no other header fields, `exp` required, at
+  most an hour old); its payload, not the unsigned body, is used; its key
+  must be the URL's and a known session's. Status 1 records who's in it
+  (known participant ids only), 4 closes, 3/7 are recorded, 2 and 6 save.
+  A save names a participant (`users[0]`, the last editor) who opened it
+  for editing, whom the Document Server listed and who is in the document or
+  left at most 30 minutes ago, in a session it reported on within a day;
+  its `filetype` is one the editor writes for that kind of document;
+  `Identity` re-checks them (and their folder must be the session's) (account enabled and in the domain;
+  a link not revoked or expired, still `edit`, still containing the file,
+  its creator still valid), then `Stat(...).Writable` and `OpenWrite` as
+  them; the URL must name the Document Server's file cache (`/cache/files/`
+  on its internal address or on a public base the proxy served, checked as
+  written and decoded) and is fetched only from its address (no proxy,
+  no redirects), at most the size limit, into `.hardyos-upload-<id>` and
+  renamed over the file (or, when the file changed outside the editor or is
+  gone, next to it as "name (edited by X date).ext"). A callback already
+  handled is acknowledged and not written again; a new save after the
+  session closed is refused. Refusals answer `{"error":1}` so the Document
+  Server keeps the edits as a forgotten file. Saves are audited as
+  `files.write` by the person (or "link #N of creator (visitor: name)").
+- **Putting people out.** A JWT-signed `drop` to the command service
+  (`/coauthoring/CommandService.ashx` on the internal address) ends a
+  participant's editing: when their link is turned off, their account is
+  turned off, deleted or gone from the domain, when a status-1 callback lists
+  someone who fails the re-check, and from a sweep every minute, which also
+  closes sessions nobody has been in for 30 minutes or the Document Server
+  hasn't reported on for a day. Audited as `office.drop`.
+- **Share links**: `access` view or edit (edit only for files the editor
+  saves, and folders; chosen explicitly). `/s/<token>/office` asks the
+  visitor's name, then serves the editor on the office origin (a redirect
+  from the desktop's address) or on `files.<base>`; participants of kind
+  `link` read and write as the link's creator.
+- **Ports.** 44250 and 44251, like every fixed port of HardyOS's own
+  listeners (app gateway 44200, app windows 44300 and up, replication
+  44400), are in `internal/ports`, whose test refuses duplicates.
+- **Notes** is web only: Markdown files through `/files/*` as the person
+  (list, download, chunked upload with overwrite after a stat check),
+  rendered by a React-element Markdown renderer without HTML.
+## Photos (Immich)
+
+Phase 7 part C (decisions 270-284, security review 285-296; user guide
+`docs/photos.md`). The desktop's Photos is the catalog's Immich app,
+configured by hardyd through Immich's own API. Root does two new named
+things: `shares.links` (list a share's links leading out of it) and an
+app's manifest-declared backup dump (`apps.Manager.PreBackup`, run by
+cloud backups).
+
+```
+ phone / browser ──https──► immich.<base> (NetBird proxy, public, nothing in front)
+        │                        └─► app gateway (HardyOS sign-in off) ─► 127.0.0.1:<web port> immich-server
+        │ OAuth (code + PKCE)                                                │  ▲
+        └────────► sso.<base> ── hardyd's OIDC provider ◄── discovery/token ─┘  │ API key (x-api-key)
+                                     │ client "photos-immich" (Clients.Ensure)    │
+ hardyd: photos.sync job ────────────┴─ Immich API on 127.0.0.1 ─────────────────┘
+        │ apps.status / apps.services / apps.pull / apps.reconfigure / apps.up, devices.inventory (hardyd-priv)
+```
+
+- **Package** (`apps/catalog/immich`, 3.3.5.1). Every image pinned by
+  digest; every service as the app's user; the web port published on
+  `127.0.0.1` only (the window proxy and the app gateway are the only ways
+  in, and both run `filterAppRequest`); `PHOTOS` (write, `/data`),
+  `EXISTING`, `EXISTING_2`, `EXISTING_3` (read, `/mnt/existing*`) and
+  `FAMILY` (read, `/mnt/family`). Machine learning: the CPU service always,
+  plus `-cuda`, `-openvino` and `-rocm` services with
+  `deploy.replicas: ${ML_*_REPLICAS}` (0 by default) and
+  `pull_policy: never`. Those are **managed settings**
+  (`Setting.Managed`): hidden from the install form and the settings
+  screen, checked like any other, kept across updates, and reset to their
+  default by an update whose options no longer include the old value.
+  `ServiceImage.Idle` marks services with 0 replicas: installs and updates
+  don't download them, and Compose doesn't either (`pull_policy`).
+  `/dev/kfd` (ROCm) needs its own `rocm` permission (grant `gpu.rocm`)
+  next to `gpu`, and is dropped like `/dev/dri` when the server has none.
+  `backup.dump` runs `pg_dump` into `db-dump/` before a cloud backup.
+- **`internal/photos`** (hardyd, unprivileged): `Settings` (Normalize),
+  `ChooseML` (GPUs from the devices inventory, `runtime.GOARCH`),
+  `RedirectURIs`, `Apply` (merges HardyOS's part of Immich's system config
+  into the current one: OAuth, password login, storage template, ML
+  URLs, library scan, DB dumps, external domain; everything else is left
+  as Immich's administrators set it; `user.deleteDelay` at least 30 days),
+  an `Immich` API client (bounded bodies, no redirects, 127.0.0.1 only),
+  `Reconciler.EnsureAdmin` (first, before anything slow; another
+  administrator on an Immich installed with new data,
+  `apps.new_data.immich`, is `ErrUnexpectedAdmin`: status incident,
+  critical alert `security.photos`), `Reconciler.Run` (family account by
+  recorded id and partner-only key, config, the account guard in
+  `accounts.go`, libraries keyed by the owner's subject with link
+  exclusions, partners) and `Store` (migration `0060_photos.sql`:
+  `photos_libraries` (with `subject`), `photos_accounts` (made/suspended
+  by subject), `photos_partners`; settings rows `photos.settings`,
+  `photos.status`, `photos.ml_applied`; `photos.immich` and
+  `photos.oidc_client` sealed with secretbox purpose `photos`, bound to
+  the row's name). `immichfake` is a test double of Immich's API.
+- **Jobs** (`api/handlers_photos.go`): `photos.sync`, `photos.settings`,
+  `photos.link`, locked `app:immich` with the app's own jobs. Changes are
+  audited as HardyOS's (`photos.sync`, `photos.account.*`,
+  `photos.family.*`, `photos.incident`, `oidc.client.*`). `RunPhotos`
+  starts a sync (a system job) after hardyd starts, after Immich's app
+  jobs, `remote.*`, `vms.*`, `domain.*` and OIDC settings jobs, right
+  after a user is changed or deleted or Immich's access list changes
+  (`photosNudge`), every 6 hours, and when its 5-minute check finds HardyOS
+  not yet Immich's administrator, a change in accounts/roles/groups/access
+  (`photosAccessPrint`), an accelerated ML service down while its GPU is
+  back with the server, or a new OAuth-linked Immich account.
+- **Accounts** (`photos/accounts.go`, decision 285): accounts are only
+  ever found by sign-in subject. Every person who may use Immich gets an
+  account made ahead (`photos_accounts.made`) holding their address;
+  other unlinked accounts holding a HardyOS address are renamed
+  `unlinked-<id>@hardyos.invalid`; linked accounts' addresses and
+  administrator flags are put back to HardyOS's and their passwords
+  rotated while Immich's passwords are off; accounts of people who may no
+  longer use Photos are suspended (address `suspended-<id>@…`, random
+  password, not admin, soft-deleted) and restored when they may again.
+  Service accounts use `@service.hardyos.invalid`, placeholders
+  `@local.hardyos.invalid` (HardyOS accounts only).
+- **Request filter** (`api/appfilter.go`): for `immich`, the window proxy
+  and the app gateway answer 403 to `PUT /api/users/me` setting `email` or
+  `password` (or a body they can't read), `POST /api/oauth/unlink` and
+  `POST /api/auth/admin-sign-up`, matching paths as Express would
+  (case, slashes, dot segments, percent-encoding, method overrides).
+- **Links** (decision 286): `shares.links` walks a share without
+  following links (5 million entries, 10 minutes) and lists links whose
+  target is absolute, missing or outside the share; libraries on it get
+  them as exclusion patterns, or aren't made (more than 200, truncated,
+  unchecked). SFTP refuses `symlink` and `hardlink` requests.
+- **Sign-in.** Only with the issuer `https://sso.<base>` (Immich's
+  server checks the provider's certificate). The managed client's
+  redirect URIs: `/auth/login` and `/user-settings` on the published
+  origin and the window proxy's origin, plus
+  `/api/oauth/mobile-redirect` on the published origin (Immich's mobile
+  override; the provider takes https only, exact matches). Scope
+  `hardyos_photos`, allowed only for the `photos-immich` client, adds
+  `hardyos_photos_role`, `hardyos_storage_label` (reserved names prefixed
+  `u-`) and, for HardyOS's own accounts only, a placeholder `email`
+  (`<label>@local.hardyos.invalid`) to the ID token and userinfo.
+  `oidc.Config.ManagedAccess` lets the client's owner refuse a person at
+  sign-in and refresh: Photos allows the app's access list.
+  `oidc.Config.ConfirmRedirect` makes sign-ins to Immich's mobile redirect
+  always show a confirmation page (never silent, not with prompt=none).
+  `Provider.ProfileFor` gives the same subject/email/label for accounts
+  made ahead of a first sign-in.
+- **Machine learning.** `apps.reconfigure` with the managed settings
+  (after `apps.pull` of the chosen service), then `apps.up`; Immich's ML
+  URLs list the accelerated service first and the CPU one as fallback.
+- **Publishing.** Phones need Immich published without a sign-in in front
+  (gateway HardyOS sign-in off; NetBird SSO off): the Control Panel button
+  uses the existing `PUT /apps/immich/publish` (public, auth none,
+  `confirmOpen`), audited as before.
+- **Web.** `apps/photos/PhotosApp` (the dock's Photos: `GET /photos`, then
+  `AppFrameView` for the app, with a "sign in in a tab" bar while SSO is on)
+  and Control Panel › Photos (`control-panel/Photos.tsx`).
+- **Tests.** `internal/photos` (settings, ML choice, redirect URIs, config
+  merge, sealing, reconciliation against `immichfake`: address takeover,
+  access following HardyOS, rehoming, link exclusions, family account by
+  id, incidents), `internal/apps` (`immich_test.go`: digests, idle
+  services, 127.0.0.1 port, read-only mounts, managed settings, rocm,
+  backup dump), `internal/shares` (link scan), `internal/oidc`
+  (`photos_test.go`: claims, scope only for Photos, ManagedAccess,
+  confirmation), `internal/api` (`photos_test.go`, `appfilter_test.go`),
+  `internal/cloudbackup` (the dump before the snapshot) and CI's
+  **Photos (Immich)** job: the real Immich 3.3.5 with HardyOS's provider
+  (`TestImmichIntegration`: links followed and excluded, suspension ends
+  sessions, restore, the package's `pg_dump`).
 
 ## Data and state
 

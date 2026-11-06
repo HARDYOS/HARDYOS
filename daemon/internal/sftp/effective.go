@@ -38,7 +38,7 @@ func CheckEffective(out, root string) error {
 		}
 	}
 	want := []struct{ key, value string }{
-		{"forcecommand", "internal-sftp -d /"},
+		{"forcecommand", "internal-sftp -d / -P symlink,hardlink"},
 		{"chrootdirectory", root + "/%U"},
 		{"disableforwarding", "yes"},
 		{"allowgroups", Group},

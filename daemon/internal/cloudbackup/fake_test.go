@@ -341,6 +341,23 @@ type fakeApps struct {
 	srcs   map[string]apps.BackupSource
 	dirs   map[string]string
 	filled []string
+	// dumps records PreBackup calls; a dump writes data/dump.sql
+	// ("dump of <db.sqlite>") unless dumpErr is set.
+	dumps   []string
+	dumpErr error
+}
+
+func (f *fakeApps) PreBackup(_ context.Context, id string) (bool, error) {
+	f.dumps = append(f.dumps, id)
+	if f.dumpErr != nil {
+		return true, f.dumpErr
+	}
+	dir := f.dirs[id]
+	if dir == "" {
+		return false, nil
+	}
+	db, _ := os.ReadFile(filepath.Join(dir, "data", "db.sqlite"))
+	return true, os.WriteFile(filepath.Join(dir, "data", "dump.sql"), append([]byte("dump of "), db...), 0o600)
 }
 
 func (f *fakeApps) BackupSource(_ context.Context, id string) (*apps.BackupSource, error) {

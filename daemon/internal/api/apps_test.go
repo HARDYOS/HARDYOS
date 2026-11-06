@@ -178,6 +178,11 @@ func (d *stubApps) register(ps *priv.Server) {
 			Settings: []apps.SettingValue{{Env: "ADMIN_PASSWORD", Set: true}, {Env: "TITLE", Value: "Notes"}},
 			Grants:   app.Grants}, nil
 	})
+	ps.Handle(priv.OpAppsServices, func(_ context.Context, raw json.RawMessage) (any, error) {
+		rec("services", raw)
+		return priv.AppServicesResult{Services: []apps.ServiceImage{{Service: "app", Image: "ghcr.io/x/app:latest"},
+			{Service: "immich-machine-learning-cuda", Image: "ghcr.io/immich-app/immich-machine-learning:v3.3.5-cuda@sha256:" + strings.Repeat("b", 64), Idle: true}}}, nil
+	})
 	ps.Handle(priv.OpAppsStart, setState("running"))
 	ps.Handle(priv.OpAppsStop, setState("stopped"))
 	ps.Handle(priv.OpAppsLogs, func(_ context.Context, raw json.RawMessage) (any, error) {

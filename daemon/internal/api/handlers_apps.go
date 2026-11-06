@@ -18,6 +18,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/office"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/zfs"
 )
@@ -92,6 +93,13 @@ func takeSettings(settings map[string]string, ref, what string) (map[string]stri
 // far it has got, so a big image moves the bar instead of sitting still.
 func pullImages(jc *jobs.Context, pc *priv.Client, id string, services []apps.ServiceImage, from, to float64) ([]string, error) {
 	var notes []string
+	var active []apps.ServiceImage
+	for _, sv := range services {
+		if !sv.Idle {
+			active = append(active, sv)
+		}
+	}
+	services = active
 	step := (to - from) / float64(max(len(services), 1))
 	for i, sv := range services {
 		base := from + float64(i)*step
@@ -202,6 +210,15 @@ func RegisterAppJobs(m *jobs.Manager, pc *priv.Client, store *appstore.Store) {
 		cancel()
 		if err != nil {
 			return nil, err
+		}
+		if store.DB != nil && !prep.Upgrade {
+			// Whether this install started from empty data (Photos treats
+			// a stranger's administrator in such an Immich as an incident).
+			v := ""
+			if prep.NewData {
+				v = "1"
+			}
+			_ = store.DB.SetSetting(jc, AppNewDataSetting(p.ID), v)
 		}
 		notes := append([]string{}, prep.Warnings...)
 		pulled, err := pullImages(jc, pc, p.ID, prep.Services, 10, 85)
@@ -894,6 +911,11 @@ func (s *Server) handleAppInstall(w http.ResponseWriter, r *http.Request, u *aut
 		return
 	}
 	mf := pkg.Manifest
+	if mf.ID == office.AppID {
+		// Its secret is HardyOS's to set (decision 250).
+		writeError(w, http.StatusConflict, "managed_app", "the Document Server is installed by turning the office suite on in Control Panel › Office")
+		return
+	}
 	source := apps.Source(req.Source)
 	sourceName := st.SourceNameOf(r.Context(), req.Source, req.Ref, req.CatalogID)
 	o, err := s.appsStatus(r.Context())

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -32,6 +34,59 @@ func (m *Manager) BackupSource(ctx context.Context, id string) (*BackupSource, e
 		return nil, err
 	}
 	return &BackupSource{ID: ia.state.ID, Name: ia.manifest.Name, Version: ia.manifest.Version, Pool: c.Pool, Dataset: ia.dataset}, nil
+}
+
+// PreBackup runs the app's backup dump (manifest backup.dump), if it has
+// one and the service is running, right before a backup's snapshot. It
+// runs in the service's container as the app's user, with no shell and no
+// TTY, bounded by the manifest's timeout; it changes nothing outside the
+// app's own folders. ran is false when there was nothing to run (no hook,
+// or the app is stopped and its files are consistent anyway).
+func (m *Manager) PreBackup(ctx context.Context, id string) (ran bool, err error) {
+	ia, _, err := m.app(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	if ia.manifest.Backup == nil || ia.manifest.Backup.Dump == nil || ia.state.Removed || ia.state.UID == 0 {
+		return false, nil
+	}
+	d := ia.manifest.Backup.Dump
+	r, err := m.resolved(ctx, ia)
+	if err != nil {
+		return false, err
+	}
+	services, _ := r["services"].(map[string]any)
+	if _, ok := services[d.Service]; !ok {
+		return false, fmt.Errorf("the backup dump's service %s isn't in the app", d.Service)
+	}
+	out, err := m.runCompose(ctx, m.composeArgs(ia, "ps", "--status", "running", "--services")...)
+	if err != nil {
+		return false, err
+	}
+	running := false
+	for _, l := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(l) == d.Service {
+			running = true
+		}
+	}
+	if !running {
+		return false, nil
+	}
+	timeout := time.Duration(d.TimeoutSeconds) * time.Second
+	if timeout == 0 {
+		timeout = 10 * time.Minute
+	}
+	dctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	user := fmt.Sprintf("%d:%d", ia.state.UID, ia.state.UID)
+	args := m.composeArgs(ia, append([]string{"exec", "-T", "--user", user, d.Service}, d.Command...)...)
+	if _, err := m.runCompose(dctx, args...); err != nil {
+		if dctx.Err() != nil {
+			return true, fmt.Errorf("the backup dump took longer than %s", timeout)
+		}
+		return true, fmt.Errorf("the backup dump failed: %w", err)
+	}
+	return true, nil
 }
 
 // BackupSources lists every installed app (none when apps aren't set up).

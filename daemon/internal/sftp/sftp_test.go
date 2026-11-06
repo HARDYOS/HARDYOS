@@ -21,7 +21,7 @@ func TestRenderSSHD(t *testing.T) {
 	on := RenderSSHD("/srv/hardyos/sftp", true)
 	for _, want := range []string{
 		"Match Group *\\*\n", "Match User *\\*,*@*\n", "\tAllowGroups hardyos-sftp\n",
-		"\tChrootDirectory /srv/hardyos/sftp/%U\n", "\tForceCommand internal-sftp -d /\n",
+		"\tChrootDirectory /srv/hardyos/sftp/%U\n", "\tForceCommand internal-sftp -d / -P symlink,hardlink\n",
 		"\tDisableForwarding yes\n", "\tAllowTcpForwarding no\n", "\tPermitTTY no\n", "\tX11Forwarding no\n",
 		"\tPermitTunnel no\n", "\tPubkeyAuthentication no\n", "\tAuthorizedKeysFile none\n", "\tAuthenticationMethods password\n",
 	} {
@@ -102,7 +102,7 @@ func TestRealSSHD(t *testing.T) {
 		if err != nil {
 			t.Fatalf("sshd -T: %v %s", err, out)
 		}
-		for _, want := range []string{"forcecommand internal-sftp -d /", "chrootdirectory /srv/hardyos/sftp/%U", "disableforwarding yes", "permittty no", "allowgroups hardyos-sftp", "pubkeyauthentication no", "x11forwarding no", "allowtcpforwarding no"} {
+		for _, want := range []string{"forcecommand internal-sftp -d / -P symlink,hardlink", "chrootdirectory /srv/hardyos/sftp/%U", "disableforwarding yes", "permittty no", "allowgroups hardyos-sftp", "pubkeyauthentication no", "x11forwarding no", "allowtcpforwarding no"} {
 			if !strings.Contains(string(out), want) {
 				t.Errorf("%s: missing %q", u, want)
 			}

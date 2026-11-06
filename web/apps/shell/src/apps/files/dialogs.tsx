@@ -1,10 +1,11 @@
-import type { FileEntry, FileShare, ShareLinkCreated } from "@hardy/api-client";
+import type { FileEntry, FileShare, OfficeStatus, ShareLinkAccess, ShareLinkCreated } from "@hardy/api-client";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, errorMessage, unwrap } from "../../api";
 import { bytes, dateTime } from "../../format";
 import { Alert, Button, Field, Loading, Select, TextInput, Toggle } from "../../ui";
 import { ConfirmDialog, Dialog } from "../../ui/Dialog";
+import { NEW_KINDS, type NewKind, editableFormat, newDocument } from "../office/officeApi";
 import { HomeIcon, KindIcon } from "./icons";
 import { HOME, basename, crumbs, kindOf, nameProblem, parent } from "./paths";
 
@@ -307,8 +308,84 @@ const GB = 1_000_000_000;
 const UPLOAD_BUDGETS = [1 * GB, 5 * GB, 10 * GB, 50 * GB, 100 * GB, 500 * GB, 1000 * GB];
 
 /** Makes a share link for one file or folder, then shows it once to copy. */
-export function ShareLinkDialog({ share, entry, onClose }: { share: string; entry: FileEntry; onClose: () => void }) {
+/** "New document": a kind and a name; the empty file is made as the person and opened. */
+export function NewDocumentDialog({
+  share,
+  dir,
+  taken,
+  onCreated,
+  onClose,
+}: {
+  share: string;
+  dir: string;
+  taken: string[];
+  onCreated: (e: FileEntry) => void;
+  onClose: () => void;
+}) {
+  const [kind, setKind] = useState<NewKind>("document");
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const k = NEW_KINDS.find((x) => x.kind === kind)!;
+  const base = name.trim() || k.fallback;
+  const full = base.toLowerCase().endsWith(`.${k.ext}`) ? base : `${base}.${k.ext}`;
+  const problem = nameProblem(full, taken);
+
+  async function create() {
+    if (problem) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const e = await newDocument(share, dir, kind, full);
+      onCreated(e);
+      onClose();
+    } catch (err) {
+      setError(errorMessage(err));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog
+      title="New document"
+      description="An empty file in this folder, opened in the editor."
+      onClose={onClose}
+      onSubmit={create}
+      width={440}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button type="submit" variant="primary" busy={busy} disabled={!!problem}>
+            Create and open
+          </Button>
+        </>
+      }
+    >
+      <div className="stack">
+        <div className="fm-kinds" role="radiogroup" aria-label="Kind">
+          {NEW_KINDS.map((x) => (
+            <label key={x.kind} className={`fm-kind ${kind === x.kind ? "is-on" : ""}`}>
+              <input type="radio" name="kind" value={x.kind} checked={kind === x.kind} onChange={() => setKind(x.kind)} />
+              <span>{x.label}</span>
+              <span className="small muted mono">.{x.ext}</span>
+            </label>
+          ))}
+        </div>
+        <Field label="Name" error={name ? problem : null} hint={`Saved as ${full}`}>
+          {(id) => <TextInput id={id} value={name} placeholder={k.fallback} onChange={(e) => setName(e.target.value)} />}
+        </Field>
+        {error && <Alert tone="bad">{error}</Alert>}
+      </div>
+    </Dialog>
+  );
+}
+
+export function ShareLinkDialog({ share, entry, office, onClose }: { share: string; entry: FileEntry; office?: OfficeStatus; onClose: () => void }) {
   const [days, setDays] = useState(7);
+  // Editing in the browser: only when the office suite is on, for folders
+  // and documents the editor saves, and only when picked (decision 256).
+  const canEditLink = !!office?.enabled && (entry.dir || editableFormat(office, entry.name));
+  const [access, setAccess] = useState<ShareLinkAccess>("view");
   const [usePassword, setUsePassword] = useState(false);
   const [password, setPassword] = useState("");
   const [upload, setUpload] = useState(false);
@@ -337,6 +414,7 @@ export function ShareLinkDialog({ share, entry, onClose }: { share: string; entr
             allowUpload: entry.dir ? upload : undefined,
             maxUploadBytes: entry.dir && upload ? budget : undefined,
             maxDownloads: limitN || undefined,
+            access: canEditLink ? access : undefined,
           },
         }),
       );
@@ -365,6 +443,7 @@ export function ShareLinkDialog({ share, entry, onClose }: { share: string; entr
         <div className="stack">
           <p className="dialog__text">
             Anyone with this link can {entry.dir ? "open this folder" : "download this file"}
+            {made.link.access === "edit" ? (entry.dir ? " and edit the documents in it in their browser" : " and edit it in their browser") : ""}
             {made.link.hasPassword ? " once they enter the password" : ""} until <strong>{dateTime(made.link.expiresAt)}</strong>.
           </p>
           <div className="fm-linkbox">
@@ -418,6 +497,21 @@ export function ShareLinkDialog({ share, entry, onClose }: { share: string; entr
             </Select>
           )}
         </Field>
+        {canEditLink && (
+          <Field label="People can" hint={entry.dir ? "Applies to documents in the folder." : undefined}>
+            {(id) => (
+              <Select id={id} value={access} onChange={(e) => setAccess(e.target.value as ShareLinkAccess)}>
+                <option value="view">View{entry.dir ? " and download" : ""} only</option>
+                <option value="edit">Edit in their browser</option>
+              </Select>
+            )}
+          </Field>
+        )}
+        {canEditLink && access === "edit" && (
+          <Alert tone="warn" title="Anyone with the link can change the document">
+            Their changes are saved as you, over the shared copy. Older versions stay in Previous versions. Consider a password and a short expiry.
+          </Alert>
+        )}
         <Toggle label="Ask for a password" checked={usePassword} onChange={setUsePassword} />
         {usePassword && (
           <Field label="Password" error={password ? pwProblem : null} hint="Tell people the password some other way than the link.">

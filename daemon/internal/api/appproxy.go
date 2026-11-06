@@ -64,11 +64,12 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/ports"
 )
 
 // Window proxy settings.
 const (
-	DefaultAppProxyBase = 44300
+	DefaultAppProxyBase = ports.AppProxyBase
 	proxyAuthPath       = "/__hardyos/auth"
 	proxyCookiePrefix   = "hardyos_app_"
 	proxyTokenTTL       = time.Minute
@@ -546,6 +547,9 @@ func (p *appProxy) handler(l *proxyListener) http.Handler {
 			p.end(key, ss)
 			proxyPage(w, http.StatusForbidden, "You can't use this app right now",
 				"Your HardyOS sign-in ended or an administrator changed who may use it. Open it again from the desktop.")
+			return
+		}
+		if filterAppRequest(w, r, l.appID) {
 			return
 		}
 		if l.webmail.Load() {
