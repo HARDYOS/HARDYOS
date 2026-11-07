@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -80,7 +81,44 @@ func twoNodeCluster(t *testing.T) (*clusterNode, *clusterNode) {
 	if _, err := c1.svc.Join(ctx, "192.168.1.105", off.Code, cluster.RoleCompute); err != nil {
 		t.Fatal(err)
 	}
-	return nas, c1
+	// Join returns once c1 is in the log; under load the two may not yet
+	// agree that c1 is active, nor have a path to each other (a relayed
+	// request then answers 502). Wait until they do.
+	var last error
+	for ctx.Err() == nil {
+		if last = clusterReady(ctx, nas, c1); last == nil {
+			return nas, c1
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("the two-node cluster didn't settle: %v", last)
+	return nil, nil
+}
+
+// clusterReady: both members know both as active at the same index and
+// reach each other over the cluster port.
+func clusterReady(ctx context.Context, a, b *clusterNode) error {
+	la, lb := a.svc.Live(), b.svc.Live()
+	sa, sb := la.State().Snapshot(), lb.State().Snapshot()
+	if sa.Index != sb.Index {
+		return fmt.Errorf("indexes %d and %d", sa.Index, sb.Index)
+	}
+	for _, s := range []*cluster.Snapshot{sa, sb} {
+		for _, id := range []cluster.NodeID{"nas", "c1"} {
+			if n := s.Nodes[id]; n == nil || n.State != cluster.NodeActive {
+				return fmt.Errorf("%s isn't active yet", id)
+			}
+		}
+	}
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := la.Call(cctx, "c1", http.MethodGet, "/ping", nil, nil); err != nil {
+		return fmt.Errorf("nas -> c1: %w", err)
+	}
+	if err := lb.Call(cctx, "nas", http.MethodGet, "/ping", nil, nil); err != nil {
+		return fmt.Errorf("c1 -> nas: %w", err)
+	}
+	return nil
 }
 
 func TestClusterProxyAssertionsAndAuthorization(t *testing.T) {
@@ -228,29 +266,43 @@ func TestRelayRefusesReplayTamperAndStrangers(t *testing.T) {
 	}
 	jws := req.Header.Get(cluster.AssertionHeader)
 	resp, err := core.RoundTripRelay(req)
-	if err != nil || resp.StatusCode != 404 {
-		t.Fatalf("first = %v %v", resp.StatusCode, err)
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if resp.StatusCode != 404 {
+		t.Fatalf("first = %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 	sb.Close()
-	req2, sb2, _ := core.RelayRequest(ctx, &cluster.Forward{Node: "c1", Principal: admin, Method: "POST", Path: path,
+	req2, sb2, err := core.RelayRequest(ctx, &cluster.Forward{Node: "c1", Principal: admin, Method: "POST", Path: path,
 		Header: f.Header, Body: strings.NewReader(body)})
+	if err != nil {
+		t.Fatal(err)
+	}
 	req2.Header.Set(cluster.AssertionHeader, jws)
 	req2.Body = io.NopCloser(bytes.NewReader([]byte(body)))
 	resp2, err := core.RoundTripRelay(req2)
 	sb2.Close()
-	if err != nil || resp2.StatusCode != 403 {
-		t.Fatalf("replay = %v %v", resp2.StatusCode, err)
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if resp2.StatusCode != 403 {
+		t.Fatalf("replay = %d", resp2.StatusCode)
 	}
 	resp2.Body.Close()
 	// A request without an assertion over the relay is refused.
-	req3, sb3, _ := core.RelayRequest(ctx, &cluster.Forward{Node: "c1", Principal: admin, Method: "GET", Path: "/api/v1/jobs"})
-
+	req3, sb3, err := core.RelayRequest(ctx, &cluster.Forward{Node: "c1", Principal: admin, Method: "GET", Path: "/api/v1/jobs"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	req3.Header.Del(cluster.AssertionHeader)
 	resp3, err := core.RoundTripRelay(req3)
 	sb3.Close()
-	if err != nil || resp3.StatusCode != 403 {
-		t.Fatalf("no assertion = %v %v", resp3.StatusCode, err)
+	if err != nil {
+		t.Fatalf("no assertion: %v", err)
+	}
+	if resp3.StatusCode != 403 {
+		t.Fatalf("no assertion = %d", resp3.StatusCode)
 	}
 	resp3.Body.Close()
 	_ = c1
