@@ -6,10 +6,10 @@ storage server, move workloads between servers and restart them elsewhere
 when a server dies. Architecture: [architecture.md](architecture.md#cluster);
 design: [plans/cluster.md](plans/cluster.md); decisions 320-359.
 
-This guide covers the cluster core (part A): creating and joining a
+This guide covers the cluster core (part A: creating and joining a
 cluster, the witness on the VPS, the server switcher and how the servers
-talk to each other. Parts B (the storage node) and C (moves, high
-availability, fencing) add their sections below.
+talk to each other), the storage server (part B) and moving workloads,
+high availability and fencing (part C).
 
 ## What a cluster is
 
@@ -143,12 +143,153 @@ to vote or delay changes, but can't forge or replay changes.
   automatically, even when unreachable: an administrator decides.
 - **Dissolve** (on the last server): ends the cluster.
 
+## The storage server (cluster storage)
+
+One server, the NAS with the **storage** role, holds the pool for every
+cluster VM and app. Compute servers use it over the storage network:
+
+- a VM's **disks** are ZFS volumes on the NAS, each an iSCSI disk that the
+  NAS gives to exactly one compute server (the one running the VM; two only
+  while a VM migrates live);
+- a VM's **state folder** (settings, firmware variables, TPM, cloud-init
+  disc) and an **app's data** are datasets on the NAS, mounted over NFS by
+  that one server only;
+- **shared folders** put in the cluster (Cluster › Storage › Shared folders
+  in the cluster) are mounted by every compute server, so cluster apps use
+  them as on one server. People on the LAN keep using SMB and NFS on the
+  NAS as before.
+
+Snapshots, backups and replication of cluster VMs and apps stay on the NAS
+(Cluster › Storage › Workloads on cluster storage › Snapshots). For a
+snapshot of a running VM the NAS asks the server running it to freeze the
+guest's file systems first (thawed after 60 seconds at most); a running
+app's backup dump runs on its server first. Rolling back needs the VM or
+app stopped.
+
+**The storage network.** The create and join wizards (and Cluster ›
+Storage › Storage network) list this server's ports with their speed: a
+dedicated port (best, fastest first), a VLAN on the LAN port (the switch
+must carry it), or the LAN itself (it works, but iSCSI and NFS then share
+the wire with everyone; not recommended). The address is static and
+private, without a gateway, in the cluster's storage subnet (suggested
+`10.77.0.0/24`, `.10` for the NAS). Jumbo frames (MTU 9000) are offered on
+ports of 1 Gb/s and up; the switch must allow them. Like every network
+change it is kept only once you confirm it. Compute servers refuse to use
+cluster storage over any other path, never over NetBird.
+
+**App data: folder or volume.** An app's data is an NFS folder (default:
+plain files) or a **block volume** (a ZFS volume with ext4 or xfs that only
+the app's server mounts). Apps that keep a database get a block volume by
+default (their package says so, or the compose file runs a known database
+server): databases need a disk that behaves like a local one. A stopped
+app can be switched (Cluster › Storage › the app › Data mode, typed
+confirmation; a snapshot is taken first).
+
+**Fencing on the NAS.** When the cluster declares a compute server dead
+(see High availability), the NAS disables that server's iSCSI target
+(dropping its sessions), removes it from every export, expires its NFS
+clients and blocks its address, and only then confirms in the log. It
+keeps refusing the server until it rejoins. Each compute server has its own
+iSCSI target and login secrets (mutual CHAP) that the NAS's root keeps and
+hands to that server alone; **New CHAP secrets** next to the server's
+target in Cluster › Storage replaces them.
+
+## Moving VMs and apps
+
+Cluster VMs and apps show a **Move…** button (VMs app, App Store) and are
+listed in Cluster › **Workloads and HA**. The Move dialog lists every
+compute server with whether it fits (memory, CPU, bridges and VLANs,
+watchdog, devices) and why not.
+
+- **Offline move** (VMs and apps): the VM shuts down (guest agent or ACPI,
+  up to 3 minutes) or the app stops, its server lets go of the storage, the
+  NAS hands it to the new server, which starts it. An app's images are
+  downloaded on the new server before it stops on the old one. If a step
+  fails the workload stays stopped where the log last put it, with Retry
+  and Move back.
+- **Live migration** (running VMs without passthrough devices, to a server
+  with a compatible CPU and the same bridge and VLANs): the VM keeps
+  running while its memory is copied over the storage network. If it fails
+  the VM keeps running where it was. Cluster VMs use the cluster's CPU
+  baseline so they can migrate between servers with different CPUs; a VM
+  set to the host's exact CPU migrates only between identical CPUs.
+- **VMs with passthrough devices** (GPU, USB) are pinned to their server:
+  never HA, never migrated live. An offline move to a server you pick is
+  possible once that server confirms it has matching devices (typed
+  confirmation).
+- **Move everything off…** (Cluster › Workloads and HA › Compute servers)
+  drains a server: migrates live what can be, moves the rest offline (HA
+  workloads first) and, if you agree, stops what can't move. Use it before
+  maintenance and before a server leaves.
+
+## High availability
+
+Turn HA on per VM or app in Cluster › Workloads and HA: priority (higher
+recovers first), restarts in place per hour before it moves elsewhere,
+preferred servers (optionally *only* those), an anti-affinity group (kept
+on different servers when possible) and fail back.
+
+**When a compute server dies** (default timings):
+
+1. After 10 seconds without hearing it, the cluster shows it as suspect.
+2. The server itself, if it still runs but is cut off, loses its quorum
+   lease after 15 seconds and **stops its HA workloads at once**; it also
+   stops feeding its hardware watchdog, so if stopping hangs the watchdog
+   resets the machine within 10 seconds.
+3. After 40 seconds the leader declares it **dead**; the NAS cuts it off
+   (above) and confirms.
+4. Only then are its HA workloads started on other servers, by priority,
+   from the same disks: nothing is lost beyond writes in flight. A workload
+   that fits nowhere waits (*pending*, retried every 30 seconds). Its
+   non-HA workloads are marked *orphaned*; start them elsewhere with Move.
+5. When the server comes back it starts nothing, sees it was fenced and,
+   after a new boot, rejoins; the NAS lets it in again with nothing mapped.
+   Its former workloads stay where they are (unless fail back is on).
+
+A VM or app is **never** run by two servers against the same disk: the log
+names one owner per generation, the NAS maps the disk to that owner only,
+recovery waits for the NAS's confirmed fence, and every server stops
+whatever the log no longer places on it.
+
+Other cases: a server that loses only the storage network while the others
+still reach the NAS is isolated and fenced the same way. If **every**
+server loses the NAS nothing fails over (there is nowhere to go): VMs pause
+on I/O errors and resume when it is back. If the cluster loses quorum
+altogether, HA workloads stop everywhere and start again when quorum
+returns: that is the price of never running a disk twice.
+
+**Watchdogs.** HA needs a hardware watchdog on the compute server (most
+boards have one: `iTCO_wdt`, `sp5100_tco`, IPMI). A server with only the
+software watchdog (a kernel hang defeats it) or none is skipped for HA; an
+administrator can allow it per server (Compute servers › **Allow HA
+anyway…**, typed confirmation, behind a warning).
+
+**Timings** (Workloads and HA › Failover timings) can be changed within
+safe bounds: a server is declared dead no sooner than quorum lease +
+watchdog + 10 seconds, and the self-stop time is shorter than the
+watchdog's. Every server refuses unsafe values, not only the desktop.
+
+**Images.** Every HA app's container images are kept downloaded on every
+server that could take it over, so a failover never needs the internet.
+
+**Published apps** (NetBird) follow the app: its new server re-targets the
+app's published name after a move or a failover.
+
+**Not there yet.** Nothing in the desktop or the API turns a VM or app into
+a cluster workload yet (the plan's "Move to cluster storage", section
+6.5); cluster workloads exist only once that conversion is built. The LAN
+check (a server whose LAN alone fails) reports the LAN as always working
+until its probe is built, so LAN isolation never triggers.
+
 ## Alerts
 
 - *This server lost the cluster's quorum* (warning) after 30 seconds
   without a majority, and *has quorum again* when it's back.
 - *This server stopped following the cluster* (critical): the log holds a
   change this version doesn't understand. Update HardyOS on this server.
+- High-availability actions (a server declared dead or isolated,
+  recoveries, workloads pending or in error) are recorded as finished jobs
+  (`cluster.ha.*`) and in the audit log.
 
 ## Security notes
 

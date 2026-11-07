@@ -98,9 +98,14 @@ jobs:
           sudo ln -sf /dev/null /etc/systemd/system-generators/nfs-server-generator
           sudo systemctl daemon-reload
           sudo modprobe -a target_core_mod target_core_iblock iscsi_target_mod iscsi_tcp || echo "LIO modules unavailable: the LIO test will skip"
-      - name: build test binary
+      - name: build test binaries
         working-directory: daemon
-        run: go test -c -o "$RUNNER_TEMP/san.test" ./internal/cluster/san
+        run: |
+          go test -c -o "$RUNNER_TEMP/san.test" ./internal/cluster/san
+          go test -race -c -o "$RUNNER_TEMP/e2e.test" ./internal/cluster/e2e
+      - name: parts A, B and C together - join, storage grants, VM and app placed, offline move, node death, fence, recovery
+        working-directory: daemon/internal/cluster/e2e
+        run: '"$RUNNER_TEMP/e2e.test" -test.run TestClusterEndToEnd -test.v -test.count 1 -test.timeout 10m'
       - name: storage node - LIO targets with mutual CHAP, initiators in network namespaces, fence under I/O, cluster NFS exports
         run: sudo HARDYOS_CLUSTER_INTEGRATION=1 "$RUNNER_TEMP/san.test" -test.run TestClusterStorageIntegration -test.v -test.timeout 10m
       - name: LIO and NFS state

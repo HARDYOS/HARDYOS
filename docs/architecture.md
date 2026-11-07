@@ -2369,6 +2369,46 @@ The plan is `docs/plans/cluster.md` sections 6.3-7.6; decisions 350-359.
   watchdog feeder against a fake device, and the XML check. Nothing touches a
   real watchdog, libvirt, disk or network.
 
+### How the parts fit together
+
+- **One live membership.** `member.Service` replaces its core when the
+  server leaves a cluster (a new key and state machine), so parts B and C
+  never hold a core: they get `member.Live`, which is `Membership`,
+  `PeerClient` and `PeerMux` over the current core, adds their peer
+  handlers and part C's migrate hook to every core before it starts, and
+  re-subscribes `Subscribe` when the core changes.
+- **Order in hardyd** (`cmd/hardyd/cluster_{a,b,c}.go`): the membership
+  service is built before the job manager starts; part B's storage service
+  and agent and part C's `ha.Service` are wired onto `member.Live`; the API
+  routes are attached; then the core starts (`Init`, `Run`) and replays the
+  log. The heartbeat's own report (`ha.HealthReporter`) carries part B's
+  storage health and part C's running workloads; `ha.Announcer` records a
+  compute server's hardware (CPUs, memory, KVM, bridge, watchdog kind) with
+  `member.update`, which placement and HA eligibility read.
+- **Every state machine knows every command.** Parts B's and C's appliers
+  are in the state package's registry (like part A's), so members and the
+  witness apply `storage.*`, `workload.*`, `placement.*`, `move.*`, `ha.*`
+  and `node.*` from the first entry on; `cluster.timings` is checked with
+  `state.ValidateTimings` on every node.
+- **hardyd-priv** gives the VM and app engines part B's backends
+  (`vms.Manager.Backend`, `apps.Manager.Backend`, `apps.Manager.ClusterShares`
+  for cluster apps' shared folders) before they start.
+- **Live migration's libvirt connection** goes over the cluster port's
+  `hardyos-migrate/1` (`moves.ALPNStream` on the source, part A's transport
+  hands it to `moves.Node.ServeMigrateConn` on the destination; never over
+  NetBird).
+- **End-to-end test** (`internal/cluster/e2e`, every `go test ./...`): a
+  storage node, three compute nodes and the witness in one process with all
+  three parts' real code (real Raft, TLS and signed log on an in-memory
+  network; part B's real `san.Root` on a fake configfs and zfs; fake
+  compute-side root operations that only attach what the storage node's
+  configfs and exports really give them). It joins, provisions and places a
+  VM and an app, moves the app offline, cuts a compute node off and checks
+  that it fences itself, is declared dead, is fenced by the storage node
+  and only then is its HA VM restarted elsewhere, with never two runners,
+  never a LUN in two targets and never a start while another node can reach
+  the disk.
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly
