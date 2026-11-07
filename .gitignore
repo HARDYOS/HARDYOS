@@ -22,3 +22,9 @@ Thumbs.db
 
 # Local dev state
 /.dev/
+
+# Binaries built by `go build` inside daemon/
+/daemon/hardyd
+/daemon/hardyd-priv
+/daemon/hardyctl
+/daemon/hardyos-witness
