@@ -344,6 +344,7 @@ func (r *Root) apply(ctx context.Context, a ApplyArgs) error {
 	for _, n := range nodes {
 		plan.CHAP[n] = chap[n]
 	}
+	r.loadModules(ctx)
 	rerr := Reconcile(r.FS, plan)
 	st.Problem = ""
 	if rerr != nil {
@@ -353,6 +354,20 @@ func (r *Root) apply(ctx context.Context, a ApplyArgs) error {
 		return err
 	}
 	return rerr
+}
+
+// targetModules are LIO's core, its block backstore and the iSCSI fabric.
+var targetModules = []string{"target_core_mod", "target_core_iblock", "iscsi_target_mod"}
+
+// loadModules loads LIO when its configfs group isn't there yet (a
+// storage node's first apply after boot).
+func (r *Root) loadModules(ctx context.Context) {
+	if r.FS.Exists("core") && r.FS.Exists("iscsi") {
+		return
+	}
+	if _, err := sysexec.Output(ctx, r.Runner, "modprobe", append([]string{"-a"}, targetModules...)...); err != nil {
+		r.log().Warn("san: loading the iSCSI target modules", "err", err)
+	}
 }
 
 // ValidationError is a refused request (bad_args).

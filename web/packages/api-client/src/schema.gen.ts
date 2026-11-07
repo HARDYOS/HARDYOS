@@ -5090,6 +5090,181 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/cluster/storage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Cluster storage overview (storage server, health, grants, fences, cluster shares, the storage agent's last pass) */
+        get: operations["getClusterStorage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/storage/nodes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Each member's storage status (sessions, attachments, mounts), asked over the peer API */
+        get: operations["listClusterStorageNodes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/storage/exports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The storage server's iSCSI targets and NFS exports as root has them (desired, live, drift, fences) */
+        get: operations["getClusterStorageExports"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/storage/network": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Ways to carry the storage network on this server (dedicated ports fastest first, a VLAN, the LAN), the saved plan and a suggested address */
+        get: operations["getClusterStorageNetwork"];
+        put?: never;
+        /** Set up this server's storage network (a job; applied like any network change and rolled back unless confirmed in Network settings) */
+        post: operations["applyClusterStorageNetwork"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/storage/shares/{pool}/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Use a shared folder of the storage server in the cluster (exported to every compute server with root squashed), or stop (a job) */
+        put: operations["setClusterStorageShare"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/storage/workloads/{kind}/{id}/snapshots": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: "vm" | "app";
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Snapshots of a cluster VM's or app's storage on the storage server */
+        get: operations["listClusterStorageSnapshots"];
+        put?: never;
+        /** Snapshot a cluster workload on the storage server (a running VM is frozen by its owner's guest agent, a running app's backup dump runs on its owner first; a job) */
+        post: operations["createClusterStorageSnapshot"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/storage/workloads/{kind}/{id}/rollback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Roll a stopped cluster workload back to a snapshot (confirm is the snapshot's name; a job) */
+        post: operations["rollbackClusterStorage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/storage/workloads/{kind}/{id}/snapshots/{name}/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Delete a snapshot of a cluster workload (confirm is the snapshot's name; a job) */
+        post: operations["deleteClusterStorageSnapshot"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/storage/apps/{id}/mode": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Move a stopped cluster app's data between NFS and block mode on the storage server (a snapshot of the source is kept; confirm is the app's id; a job) */
+        post: operations["setClusterAppStorageMode"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/storage/nodes/{node}/chap/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Give a compute server new CHAP secrets (run on the storage server; confirm is the server's node id; a job) */
+        post: operations["rotateClusterStorageCHAP"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -8990,6 +9165,235 @@ export interface components {
             settings?: components["schemas"]["MailManualSettings"];
             webmailInstalled: boolean;
             reason?: string;
+        };
+        ClusterStorageNode: {
+            id: string;
+            name: string;
+            /** @enum {string} */
+            role: "compute" | "storage" | "witness";
+            state: string;
+            fenceEpoch?: number;
+            addresses?: {
+                lan?: string;
+                netbird?: string;
+                storage?: string;
+                portals?: string[];
+            };
+        };
+        ClusterStorageHealth: {
+            node: string;
+            reachable: boolean;
+            pool: string;
+            poolState: string;
+            sessions?: {
+                [key: string]: number;
+            };
+            fenced?: string[];
+            problem?: string;
+        };
+        ClusterStorageVolume: {
+            dataset: string;
+            disk: string;
+            sizeGB: number;
+            wwn: string;
+        };
+        ClusterStorageExport: {
+            /** @enum {string} */
+            kind: "vmstate" | "appdata" | "share";
+            dataset: string;
+            path: string;
+            mountPath: string;
+            fsid: string;
+        };
+        ClusterWorkloadStorage: {
+            pool: string;
+            /** @enum {string} */
+            mode?: "nfs" | "block";
+            blockFS?: string;
+            volumes?: components["schemas"]["ClusterStorageVolume"][];
+            exports?: components["schemas"]["ClusterStorageExport"][];
+            shares?: string[];
+        };
+        ClusterWorkloadRef: {
+            /** @enum {string} */
+            kind: "vm" | "app";
+            id: string;
+        };
+        ClusterStorageWorkload: {
+            workload: components["schemas"]["ClusterWorkloadRef"];
+            name: string;
+            owner: string;
+            nodes: string[];
+            generation: number;
+            applied: boolean;
+            migration: boolean;
+            state: string;
+            storage: components["schemas"]["ClusterWorkloadStorage"];
+        };
+        ClusterStorageFence: {
+            node: string;
+            epoch: number;
+            reason: string;
+            confirmed: boolean;
+            /** Format: date-time */
+            requested: string;
+            /** Format: date-time */
+            confirmedAt?: string;
+        };
+        ClusterStorageShare: {
+            id: string;
+            pool: string;
+            dataset: string;
+            path: string;
+            mountPath: string;
+            fsid: string;
+        };
+        ClusterStorageAgent: {
+            /** Format: date-time */
+            at: string;
+            index: number;
+            problem?: string;
+            fenced?: string[];
+            acked: number;
+            targets: number;
+            luns: number;
+            exports: number;
+            firewall: boolean;
+        };
+        ClusterStorageOverview: {
+            member: boolean;
+            self?: components["schemas"]["ClusterStorageNode"];
+            storageNode?: components["schemas"]["ClusterStorageNode"];
+            storageSubnet: string;
+            health?: components["schemas"]["ClusterStorageHealth"];
+            agent?: components["schemas"]["ClusterStorageAgent"];
+            workloads: components["schemas"]["ClusterStorageWorkload"][];
+            fences: components["schemas"]["ClusterStorageFence"][];
+            shares: components["schemas"]["ClusterStorageShare"][];
+        };
+        ClusterStorageAttachment: {
+            workload: components["schemas"]["ClusterWorkloadRef"];
+            generation: number;
+            disks?: {
+                [key: string]: string;
+            };
+            stateDir: string;
+            multipath?: boolean;
+            mounts: string[];
+            wwns?: string[];
+            dataset: string;
+            mode?: string;
+            /** Format: date-time */
+            at: string;
+        };
+        ClusterStorageNodeStatus: {
+            node: string;
+            role: string;
+            reachable: boolean;
+            healthy: boolean;
+            problem?: string;
+            sessions: number;
+            attached?: components["schemas"]["ClusterStorageAttachment"][] | null;
+            shares: {
+                [key: string]: string;
+            };
+            interface?: string;
+            address?: string;
+            /** Format: date-time */
+            checked: string;
+        };
+        ClusterStorageTarget: {
+            node: string;
+            enabled: boolean;
+            fenceEpoch?: number;
+            luns: string[];
+        };
+        ClusterStorageSANStatus: {
+            loaded: boolean;
+            desired?: {
+                cluster?: string;
+                index?: number;
+                portals?: string[];
+                targets?: components["schemas"]["ClusterStorageTarget"][];
+                backstores?: {
+                    name?: string;
+                    workload?: components["schemas"]["ClusterWorkloadRef"];
+                    dataset?: string;
+                    disk?: string;
+                    generation?: number;
+                    migration?: boolean;
+                }[];
+            };
+            current: {
+                [key: string]: components["schemas"]["ClusterStorageTarget"];
+            };
+            sessions: {
+                [key: string]: number;
+            };
+            fences: {
+                [key: string]: number;
+            };
+            exports?: {
+                [key: string]: string[];
+            };
+            problem?: string;
+            /** Format: date-time */
+            applied: string;
+            drift?: {
+                [key: string]: {
+                    missing?: string[];
+                    extra?: string[];
+                    enabled?: boolean;
+                };
+            };
+        };
+        ClusterStorageCandidate: {
+            /** @enum {string} */
+            kind: "dedicated" | "vlan" | "lan";
+            interface: string;
+            speedMbps: number;
+            carrier: boolean;
+            defaultRoute: boolean;
+            warning?: string;
+        };
+        ClusterStoragePlan: {
+            /** @enum {string} */
+            kind: "dedicated" | "vlan" | "lan";
+            interface: string;
+            vlan?: number;
+            /** @description This server's storage address with its prefix, e.g. 10.77.0.21/24 */
+            address: string;
+            /** @description 0 or 1500, or 9000 for jumbo frames */
+            mtu?: number;
+        };
+        ClusterStorageNetwork: {
+            candidates: components["schemas"]["ClusterStorageCandidate"][];
+            plan?: components["schemas"]["ClusterStoragePlan"] | null;
+            subnet: string;
+            suggested: string;
+            current: string;
+            interface: string;
+            jumbo: {
+                [key: string]: boolean;
+            };
+            live: components["schemas"]["LiveInterface"][];
+            pending: boolean;
+        };
+        ClusterStorageSnapshot: {
+            name: string;
+            /** Format: date-time */
+            created: string;
+            used: number;
+            reason?: string;
+        };
+        ClusterAppModeRequest: {
+            /** @enum {string} */
+            to: "nfs" | "block";
+            /** @enum {string} */
+            fs?: "ext4" | "xfs";
+            sizeGB?: number;
+            removeOld?: boolean;
+            confirm: string;
         };
     };
     responses: {
@@ -16921,6 +17325,287 @@ export interface operations {
                 };
             };
             404: components["responses"]["NotFound"];
+        };
+    };
+    getClusterStorage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Overview (member false outside a cluster) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClusterStorageOverview"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    listClusterStorageNodes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Per-node status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        nodes: components["schemas"]["ClusterStorageNodeStatus"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    getClusterStorageExports: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description LIO and export status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClusterStorageSANStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    getClusterStorageNetwork: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Storage network choices */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClusterStorageNetwork"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    applyClusterStorageNetwork: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClusterStoragePlan"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    setClusterStorageShare: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pool: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    inCluster: boolean;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    listClusterStorageSnapshots: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: "vm" | "app";
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Snapshots */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        snapshots: components["schemas"]["ClusterStorageSnapshot"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    createClusterStorageSnapshot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: "vm" | "app";
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    name?: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    rollbackClusterStorage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: "vm" | "app";
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    name: string;
+                    confirm: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    deleteClusterStorageSnapshot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: "vm" | "app";
+                id: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    confirm: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    setClusterAppStorageMode: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClusterAppModeRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    rotateClusterStorageCHAP: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    confirm: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
 }

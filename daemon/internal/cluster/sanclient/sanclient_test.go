@@ -141,6 +141,7 @@ func TestAttachRecordsAndBackends(t *testing.T) {
 		d := filepath.Join(c.Sys, "sys/block", name, "device")
 		_ = os.MkdirAll(d, 0o755)
 		_ = os.WriteFile(filepath.Join(d, "wwid"), []byte(id+"\n"), 0o644)
+		_ = os.WriteFile(filepath.Join(d, "delete"), nil, 0o644) // sysfs attributes exist
 	}
 	if err := c.Detach(ctx, DetachArgs{Workload: cluster.WorkloadRef{Kind: cluster.KindVM, ID: "web"}}); err != nil {
 		t.Fatal(err)
@@ -148,7 +149,7 @@ func TestAttachRecordsAndBackends(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(c.Sys, "sys/block/sdb/device/delete")); string(b) != "1" {
 		t.Fatal("the LUN's SCSI disk wasn't removed")
 	}
-	if _, err := os.Stat(filepath.Join(c.Sys, "sys/block/sda/device/delete")); err == nil {
+	if b, _ := os.ReadFile(filepath.Join(c.Sys, "sys/block/sda/device/delete")); len(b) != 0 {
 		t.Fatal("another disk was removed")
 	}
 	if l, _ := (VMBackend{C: c}).List(ctx); len(l) != 0 {

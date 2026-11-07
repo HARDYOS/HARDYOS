@@ -47,6 +47,7 @@ tags:
   - name: monitor
   - name: ups
   - name: mail
+  - name: cluster-storage
 paths:
   /health:
     get:
@@ -5705,6 +5706,222 @@ paths:
   #
   #
   # ---- Phase 8 part B (cluster storage): /cluster/storage/... below this line (tag cluster-storage)
+  /cluster/storage:
+    get:
+      operationId: getClusterStorage
+      summary: Cluster storage overview (storage server, health, grants, fences, cluster shares, the storage agent's last pass)
+      tags: [cluster-storage]
+      responses:
+        "200":
+          description: Overview (member false outside a cluster)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClusterStorageOverview" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /cluster/storage/nodes:
+    get:
+      operationId: listClusterStorageNodes
+      summary: Each member's storage status (sessions, attachments, mounts), asked over the peer API
+      tags: [cluster-storage]
+      responses:
+        "200":
+          description: Per-node status
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [nodes]
+                properties:
+                  nodes: { type: array, items: { $ref: "#/components/schemas/ClusterStorageNodeStatus" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /cluster/storage/exports:
+    get:
+      operationId: getClusterStorageExports
+      summary: The storage server's iSCSI targets and NFS exports as root has them (desired, live, drift, fences)
+      tags: [cluster-storage]
+      responses:
+        "200":
+          description: LIO and export status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClusterStorageSANStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /cluster/storage/network:
+    get:
+      operationId: getClusterStorageNetwork
+      summary: Ways to carry the storage network on this server (dedicated ports fastest first, a VLAN, the LAN), the saved plan and a suggested address
+      tags: [cluster-storage]
+      responses:
+        "200":
+          description: Storage network choices
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClusterStorageNetwork" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: applyClusterStorageNetwork
+      summary: Set up this server's storage network (a job; applied like any network change and rolled back unless confirmed in Network settings)
+      tags: [cluster-storage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClusterStoragePlan" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /cluster/storage/shares/{pool}/{id}:
+    put:
+      operationId: setClusterStorageShare
+      summary: Use a shared folder of the storage server in the cluster (exported to every compute server with root squashed), or stop (a job)
+      tags: [cluster-storage]
+      parameters:
+        - { name: pool, in: path, required: true, schema: { type: string } }
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [inCluster]
+              properties:
+                inCluster: { type: boolean }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /cluster/storage/workloads/{kind}/{id}/snapshots:
+    parameters:
+      - { name: kind, in: path, required: true, schema: { type: string, enum: [vm, app] } }
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: listClusterStorageSnapshots
+      summary: Snapshots of a cluster VM's or app's storage on the storage server
+      tags: [cluster-storage]
+      responses:
+        "200":
+          description: Snapshots
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [snapshots]
+                properties:
+                  snapshots: { type: array, items: { $ref: "#/components/schemas/ClusterStorageSnapshot" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    post:
+      operationId: createClusterStorageSnapshot
+      summary: Snapshot a cluster workload on the storage server (a running VM is frozen by its owner's guest agent, a running app's backup dump runs on its owner first; a job)
+      tags: [cluster-storage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /cluster/storage/workloads/{kind}/{id}/rollback:
+    post:
+      operationId: rollbackClusterStorage
+      summary: Roll a stopped cluster workload back to a snapshot (confirm is the snapshot's name; a job)
+      tags: [cluster-storage]
+      parameters:
+        - { name: kind, in: path, required: true, schema: { type: string, enum: [vm, app] } }
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, confirm]
+              properties:
+                name: { type: string }
+                confirm: { type: string }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /cluster/storage/workloads/{kind}/{id}/snapshots/{name}/delete:
+    post:
+      operationId: deleteClusterStorageSnapshot
+      summary: Delete a snapshot of a cluster workload (confirm is the snapshot's name; a job)
+      tags: [cluster-storage]
+      parameters:
+        - { name: kind, in: path, required: true, schema: { type: string, enum: [vm, app] } }
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: name, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { type: string }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /cluster/storage/apps/{id}/mode:
+    post:
+      operationId: setClusterAppStorageMode
+      summary: Move a stopped cluster app's data between NFS and block mode on the storage server (a snapshot of the source is kept; confirm is the app's id; a job)
+      tags: [cluster-storage]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClusterAppModeRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /cluster/storage/nodes/{node}/chap/rotate:
+    post:
+      operationId: rotateClusterStorageCHAP
+      summary: Give a compute server new CHAP secrets (run on the storage server; confirm is the server's node id; a job)
+      tags: [cluster-storage]
+      parameters:
+        - { name: node, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { type: string }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   #
   #
   # ---- Phase 8 part C (placement, moves, HA): /cluster/workloads/..., /cluster/moves/..., /cluster/ha/... below this line (tag cluster-ha)
@@ -9693,3 +9910,252 @@ components:
         webmailInstalled: { type: boolean }
         reason: { type: string }
     # ---- end of mail API schemas ----
+    # ---- Phase 8 part B (cluster storage) schemas ----
+    ClusterStorageNode:
+      type: object
+      required: [id, name, role, state]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        role: { type: string, enum: [compute, storage, witness] }
+        state: { type: string }
+        fenceEpoch: { type: integer }
+        addresses:
+          type: object
+          properties:
+            lan: { type: string }
+            netbird: { type: string }
+            storage: { type: string }
+            portals: { type: array, items: { type: string } }
+    ClusterStorageHealth:
+      type: object
+      required: [node, reachable, pool, poolState]
+      properties:
+        node: { type: string }
+        reachable: { type: boolean }
+        pool: { type: string }
+        poolState: { type: string }
+        sessions: { type: object, additionalProperties: { type: integer } }
+        fenced: { type: array, items: { type: string } }
+        problem: { type: string }
+    ClusterStorageVolume:
+      type: object
+      required: [dataset, disk, sizeGB, wwn]
+      properties:
+        dataset: { type: string }
+        disk: { type: string }
+        sizeGB: { type: integer }
+        wwn: { type: string }
+    ClusterStorageExport:
+      type: object
+      required: [kind, dataset, path, mountPath, fsid]
+      properties:
+        kind: { type: string, enum: [vmstate, appdata, share] }
+        dataset: { type: string }
+        path: { type: string }
+        mountPath: { type: string }
+        fsid: { type: string }
+    ClusterWorkloadStorage:
+      type: object
+      required: [pool]
+      properties:
+        pool: { type: string }
+        mode: { type: string, enum: [nfs, block] }
+        blockFS: { type: string }
+        volumes: { type: array, items: { $ref: "#/components/schemas/ClusterStorageVolume" } }
+        exports: { type: array, items: { $ref: "#/components/schemas/ClusterStorageExport" } }
+        shares: { type: array, items: { type: string } }
+    ClusterWorkloadRef:
+      type: object
+      required: [kind, id]
+      properties:
+        kind: { type: string, enum: [vm, app] }
+        id: { type: string }
+    ClusterStorageWorkload:
+      type: object
+      required: [workload, name, owner, nodes, generation, applied, migration, state, storage]
+      properties:
+        workload: { $ref: "#/components/schemas/ClusterWorkloadRef" }
+        name: { type: string }
+        owner: { type: string }
+        nodes: { type: array, items: { type: string } }
+        generation: { type: integer }
+        applied: { type: boolean }
+        migration: { type: boolean }
+        state: { type: string }
+        storage: { $ref: "#/components/schemas/ClusterWorkloadStorage" }
+    ClusterStorageFence:
+      type: object
+      required: [node, epoch, reason, confirmed, requested]
+      properties:
+        node: { type: string }
+        epoch: { type: integer }
+        reason: { type: string }
+        confirmed: { type: boolean }
+        requested: { type: string, format: date-time }
+        confirmedAt: { type: string, format: date-time }
+    ClusterStorageShare:
+      type: object
+      required: [id, pool, dataset, path, mountPath, fsid]
+      properties:
+        id: { type: string }
+        pool: { type: string }
+        dataset: { type: string }
+        path: { type: string }
+        mountPath: { type: string }
+        fsid: { type: string }
+    ClusterStorageAgent:
+      type: object
+      required: [at, index, acked, targets, luns, exports, firewall]
+      properties:
+        at: { type: string, format: date-time }
+        index: { type: integer }
+        problem: { type: string }
+        fenced: { type: array, items: { type: string } }
+        acked: { type: integer }
+        targets: { type: integer }
+        luns: { type: integer }
+        exports: { type: integer }
+        firewall: { type: boolean }
+    ClusterStorageOverview:
+      type: object
+      required: [member, storageSubnet, workloads, fences, shares]
+      properties:
+        member: { type: boolean }
+        self: { $ref: "#/components/schemas/ClusterStorageNode" }
+        storageNode: { $ref: "#/components/schemas/ClusterStorageNode" }
+        storageSubnet: { type: string }
+        health: { $ref: "#/components/schemas/ClusterStorageHealth" }
+        agent: { $ref: "#/components/schemas/ClusterStorageAgent" }
+        workloads: { type: array, items: { $ref: "#/components/schemas/ClusterStorageWorkload" } }
+        fences: { type: array, items: { $ref: "#/components/schemas/ClusterStorageFence" } }
+        shares: { type: array, items: { $ref: "#/components/schemas/ClusterStorageShare" } }
+    ClusterStorageAttachment:
+      type: object
+      required: [workload, generation, stateDir, mounts, dataset, at]
+      properties:
+        workload: { $ref: "#/components/schemas/ClusterWorkloadRef" }
+        generation: { type: integer }
+        disks: { type: object, additionalProperties: { type: string } }
+        stateDir: { type: string }
+        multipath: { type: boolean }
+        mounts: { type: array, items: { type: string } }
+        wwns: { type: array, items: { type: string } }
+        dataset: { type: string }
+        mode: { type: string }
+        at: { type: string, format: date-time }
+    ClusterStorageNodeStatus:
+      type: object
+      required: [node, role, reachable, healthy, sessions, shares, checked]
+      properties:
+        node: { type: string }
+        role: { type: string }
+        reachable: { type: boolean }
+        healthy: { type: boolean }
+        problem: { type: string }
+        sessions: { type: integer }
+        attached:
+          type: array
+          nullable: true
+          items: { $ref: "#/components/schemas/ClusterStorageAttachment" }
+        shares: { type: object, additionalProperties: { type: string } }
+        interface: { type: string }
+        address: { type: string }
+        checked: { type: string, format: date-time }
+    ClusterStorageTarget:
+      type: object
+      required: [node, enabled, luns]
+      properties:
+        node: { type: string }
+        enabled: { type: boolean }
+        fenceEpoch: { type: integer }
+        luns: { type: array, items: { type: string } }
+    ClusterStorageSANStatus:
+      type: object
+      required: [loaded, current, sessions, fences, applied]
+      properties:
+        loaded: { type: boolean }
+        desired:
+          type: object
+          properties:
+            cluster: { type: string }
+            index: { type: integer }
+            portals: { type: array, items: { type: string } }
+            targets: { type: array, items: { $ref: "#/components/schemas/ClusterStorageTarget" } }
+            backstores:
+              type: array
+              items:
+                type: object
+                properties:
+                  name: { type: string }
+                  workload: { $ref: "#/components/schemas/ClusterWorkloadRef" }
+                  dataset: { type: string }
+                  disk: { type: string }
+                  generation: { type: integer }
+                  migration: { type: boolean }
+        current: { type: object, additionalProperties: { $ref: "#/components/schemas/ClusterStorageTarget" } }
+        sessions: { type: object, additionalProperties: { type: integer } }
+        fences: { type: object, additionalProperties: { type: integer } }
+        exports: { type: object, additionalProperties: { type: array, items: { type: string } } }
+        problem: { type: string }
+        applied: { type: string, format: date-time }
+        drift:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              missing: { type: array, items: { type: string } }
+              extra: { type: array, items: { type: string } }
+              enabled: { type: boolean }
+    ClusterStorageCandidate:
+      type: object
+      required: [kind, interface, speedMbps, carrier, defaultRoute]
+      properties:
+        kind: { type: string, enum: [dedicated, vlan, lan] }
+        interface: { type: string }
+        speedMbps: { type: integer }
+        carrier: { type: boolean }
+        defaultRoute: { type: boolean }
+        warning: { type: string }
+    ClusterStoragePlan:
+      type: object
+      required: [kind, interface, address]
+      properties:
+        kind: { type: string, enum: [dedicated, vlan, lan] }
+        interface: { type: string }
+        vlan: { type: integer }
+        address: { type: string, description: "This server's storage address with its prefix, e.g. 10.77.0.21/24" }
+        mtu: { type: integer, description: "0 or 1500, or 9000 for jumbo frames" }
+    ClusterStorageNetwork:
+      type: object
+      required: [candidates, subnet, suggested, current, interface, jumbo, live, pending]
+      properties:
+        candidates: { type: array, items: { $ref: "#/components/schemas/ClusterStorageCandidate" } }
+        plan:
+          nullable: true
+          allOf: [{ $ref: "#/components/schemas/ClusterStoragePlan" }]
+        subnet: { type: string }
+        suggested: { type: string }
+        current: { type: string }
+        interface: { type: string }
+        jumbo: { type: object, additionalProperties: { type: boolean } }
+        live: { type: array, items: { $ref: "#/components/schemas/LiveInterface" } }
+        pending: { type: boolean }
+    ClusterStorageSnapshot:
+      type: object
+      required: [name, created, used]
+      properties:
+        name: { type: string }
+        created: { type: string, format: date-time }
+        used: { type: integer }
+        reason: { type: string }
+    ClusterAppModeRequest:
+      type: object
+      required: [to, confirm]
+      properties:
+        to: { type: string, enum: [nfs, block] }
+        fs: { type: string, enum: [ext4, xfs] }
+        sizeGB: { type: integer }
+        removeOld: { type: boolean }
+        confirm: { type: string }
+    # ---- end of Phase 8 part B schemas ----
