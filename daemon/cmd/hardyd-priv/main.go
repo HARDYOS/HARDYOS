@@ -250,6 +250,7 @@ func main() {
 			UPS:     &ups.Root{Runner: sysexec.Exec{}, Root: os.DirFS("/")},
 		})
 		priv.QuietMonitoringOps(s)
+		wireClusterA(s) // phase 8 cluster core (cluster_a.go)
 		if len(updater.Keys()) == 0 {
 			log.Warn("no trusted release key: updates can't be installed until one is added")
 		}
