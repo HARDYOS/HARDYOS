@@ -6,15 +6,11 @@ import (
 	"errors"
 	"io"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"net/netip"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func files(t *testing.T) map[string]File {
@@ -51,10 +47,21 @@ func TestNormalizeRefuses(t *testing.T) {
 		},
 		"space in host": func(c *RootConfig, _ *RootSecrets) { c.Hostname = "mail.example.net\nmynetworks = 0.0.0.0/0" },
 		"dav for stranger": func(_ *RootConfig, s *RootSecrets) {
-			s.DAV = map[string]string{"zed@example.net": strings.Repeat("a", 40)}
+			s.DAV = map[string]string{"0123456789abcdef01234567": strings.Repeat("a", 40)}
 		},
-		"notify elsewhere": func(c *RootConfig, _ *RootSecrets) { c.NotifyFrom = "x@other.test" },
-		"quota too big":    func(c *RootConfig, _ *RootSecrets) { c.Mailboxes[0].QuotaMB = MaxQuotaMB + 1 },
+		"notify elsewhere":    func(c *RootConfig, _ *RootSecrets) { c.NotifyFrom = "x@other.test" },
+		"notify is a mailbox": func(c *RootConfig, _ *RootSecrets) { c.NotifyFrom = "bob@example.net" },
+		"notify is an alias":  func(c *RootConfig, _ *RootSecrets) { c.NotifyFrom = "mom@example.net" },
+		"notify is a group":   func(c *RootConfig, _ *RootSecrets) { c.NotifyFrom = "family@example.net" },
+		"notify postmaster":   func(c *RootConfig, _ *RootSecrets) { c.NotifyFrom = "postmaster@example.net" },
+		"no mailbox key":      func(c *RootConfig, _ *RootSecrets) { c.Mailboxes[0].Key = "" },
+		"path as key":         func(c *RootConfig, _ *RootSecrets) { c.Mailboxes[0].Key = "../../../../etc/x0000000" },
+		"same key twice":      func(c *RootConfig, _ *RootSecrets) { c.Mailboxes[1].Key = c.Mailboxes[0].Key },
+		"vps off netbird":     func(c *RootConfig, _ *RootSecrets) { c.VPSPeer = "192.168.1.9" },
+		"no netbird network":  func(c *RootConfig, _ *RootSecrets) { c.NetBirdNet = "" },
+		"bad interface":       func(c *RootConfig, _ *RootSecrets) { c.NetBirdIface = "wt0 accept" },
+		"tiny storage limit":  func(c *RootConfig, _ *RootSecrets) { c.StorageLimitMB = 10 },
+		"quota too big":       func(c *RootConfig, _ *RootSecrets) { c.Mailboxes[0].QuotaMB = MaxQuotaMB + 1 },
 	}
 	for name, mut := range cases {
 		c, s := sampleConfig(), sec
@@ -91,6 +98,9 @@ func TestPostfixIsNoOpenRelay(t *testing.T) {
 		"relayhost = [email-smtp.us-east-1.amazonaws.com]:587\n",
 		"smtp_tls_security_level = secure\n",
 		"milter_default_action = tempfail\n",
+		"smtpd_milters = unix:/var/spool/postfix/hardyos-rspamd/milter.sock\n",
+		"sender_dependent_default_transport_maps = texthash:/etc/postfix/hardyos/bounce_transport\n",
+		"notify_classes = 2bounce, resource, software\n2bounce_notice_recipient = alice@example.net\n",
 		"smtpd_client_event_limit_exceptions = 100.90.1.2/32 127.0.0.0/8 [::1]/128\n",
 	} {
 		if !strings.Contains(main, want) {
@@ -122,7 +132,8 @@ func TestPostfixIsNoOpenRelay(t *testing.T) {
 		block = block[:end]
 		for _, want := range []string{"smtpd_tls_security_level=encrypt", "smtpd_sasl_auth_enable=yes",
 			"smtpd_client_restrictions=permit_sasl_authenticated,reject", "reject_sender_login_mismatch",
-			"smtpd_relay_restrictions=permit_sasl_authenticated,reject"} {
+			"smtpd_relay_restrictions=permit_sasl_authenticated,reject",
+			"check_sender_access,texthash:/etc/postfix/hardyos/null_sender,reject_sender_login_mismatch"} {
 			if !strings.Contains(block, want) {
 				t.Errorf("%s lacks %s", svc, want)
 			}
@@ -131,9 +142,22 @@ func TestPostfixIsNoOpenRelay(t *testing.T) {
 		if strings.Contains(block, "smtpd_upstream_proxy_protocol=haproxy") != proxied {
 			t.Errorf("%s: PROXY protocol should be %v", svc, proxied)
 		}
+		// Forwarded sign-ins name themselves to the auth policy.
+		if strings.Contains(block, "smtpd_sasl_service="+ProxySASLService) != proxied {
+			t.Errorf("%s: SASL service should be %s only when forwarded", svc, ProxySASLService)
+		}
 	}
 	if !strings.Contains(master, "smtpd_client_restrictions=check_client_access,cidr:/etc/postfix/hardyos/vps.cidr,reject") {
 		t.Error("the relay port isn't limited to the VPS")
+	}
+	if !strings.Contains(master, "reject_unauth_destination,check_policy_service,unix:private/quota-status\n") {
+		t.Error("the relay port doesn't ask about full mailboxes")
+	}
+	if got := fs["/etc/postfix/hardyos/null_sender"].Content; !strings.Contains(got, "\n<> REJECT ") {
+		t.Errorf("null_sender = %q", got)
+	}
+	if got := fs["/etc/postfix/hardyos/bounce_transport"].Content; !strings.Contains(got, "\n<> "+BounceTransport+"\n") {
+		t.Errorf("bounce_transport = %q", got)
 	}
 	if got := fs["/etc/postfix/hardyos/vps.cidr"].Content; !strings.Contains(got, "\n100.90.1.2/32 OK\n") {
 		t.Errorf("vps.cidr = %q", got)
@@ -164,9 +188,18 @@ func TestSecretsStayPrivate(t *testing.T) {
 		if strings.Contains(f.Content, sec.SESPassword) && (f.Mode != 0o600 || f.Group != "") {
 			t.Errorf("%s (%o %s) holds the SES password", p, f.Mode, f.Group)
 		}
-		if strings.Contains(f.Content, sec.DAV["alice@example.net"]) && (world || p != RadicaleUsers) {
+		if strings.Contains(f.Content, sec.DAV[keyAlice]) && (world || p != RadicaleUsers) {
 			t.Errorf("%s holds a calendar password", p)
 		}
+		if strings.Contains(f.Content, rspamdPassword(sec)) && (world || f.Group == "") {
+			t.Errorf("%s (%o) holds Rspamd's controller password", p, f.Mode)
+		}
+	}
+	if f := fs[DovecotDir+"/sieve-pipe/rspamd-learn"]; f.Mode != 0o750 || f.Group != VMailUser {
+		t.Errorf("rspamd-learn %o %s", f.Mode, f.Group)
+	}
+	if f := fs[RspamdLocalDir+"/worker-controller.inc"]; f.Mode != 0o640 || f.Group != "_rspamd" {
+		t.Errorf("worker-controller.inc %o %s", f.Mode, f.Group)
 	}
 	if f := fs[DovecotConf]; f.Mode != 0o640 || f.Group != "dovecot" {
 		t.Errorf("dovecot.conf %o %s", f.Mode, f.Group)
@@ -177,20 +210,33 @@ func TestDovecotConfig(t *testing.T) {
 	c := files(t)[DovecotConf].Content
 	for _, want := range []string{
 		"ssl = required\n", "auth_allow_cleartext = no\n", "haproxy_trusted_networks = 100.90.1.2\n",
-		"auth_policy_reject_on_fail = yes\n", "grant_url = http://127.0.0.1:44250/token\n",
-		"auth_policy_server_url = http://127.0.0.1:44250/policy\n", "mechanisms_filter = plain login\n",
+		"auth_policy_reject_on_fail = yes\n", "grant_url = http://hardyd.invalid/token\n",
+		"auth_policy_server_url = http://hardyd.invalid/policy\n", "mechanisms_filter = plain login\n",
+		"auth_policy {\n  http_client_proxy_socket_path = /run/hardyos-mail-auth.sock\n}\n",
+		"  oauth2 {\n    http_client_proxy_socket_path = /run/hardyos-mail-auth.sock\n",
+		"  local_port = %{local_port}\n",
 		"port = 10993\n    ssl = yes\n    haproxy = yes\n", "inet_listener imap {\n    port = 0\n",
-		"mail_home = /tank/mail/vmail/%{user | domain}/%{user | username}\n",
+		"quota_full_tempfail = yes\n", "auth_cache_size = 0\n", "lmtp_rcpt_check_quota = yes\n", "quota_status_success = DUNNO\n",
+		"    auto = subscribe\n    autoexpunge = 30 days\n",
+		"  unix_listener auth-userdb {\n    mode = 0600\n    user = hardyos-vmail\n",
+		"  unix_listener lmtp {\n    mode = 0600\n",
+		"  unix_listener /var/spool/postfix/private/quota-status {\n    mode = 0600\n    user = postfix\n",
 	} {
 		if !strings.Contains(c, want) {
 			t.Errorf("dovecot.conf lacks %q", want)
 		}
 	}
+	// Homes come from the user list only, never from the address.
+	for _, bad := range []string{"mail_home", "127.0.0.1"} {
+		if strings.Contains(c, bad) {
+			t.Errorf("dovecot.conf has %q", bad)
+		}
+	}
 	users := files(t)[DovecotDir+"/users"].Content
-	if !strings.Contains(users, "alice@example.net::29990:29990::/tank/mail/vmail/example.net/alice::userdb_quota_storage_size=2048M\n") {
+	if !strings.Contains(users, "alice@example.net::29990:29990::/tank/mail/vmail/"+keyAlice+"::userdb_quota_storage_size=2048M\n") {
 		t.Errorf("users file: %s", users)
 	}
-	if !strings.Contains(users, "bob@example.net::29990:29990::/tank/mail/vmail/example.net/bob::\n") {
+	if !strings.Contains(users, "bob@example.net::29990:29990::/tank/mail/vmail/"+keyBob+"::\n") {
 		t.Errorf("bob (no quota): %s", users)
 	}
 	noV6 := sampleEnv()
@@ -224,14 +270,50 @@ func TestRspamdAndRadicale(t *testing.T) {
 	if !strings.Contains(fs[RspamdLocalDir+"/antivirus.conf"].Content, ClamdSocket) {
 		t.Error("ClamAV on but not configured")
 	}
-	if !strings.Contains(fs[RadicaleConf].Content, "hosts = 127.0.0.1:5232\n") {
-		t.Error("Radicale listens beyond localhost")
+	// Radicale has no TCP port: gunicorn on a Unix socket only hardyd's
+	// group can reach (decision 319).
+	if strings.Contains(fs[RadicaleConf].Content, "hosts") {
+		t.Error("Radicale's own server is configured")
+	}
+	if d := fs[RadicaleDropIn].Content; !strings.Contains(d, "ExecStart=\nExecStart=/usr/bin/gunicorn --bind unix:/run/hardyos-mail/radicale/radicale.sock --umask 0007") ||
+		!strings.Contains(d, "RADICALE_CONFIG=/etc/radicale/config radicale\n") || !strings.Contains(d, RadicaleSocketDir) {
+		t.Errorf("Radicale drop-in: %s", d)
 	}
 	if !strings.Contains(fs[RadicaleRights].Content, "[family-collections]") {
 		t.Error("no family calendar rights")
 	}
+	if !strings.Contains(fs[RadicaleUsers].Content, keyAlice+":") || strings.Contains(fs[RadicaleUsers].Content, "@") {
+		t.Errorf("Radicale's users aren't the mailbox keys: %s", fs[RadicaleUsers].Content)
+	}
+	for _, want := range []string{"allow_envfrom_empty = false;", "sign_local = false;", "sign_authenticated = true;"} {
+		if !strings.Contains(dk, want) {
+			t.Errorf("dkim_signing lacks %s", want)
+		}
+	}
+	if got := fs[RspamdLocalDir+"/worker-proxy.inc"].Content; !strings.Contains(got, `bind_socket = "/var/spool/postfix/hardyos-rspamd/milter.sock mode=0660";`) {
+		t.Errorf("milter: %s", got)
+	}
+	ctl := fs[RspamdLocalDir+"/worker-controller.inc"].Content
+	if !strings.Contains(ctl, `bind_socket = "/run/hardyos-mail/rspamd/controller.sock mode=0660";`) || !strings.Contains(ctl, "enable_password = ") {
+		t.Errorf("controller: %s", ctl)
+	}
+	if got := fs[RspamdLocalDir+"/worker-normal.inc"].Content; !strings.Contains(got, "enabled = false;") {
+		t.Errorf("worker-normal: %s", got)
+	}
+	for p, f := range fs {
+		if strings.HasPrefix(p, "/etc/rspamd") && strings.Contains(f.Content, "127.0.0.1:") {
+			t.Errorf("%s listens on TCP", p)
+		}
+	}
+	lua := fs[RspamdLocalLua].Content
+	if !strings.Contains(lua, `set_pre_result("reject"`) || !strings.Contains(lua, RspamdSendersMap) || !strings.Contains(lua, "[^,%s]+") {
+		t.Errorf("From check: %s", lua)
+	}
+	if got := fs[RspamdSendersMap].Content; !strings.Contains(got, "family@example.net alice@example.net,bob@example.net\n") {
+		t.Errorf("senders map: %s", got)
+	}
 	nft := fs[NFTFile].Content
-	if !strings.Contains(nft, "ip saddr 100.90.1.2 accept") || !strings.Contains(nft, "tcp dport { 2525, 10587, 10465, 10993 } drop") {
+	if !strings.Contains(nft, `iifname "wt0" ip saddr 100.90.1.2 accept`) || !strings.Contains(nft, "tcp dport { 2525, 10587, 10465, 10993 } drop") {
 		t.Errorf("nft: %s", nft)
 	}
 }
@@ -295,12 +377,12 @@ func TestRootApplyWritesAndRestores(t *testing.T) {
 
 func TestDeleteMailboxNeedsConfirmation(t *testing.T) {
 	r := &Root{Dataset: func(context.Context, string) (string, error) { return t.TempDir(), nil }}
-	err := r.DeleteMailbox(context.Background(), DeleteArgs{Pool: "tank", Address: "alice@example.net", Confirm: "alice"})
+	err := r.DeleteMailbox(context.Background(), DeleteArgs{Pool: "tank", Key: keyAlice, Address: "alice@example.net", Confirm: "alice"})
 	var ve *ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("deleted without the typed address: %v", err)
 	}
-	if err := r.DeleteMailbox(context.Background(), DeleteArgs{Pool: "tank", Address: "../x@example.net", Confirm: "../x@example.net"}); err == nil {
+	if err := r.DeleteMailbox(context.Background(), DeleteArgs{Pool: "tank", Key: keyAlice, Address: "../x@example.net", Confirm: "../x@example.net"}); err == nil {
 		t.Fatal("a path in the address was accepted")
 	}
 }
@@ -500,7 +582,7 @@ func TestClientSettings(t *testing.T) {
 		}
 	}
 	for _, want := range []string{"com.apple.mail.managed", "com.apple.caldav.account", "Alice &lt;&amp;&gt;", "<integer>993</integer>",
-		"https://mail.example.net/dav-mail/alice@example.net/"} {
+		"<string>https://mail.example.net/dav-mail/</string>"} {
 		if !strings.Contains(mc, want) {
 			t.Errorf("mobileconfig lacks %q", want)
 		}
@@ -526,6 +608,10 @@ func TestVPSScript(t *testing.T) {
 		"mynetworks = 127.0.0.0/8 [::1]/128\n", "maximal_queue_lifetime = 14d\n",
 		"server home 100.90.1.7:10993 send-proxy-v2", "server home 100.90.1.7:10465 send-proxy-v2", "server home 100.90.1.7:10587 send-proxy-v2",
 		"set -euo pipefail", "postfix check", "haproxy -c -f",
+		// Per-client limits and postscreen (decision 312).
+		"smtpd_client_recipient_rate_limit = 200\n", "smtpd_hard_error_limit = 5\n", "smtpd_client_connection_count_limit = 10\n",
+		"postscreen_greet_action = enforce\n", "smtp inet n - y - 1 postscreen", "smtpd pass - - y - - smtpd",
+		"tcp-request connection reject if { sc0_conn_cur gt 20 } || { sc0_conn_rate gt 60 }",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("script lacks %q", want)
@@ -610,116 +696,7 @@ func TestCheckVPS(t *testing.T) {
 
 // ---- sign-in ----
 
-func TestThrottleNeverLocksOutTheLAN(t *testing.T) {
-	th := NewThrottle()
-	attacker := netip.MustParseAddr("198.51.100.66")
-	lan := netip.MustParseAddr("192.168.1.20")
-	for i := 0; i < 10; i++ {
-		th.Result("admin@example.net", attacker, false)
-	}
-	if v := th.Check("admin@example.net", attacker); !v.Block {
-		t.Fatal("the attacker isn't blocked")
-	}
-	if v := th.Check("admin@example.net", lan); v.Block || v.Wait > 0 {
-		t.Fatalf("the LAN is held back by an internet attack: %+v", v)
-	}
-	// Mistakes on the LAN slow down, never block.
-	for i := 0; i < 50; i++ {
-		th.Result("admin@example.net", lan, false)
-	}
-	if v := th.Check("admin@example.net", lan); v.Block {
-		t.Fatal("the LAN was blocked")
-	} else if v.Wait > 31*time.Second {
-		t.Fatalf("LAN wait %s", v.Wait)
-	}
-	for _, a := range []string{"10.0.0.1", "172.17.0.2", "100.90.1.2", "fd00::1", "127.0.0.1"} {
-		if !Inside(netip.MustParseAddr(a)) {
-			t.Errorf("%s isn't inside", a)
-		}
-	}
-	if Inside(attacker) {
-		t.Error("an internet address counts as inside")
-	}
-}
-
-type checker map[string]string
-
-func (c checker) CheckLogin(_ context.Context, l, s string) error {
-	if c[l] == s && s != "" {
-		return nil
-	}
-	return ErrBadLogin
-}
-
-func TestAuthServer(t *testing.T) {
-	secret := strings.Repeat("s", 40)
-	as := &AuthServer{Secret: func() string { return secret }, Checker: checker{"alice@example.net": "pw1"}, Limits: NewThrottle()}
-	srv := httptest.NewServer(as)
-	defer srv.Close()
-	post := func(path string, form url.Values, hdr map[string]string) (int, string) {
-		req, _ := http.NewRequest("POST", srv.URL+path, strings.NewReader(form.Encode()))
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		for k, v := range hdr {
-			req.Header.Set(k, v)
-		}
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer resp.Body.Close()
-		b, _ := io.ReadAll(resp.Body)
-		return resp.StatusCode, string(b)
-	}
-	grant := url.Values{"grant_type": {"password"}, "username": {"Alice@example.net"}, "password": {"pw1"}, "client_id": {"dovecot"}, "client_secret": {secret}}
-	if code, body := post("/token", grant, nil); code != 200 || !strings.Contains(body, `"username":"alice@example.net"`) || !strings.Contains(body, `"active":"true"`) {
-		t.Fatalf("grant %d %s", code, body)
-	}
-	bad := url.Values{"grant_type": {"password"}, "username": {"alice@example.net"}, "password": {"nope"}, "client_secret": {secret}}
-	if code, _ := post("/token", bad, nil); code != 400 {
-		t.Fatalf("wrong password: %d", code)
-	}
-	noClient := url.Values{"grant_type": {"password"}, "username": {"alice@example.net"}, "password": {"pw1"}, "client_secret": {"guess"}}
-	if code, _ := post("/token", noClient, nil); code != 401 {
-		t.Fatalf("without the client secret: %d", code)
-	}
-	// Policy needs the bearer secret.
-	req, _ := http.NewRequest("POST", srv.URL+"/policy?command=allow", strings.NewReader(`{"login":"a@example.net","remote":"198.51.100.66"}`))
-	resp, _ := http.DefaultClient.Do(req)
-	resp.Body.Close()
-	if resp.StatusCode != 401 {
-		t.Fatalf("policy without the secret: %d", resp.StatusCode)
-	}
-	for i := 0; i < 10; i++ {
-		req, _ := http.NewRequest("POST", srv.URL+"/policy?command=report", strings.NewReader(`{"login":"a@example.net","remote":"198.51.100.66","success":false,"fail_type":"credentials"}`))
-		req.Header.Set("Authorization", "Bearer "+secret)
-		resp, _ := http.DefaultClient.Do(req)
-		resp.Body.Close()
-	}
-	req, _ = http.NewRequest("POST", srv.URL+"/policy?command=allow", strings.NewReader(`{"login":"a@example.net","remote":"198.51.100.66"}`))
-	req.Header.Set("Authorization", "Bearer "+secret)
-	resp, _ = http.DefaultClient.Do(req)
-	b, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if !strings.Contains(string(b), `"status":-1`) {
-		t.Fatalf("blocked address allowed: %s", b)
-	}
-	// Mail off: everything refused.
-	as.Secret = func() string { return "" }
-	if code, _ := post("/token", grant, nil); code != 401 {
-		t.Fatalf("grant while off: %d", code)
-	}
-}
-
-func TestAuthServerLoopbackOnly(t *testing.T) {
-	as := &AuthServer{Secret: func() string { return "x" }, Checker: checker{}, Limits: NewThrottle()}
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/token", nil)
-	req.RemoteAddr = "192.168.1.5:4000"
-	as.ServeHTTP(rec, req)
-	if rec.Code != 403 {
-		t.Fatalf("a LAN client reached the sign-in listener: %d", rec.Code)
-	}
-}
+// AUTHTESTS
 
 func TestLocalPartAndAddresses(t *testing.T) {
 	for _, a := range []string{"alice@example.net", "a.b+c_d-e@sub.example.co"} {

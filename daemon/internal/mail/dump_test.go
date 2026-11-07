@@ -31,11 +31,11 @@ func TestDumpRender(t *testing.T) {
 
 func sampleConfig() RootConfig {
 	return RootConfig{
-		Pool: "tank", Hostname: "mail.example.net", VPSPeer: "100.90.1.2",
+		Pool: "tank", Hostname: "mail.example.net", VPSPeer: "100.90.1.2", NetBirdNet: "100.90.0.0/16", NetBirdIface: "wt0",
 		Domains: []RootDomain{{Name: "example.net", Selector: "hardyos1"}, {Name: "family.example", Selector: "hardyos1"}},
 		Mailboxes: []RootMailbox{
-			{Address: "alice@example.net", Aliases: []string{"mom@example.net", "alice@family.example"}, QuotaMB: 2048},
-			{Address: "bob@example.net", QuotaMB: 0},
+			{Key: keyAlice, Address: "alice@example.net", Aliases: []string{"mom@example.net", "alice@family.example"}, QuotaMB: 2048},
+			{Key: keyBob, Address: "bob@example.net", QuotaMB: 0},
 		},
 		GroupAliases: []RootGroupAlias{{Address: "family@example.net", Targets: []string{"alice@example.net", "bob@example.net"}}},
 		Postmaster:   "alice@example.net",
@@ -48,8 +48,14 @@ func sampleSecrets() RootSecrets {
 	return RootSecrets{
 		SESPassword: "BAbcdEFghIJklMNopQRstUVwxYZ0123456789abcdEFGH",
 		AuthSecret:  "0123456789abcdef0123456789abcdef0123456789abcdef",
-		DAV:         map[string]string{"alice@example.net": "dav0123456789abcdef0123456789abcdef"},
+		DAV:         map[string]string{keyAlice: "dav0123456789abcdef0123456789abcdef"},
 	}
 }
+
+// Sample mailbox keys.
+const (
+	keyAlice = "a11ce0000000000000000001"
+	keyBob   = "b0b000000000000000000002"
+)
 
 func sampleEnv() Env { return Env{MailRoot: "/tank/mail", VMailUID: 29990, VMailGID: 29990} }

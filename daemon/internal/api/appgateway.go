@@ -570,6 +570,11 @@ func (rt *remoteRuntime) proxyFor(route *gwRoute, desktopHost string) *gwRoute {
 			pr.Out.Header.Set("X-Forwarded-Proto", "https")
 			pr.Out.Header.Set("X-Forwarded-Host", pr.In.Host)
 			gatewayRequestCookies(pr.Out.Header)
+			if route.appID == WebmailAppID {
+				// Only HardyOS's window proxy signs people in to webmail
+				// (decision 305): never credentials from the internet.
+				pr.Out.Header.Del("Authorization")
+			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			gatewayFixResponse(resp, target, host, frame)

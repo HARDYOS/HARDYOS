@@ -30,6 +30,7 @@ recommends:
   - rspamd
   - redis-server
   - radicale
+  - gunicorn
 contents:
   - src: ../dist/bin/hardyd
     dst: /usr/bin/hardyd
@@ -51,6 +52,8 @@ contents:
     dst: /lib/systemd/system/hardyd.service
   - src: ./systemd/hardyd-priv.service
     dst: /lib/systemd/system/hardyd-priv.service
+  - src: ./systemd/hardyd-mail-auth.socket
+    dst: /lib/systemd/system/hardyd-mail-auth.socket
   - src: ./systemd/hardyos-issue.service
     dst: /lib/systemd/system/hardyos-issue.service
   - src: ./systemd/hardyos-dc.service

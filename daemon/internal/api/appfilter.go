@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"path"
@@ -20,7 +22,71 @@ import (
 type appFilter func(r *http.Request) string
 
 var appFilters = map[string]appFilter{
-	"immich": immichFilter,
+	"immich":     immichFilter,
+	WebmailAppID: webmailFilter,
+}
+
+// webmailFilter keeps Roundcube's own sign-in form shut (decision 305).
+// It's a convenience, not a security boundary: what keeps a password typed
+// into the form away from the mail server is hardyd refusing passwords from
+// the webmail app's address (and Apache refusing requests without the
+// window proxy's credentials). It reads urlencoded and multipart bodies and
+// looks at each source of a field on its own.
+func webmailFilter(r *http.Request) string {
+	if r.Method != http.MethodPost {
+		return ""
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), r.Body))
+	if err != nil {
+		return ""
+	}
+	fields := []url.Values{r.URL.Query()}
+	mt, params, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	switch {
+	case mt == "multipart/form-data" && params["boundary"] != "":
+		mr := multipart.NewReader(bytes.NewReader(body), params["boundary"])
+		v := url.Values{}
+		for i := 0; i < 100; i++ {
+			p, err := mr.NextPart()
+			if err != nil {
+				break
+			}
+			if name := p.FormName(); name != "" && p.FileName() == "" {
+				b, _ := io.ReadAll(io.LimitReader(p, 4096))
+				v.Add(name, string(b))
+			}
+			p.Close()
+		}
+		fields = append(fields, v)
+	default:
+		v, _ := url.ParseQuery(string(body))
+		fields = append(fields, v)
+	}
+	for _, v := range fields {
+		if v.Has("_pass") || v.Has("_user") {
+			return webmailRefusal
+		}
+	}
+	for _, task := range fields {
+		for _, action := range fields {
+			if equalAny(task["_task"], "login") && equalAny(action["_action"], "login") {
+				return webmailRefusal
+			}
+		}
+	}
+	return ""
+}
+
+const webmailRefusal = "Webmail signs you in with your HardyOS sign-in; open Mail from the HardyOS desktop"
+
+func equalAny(vals []string, want string) bool {
+	for _, v := range vals {
+		if strings.EqualFold(strings.TrimSpace(v), want) {
+			return true
+		}
+	}
+	return false
 }
 
 // filterAppRequest answers a refused request and reports whether it did.

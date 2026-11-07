@@ -143,6 +143,10 @@ class Directory:
             "created": gen_time(first(m, "whenCreated")),
             "lastLogon": ad_time(first(m, "lastLogonTimestamp", "0")),
             "builtin": name.lower() in PROTECTED_USERS or rid(m) < 1000,
+            # Stay with the account itself (renames keep them; an account
+            # made again under the same name gets new ones).
+            "objectGuid": guid_of(m),
+            "sid": sid_of(m),
         }
 
     # ---- commands ------------------------------------------------------

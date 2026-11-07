@@ -16,6 +16,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/hardyos/hardyos/daemon/internal/ports"
 )
 
 // Modes.
@@ -83,7 +85,7 @@ type Secrets struct {
 }
 
 // DefaultPort is NUT's network port.
-const DefaultPort = 3493
+const DefaultPort = ports.NUT
 
 // MonitorUser is the NUT account upsmon uses on this server; its password
 // is made by hardyd-priv on every apply and never leaves root.

@@ -186,7 +186,9 @@ func MobileConfig(c ClientSettings) []byte {
 			p.WriteString(plistInt(pre+"Port", 443))
 			p.WriteString(plistBool(pre+"UseSSL", true))
 			p.WriteString(plistString(pre+"Username", c.Address))
-			p.WriteString(plistString(pre+"PrincipalURL", "https://"+c.Hostname+DAVPath+c.Address+"/"))
+			// The server root: Radicale names the person's own collections
+			// (under their mailbox's key) when asked.
+			p.WriteString(plistString(pre+"PrincipalURL", "https://"+c.Hostname+DAVPath))
 			p.WriteString("\t\t</dict>\n")
 		}
 	}
@@ -223,7 +225,7 @@ type ManualSettings struct {
 func Manual(hostname, address string, family bool) ManualSettings {
 	m := ManualSettings{Address: address, Username: address, IMAPHost: hostname, IMAPPort: 993, IMAPTLS: "SSL/TLS",
 		SMTPHost: hostname, SMTPPort: 465, SMTPTLS: "SSL/TLS", AltSMTP: 587,
-		DAVURL: "https://" + hostname + DAVPath + address + "/"}
+		DAVURL: "https://" + hostname + DAVPath}
 	if family {
 		m.Family = "https://" + hostname + DAVPath + "family/calendar/"
 		m.Contacts = "https://" + hostname + DAVPath + "family/contacts/"
