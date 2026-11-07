@@ -2090,6 +2090,325 @@ cloud backups).
   (`TestImmichIntegration`: links followed and excluded, suspension ends
   sessions, restore, the package's `pg_dump`).
 
+## Cluster
+
+Phase 8 (user guide: [cluster.md](cluster.md); design and the parts' split:
+[plans/cluster.md](plans/cluster.md); decisions 320-359). Part A, the
+cluster core, is below; parts B (storage node) and C (placement, moves,
+HA, fencing) add subsections.
+
+### Packages
+
+| Package | What | Runs in |
+| --- | --- | --- |
+| `internal/cluster` (contract.go) | Types and interfaces the parts share | everywhere |
+| `internal/cluster` | `Core`: identity, signed commands, assertions, the 44500 listener (transport.go), paths, Raft (node.go), heartbeats and the quorum lease, join, relays | hardyd, witness |
+| `internal/cluster/state` | The pure FSM and part A's appliers (members.go, witness.go); B and C add files | hardyd, witness |
+| `internal/cluster/member` | hardyd's side: DB store (sealed identity, `cluster_join_codes`), jobs, address discovery, alerts, the witness script | hardyd |
+| `internal/cluster/witness` | The witness runtime, its file store, the install script template | witness |
+| `internal/cluster/clustertest` | In-memory network with cuttable links, memory store | tests |
+| `api/handlers_cluster.go`, `api/clusterproxy.go` | Cluster routes, `/api/v1/nodes/{node}/...`, relay target, merged events, remote app windows | hardyd |
+| `cmd/hardyos-witness` | The witness binary | VPS |
+
+The state package imports the contract; the core can't import the state
+package back, so the core drives the FSM through `cluster.StateMachine`
+and hardyd and the witness hand it `state.New()`.
+
+### The replicated state and the signed log
+
+- `hashicorp/raft` v1.7.3 with `raft-boltdb/v2` and a file snapshot store
+  in `/var/lib/hardyos/cluster/raft` (hardyd's; the witness's in its systemd
+  state directory). Pre-vote on. Raft server ids and addresses are node
+  ids; the stream layer resolves them to a path.
+- A log entry is a `SignedCommand`: the canonical JSON of a `Command`
+  (type, cluster, proposer, sequence, actor, time, body) and the
+  proposer's ES256 signature. Members' public keys are in the state
+  (`Node.PublicKey`, pin = its SHA-256); `cluster.create` carries its
+  creator's key. At apply every node checks, in order: decodable entry;
+  for the right cluster; proposer is a member; signature; known type
+  (unknown: the FSM halts, the node stops taking part and raises a
+  critical alert); sequence greater than the proposer's last; signer role;
+  then the applier on a copy of the state. A validly signed but refused
+  entry still uses up its sequence number, so it can't be replayed once its
+  preconditions would hold. Refusals are deterministic no-ops everywhere.
+- `Propose` serializes this node's proposals, persists the next sequence
+  number before signing, and hands the entry to the leader (`POST
+  /cluster/v1/propose`; the leader accepts only commands the calling
+  member signed itself). It is resent only when it surely wasn't appended.
+- A restarted node reaches its peers before Raft has replayed the log: the
+  members are saved in the membership record (`cluster.info`) after every
+  membership change.
+
+### The listener on 44500
+
+TLS 1.3, client certificates requested and checked per protocol against
+the pins in the state (a joining node's first connections use the members
+its join answer listed). ALPN:
+
+| Protocol | Use | Who |
+| --- | --- | --- |
+| `hardyos-raft/1` | Raft's stream layer | members (any state) |
+| `hardyos-peer/1` | HTTP/2 peer API: ping, propose, heartbeat, health, status, join; parts B/C register theirs | per path: `Handle` = unfenced HardyOS members, `AllowFenced`, the witness only where part A allows it, non-members only `POST /join` |
+| `hardyos-relay/1` | HTTP/1.1: forwarded desktop requests, WebSockets, app windows | unfenced HardyOS members |
+| `hardyos-migrate/1` | part C's live migration relay | compute members |
+| `http/1.1` (no certificate) | `GET /cluster/v1/witness/binary` only, only while a witness code is open | the install script's curl, which pins the member's key |
+
+Paths: each member is probed on every shared path (LAN, storage network,
+NetBird; the witness NetBird only) every second over a kept-alive HTTP/2
+connection per path; the path in use is left after 3 misses and a better
+one is taken back after 10 good probes. A switch closes the outgoing Raft
+and peer connections to that node so they redial on the new path. A
+live-migration connection is never dialled over NetBird.
+
+### Liveness
+
+Heartbeats every `Timings.Heartbeat` to the leader, which answers only
+after `VerifyLeader` (cached for the leader lease) and records when it last
+heard each node; a node is quorate until send time + Q of its last answered
+heartbeat. A new leader starts every node's clock at its election. The
+leader reconciles Raft's configuration with the state: new members join as
+non-voters, removed ones leave, and voter changes (promotion after
+`member.ready`, maintenance, the witness when the HardyOS voter count is
+even) happen only when every current voter has been heard since the
+election and within the suspect time. Nothing is removed because it is
+unreachable. A witness that leads transfers leadership at once.
+
+### The cluster desktop
+
+`/api/v1/nodes/{node}/<path>` on the entry node is the same handler for
+itself and otherwise a relay request: cookies, `Authorization`, `Origin`
+and forwarding headers dropped; `X-Hardyos-Cluster-Assertion` added (ES256
+compact JWS: issuer, audience, principal, session hash, 60 s, nonce,
+request hash over method, path, query and the body's SHA-256; bodies above
+8 MiB are spooled to a temporary file to be hashed). Sign-in, setup, the
+installer, health and the proxy itself are never forwarded. The target
+(`clusterproxy.go` relay handler) checks the TLS peer is the issuer, the
+signature with the issuer's key from the state, audience, freshness (5 s
+skew), the nonce (2 minutes) and the request hash, then authorizes: domain
+accounts by name and SID against its own directory (recorded like a domain
+sign-in), administrators of any member as a synthetic administrator
+`alice (via c1)` (never forwarded again), local non-admins refused. The
+request then runs through the normal API handler with that user;
+state-changing ones are also audited as `cluster.proxied`. `Set-Cookie`
+never comes back. WebSocket upgrades are relayed byte for byte after the
+same checks (the entry checks the Origin) and closed within 15 s of the
+session ending. `/cluster/events` merges this node's event stream with
+every member's (relayed as the person), each tagged with its node.
+
+App windows of apps on other members: `POST /nodes/{node}/apps/{id}/open`
+makes a window proxy listener on the entry node keyed `~<node>.<app>`
+whose upstream is a relay to `/cluster/v1/window/{app}/...` on the owner;
+the entry's desktop session and token rules apply as for local apps, and
+the owner checks the app's access list for the asserted person on every
+request.
+
+### Root operations
+
+Part A adds only `cluster.status` (read-only: boot id, watchdog devices,
+the state directory's owner). Raft's files are hardyd's.
+
+### Storage node and storage clients (part B)
+
+The storage role and the compute nodes' storage clients
+(`docs/plans/cluster.md` sections 5 and 6.1; decisions 323, 340-349). One
+HardyOS server holds the pool; compute servers use its zvols over iSCSI (VM
+disks, and apps in block mode) and its datasets over NFSv4.2 (VM state, apps
+in NFS mode, cluster shared folders). Snapshots, backups and replication stay
+on the storage server.
+
+**Who decides what.** Only the applied, signed cluster state says which node
+may reach which workload's storage (`Grant`s, fences, cluster shares).
+hardyd's storage agent on the storage node (`internal/cluster/storagesvc`)
+builds a desired configuration from it (`BuildDesired`: nothing from requests)
+and hands it to hardyd-priv; root validates it again and checks every dataset
+itself (`internal/cluster/san`). Then the agent acknowledges in the log
+(`storage.applied`, `storage.fenced`, `storage.unfenced`), and a compute node
+attaches only a grant that names it at its generation and is acknowledged
+(`storagesvc.CheckGrant`; decision 326).
+
+**Storage node, root side** (`internal/cluster/san`, `priv/san_ops.go`):
+
+- **LIO through configfs** (`/sys/kernel/config/target`), reconciled from
+  root's own state file `/var/lib/hardyos/root/cluster/san.json` at boot and on
+  every change; `targetcli` is only for diagnostics, there is no
+  `saveconfig.json`. HardyOS's backstores live in their own HBA
+  (`core/iblock_77`) and its targets start with its IQN prefix, so objects made
+  by hand are never touched.
+- **One target per compute node** (`iqn.2026-11.net.hardynetworks:hardyos.<cluster8>.<node>`),
+  TPG 1 on the storage portal(s) only, `authentication=1`,
+  `generate_node_acls=0`, exactly one ACL (the node's initiator) with mutual
+  CHAP. SendTargets discovery is closed (random credentials nobody has):
+  compute nodes are told their target.
+- **LUNs**: backstore `hcv_<vm>_<disk>` / `hca_<app>_block` on
+  `/dev/zvol/...`; unit serial from SHA-256 of the cluster id and the zvol's
+  GUID, so the WWN (`wwn-0x6001405…`) never changes; `emulate_tpu=1`, write
+  cache per the zvol's `sync`. Cluster zvols carry `org.hardyos:role=cluster`
+  and the owner's id, and `volmode=dev` (the storage node never scans guest
+  partitions). A LUN is in one target, two only for a live-migration grant
+  (`Desired.Validate`).
+- **Fences** (`san.fence {node, epoch, confirm}`): recorded first, then the
+  target is disabled (sessions dropped), everything unmapped, the node's
+  address removed from every export, its NFSv4 clients expired and its address
+  dropped by the firewall. Until `san.unfence` with the same epoch, no
+  `san.apply`, export or firewall change can give the node anything back, and
+  it can't get its CHAP secrets. A desired state from an older Raft index than
+  the applied one is refused.
+- **NFS** (`internal/nfs/cluster.go`): `/etc/exports.d/hardyos-cluster.exports`,
+  VM state and app data to the owner's storage address only
+  (`no_root_squash`), cluster shares to every active compute node
+  (`root_squash`), `fsid` derived from the dataset's GUID; paths and GUIDs are
+  read by root from ZFS, never taken from hardyd. NFSv4 lease and grace times
+  15 s (`/etc/nfs.conf.d/hardyos-cluster.conf`). The LAN shares' manager keeps
+  nfsd running while cluster exports exist.
+- **Firewall** (`/etc/hardyos/cluster-storage.nft`, table
+  `hardyos_cluster_storage`): storage-subnet sources arriving on any other
+  interface are dropped, iSCSI only on the storage interface, fenced
+  addresses dropped before members are accepted, 2049/3260 on the storage
+  interface only from members. On compute nodes the live-migration range
+  49152-49215 is open only to members' storage addresses.
+- **Volumes and datasets** (`san.volume.*`, `san.dataset.*`,
+  `san.snapshot.*`, `san.app.migrate`): only under `<pool>/vms/<id>` and
+  `<pool>/apps/<id>`, destroy and rollback with typed confirmation and refused
+  while anything of the workload is mapped or exported.
+
+**Compute node, root side** (`internal/cluster/sanclient`,
+`priv/sanclient_ops.go`): open-iscsi with `node.startup = manual` (a fenced
+node never logs in at boot), node records written by root as 0600 files with
+the CHAP secrets (never `iscsiadm -o update`), replacement timeout 15 s,
+NOP-Outs every 5 s; devices found by WWN; optional multipath with an allow
+list (`find_multipaths strict`, `no_path_retry 3`); NFS mounts
+`vers=4.2,hard,…,nosuid,nodev` (VM state `noexec`) at
+`/mnt/hc/<pool>/{vms,apps,shares}/<id>`; block-mode app volumes mounted at the
+same place. Before any login or mount, `ip route get` must show the storage
+interface without a gateway, never NetBird. Attachments are recorded in
+`/run/hardyos/cluster/attached.json`, which the engines' cluster backends read
+(`VMBackend`, `AppBackend`, `ShareResolver`; part C wires them in).
+
+**hardyd** (`internal/cluster/storagesvc`, `api/handlers_cluster_storage.go`):
+`StorageService` runs on the storage node (forwarded over the peer API from
+any member), audited there as `person (via node)`; the storage agent; the
+compute attacher (fetches its own CHAP secrets from the storage node, which
+hands a node only its own, seals them with purpose `cluster`); freeze and dump
+forwarding (the storage node asks a running VM's owner to freeze its guest,
+with an automatic thaw after 60 s, and a running app's owner to run its backup
+dump, before snapshotting); rollbacks and data-mode switches done offline on
+the storage node (the owner detaches, the agent holds the workload out of LIO
+and the exports). The Cluster app's Storage page
+(`web/apps/shell/src/apps/cluster/storage`) shows the storage server, per-node
+status, targets and exports with drift, cluster shares, snapshots and data
+modes, and the storage network step of the create and join wizards.
+
+**App data mode** (decision 341): NFS folder or block volume (a zvol LUN with
+ext4 or xfs, exclusive to the app's node). Apps that keep a database default to
+block: the manifest's `storage.database` or `storage.mode`, or a known
+database image in the compose file (`apps.DefaultStorageMode`). The admin can
+switch a stopped app (a job, typed confirmation, a snapshot of the source
+first; `storage.layout` commits the new layout and bumps the generation).
+
+**Storage network** (`internal/network/storagenet.go`, decision 343): a
+dedicated port (fastest first), a VLAN on the LAN port, or the LAN itself
+(warned against); static private IPv4 address without gateway, in the
+cluster's subnet; jumbo frames offered on physical ports of 1 Gb/s and up.
+Applied as a normal network change (kept only when confirmed, else rolled
+back).
+
+Tests: configfs rendering against `san.FakeFS` (which refuses what configfs
+refuses: creating attributes, removing busy objects, changing an exported
+LUN's serial), root's fences against later requests, exports, nft rules, node
+records and command lines, attachments, appliers, the desired-state builder
+and the agent's order; `TestClusterStorageIntegration`
+(`HARDYOS_CLUSTER_INTEGRATION=1`, CI's **Cluster (namespaces)** job) runs real
+LIO on a file-backed pool with initiators in network namespaces (their own
+iscsid and `/etc/iscsi`), a fence under I/O, and NFS mounts from the
+namespaces; it skips with the reason when the kernel lacks the target modules.
+
+### Placement, moves, HA and fencing (part C)
+
+The plan is `docs/plans/cluster.md` sections 6.3-7.6; decisions 350-359.
+
+- **State** (`internal/cluster/state/placement.go`, `fence.go`): pure appliers
+  for `workload.*`, `placement.*`, `move.*`, `ha.policy`, `ha.watchdog`,
+  `cluster.cpubaseline`, `node.dead/isolated/rejoin`. Every owner or grant
+  change raises the generation; owner changes need a stopped report, a
+  confirmed fence, or a live migration's collapse (decision 350).
+  `state.MayRun` is the single check before a node runs anything;
+  `state.ValidateTimings` bounds the timings (decision 353).
+- **Placement** (`internal/cluster/placement`): filters active, quorate,
+  storage-reachable compute nodes with the bridges/VLANs, memory (never
+  overcommitted), CPU model and HA watchdog a workload needs; scores preferred
+  nodes, anti-affinity, least committed memory; returns reasons.
+- **Node** (hardyd, `internal/cluster/runtime`, `fence`): the reconciler
+  stops stale workloads and starts placed ones through hardyd-priv's
+  `vms.cluster.*` / `apps.cluster.*` ops, which refuse any generation other
+  than the attachment's; the fence agent arms the watchdog for HA workloads
+  and self-fences on lease loss or `node.dead/isolated`; root's feeder pets
+  `/dev/watchdog0` only within hardyd's deadline (decision 356); the
+  pre-puller keeps HA apps' images (decision 355).
+- **Leader** (`internal/cluster/ha`): detection, isolation, recovery only
+  after the storage fence, pending/relocation, LAN evacuation, fail back
+  (decision 359). `ha.Service` wires everything and backs
+  `/api/v1/cluster/ha`, `/cluster/workloads/{kind}/{id}/{ha,request}`,
+  `/cluster/moves[/candidates|/drain]`.
+- **Moves** (`internal/cluster/moves`): offline (stop on A, report, hand over,
+  storage regrants, B attaches and starts) and live (two-node grant, both
+  attach, destination admits, source sends over a relayed one-shot socket,
+  grant collapses; failure keeps the VM on A). Passthrough VMs: offline only,
+  to a node whose own `devices.check` passes, confirmed (decision 354).
+  Peer API steps under `/cluster/v1/moves/*`.
+- **Live migration channel** (decision 351): `hardyos-migrate` user, polkit
+  access driver with per-migration rules, `packaging/libvirt/hooks/qemu` →
+  `hardyd-priv libvirt-hook` → `vms.migrate.check`. Cluster VMs render with
+  `cache=none`, `error_policy=stop`, their LUN by WWN and the cluster CPU
+  baseline (`Spec.CPUModel`, chosen by `vms.ChooseBaseline`).
+- **Publishing** (`internal/publish/cluster.go`): cluster apps' NetBird
+  services are named after the cluster and follow the owner (decision 358).
+- **Tests**: `clustertest` is an in-process cluster (real appliers, fake
+  membership, storage node, runtimes, watchdogs, fake clock) that flags any
+  moment two nodes could write one disk; the scenarios of section 7.4, moves
+  with a real HTTP relay, a random-command property test of the appliers, the
+  watchdog feeder against a fake device, and the XML check. Nothing touches a
+  real watchdog, libvirt, disk or network.
+
+### How the parts fit together
+
+- **One live membership.** `member.Service` replaces its core when the
+  server leaves a cluster (a new key and state machine), so parts B and C
+  never hold a core: they get `member.Live`, which is `Membership`,
+  `PeerClient` and `PeerMux` over the current core, adds their peer
+  handlers and part C's migrate hook to every core before it starts, and
+  re-subscribes `Subscribe` when the core changes.
+- **Order in hardyd** (`cmd/hardyd/cluster_{a,b,c}.go`): the membership
+  service is built before the job manager starts; part B's storage service
+  and agent and part C's `ha.Service` are wired onto `member.Live`; the API
+  routes are attached; then the core starts (`Init`, `Run`) and replays the
+  log. The heartbeat's own report (`ha.HealthReporter`) carries part B's
+  storage health and part C's running workloads; `ha.Announcer` records a
+  compute server's hardware (CPUs, memory, KVM, bridge, watchdog kind) with
+  `member.update`, which placement and HA eligibility read.
+- **Every state machine knows every command.** Parts B's and C's appliers
+  are in the state package's registry (like part A's), so members and the
+  witness apply `storage.*`, `workload.*`, `placement.*`, `move.*`, `ha.*`
+  and `node.*` from the first entry on; `cluster.timings` is checked with
+  `state.ValidateTimings` on every node.
+- **hardyd-priv** gives the VM and app engines part B's backends
+  (`vms.Manager.Backend`, `apps.Manager.Backend`, `apps.Manager.ClusterShares`
+  for cluster apps' shared folders) before they start.
+- **Live migration's libvirt connection** goes over the cluster port's
+  `hardyos-migrate/1` (`moves.ALPNStream` on the source, part A's transport
+  hands it to `moves.Node.ServeMigrateConn` on the destination; never over
+  NetBird).
+- **End-to-end test** (`internal/cluster/e2e`, every `go test ./...`): a
+  storage node, three compute nodes and the witness in one process with all
+  three parts' real code (real Raft, TLS and signed log on an in-memory
+  network; part B's real `san.Root` on a fake configfs and zfs; fake
+  compute-side root operations that only attach what the storage node's
+  configfs and exports really give them). It joins, provisions and places a
+  VM and an app, moves the app offline, cuts a compute node off and checks
+  that it fences itself, is declared dead, is fenced by the storage node
+  and only then is its HA VM restarted elsewhere, with never two runners,
+  never a LUN in two targets and never a start while another node can reach
+  the disk.
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly

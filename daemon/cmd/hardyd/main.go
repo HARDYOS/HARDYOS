@@ -27,6 +27,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/backups"
 	"github.com/hardyos/hardyos/daemon/internal/clientip"
 	"github.com/hardyos/hardyos/daemon/internal/cloudbackups"
+	"github.com/hardyos/hardyos/daemon/internal/cluster/ha"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/files"
 	"github.com/hardyos/hardyos/daemon/internal/install"
@@ -229,6 +230,21 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		inst.RegisterJobs(manager)
 		log.Info("live installer mode: serving the web installer")
 	}
+	// Phase 8 cluster: the core (part A), storage (part B), placement,
+	// moves, HA and fencing (part C). B and C register on A's live
+	// membership before the core is started (start, below), so their
+	// peer endpoints are there before the log is replayed.
+	clusterCore := newClusterA(live, db, manager, broker, secrets, alerts, log)
+	var clusterHA *ha.Service
+	var clusterStorage *clusterB
+	if !live {
+		parts := clusterCore.parts()
+		clusterStorage = wireClusterB(ctx, log, db, pc, secrets, &audit.Log{DB: db, Events: broker}, parts)
+		clusterHA = wireClusterC(db, pc, manager, broker, remote, parts, clusterStorage, log)
+		health := newHealth(parts, clusterStorage, clusterHA)
+		clusterCore.Service.Health = health.Get
+		go health.Run(ctx)
+	}
 	if err := manager.Start(jobCtx); err != nil {
 		cancelJobs()
 		return fmt.Errorf("start jobs: %w", err)
@@ -241,9 +257,12 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		WebRoot: webRoot, Insecure: httpsAddr == "", Installer: inst, Updates: upd, Backups: bk, CloudBackups: cloud,
 		Apps: appStore, Files: fileAccess, TrustedProxies: trustedProxies, Secrets: secrets, Remote: remote,
 		Replication: repl,
-		Alerts:      alerts, Monitor: mon, Mail: mailSvc,
+		Alerts:      alerts, Monitor: mon, Mail: mailSvc, ClusterHA: clusterHA,
 	})
 
+	clusterCore.attach(handler)    // /cluster routes and the per-node API proxy (cluster_a.go)
+	clusterStorage.routes(handler) // /cluster/storage (cluster_b.go)
+	clusterCore.start(ctx, log)    // the cluster log, heartbeats and paths
 	go housekeeping(ctx, log, &auth.Sessions{DB: db})
 	go collector.Run(ctx) // CPU, memory and network history
 	if !live {
@@ -262,6 +281,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 			go p.Start(ctx) // sign-in provider: signing keys on schedule, expired sign-ins removed
 		}
 		go handler.RunPhotos(ctx, api.PhotosOptions{}) // Photos: keeps the Immich app set up
+		go clusterHA.Start(ctx)                        // cluster: reconciler, fence agent, HA coordinator, image pre-pull
 	}
 
 	var servers []*http.Server

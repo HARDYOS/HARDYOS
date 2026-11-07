@@ -119,6 +119,9 @@ type proxyListener struct {
 	// webmail: the catalog's Mail app (Roundcube): each request carries
 	// the person's mailbox sign-in (a token tied to this session).
 	webmail atomic.Bool
+	// remote: an app on another cluster member, relayed to its owner
+	// (clusterproxy.go); nil for this server's own apps.
+	remote *remoteWindow
 }
 
 type proxyToken struct {
@@ -398,6 +401,11 @@ func (p *appProxy) reconcile(ctx context.Context) {
 	}
 	now := time.Now()
 	p.mu.Lock()
+	for id := range p.listeners {
+		if isRemoteWindow(id) {
+			want[id] = true // remote windows live until the proxy stops
+		}
+	}
 	for id, l := range p.listeners {
 		if !want[id] {
 			_ = l.srv.Close()
@@ -528,6 +536,9 @@ func (p *appProxy) handler(l *proxyListener) http.Handler {
 				"It may be starting or stopped. Check it in the App Store, then reload this window.")
 		},
 	}
+	if l.remote != nil {
+		rp.Transport = l.remote
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if why := p.crossAppRequest(r); why != "" {
 			proxyPage(w, http.StatusForbidden, "Blocked a request from another page", why)
@@ -551,6 +562,9 @@ func (p *appProxy) handler(l *proxyListener) http.Handler {
 		}
 		if filterAppRequest(w, r, l.appID) {
 			return
+		}
+		if l.remote != nil {
+			r = r.WithContext(context.WithValue(context.WithValue(r.Context(), windowUserKey{}, ss.userID), windowDeskKey{}, ss.desktopToken))
 		}
 		if l.webmail.Load() {
 			if c, ok := p.webmailCreds(r, ss, key); ok {
@@ -763,9 +777,13 @@ func (p *appProxy) verify(r *http.Request, ss *proxySession) bool {
 	if err != nil {
 		return false
 	}
-	may, err := s.mayUse(ctx, ss.desktopToken, u, ss.appID)
-	if err != nil || !may {
-		return false
+	// A remote app's access list is its owner's, checked there on every
+	// relayed request.
+	if !isRemoteWindow(ss.appID) {
+		may, err := s.mayUse(ctx, ss.desktopToken, u, ss.appID)
+		if err != nil || !may {
+			return false
+		}
 	}
 	p.mu.Lock()
 	ss.checked = time.Now()

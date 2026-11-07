@@ -76,6 +76,45 @@ jobs:
       - name: replication between two pools over mutual TLS (full, incremental, resume, refusals, restore)
         run: sudo HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/replication.test" -test.run TestZFSReplicationIntegration -test.v -test.timeout 15m
 
+  cluster:
+    name: Cluster (namespaces)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache: false
+      - name: install ZFS, LIO, open-iscsi and the NFS server
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zfsutils-linux acl nfs-kernel-server open-iscsi e2fsprogs \
+            "linux-modules-extra-$(uname -r)" || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zfsutils-linux acl nfs-kernel-server open-iscsi e2fsprogs
+          sudo modprobe zfs
+          # The test runs its own iscsid per namespace; the runner's stays off.
+          sudo systemctl disable --now iscsid.socket iscsid.service open-iscsi.service 2>/dev/null || true
+          sudo systemctl disable --now nfs-server.service || true
+          sudo mkdir -p /etc/systemd/system-generators
+          sudo ln -sf /dev/null /etc/systemd/system-generators/nfs-server-generator
+          sudo systemctl daemon-reload
+          sudo modprobe -a target_core_mod target_core_iblock iscsi_target_mod iscsi_tcp || echo "LIO modules unavailable: the LIO test will skip"
+      - name: build test binaries
+        working-directory: daemon
+        run: |
+          go test -c -o "$RUNNER_TEMP/san.test" ./internal/cluster/san
+          go test -race -c -o "$RUNNER_TEMP/e2e.test" ./internal/cluster/e2e
+      - name: parts A, B and C together - join, storage grants, VM and app placed, offline move, node death, fence, recovery
+        working-directory: daemon/internal/cluster/e2e
+        run: '"$RUNNER_TEMP/e2e.test" -test.run TestClusterEndToEnd -test.v -test.count 1 -test.timeout 10m'
+      - name: storage node - LIO targets with mutual CHAP, initiators in network namespaces, fence under I/O, cluster NFS exports
+        run: sudo HARDYOS_CLUSTER_INTEGRATION=1 "$RUNNER_TEMP/san.test" -test.run TestClusterStorageIntegration -test.v -test.timeout 10m
+      - name: LIO and NFS state
+        if: failure()
+        run: |
+          sudo targetcli ls 2>/dev/null || sudo find /sys/kernel/config/target -maxdepth 4 | head -100 || true
+          sudo cat /etc/exports.d/hardyos-cluster.exports || true
+          sudo dmesg | tail -60 || true
+
   nfs:
     name: NFS (loopback)
     runs-on: ubuntu-24.04

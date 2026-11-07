@@ -84,6 +84,11 @@ func (s *Server) admin(h authedHandler) http.Handler {
 }
 
 func (s *Server) currentUser(w http.ResponseWriter, r *http.Request) (*auth.User, bool) {
+	// A request another cluster member relayed, already verified and
+	// authorized by clusterproxy.go's relay handler (never set otherwise).
+	if u := clusterUserFrom(r.Context()); u != nil {
+		return u, true
+	}
 	token, ok := s.sessionToken(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthenticated", "sign in required")

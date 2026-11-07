@@ -83,6 +83,9 @@ type Manifest struct {
 	Permissions Permissions `json:"permissions,omitempty"`
 	// Backup is what to do before the app's data is backed up.
 	Backup *BackupHooks `json:"backup,omitempty"`
+	// Storage says how the app's data is best kept on cluster storage
+	// (storage_mode.go; ignored on a single server).
+	Storage *StorageHints `json:"storage,omitempty"`
 }
 
 // BackupHooks prepare an app's data for a backup.
@@ -420,6 +423,7 @@ func (m *Manifest) Validate() error {
 			p.addf("backup.dump.timeoutSeconds is 10 to 3600")
 		}
 	}
+	m.Storage.validate(&p) // cluster storage hints (storage_mode.go)
 	return p.err()
 }
 

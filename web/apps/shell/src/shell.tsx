@@ -1,7 +1,7 @@
 import type { AppManifest, ShellBridge } from "@hardy/sdk";
 import type { User } from "@hardy/api-client";
 import { type ComponentType, type LazyExoticComponent, type ReactNode, createContext, lazy, useContext } from "react";
-import { ActivityIcon, BagIcon, CloudUpIcon, DocumentIcon, FolderIcon, ListIcon, MailIcon, NotesIcon, PhotoIcon, ScreenIcon, SlidersIcon, StorageIcon, TerminalIcon, VMIcon } from "./icons";
+import { ActivityIcon, BagIcon, CloudUpIcon, DocumentIcon, FolderIcon, ListIcon, MailIcon, NetworkIcon, NotesIcon, PhotoIcon, ScreenIcon, SlidersIcon, StorageIcon, TerminalIcon, VMIcon } from "./icons";
 
 /** Props every app window receives. */
 export interface AppProps {
@@ -110,6 +110,16 @@ export const APPS: AppDef[] = [
     adminOnly: true,
   },
   {
+    id: "os.hardy.cluster",
+    name: "Cluster",
+    icon: "network",
+    color: "#22D3EE",
+    glyph: (s) => <NetworkIcon size={s} />,
+    component: lazy(() => import("./apps/cluster/ClusterApp")),
+    defaultSize: { width: 1080, height: 720 },
+    adminOnly: true,
+  },
+  {
     id: "os.hardy.terminal",
     name: "Terminal",
     icon: "terminal",
@@ -181,6 +191,8 @@ const officeEditor: AppDef = {
 };
 
 export function appById(id: string): AppDef | undefined {
+  // A window opened for another cluster member is keyed <app>@<node>.
+  id = id.split("@")[0] ?? id;
   if (id === APP_WINDOW || id.startsWith(`${APP_WINDOW}:`)) return appWindow;
   if (id === OFFICE_EDITOR || id.startsWith(`${OFFICE_EDITOR}:`)) return officeEditor;
   if (id === VM_CONSOLE || id.startsWith(`${VM_CONSOLE}:`)) return vmConsole;

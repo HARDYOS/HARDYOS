@@ -58,6 +58,10 @@ type Spec struct {
 	Devices    []devices.Device  `json:"devices"`
 	Streaming  *Streaming        `json:"streaming,omitempty"`
 	Labels     map[string]string `json:"labels,omitempty"`
+	// CPUModel is a named libvirt CPU model (a cluster's baseline) instead
+	// of the host's own CPU: the VM can then migrate live between servers
+	// with different CPUs. Empty: host-passthrough.
+	CPUModel string `json:"cpuModel,omitempty"`
 }
 
 // CPU is the VM's processor.
@@ -202,6 +206,7 @@ var (
 	idRE       = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}[a-z0-9]$`)
 	diskNameRE = regexp.MustCompile(`^disk[0-9]$`)
 	macRE      = regexp.MustCompile(`^[0-9a-f]{2}(:[0-9a-f]{2}){5}$`)
+	cpuModelRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}$`)
 	uuidRE     = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	userRE     = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,30}$`)
 	hostRE     = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -372,6 +377,9 @@ func (s *Spec) Validate(h Host) error {
 	}
 	if s.UUID != "" && !uuidRE.MatchString(s.UUID) {
 		add("the VM's UUID %q isn't valid", s.UUID)
+	}
+	if s.CPUModel != "" && !cpuModelRE.MatchString(s.CPUModel) {
+		add("%q isn't a CPU model name", s.CPUModel)
 	}
 	if zfs.ValidPoolName(s.Pool) != nil || (len(h.Pools) > 0 && !slices.Contains(h.Pools, s.Pool)) {
 		add("there's no pool called %q for the VM's disks", s.Pool)

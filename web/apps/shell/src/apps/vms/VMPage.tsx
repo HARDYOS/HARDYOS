@@ -22,6 +22,7 @@ import { Alert, Badge, Button, Card, EmptyState, ErrorBox, Field, IconButton, Lo
 import { AreaChart } from "../../ui/Chart";
 import { ConfirmDialog, Dialog } from "../../ui/Dialog";
 import { toast } from "../../ui/toasts";
+import { MoveButton } from "../cluster/ha/MoveButton";
 import { DevicePicker } from "./devices";
 import { Meter, StateBadge, VMGlyph } from "./parts";
 import { type VMAction, diskSize, isOn, memory, osLabel, pushSample, useLibrary, useSnapshots, useVM, vmAction, vmKeys } from "./vmApi";
@@ -115,6 +116,7 @@ export function VMPage({
           </div>
         </div>
         <div className="row" style={{ gap: 6 }}>
+          <MoveButton kind="vm" id={vm.id} name={vm.name} onJob={jobs.start} disabled={busy} />
           {on ? (
             <>
               <Button onClick={() => onOpenConsole(vm)}>
