@@ -15,33 +15,10 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 )
 
-// PeerStream is a StreamDialer over the peer API: one streamed request
-// whose body carries the source's libvirt bytes and whose answer carries
-// the destination's (HTTP/2 full duplex on the cluster port).
-type PeerStream struct{ Peers cluster.PeerClient }
-
-// DialMigrate implements StreamDialer.
-func (p PeerStream) DialMigrate(ctx context.Context, node cluster.NodeID, token string) (io.ReadWriteCloser, error) {
-	pr, pw := io.Pipe()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://peer"+cluster.PeerPathPrefix+PathStream+"?token="+url.QueryEscape(token), pr)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/octet-stream")
-	res, err := p.Peers.Do(ctx, node, req)
-	if err != nil {
-		pw.Close()
-		return nil, err
-	}
-	if res.StatusCode != http.StatusOK {
-		res.Body.Close()
-		pw.Close()
-		return nil, fmt.Errorf("%s refused the migration stream: %s", node, res.Status)
-	}
-	return &duplex{r: res.Body, w: pw}, nil
-}
-
-// ALPNStream is a StreamDialer over the cluster port's hardyos-migrate/1
+// ALPNStream is the only StreamDialer: the peer API's streamed fallback
+// is gone because the peer API may run over NetBird, and a live
+// migration's connection never does (decision 332). It dials the
+// cluster port's hardyos-migrate/1
 // (part A's stream layer: LAN, then the storage network, never NetBird):
 // the token line, the destination's MigrateOK, then the libvirt bytes.
 // The destination serves it with Node.ServeMigrateConn.
@@ -72,18 +49,6 @@ func (a ALPNStream) DialMigrate(ctx context.Context, node cluster.NodeID, token 
 	}
 	_ = conn.SetDeadline(time.Time{})
 	return &bufConn{Conn: conn, r: br}, nil
-}
-
-type duplex struct {
-	r io.ReadCloser
-	w *io.PipeWriter
-}
-
-func (d *duplex) Read(b []byte) (int, error)  { return d.r.Read(b) }
-func (d *duplex) Write(b []byte) (int, error) { return d.w.Write(b) }
-func (d *duplex) Close() error {
-	d.w.Close()
-	return d.r.Close()
 }
 
 // PeerImages is runtime.ImageSource over the peer API: the owner lists the

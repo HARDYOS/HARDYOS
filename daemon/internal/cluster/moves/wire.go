@@ -6,6 +6,7 @@
 package moves
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 
@@ -23,7 +24,8 @@ const (
 	PathAccept        = "moves/migrate/accept"
 	PathSend          = "moves/migrate/send"
 	PathEnd           = "moves/migrate/end"
-	PathStream        = "moves/migrate/stream"
+	PathAbort         = "moves/migrate/abort"
+	PathState         = "moves/migrate/state"
 	PathPublishExport = "moves/publish/export"
 	PathPublishImport = "moves/publish/import"
 	PathRequirements  = "workloads/requirements"
@@ -96,8 +98,40 @@ type EndRequest struct {
 }
 
 // PublishConfig is an app's NetBird publishing settings handed from the
-// old owner to the new one.
+// old owner to the new one: the destination fetches them from the source
+// itself while the move is in progress (the source answers only the
+// move's destination), and imports them when the mover says so.
 type PublishConfig struct {
 	App    string          `json:"app"`
 	Config json.RawMessage `json:"config,omitempty"`
+}
+
+// AbortRequest (destination of a failed live migration): stop whatever of
+// the VM runs here at once and let its storage go, whatever the grant.
+type AbortRequest struct {
+	VM         string `json:"vm"`
+	Generation uint64 `json:"generation"`
+}
+
+// StateRequest asks root's view of a VM on a node.
+type StateRequest struct {
+	VM string `json:"vm"`
+}
+
+// StateResult is a VM's state on a node, as root sees it.
+type StateResult struct {
+	// Runs: QEMU runs it here (running or paused).
+	Runs       bool   `json:"runs"`
+	Paused     bool   `json:"paused,omitempty"`
+	Generation uint64 `json:"generation,omitempty"`
+}
+
+// StepKind is the job kind each step a node runs for a move is recorded
+// as (with an audit entry), on that node.
+const StepKind = "cluster.move.step"
+
+// Actions records a node's move steps as finished jobs and audit entries
+// (ha.Service implements it).
+type Actions interface {
+	Run(ctx context.Context, kind, title, target string, fn func(ctx context.Context) error) error
 }

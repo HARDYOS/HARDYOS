@@ -54,8 +54,8 @@ func TestPrepullKeepsHAAppImagesEverywhere(t *testing.T) {
 	w := clustertest.New(t, "c1", "c2")
 	app := cluster.WorkloadRef{Kind: cluster.KindApp, ID: "wiki"}
 	plain := cluster.WorkloadRef{Kind: cluster.KindApp, ID: "notes"}
-	_ = w.Propose("c1", cluster.CmdWorkloadAdd, state.WorkloadAdd{Workload: app, Name: "wiki", Owner: "c1", HA: cluster.HAPolicy{Enabled: true}})
-	_ = w.Propose("c1", cluster.CmdWorkloadAdd, state.WorkloadAdd{Workload: plain, Name: "notes", Owner: "c1"})
+	_ = w.Propose("c1", cluster.CmdWorkloadAdd, state.WorkloadAdd{SpecHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Workload: app, Name: "wiki", Owner: "c1", HA: cluster.HAPolicy{Enabled: true}})
+	_ = w.Propose("c1", cluster.CmdWorkloadAdd, state.WorkloadAdd{SpecHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Workload: plain, Name: "notes", Owner: "c1"})
 	src := &source{imgs: map[string][]string{"wiki": {"ghcr.io/x/wiki:1.0", "postgres:16"}, "notes": {"notes:1"}}}
 	st := &store{have: []string{"postgres:16"}}
 	p := &runtime.Prepuller{Cluster: w.Nodes["c2"], Source: src, Images: st, Now: w.Clock.Now}

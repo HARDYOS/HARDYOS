@@ -11,11 +11,16 @@ package apps
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 )
 
@@ -80,10 +85,20 @@ func (m *Manager) clusterEngine(ctx context.Context) (*EngineConfig, error) {
 type ClusterStartArgs struct {
 	ID         string `json:"id"`
 	Generation uint64 `json:"generation"`
+	// SpecHash is the hash of the app's approved settings in the
+	// replicated placement (decision 386): root starts the app only when
+	// its own hash of the files on cluster storage is the same.
+	SpecHash string `json:"specHash"`
 }
 
+// ErrSpecChanged: what is on cluster storage isn't what an administrator
+// approved (the hash in the cluster's placement differs).
+var ErrSpecChanged = errors.New("the settings on cluster storage aren't the ones an administrator approved; refusing to start")
+
 // ClusterStart starts a cluster app whose storage is attached here under
-// the generation hardyd names.
+// the generation hardyd names, only when the files on cluster storage are
+// the approved ones (SpecHash) and pass the full policy check again: the
+// folder is shared storage that other servers could have written.
 func (m *Manager) ClusterStart(ctx context.Context, a ClusterStartArgs) error {
 	ia, st, err := m.remote(ctx, a.ID)
 	if err != nil {
@@ -91,6 +106,17 @@ func (m *Manager) ClusterStart(ctx context.Context, a ClusterStartArgs) error {
 	}
 	if a.Generation == 0 || st.Generation != a.Generation {
 		return fmt.Errorf("%w (attached %d, asked %d)", ErrGeneration, st.Generation, a.Generation)
+	}
+	h, err := m.clusterHash(ia)
+	if err != nil {
+		return err
+	}
+	if a.SpecHash == "" || subtle.ConstantTimeCompare([]byte(h), []byte(a.SpecHash)) != 1 {
+		m.log().Warn("apps: refused to start a cluster app whose files changed", "app", a.ID, "have", h, "approved", a.SpecHash)
+		return ErrSpecChanged
+	}
+	if err := m.clusterRecheck(ctx, ia); err != nil {
+		return err
 	}
 	c, err := m.clusterEngine(ctx)
 	if err != nil {
@@ -100,6 +126,108 @@ func (m *Manager) ClusterStart(ctx context.Context, a ClusterStartArgs) error {
 		return err
 	}
 	return m.noRestart(ctx, a.ID)
+}
+
+// clusterRecheck runs the install's policy check on the stored resolved
+// compose file again, with the app's own manifest, ports and shares
+// (only HardyOS's own cgroup slice is taken out first: the check refuses
+// it from a package).
+func (m *Manager) clusterRecheck(ctx context.Context, ia *installedApp) error {
+	b, err := readStateFile(ia.meta(resolvedFile))
+	if err != nil {
+		return err
+	}
+	r, err := ParseResolved(b)
+	if err != nil {
+		return err
+	}
+	slice := SliceName(ia.state.ID)
+	services, _ := r["services"].(map[string]any)
+	for name, raw := range services {
+		svc, _ := raw.(map[string]any)
+		if svc == nil {
+			continue
+		}
+		if cg, ok := svc["cgroup_parent"]; ok {
+			if s, _ := cg.(string); s != slice {
+				return fmt.Errorf("service %s runs in another cgroup (%v); refusing to start", name, cg)
+			}
+			delete(svc, "cgroup_parent")
+		}
+	}
+	binds, err := m.currentShareBinds(ctx, ia)
+	if err != nil {
+		return err
+	}
+	dataDir := filepath.Join(ia.dir, dataDirName)
+	if err := r.check(ia.manifest, ProjectName(ia.state.ID), dataDir, ia.state.Ports, binds); err != nil {
+		return fmt.Errorf("the app's compose file on cluster storage no longer passes the policy check: %w", err)
+	}
+	return nil
+}
+
+// clusterSpec is what an administrator approves for a cluster app: the
+// resolved compose file, the manifest and what the app was granted.
+type clusterSpec struct {
+	Manifest      json.RawMessage        `json:"manifest"`
+	Resolved      json.RawMessage        `json:"resolved"`
+	Ports         map[string]int         `json:"ports"`
+	Shares        map[string]ShareChoice `json:"shares"`
+	Grants        []string               `json:"grants"`
+	Limits        Limits                 `json:"limits"`
+	UID           int                    `json:"uid"`
+	Source        Source                 `json:"source"`
+	CatalogSHA256 string                 `json:"catalogSHA256"`
+}
+
+// canonical re-encodes JSON with sorted object keys.
+func canonical(b []byte) (json.RawMessage, error) {
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		return nil, err
+	}
+	return json.Marshal(v)
+}
+
+// clusterHash is the hash of a cluster app's approved settings.
+func (m *Manager) clusterHash(ia *installedApp) (string, error) {
+	rb, err := readStateFile(ia.meta(resolvedFile))
+	if err != nil {
+		return "", err
+	}
+	mb, err := readStateFile(ia.meta(ManifestFile))
+	if err != nil {
+		return "", err
+	}
+	spec := clusterSpec{Ports: ia.state.Ports, Shares: ia.state.Shares, Grants: slices.Clone(ia.state.Grants),
+		Limits: ia.state.Limits, UID: ia.state.UID, Source: ia.state.Source, CatalogSHA256: ia.state.CatalogSHA256}
+	if spec.Resolved, err = canonical(rb); err != nil {
+		return "", fmt.Errorf("the resolved compose file: %w", err)
+	}
+	if spec.Manifest, err = canonical(mb); err != nil {
+		return "", fmt.Errorf("the manifest: %w", err)
+	}
+	sort.Strings(spec.Grants)
+	b, err := json.Marshal(spec)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+// ClusterHash is the hash of the approved settings of a cluster app
+// attached here (hardyd records it in the placement after the
+// administrator's install or change: workload.add, workload.spec).
+func (m *Manager) ClusterHash(ctx context.Context, id string) (string, error) {
+	ia, _, err := m.remote(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	if err := m.clusterRecheck(ctx, ia); err != nil {
+		return "", err
+	}
+	return m.clusterHash(ia)
 }
 
 // noRestart turns Docker's own restart policy off for a cluster app's

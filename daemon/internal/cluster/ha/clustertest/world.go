@@ -206,6 +206,8 @@ func (w *World) wire(n *Node) {
 	rts := []cluster.Runtime{&fakeRuntime{n: n, kind: cluster.KindVM}, &fakeRuntime{n: n, kind: cluster.KindApp}}
 	n.Rec = &runtime.Reconciler{Cluster: n, Attacher: &fakeAttacher{n: n}, Runtimes: rts, BootID: func() string { return n.BootID }, Now: w.Clock.Now}
 	n.Agent = &fence.Agent{Cluster: n, Watchdog: &fakeWatchdog{n: n}, Fencer: &fakeFencer{n: n}, Running: n.Rec.Local, Now: w.Clock.Now}
+	n.Rec.FenceReady = n.Agent.Ready
+	n.Rec.CleanFence = n.Agent.CleanFence
 	n.Coord = &ha.Coordinator{Cluster: n, Scheduler: &placement.Scheduler{ReservedMB: 1024}, Now: w.Clock.Now}
 }
 
@@ -858,6 +860,7 @@ func clone(s *cluster.Snapshot) *cluster.Snapshot {
 		x.Storage.Volumes = slices.Clone(v.Storage.Volumes)
 		x.Storage.Exports = slices.Clone(v.Storage.Exports)
 		x.Storage.Shares = slices.Clone(v.Storage.Shares)
+		x.Relocated = slices.Clone(v.Relocated)
 		c.Placements[k] = &x
 	}
 	c.Grants = map[cluster.WorkloadRef]*cluster.Grant{}
@@ -893,6 +896,16 @@ func mustAddr(s string) netip.Addr     { return netip.MustParseAddr(s) }
 // Clone deep-copies a snapshot.
 func Clone(s *cluster.Snapshot) *cluster.Snapshot { return clone(s) }
 
+// Mutate changes the applied state directly (what another part's applier
+// would do; tests).
+func (w *World) Mutate(f func(*cluster.Snapshot)) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	next := clone(w.snap)
+	f(next)
+	w.snap = next
+}
+
 // SetCompute changes a node's hardware in the state (tests).
 func (w *World) SetCompute(id cluster.NodeID, f func(*cluster.ComputeInfo)) {
 	w.mu.Lock()
@@ -905,7 +918,7 @@ func (w *World) SetCompute(id cluster.NodeID, f func(*cluster.ComputeInfo)) {
 // AddVM adds an HA (or not) VM placed on owner, asked to run.
 func (w *World) AddVM(id string, owner cluster.NodeID, ha bool, priority int) cluster.WorkloadRef {
 	ref := cluster.WorkloadRef{Kind: cluster.KindVM, ID: id}
-	err := w.Propose(owner, cluster.CmdWorkloadAdd, state.WorkloadAdd{Workload: ref, Name: id, Owner: owner, Requested: cluster.RequestRunning,
+	err := w.Propose(owner, cluster.CmdWorkloadAdd, state.WorkloadAdd{SpecHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Workload: ref, Name: id, Owner: owner, Requested: cluster.RequestRunning,
 		HA: cluster.HAPolicy{Enabled: ha, Priority: priority}, Storage: cluster.WorkloadStorage{Pool: "tank"}})
 	if err != nil {
 		w.T.Fatalf("adding %s: %v", id, err)

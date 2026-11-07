@@ -343,6 +343,20 @@ type Placement struct {
 	// Problem says why it is pending or in error.
 	Problem string    `json:"problem,omitempty"`
 	Changed time.Time `json:"changed"`
+	// SpecHash is the SHA-256 ("sha256:<hex>") of what an administrator
+	// approved for the workload: an app's resolved compose file, manifest
+	// and grants, a VM's security-relevant settings. A node starts the
+	// workload only when root's own hash of what it would run matches
+	// (part C amendment, decision 386).
+	SpecHash string `json:"specHash,omitempty"`
+	// MoveBy is the member whose move.begin started the move in progress
+	// (or the last one): only it (or the leader) may drive the move's steps
+	// on the two nodes (part C amendment, decision 387).
+	MoveBy NodeID `json:"moveBy,omitempty"`
+	// Relocated are the times (command times) of the HA coordinator's
+	// relocations within the last hour, so every leader counts the same
+	// (part C amendment, decision 393).
+	Relocated []time.Time `json:"relocated,omitempty"`
 }
 
 // Requirements is what a workload needs from a compute node (Scheduler).
@@ -464,6 +478,10 @@ type Fence struct {
 	Confirmed   bool      `json:"confirmed"`
 	Requested   time.Time `json:"requested"`
 	ConfirmedAt time.Time `json:"confirmedAt,omitempty"`
+	// BootID is the node's boot id when it was declared dead or isolated:
+	// a rejoin after a "dead" fence must carry another one (part C
+	// amendment, decision 389).
+	BootID string `json:"bootId,omitempty"`
 }
 
 // WatchdogOverride is an administrator's typed confirmation that a node
@@ -594,6 +612,10 @@ const (
 	// HA workloads run on a node without a hardware watchdog (softdog or
 	// none; decision 352). Part C amendment.
 	CmdHAWatchdog CommandType = "ha.watchdog"
+	// CmdWorkloadSpec records the hash of a workload's newly approved
+	// settings (its owner, after an administrator changed them; part C
+	// amendment, decision 386).
+	CmdWorkloadSpec CommandType = "workload.spec"
 )
 
 // Actor is who caused a command: a person through a node, or HardyOS

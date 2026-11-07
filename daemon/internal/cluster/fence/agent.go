@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,6 +41,11 @@ type AgentStatus struct {
 	LastFence    time.Time             `json:"lastFence,omitzero"`
 	FenceReason  string                `json:"fenceReason,omitempty"`
 	CleanStopped bool                  `json:"cleanStopped"`
+	// Idle: armed with no HA workload here (a nowayout device, or root
+	// refused to disarm while other cluster workloads run).
+	Idle bool `json:"idle,omitempty"`
+	// RootRestarted: hardyd-priv restarted while the watchdog was armed.
+	RootRestarted bool `json:"rootRestarted,omitempty"`
 }
 
 // Agent is the node-local self-fencing state machine (cluster.FenceAgent):
@@ -50,7 +56,14 @@ type AgentStatus struct {
 //	  SELF-FENCING: root stops petting; HA workloads are killed and
 //	  detached; done within S -> disarm -> DISARMED; not done -> the
 //	  watchdog resets the server within W
-//	ARMED --(no HA workload here any more, quorate)--> DISARMED
+//	ARMED --(no HA workload here any more, quorate)--> DISARMED (unless
+//	  the device is nowayout or root still sees cluster workloads: then
+//	  it stays armed, petted while quorate)
+//
+// Until it has been quorate once, or the lease time Q has passed since it
+// started, a lost lease isn't acted on (a restarted hardyd hasn't heard
+// the leader yet; root keeps the deadline it last had). HA workloads start
+// only once it is ARMED (Ready).
 type Agent struct {
 	Cluster  Cluster
 	Watchdog cluster.Watchdog
@@ -59,6 +72,10 @@ type Agent struct {
 	Log      *slog.Logger
 	// Now is the clock (monotonic; tests fake it).
 	Now func() time.Time
+	// Boot and Mono are CLOCK_BOOTTIME and CLOCK_MONOTONIC (defaults
+	// BootNow, MonoNow; tests fake them): when they drift apart the server
+	// was suspended and the lease counts as lost (decision 392).
+	Boot, Mono func() time.Time
 	// OnChange is called after every state change (events, alerts).
 	OnChange func(AgentStatus)
 
@@ -74,6 +91,19 @@ type Agent struct {
 	reason     string
 	clean      bool
 	haHere     []cluster.WorkloadRef
+	started    time.Time // first Step
+	everQ      bool      // quorate at least once since started
+	armedW     time.Duration
+	nowayout   bool
+	idle       bool
+	instance   string // hardyd-priv's instance at the last status
+	rootGone   bool
+	keysPinned bool
+	// suspend detection
+	lastBoot, lastMono time.Time
+	voidBefore         time.Time // a lease ending before voidBefore+Q is void
+	cleanEpoch         uint64    // a fence of this epoch was obeyed cleanly here
+	fenceEpoch         uint64    // the epoch the running self-fence obeys (0: lease loss)
 }
 
 var _ cluster.FenceAgent = (*Agent)(nil)
@@ -102,6 +132,24 @@ func (a *Agent) State() cluster.FenceState {
 	return a.state
 }
 
+// Ready reports whether HA workloads may start here: the watchdog is
+// armed and no self-fence is running.
+func (a *Agent) Ready() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.state == cluster.FenceArmed && !a.fencing && !a.rootGone
+}
+
+// CleanFence reports whether this hardyd obeyed the node's fence of epoch
+// itself: its self-fence finished with everything stopped, or nothing HA
+// ran here when the order came. Only then may an isolated node rejoin on
+// the same boot (node.rejoin's Clean).
+func (a *Agent) CleanFence(epoch uint64) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return epoch > 0 && a.cleanEpoch == epoch
+}
+
 // Status reports the agent's view.
 func (a *Agent) Status() AgentStatus {
 	a.mu.Lock()
@@ -115,7 +163,7 @@ func (a *Agent) statusLocked() AgentStatus {
 		st = cluster.FenceDisarmed
 	}
 	return AgentStatus{State: st, Kind: a.kind, Problem: a.problem, HAHere: slices.Clone(a.haHere),
-		LastFence: a.lastFence, FenceReason: a.reason, CleanStopped: a.clean}
+		LastFence: a.lastFence, FenceReason: a.reason, CleanStopped: a.clean, Idle: a.idle, RootRestarted: a.rootGone}
 }
 
 // Run implements cluster.FenceAgent: Step every half heartbeat.
@@ -200,6 +248,66 @@ func haWorkloads(s *cluster.Snapshot, self cluster.NodeID, running []cluster.Wor
 	return out
 }
 
+// suspended notices a suspend since the last step: the boot clock ran on
+// while the monotonic one stood still.
+func (a *Agent) suspended() bool {
+	boot, mono := a.Boot, a.Mono
+	if boot == nil || mono == nil {
+		if a.Now != nil {
+			return false // a faked clock: no suspends
+		}
+		boot, mono = BootNow, MonoNow
+	}
+	b, m := boot(), mono()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	defer func() { a.lastBoot, a.lastMono = b, m }()
+	if a.lastBoot.IsZero() {
+		return false
+	}
+	return b.Sub(a.lastBoot)-m.Sub(a.lastMono) > time.Second
+}
+
+// rootStatus reads root's view (when the watchdog can say) and reconciles:
+// an arm root still holds after hardyd restarted is adopted; a restarted
+// hardyd-priv (whose crash closed the device without the magic character)
+// is reported and the watchdog armed again at once.
+func (a *Agent) rootStatus(ctx context.Context) (*Status, bool) {
+	sw, ok := a.Watchdog.(StatusWatchdog)
+	if !ok {
+		return nil, false
+	}
+	st, err := sw.Status(ctx)
+	if err != nil {
+		return nil, false
+	}
+	a.mu.Lock()
+	prev := a.instance
+	a.instance = st.Instance
+	a.nowayout = st.NoWayOut
+	state := a.state
+	restarted := prev != "" && st.Instance != "" && prev != st.Instance
+	if state == "" || state == cluster.FenceDisarmed {
+		if st.Armed && prev == "" {
+			// hardyd restarted; root kept the watchdog armed.
+			a.state, a.kind, a.armedW = cluster.FenceArmed, st.Kind, time.Duration(st.TimeoutSec)*time.Second
+			a.keysPinned = st.Leases
+		}
+	}
+	if restarted && (state == cluster.FenceArmed || state == cluster.FenceSelfFencing) {
+		a.rootGone = !st.Armed
+	}
+	if st.Armed {
+		a.rootGone = false
+	}
+	a.mu.Unlock()
+	if restarted && (state == cluster.FenceArmed || state == cluster.FenceSelfFencing) {
+		a.log().Error("fence: hardyd-priv restarted while the watchdog was armed; the hardware resets this server unless it is armed again in time")
+		a.setProblem("hardyd-priv restarted while HA workloads were protected here; the watchdog was armed again")
+	}
+	return &st, true
+}
+
 // Step runs one round of the state machine.
 func (a *Agent) Step(ctx context.Context) {
 	self, err := a.Cluster.Self()
@@ -218,6 +326,15 @@ func (a *Agent) Step(ctx context.Context) {
 	if t.Watchdog == 0 {
 		t = cluster.DefaultTimings
 	}
+	now := a.now()
+	a.mu.Lock()
+	if a.started.IsZero() {
+		a.started = now
+	}
+	started := a.started
+	a.mu.Unlock()
+	root, haveRoot := a.rootStatus(ctx)
+
 	var running []cluster.WorkloadStatus
 	known := true
 	if a.Running != nil {
@@ -230,9 +347,29 @@ func (a *Agent) Step(ctx context.Context) {
 		}
 	}
 	quorate, until := a.Cluster.Quorate()
+	if a.suspended() {
+		// The lease was measured on a clock that stood still while the
+		// server slept: it is lost, whatever it says.
+		a.mu.Lock()
+		a.voidBefore = until
+		a.mu.Unlock()
+		a.log().Warn("fence: this server was suspended; its quorum lease counts as lost")
+	}
+	a.mu.Lock()
+	if !a.voidBefore.IsZero() {
+		if until.After(a.voidBefore) {
+			a.voidBefore = time.Time{} // a lease from a heartbeat after the resume
+		} else {
+			quorate = false
+		}
+	}
+	if quorate {
+		a.everQ = true
+	}
+	grace := !a.everQ && now.Sub(started) < t.QuorumLease
+	a.mu.Unlock()
 	ordered, why := ownFence(s, self.ID)
 	ha := haWorkloads(s, self.ID, running, (quorate && !ordered) || !known)
-	now := a.now()
 
 	a.mu.Lock()
 	a.haHere = ha
@@ -241,7 +378,21 @@ func (a *Agent) Step(ctx context.Context) {
 		state = cluster.FenceDisarmed
 	}
 	fencing, done := a.fencing, a.fenceDone
+	rootGone := a.rootGone
 	a.mu.Unlock()
+
+	if grace && !quorate && !ordered {
+		// Just started and not heard the leader yet: neither self-fence
+		// nor arm on a lease that may simply not have arrived.
+		return
+	}
+	if ordered && state == cluster.FenceDisarmed && known && len(ha) == 0 {
+		// The order came and nothing HA runs here: obeyed as it stands
+		// (the reconciler stops the rest).
+		a.mu.Lock()
+		a.cleanEpoch = self.FenceEpoch
+		a.mu.Unlock()
+	}
 
 	switch state {
 	case cluster.FenceDisarmed:
@@ -250,12 +401,16 @@ func (a *Agent) Step(ctx context.Context) {
 		}
 		// HA workloads here: arm first, whatever happens next, so a stuck
 		// stop still ends in a reset.
+		a.pinKeys(ctx, s, self)
 		kind, err := a.Watchdog.Arm(ctx, t.Watchdog)
 		a.mu.Lock()
 		a.kind = kind
+		if err == nil {
+			a.armedW = t.Watchdog
+		}
 		a.mu.Unlock()
 		if err != nil {
-			a.startSelfFence(ctx, self, ha, "no-watchdog", t, now)
+			a.startSelfFence(ctx, self, ha, "no-watchdog", t, now, ordered)
 			a.setProblem("the watchdog couldn't be armed: " + err.Error() + "; HA workloads here are stopped")
 			return
 		}
@@ -265,23 +420,48 @@ func (a *Agent) Step(ctx context.Context) {
 				reason = "no-quorum"
 			}
 			_ = a.Watchdog.Expire(ctx)
-			a.startSelfFence(ctx, self, ha, reason, t, now)
+			a.startSelfFence(ctx, self, ha, reason, t, now, ordered)
 			return
 		}
 		a.setState(cluster.FenceArmed, "")
 		a.pet(ctx, until, now, t)
 	case cluster.FenceArmed:
+		if rootGone || (haveRoot && !root.Armed) {
+			// Root lost the device (hardyd-priv restarted): arm again now.
+			if _, err := a.Watchdog.Arm(ctx, t.Watchdog); err == nil {
+				a.mu.Lock()
+				a.rootGone, a.armedW = false, t.Watchdog
+				a.mu.Unlock()
+			}
+		} else if a.armedTimeout() != t.Watchdog {
+			// The cluster's watchdog timeout changed: the device follows.
+			if _, err := a.Watchdog.Arm(ctx, t.Watchdog); err != nil {
+				a.setProblem("changing the watchdog timeout: " + err.Error())
+			} else {
+				a.mu.Lock()
+				a.armedW = t.Watchdog
+				a.mu.Unlock()
+			}
+		}
 		switch {
 		case ordered:
 			_ = a.Watchdog.Expire(ctx)
-			a.startSelfFence(ctx, self, ha, why, t, now)
+			a.startSelfFence(ctx, self, ha, why, t, now, true)
+		case !quorate && len(ha) == 0 && known && a.isIdle():
+			// Armed only because it can't be disarmed and nothing HA runs:
+			// nothing to protect, so the lease doesn't matter.
+			a.petIdle(ctx, t)
 		case !quorate:
 			// The lease already ran out, so root has stopped petting.
 			_ = a.Watchdog.Expire(ctx)
-			a.startSelfFence(ctx, self, ha, "no-quorum", t, now)
+			a.startSelfFence(ctx, self, ha, "no-quorum", t, now, false)
 		case len(ha) == 0 && known:
-			a.disarm(ctx, "")
+			if a.disarmOrIdle(ctx) {
+				return
+			}
+			a.pet(ctx, until, now, t)
 		default:
+			a.setIdle(false)
 			a.pet(ctx, until, now, t)
 		}
 	case cluster.FenceSelfFencing:
@@ -294,13 +474,99 @@ func (a *Agent) Step(ctx context.Context) {
 			a.mu.Lock()
 			a.clean = true
 			a.mu.Unlock()
-			a.disarm(ctx, "")
+			if !a.disarmOrIdle(ctx) {
+				// It can't go (nowayout, or other cluster workloads still
+				// run): armed and idle, petted only with quorum.
+				a.setState(cluster.FenceArmed, "")
+			}
 			return
 		}
 		// Not everything stopped: never pet again; the watchdog resets
 		// the server.
 		a.setProblem("HA workloads didn't stop within the self-stop time; the watchdog resets this server")
 	}
+}
+
+func (a *Agent) armedTimeout() time.Duration {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.armedW
+}
+
+func (a *Agent) isIdle() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.idle
+}
+
+func (a *Agent) setIdle(on bool) {
+	a.mu.Lock()
+	a.idle = on
+	a.mu.Unlock()
+}
+
+// disarmOrIdle disarms; a nowayout device, or root still seeing cluster
+// workloads, keeps it armed and idle (it reports false then).
+func (a *Agent) disarmOrIdle(ctx context.Context) bool {
+	a.mu.Lock()
+	nowayout := a.nowayout
+	a.mu.Unlock()
+	if nowayout {
+		a.setIdle(true)
+		return false
+	}
+	err := a.Watchdog.Disarm(ctx)
+	if err == nil {
+		a.mu.Lock()
+		a.fenceDone, a.fenceErr, a.idle, a.armedW = false, nil, false, 0
+		a.mu.Unlock()
+		a.setState(cluster.FenceDisarmed, "")
+		return true
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "still run") || strings.Contains(msg, "nowayout") {
+		a.setIdle(true)
+		a.setProblem("")
+		return false
+	}
+	a.setProblem("disarming the watchdog: " + msg)
+	return false
+}
+
+// petIdle keeps an idle (nothing HA here) armed watchdog quiet for one
+// lease time.
+func (a *Agent) petIdle(ctx context.Context, t cluster.Timings) {
+	if err := a.Watchdog.Pet(ctx, t.QuorumLease); err != nil {
+		a.setProblem("petting the watchdog: " + err.Error())
+	}
+}
+
+// pinKeys hands root the voters' keys before it arms (when both sides
+// support leader-signed lease statements).
+func (a *Agent) pinKeys(ctx context.Context, s *cluster.Snapshot, self cluster.Node) {
+	lw, ok := a.Watchdog.(LeaseWatchdog)
+	if !ok {
+		return
+	}
+	if _, ok := a.Cluster.(LeaseSource); !ok {
+		return
+	}
+	k := LeaseKeys{Cluster: string(s.Cluster), Node: string(self.ID), Voters: map[string][]byte{}}
+	for id, n := range s.Nodes {
+		if n.Suffrage == cluster.Voter && len(n.PublicKey) > 0 && n.Role != cluster.RoleWitness {
+			k.Voters[string(id)] = n.PublicKey
+		}
+	}
+	if len(k.Voters) == 0 {
+		return
+	}
+	if err := lw.PinLeaseKeys(ctx, k); err != nil {
+		a.log().Warn("fence: pinning the voters' keys in root", "err", err)
+		return
+	}
+	a.mu.Lock()
+	a.keysPinned = true
+	a.mu.Unlock()
 }
 
 func (a *Agent) pet(ctx context.Context, until, now time.Time, t cluster.Timings) {
@@ -311,7 +577,19 @@ func (a *Agent) pet(ctx context.Context, until, now time.Time, t cluster.Timings
 	if valid > t.QuorumLease {
 		valid = t.QuorumLease
 	}
-	if err := a.Watchdog.Pet(ctx, valid); err != nil {
+	var err error
+	lw, okW := a.Watchdog.(LeaseWatchdog)
+	src, okS := a.Cluster.(LeaseSource)
+	if okW && okS {
+		if stmt, ok := src.LeaseStatement(); ok {
+			err = lw.PetWithLease(ctx, valid, stmt)
+		} else {
+			err = a.Watchdog.Pet(ctx, valid)
+		}
+	} else {
+		err = a.Watchdog.Pet(ctx, valid)
+	}
+	if err != nil {
 		a.setProblem("petting the watchdog: " + err.Error())
 		return
 	}
@@ -324,13 +602,15 @@ func (a *Agent) disarm(ctx context.Context, problem string) {
 		return
 	}
 	a.mu.Lock()
-	a.fenceDone, a.fenceErr = false, nil
+	a.fenceDone, a.fenceErr, a.idle, a.armedW = false, nil, false, 0
 	a.mu.Unlock()
 	a.setState(cluster.FenceDisarmed, problem)
 }
 
-// startSelfFence stops ws by force within S, in the background.
-func (a *Agent) startSelfFence(ctx context.Context, self cluster.Node, ws []cluster.WorkloadRef, reason string, t cluster.Timings, now time.Time) {
+// startSelfFence stops ws by force within S, in the background. ordered:
+// the cluster declared this node dead or isolated (a clean finish lets an
+// isolated node rejoin on the same boot).
+func (a *Agent) startSelfFence(ctx context.Context, self cluster.Node, ws []cluster.WorkloadRef, reason string, t cluster.Timings, now time.Time, ordered bool) {
 	a.mu.Lock()
 	if a.fencing {
 		a.mu.Unlock()
@@ -338,6 +618,10 @@ func (a *Agent) startSelfFence(ctx context.Context, self cluster.Node, ws []clus
 	}
 	a.fencing, a.fenceDone, a.fenceErr = true, false, nil
 	a.fenceStart, a.lastFence, a.reason, a.clean = now, now, reason, false
+	a.fenceEpoch = 0
+	if ordered {
+		a.fenceEpoch = self.FenceEpoch
+	}
 	a.mu.Unlock()
 	a.setState(cluster.FenceSelfFencing, "")
 	a.log().Warn("fence: self-fencing", "reason", reason, "workloads", len(ws))
@@ -352,6 +636,9 @@ func (a *Agent) startSelfFence(ctx context.Context, self cluster.Node, ws []clus
 		a.fencing = false
 		a.fenceDone = err == nil
 		a.fenceErr = err
+		if err == nil && a.fenceEpoch > 0 {
+			a.cleanEpoch = a.fenceEpoch
+		}
 		a.mu.Unlock()
 		if err != nil {
 			a.log().Error("fence: HA workloads didn't stop; the watchdog will reset this server", "err", err)

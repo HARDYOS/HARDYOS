@@ -104,6 +104,10 @@ type Announcer struct {
 	}
 	// Interval is how often it checks (default 1 minute).
 	Interval time.Duration
+	// BootID is this boot's id: recorded in the state at every hardyd
+	// start (and whenever it differs), so a fence remembers the boot it
+	// fenced and a rejoin from the same boot is refused (decision 389).
+	BootID func() string
 }
 
 // Compute reads this node's hardware from hardyd-priv.
@@ -125,7 +129,21 @@ func (a *Announcer) Compute(ctx context.Context, prev *cluster.ComputeInfo) (*cl
 	}
 	ci := &cluster.ComputeInfo{CPUs: caps.CPUs, MemoryMB: caps.MemoryMB, KVM: caps.KVM, Watchdog: wd.Kind}
 	if prev != nil {
-		ci.CPUModel = prev.CPUModel // the baseline job's to set
+		ci.CPUModel = prev.CPUModel
+	}
+	// This server's exact CPU (host model, vendor and features), which a
+	// host-passthrough VM needs on any server it moves to.
+	var host struct {
+		HostModel string `json:"hostModel"`
+		Signature string `json:"signature"`
+	}
+	if err := a.Priv.Call(ctx, priv.OpVMsCPUBaseline, nil, &host); err == nil {
+		switch {
+		case host.Signature != "":
+			ci.CPUModel = host.Signature
+		case host.HostModel != "":
+			ci.CPUModel = host.HostModel
+		}
 	}
 	if caps.Bridge != "" {
 		// The home network's bridge carries every VLAN the VMs tag.
@@ -145,10 +163,19 @@ func (a *Announcer) Announce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if sameCompute(self.Compute, ci) {
+	body := state.MemberUpdateBody{}
+	if a.BootID != nil {
+		if b := a.BootID(); b != "" && b != self.BootID {
+			body.BootID = b
+		}
+	}
+	if !sameCompute(self.Compute, ci) {
+		body.Compute = ci
+	}
+	if body.Compute == nil && body.BootID == "" {
 		return nil
 	}
-	_, err = a.Cluster.Propose(ctx, cluster.CmdMemberUpdate, state.MemberUpdateBody{Compute: ci},
+	_, err = a.Cluster.Propose(ctx, cluster.CmdMemberUpdate, body,
 		cluster.Actor{Kind: "system", Name: "HardyOS", Via: self.ID})
 	return err
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/vms"
@@ -24,13 +25,34 @@ const (
 	OpVMsMigrateCheck  = "vms.migrate.check"
 	OpVMsMigrateEnd    = "vms.migrate.end"
 	OpVMsCPUBaseline   = "vms.cpu.baseline"
+	// OpVMsMigrateHealth reports whether polkitd runs (every libvirt call
+	// needs it once the access driver is on).
+	OpVMsMigrateHealth = "vms.migrate.health"
+	// OpVMsClusterHash is the hash of a cluster VM's approved settings.
+	OpVMsClusterHash = "vms.cluster.hash"
 )
 
 // RegisterVMsMigrate adds the live migration operations.
 func RegisterVMsMigrate(s *Server, m *vms.Manager) {
-	s.Handle(OpVMsMigrateSetup, func(ctx context.Context, _ json.RawMessage) (any, error) {
-		return vmDone(vmsErr(m.MigrateSetup(ctx)))
+	s.Handle(OpVMsMigrateSetup, func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var a vms.MigrateSetupArgs
+		if len(raw) > 0 && string(raw) != "null" {
+			if err := json.Unmarshal(raw, &a); err != nil {
+				return nil, Errorf(CodeBadArgs, "bad arguments: %v", err)
+			}
+		}
+		return vmDone(vmsErr(m.MigrateSetup(ctx, a)))
 	})
+	s.Handle(OpVMsMigrateHealth, func(ctx context.Context, _ json.RawMessage) (any, error) {
+		if err := m.PolkitHealth(ctx); err != nil {
+			return map[string]any{"ok": false, "problem": err.Error()}, nil
+		}
+		return map[string]any{"ok": true}, nil
+	})
+	s.Handle(OpVMsClusterHash, typed(func(ctx context.Context, a VMRef) (any, error) {
+		h, err := m.ClusterHash(ctx, a.ID)
+		return SpecHashResult{Hash: h}, migrateErr(err)
+	}))
 	s.Handle(OpVMsMigrateAccept, typed(func(ctx context.Context, a vms.MigrateAcceptArgs) (any, error) {
 		f, err := m.MigrateAccept(ctx, a)
 		if err != nil {
@@ -60,8 +82,13 @@ func RegisterVMsMigrate(s *Server, m *vms.Manager) {
 	})
 }
 
+// SpecHashResult is a cluster workload's approved-settings hash.
+type SpecHashResult struct {
+	Hash string `json:"hash"`
+}
+
 func migrateErr(err error) error {
-	if errors.Is(err, vms.ErrGeneration) || errors.Is(err, vms.ErrClusterPlaced) {
+	if errors.Is(err, vms.ErrGeneration) || errors.Is(err, vms.ErrClusterPlaced) || errors.Is(err, vms.ErrSpecChanged) {
 		return Errorf(CodeBadArgs, "%v", err)
 	}
 	return vmsErr(err)
@@ -79,30 +106,54 @@ func MigrateOpTimeouts() map[string]time.Duration {
 // <subop> <extra>, the domain XML on stdin.
 const LibvirtHookArg = "libvirt-hook"
 
-// LibvirtHookMain answers libvirt's qemu hook. Only the "migrate"
-// operation (an incoming migration, before QEMU starts) is checked: the
-// XML must match what root admitted; any other operation passes. Exit 0
-// accepts, anything else refuses.
+// hookChecked are the qemu hook operations root checks: an incoming
+// migration and every start of QEMU (decision 385).
+var hookChecked = map[string]bool{vms.HookMigrate: true, vms.HookPrepare: true, vms.HookStart: true, vms.HookRestore: true}
+
+// LibvirtHookMain answers libvirt's qemu hook. An incoming migration
+// ("migrate") and every start of QEMU ("prepare", "start", "restore") are
+// checked by root: a cluster VM, or one with an open admission, must match
+// root's own rendering; other VMs pass. When hardyd-priv can't be asked,
+// a start is refused only if the XML names cluster storage or the VM has
+// an open admission (so this server's own VMs still start at boot). Exit
+// 0 accepts, anything else refuses.
 func LibvirtHookMain(args []string, stdin io.Reader, stderr io.Writer, socket string) int {
+	return libvirtHook(args, stdin, stderr, socket, "/")
+}
+
+func libvirtHook(args []string, stdin io.Reader, stderr io.Writer, socket, root string) int {
 	if len(args) < 2 {
 		return 0
 	}
 	vm, op := args[0], args[1]
-	if op != "migrate" {
+	if !hookChecked[op] {
 		return 0
 	}
 	b, err := io.ReadAll(io.LimitReader(stdin, 1<<20+1))
 	if err != nil || len(b) > 1<<20 {
-		fmt.Fprintln(stderr, "HardyOS: the incoming domain XML couldn't be read")
+		fmt.Fprintln(stderr, "HardyOS: the domain XML couldn't be read")
 		return 1
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := NewClient(socket).Call(ctx, OpVMsMigrateCheck, vms.MigrateCheckArgs{VM: vm, XML: string(b)}, nil); err != nil {
-		fmt.Fprintf(stderr, "HardyOS refused the incoming migration of %s: %v\n", vm, err)
-		return 1
+	err = NewClient(socket).Call(ctx, OpVMsMigrateCheck, vms.MigrateCheckArgs{VM: vm, XML: string(b), Op: op}, nil)
+	if err == nil {
+		return 0
 	}
-	return 0
+	var pe *Error
+	if !errors.As(err, &pe) || pe.Code == CodeUnavailable {
+		// hardyd-priv didn't answer: decide from what root can see alone.
+		admitted := false
+		if vms.ValidID(vm) == nil {
+			_, serr := os.Stat(filepath.Join(root, vms.MigrateAdmittedDir, vm))
+			admitted = serr == nil
+		}
+		if op != vms.HookMigrate && !admitted && !vms.LooksClustered(b) {
+			return 0
+		}
+	}
+	fmt.Fprintf(stderr, "HardyOS refused to start %s (%s): %v\n", vm, op, err)
+	return 1
 }
 
 // RunLibvirtHook is LibvirtHookMain with the process's stdin and stderr.

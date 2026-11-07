@@ -52,7 +52,7 @@ var vm = cluster.WorkloadRef{Kind: cluster.KindVM, ID: "web"}
 
 func addVM(t *testing.T, s *cluster.Snapshot, ha bool) {
 	t.Helper()
-	if err := apply(s, cluster.CmdWorkloadAdd, "c1", WorkloadAdd{Workload: vm, Name: "web", Owner: "c1", Requested: cluster.RequestRunning, HA: cluster.HAPolicy{Enabled: ha}}); err != nil {
+	if err := apply(s, cluster.CmdWorkloadAdd, "c1", WorkloadAdd{SpecHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Workload: vm, Name: "web", Owner: "c1", Requested: cluster.RequestRunning, HA: cluster.HAPolicy{Enabled: ha}}); err != nil {
 		t.Fatal(err)
 	}
 	grantApplied(s, vm)
@@ -63,7 +63,7 @@ func addVM(t *testing.T, s *cluster.Snapshot, ha bool) {
 
 func TestWorkloadAddGrantsOwnerAtGenerationOne(t *testing.T) {
 	s := snap()
-	if err := apply(s, cluster.CmdWorkloadAdd, "c1", WorkloadAdd{Workload: vm, Name: "web", Owner: "nas"}); err == nil {
+	if err := apply(s, cluster.CmdWorkloadAdd, "c1", WorkloadAdd{SpecHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Workload: vm, Name: "web", Owner: "nas"}); err == nil {
 		t.Fatal("placed on the storage node")
 	}
 	addVM(t, s, true)
@@ -71,7 +71,7 @@ func TestWorkloadAddGrantsOwnerAtGenerationOne(t *testing.T) {
 	if p.Generation != 1 || g.Generation != 1 || g.Mode != cluster.GrantExclusive || !slices.Equal(g.Nodes, []cluster.NodeID{"c1"}) {
 		t.Fatalf("%+v %+v", p, g)
 	}
-	if err := apply(s, cluster.CmdWorkloadAdd, "c1", WorkloadAdd{Workload: vm, Name: "web", Owner: "c2"}); err == nil {
+	if err := apply(s, cluster.CmdWorkloadAdd, "c1", WorkloadAdd{SpecHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Workload: vm, Name: "web", Owner: "c2"}); err == nil {
 		t.Fatal("added twice")
 	}
 }
@@ -232,7 +232,7 @@ func TestLiveMigrationRefusals(t *testing.T) {
 	}
 	s.Placements[vm].Pinned = false
 	app := cluster.WorkloadRef{Kind: cluster.KindApp, ID: "wiki"}
-	_ = apply(s, cluster.CmdWorkloadAdd, "c1", WorkloadAdd{Workload: app, Name: "wiki", Owner: "c1"})
+	_ = apply(s, cluster.CmdWorkloadAdd, "c1", WorkloadAdd{SpecHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Workload: app, Name: "wiki", Owner: "c1"})
 	if err := apply(s, cluster.CmdMoveBegin, "c3", MoveBegin{Workload: app, Generation: 1, To: "c2", Mode: cluster.MoveLive}); err == nil {
 		t.Fatal("an app migrated live")
 	}
@@ -318,7 +318,7 @@ func TestNeverTwoRunners(t *testing.T) {
 	for round := 0; round < 300; round++ {
 		s := snap()
 		for _, r := range refs {
-			_ = apply(s, cluster.CmdWorkloadAdd, "c1", WorkloadAdd{Workload: r, Name: r.ID, Owner: nodes[rng.Intn(3)], Requested: cluster.RequestRunning, HA: cluster.HAPolicy{Enabled: rng.Intn(2) == 0}})
+			_ = apply(s, cluster.CmdWorkloadAdd, "c1", WorkloadAdd{SpecHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Workload: r, Name: r.ID, Owner: nodes[rng.Intn(3)], Requested: cluster.RequestRunning, HA: cluster.HAPolicy{Enabled: rng.Intn(2) == 0}})
 		}
 		for step := 0; step < 60; step++ {
 			r := refs[rng.Intn(len(refs))]

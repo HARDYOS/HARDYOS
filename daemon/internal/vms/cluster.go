@@ -9,6 +9,8 @@ package vms
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
@@ -134,6 +136,10 @@ func clusterUpdate(st *stored, prev, next *Spec) error {
 type ClusterStartArgs struct {
 	ID         string `json:"id"`
 	Generation uint64 `json:"generation"`
+	// SpecHash is the approved settings' hash in the replicated placement
+	// (decision 386): root starts the VM only when the stored spec on
+	// cluster storage hashes the same.
+	SpecHash string `json:"specHash"`
 }
 
 // ClusterStart starts a cluster VM, only when its storage is attached here
@@ -150,6 +156,10 @@ func (m *Manager) ClusterStart(ctx context.Context, a ClusterStartArgs) (*Result
 	}
 	if a.Generation == 0 || st.cluster.Generation != a.Generation {
 		return nil, fmt.Errorf("%w (attached %d, asked %d)", ErrGeneration, st.cluster.Generation, a.Generation)
+	}
+	if err := checkSpecHash(&st.spec, a.SpecHash); err != nil {
+		m.log().Warn("vms: refused to start a cluster VM whose settings changed", "id", a.ID, "err", err)
+		return nil, err
 	}
 	return m.startStored(ctx, st)
 }
@@ -169,9 +179,10 @@ func (m *Manager) ClusterStop(ctx context.Context, a ClusterStopArgs) (*VM, erro
 		return nil, ErrNotFound
 	}
 	st, err := m.findCluster(ctx, a.ID)
-	if errors.Is(err, ErrNotFound) && a.Force {
-		// Storage already gone (fenced, detached): stop the domain anyway.
-		if _, err := m.virsh(ctx, "destroy", a.ID); err != nil && !notRunning(err) {
+	if err != nil && a.Force {
+		// Storage already gone (fenced, detached) or unreadable: stop the
+		// domain anyway, by killing QEMU if libvirt can't.
+		if err := m.forceDestroy(ctx, a.ID); err != nil {
 			return nil, err
 		}
 		if a.Undefine {
@@ -184,6 +195,14 @@ func (m *Manager) ClusterStop(ctx context.Context, a ClusterStopArgs) (*VM, erro
 		return nil, err
 	}
 	v, err := m.Stop(ctx, StopArgs{ID: st.spec.ID, Force: a.Force})
+	if err != nil && a.Force {
+		// libvirt didn't stop it (polkitd down, libvirtd hung): QEMU goes.
+		if kerr := m.forceDestroy(ctx, a.ID); kerr != nil {
+			return nil, fmt.Errorf("%v; %w", err, kerr)
+		}
+		m.setRunning(a.ID, false)
+		v, err = &VM{Spec: st.spec, State: "stopped", Backend: BackendCluster}, nil
+	}
 	if err == nil && a.Force && a.Undefine {
 		m.undefine(ctx, a.ID)
 	}
@@ -256,6 +275,11 @@ type HostCPU struct {
 	HostModel string `json:"hostModel"`
 	// Usable are the named models this server can run as they are.
 	Usable []string `json:"usable"`
+	// Signature identifies this exact CPU for host-passthrough VMs: the
+	// host model, its vendor and the features libvirt adds or removes
+	// ("Skylake-Client-IBRS/Intel/<hash>"). Two servers with the same
+	// signature run a host-passthrough VM alike (decision 393).
+	Signature string `json:"signature,omitempty"`
 }
 
 type domCapsXML struct {
@@ -268,6 +292,11 @@ type domCapsXML struct {
 				Usable string `xml:"usable,attr"`
 				Name   string `xml:",chardata"`
 			} `xml:"model"`
+			Vendor   string `xml:"vendor"`
+			Features []struct {
+				Policy string `xml:"policy,attr"`
+				Name   string `xml:"name,attr"`
+			} `xml:"feature"`
 		} `xml:"mode"`
 	} `xml:"cpu"`
 }
@@ -291,6 +320,13 @@ func ParseDomainCapabilities(b []byte) (*HostCPU, error) {
 			switch mode.Name {
 			case "host-model":
 				h.HostModel = name
+				var fs []string
+				for _, f := range mode.Features {
+					fs = append(fs, f.Policy+":"+f.Name)
+				}
+				slices.Sort(fs)
+				sum := sha256.Sum256([]byte(strings.Join(fs, ",")))
+				h.Signature = name + "/" + strings.TrimSpace(mode.Vendor) + "/" + hex.EncodeToString(sum[:6])
 			case "custom":
 				if mo.Usable == "yes" {
 					h.Usable = append(h.Usable, name)

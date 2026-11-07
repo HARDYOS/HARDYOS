@@ -83,11 +83,15 @@ type fakePriv struct {
 	node cluster.NodeID
 	dir  string
 
-	mu       sync.Mutex
-	listen   map[string]string // token -> socket path
-	failSend bool
-	relayed  string
-	devOK    bool
+	mu        sync.Mutex
+	listen    map[string]string // token -> socket path
+	failSend  bool
+	relayed   string
+	destroyed []string
+	// sendLands: the migration arrives although send reports a failure.
+	sendLands bool
+	leaveCopy bool
+	devOK     bool
 }
 
 func (f *fakePriv) Call(ctx context.Context, op string, args, out any) error {
@@ -103,6 +107,15 @@ func (f *fakePriv) Call(ctx context.Context, op string, args, out any) error {
 		}
 		return remarshal(res, out)
 	case priv.OpVMsMigrateEnd:
+		return nil
+	case priv.OpVMsClusterStop:
+		// Root destroys the domain, whatever the grant says.
+		var a vms.ClusterStopArgs
+		_ = json.Unmarshal(b, &a)
+		f.mu.Lock()
+		f.destroyed = append(f.destroyed, a.ID)
+		f.mu.Unlock()
+		f.w.Nodes[f.node].Kill(cluster.WorkloadRef{Kind: cluster.KindVM, ID: a.ID})
 		return nil
 	case priv.OpVMsGet:
 		var v vms.VM
@@ -133,10 +146,24 @@ func (f *fakePriv) Call(ctx context.Context, op string, args, out any) error {
 		f.mu.Lock()
 		f.relayed = strings.TrimSpace(line)
 		f.mu.Unlock()
+		ref := cluster.WorkloadRef{Kind: cluster.KindVM, ID: a.VM}
+		f.mu.Lock()
+		lands := f.sendLands
+		f.mu.Unlock()
 		if fail {
+			if lands {
+				// The memory arrived and the source stopped, but libvirt's
+				// confirmation got lost: send reports a failure.
+				f.w.Nodes[cluster.NodeID(a.To)].StartProcess(ref, a.Generation)
+				f.w.Nodes[f.node].Kill(ref)
+				return errors.New("migration failed: connection reset during the confirm phase")
+			}
+			if f.leaveCopy {
+				// The destination's paused copy is left behind.
+				f.w.Nodes[cluster.NodeID(a.To)].StartProcess(ref, a.Generation)
+			}
 			return errors.New("migration failed: destination ran out of memory")
 		}
-		ref := cluster.WorkloadRef{Kind: cluster.KindVM, ID: a.VM}
 		f.w.Nodes[cluster.NodeID(a.To)].StartProcess(ref, a.Generation)
 		f.w.Nodes[f.node].Kill(ref)
 		return nil
@@ -193,6 +220,18 @@ type env struct {
 	w     *clustertest.World
 	mover *moves.Mover
 	privs map[cluster.NodeID]*fakePriv
+	nodes map[cluster.NodeID]*moves.Node
+}
+
+// pipeStream is the cluster port's hardyos-migrate/1 in memory: the
+// destination serves the dialled connection as from (part A names the
+// member that dialled).
+func pipeStream(nodes map[cluster.NodeID]*moves.Node, from cluster.NodeID) moves.ALPNStream {
+	return moves.ALPNStream{Dial: func(_ context.Context, to cluster.NodeID) (net.Conn, error) {
+		a, b := net.Pipe()
+		go nodes[to].ServeMigrate(b, from)
+		return a, nil
+	}}
 }
 
 func newEnv(t *testing.T) *env {
@@ -200,6 +239,7 @@ func newEnv(t *testing.T) *env {
 	w.SetLeader("c3")
 	e := &env{w: w, privs: map[cluster.NodeID]*fakePriv{}}
 	servers := map[cluster.NodeID]*httptest.Server{}
+	nodes := map[cluster.NodeID]*moves.Node{}
 	dir, err := os.MkdirTemp("", "p8c")
 	if err != nil {
 		t.Fatal(err)
@@ -210,14 +250,18 @@ func newEnv(t *testing.T) *env {
 		fp := &fakePriv{t: t, w: w, node: id, dir: dir, listen: map[string]string{}, devOK: true}
 		e.privs[id] = fp
 		m := mux{http.NewServeMux()}
+		from := id
 		node := &moves.Node{Cluster: n, Reconciler: n.Rec, Attacher: n.Rec.Attacher, Runtimes: n.Rec.Runtimes, Priv: fp,
-			Stream:    moves.PeerStream{Peers: &peers{from: id, servers: servers}},
-			GrantWait: 2 * time.Second, Poll: 5 * time.Millisecond,
+			Stream:    pipeStream(nodes, from),
+			Peers:     &peers{from: id, servers: servers},
+			GrantWait: 2 * time.Second, Poll: 5 * time.Millisecond, AuthorizeWait: 20 * time.Millisecond,
 			Caller: func(r *http.Request) (cluster.Node, bool) {
 				c := r.Header.Get("X-Test-Caller")
 				return cluster.Node{ID: cluster.NodeID(c)}, c != ""
 			}}
 		node.Register(m)
+		nodes[id] = node
+		e.nodes = nodes
 		srv := httptest.NewServer(m)
 		t.Cleanup(srv.Close)
 		servers[id] = srv
@@ -342,7 +386,7 @@ func TestPassthroughVMMoves(t *testing.T) {
 	e := newEnv(t)
 	ref := cluster.WorkloadRef{Kind: cluster.KindVM, ID: "gaming"}
 	e.w.Requirements = map[cluster.WorkloadRef]*cluster.Requirements{ref: {MemoryMB: 2048, Devices: []string{"gpu:0000:01:00.0"}}}
-	if err := e.w.Propose("c1", cluster.CmdWorkloadAdd, state.WorkloadAdd{Workload: ref, Name: "Gaming", Owner: "c1", Requested: cluster.RequestRunning, Pinned: true}); err != nil {
+	if err := e.w.Propose("c1", cluster.CmdWorkloadAdd, state.WorkloadAdd{SpecHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Workload: ref, Name: "Gaming", Owner: "c1", Requested: cluster.RequestRunning, Pinned: true}); err != nil {
 		t.Fatal(err)
 	}
 	e.w.Run(2 * time.Second)
@@ -396,7 +440,7 @@ func TestDrain(t *testing.T) {
 	a := e.w.AddVM("a", "c1", true, 90)
 	b := e.w.AddVM("b", "c1", false, 0)
 	pinned := cluster.WorkloadRef{Kind: cluster.KindVM, ID: "gpu"}
-	_ = e.w.Propose("c1", cluster.CmdWorkloadAdd, state.WorkloadAdd{Workload: pinned, Name: "gpu", Owner: "c1", Requested: cluster.RequestRunning, Pinned: true})
+	_ = e.w.Propose("c1", cluster.CmdWorkloadAdd, state.WorkloadAdd{SpecHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Workload: pinned, Name: "gpu", Owner: "c1", Requested: cluster.RequestRunning, Pinned: true})
 	e.w.Run(2 * time.Second)
 	res, err := e.mover.Drain(context.Background(), "c1", false, actor)
 	if err == nil || !strings.Contains(err.Error(), "pinned") {
@@ -426,8 +470,6 @@ func TestStreamRefusesOtherCallers(t *testing.T) {
 	if err := e.w.Propose("c3", cluster.CmdMoveBegin, state.MoveBegin{Workload: vm, Generation: 1, To: "c2", Mode: cluster.MoveLive}); err != nil {
 		t.Fatal(err)
 	}
-	p := &peers{from: "c3", servers: nil}
-	_ = p
 	token := strings.Repeat("cd", 16)
 	c3 := e.mover.Peers
 	var res moves.StepResult
@@ -435,7 +477,15 @@ func TestStreamRefusesOtherCallers(t *testing.T) {
 		moves.AcceptRequest{VM: "web", From: "c1", Token: token, Generation: 2}, &res); err != nil || !res.OK {
 		t.Fatalf("accept: %v %+v", err, res)
 	}
-	if _, err := (moves.PeerStream{Peers: c3}).DialMigrate(context.Background(), "c2", token); err == nil {
+	if _, err := pipeStream(e.nodes, "c3").DialMigrate(context.Background(), "c2", token); err == nil {
 		t.Fatal("a node other than the source opened the migration stream")
+	}
+	c, err := pipeStream(e.nodes, "c1").DialMigrate(context.Background(), "c2", token)
+	if err != nil {
+		t.Fatalf("the source couldn't open its stream: %v", err)
+	}
+	c.Close()
+	if _, err := pipeStream(e.nodes, "c1").DialMigrate(context.Background(), "c2", token); err == nil {
+		t.Fatal("an admission's stream was opened twice")
 	}
 }

@@ -481,9 +481,13 @@ committed memory. The reasons a node was skipped are returned for the UI.
   directly over the storage network (`--migrateuri tcp://<B storage
   addr>`). B's libvirt `qemu` hook (`migrate` operation) accepts the incoming
   domain only if its XML equals B's own rendering of the VM's stored spec
-  (`vms.migrate.check`). On success: `placement.set{owner=B}`, the grant
-  shrinks to B, A detaches. On failure: the VM keeps running on A; B's grant is
-  removed; B detaches.
+  (`vms.migrate.check`); the same check runs for every start of QEMU of a
+  cluster VM (`prepare`/`start`/`restore`, decision 385). On success:
+  `placement.set{owner=B}`, the grant shrinks to B, A detaches. On failure
+  both nodes' root is asked what runs (`moves/migrate/state`): B's copy is
+  destroyed by B's root (`moves/migrate/abort`) before the grant collapses
+  onto A, unless only B runs the VM (decision 388). Every step is accepted
+  only from the member that began the move or the leader (decision 387).
 - **Drain a node**: live-migrate what can be, offline-move the rest (HA ones
   first by priority), stop non-HA workloads that can't move (asking first).
   Used before maintenance and leaving.
@@ -679,9 +683,11 @@ storage grant for that generation is applied.
   - compute node (B): `sanclient.status`, `sanclient.iscsi.login` /
     `.logout` / `.rescan`, `sanclient.nfs.mount` / `.umount {force}`,
     `sanclient.multipath.apply`, `sanclient.initiator.set`;
-  - compute node (C): `cluster.watchdog.arm` / `.pet` / `.disarm` / `.expire`,
+  - compute node (C): `cluster.watchdog.arm` / `.pet {validForMs, lease}` /
+    `.disarm` (refused while cluster workloads run) / `.expire` / `.keys`,
     `cluster.selffence {epoch}` (destroy HA domains, kill HA containers, detach),
-    `vms.migrate.accept` / `.send` / `.check`, `vms.cpu.baseline`.
+    `vms.migrate.accept` / `.send` / `.check` / `.health`, `vms.cpu.baseline`,
+    `vms.cluster.hash`, `apps.cluster.hash` (decisions 385-394).
   No operation takes a command line, a path outside the named trees, or XML.
 
 ### 8.1 Storage: what holds today, and member isolation (pending)

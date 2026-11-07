@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
@@ -22,6 +24,7 @@ import (
 type Cluster interface {
 	Self() (cluster.Node, error)
 	State() cluster.State
+	Leader() (cluster.NodeID, bool)
 	Health(ctx context.Context) ([]cluster.Health, error)
 	Propose(ctx context.Context, t cluster.CommandType, body any, actor cluster.Actor) (uint64, error)
 	WaitApplied(ctx context.Context, index uint64) error
@@ -45,6 +48,11 @@ type Mover struct {
 	HoldFor time.Duration
 	Log     *slog.Logger
 	Now     func() time.Time
+
+	// applied is the highest log index this mover's proposals reached:
+	// every step names it, and the node waits until it has applied it
+	// (so it sees the move.begin that lets this node drive the step).
+	applied atomic.Uint64
 }
 
 var _ cluster.Mover = (*Mover)(nil)
@@ -89,12 +97,26 @@ func (m *Mover) propose(ctx context.Context, t cluster.CommandType, body any, ac
 	if err != nil {
 		return err
 	}
-	return m.Cluster.WaitApplied(ctx, idx)
+	if err := m.Cluster.WaitApplied(ctx, idx); err != nil {
+		return err
+	}
+	for {
+		cur := m.applied.Load()
+		if idx <= cur || m.applied.CompareAndSwap(cur, idx) {
+			return nil
+		}
+	}
+}
+
+// stepPath is a step's peer path with the log index the node must have
+// applied first.
+func (m *Mover) stepPath(path string) string {
+	return cluster.PeerPathPrefix + path + "?idx=" + strconv.FormatUint(m.applied.Load(), 10)
 }
 
 func (m *Mover) call(ctx context.Context, node cluster.NodeID, path string, in any) error {
 	var res StepResult
-	if err := m.Peers.Call(ctx, node, http.MethodPost, cluster.PeerPathPrefix+path, in, &res); err != nil {
+	if err := m.Peers.Call(ctx, node, http.MethodPost, m.stepPath(path), in, &res); err != nil {
 		return err
 	}
 	if !res.OK {
@@ -251,23 +273,8 @@ func (m *Mover) hold(ctx context.Context, w cluster.WorkloadRef, nodes ...cluste
 func (m *Mover) offline(ctx context.Context, p *cluster.Placement, to cluster.NodeID, req *cluster.Requirements, devs json.RawMessage, pinned bool, actor cluster.Actor, o Options) (*cluster.MoveResult, error) {
 	from, w, gen := p.Owner, p.Workload, p.Generation
 	wasRunning := p.Requested == cluster.RequestRunning
-	m.progress(o, 5, "Getting "+string(to)+" ready")
-	prep := PrepareRequest{Workload: w, Mode: cluster.MoveOffline, Images: req.Images}
-	if pinned {
-		prep.Devices = devs
-	}
-	if err := m.call(ctx, to, PathPrepare, prep); err != nil {
-		return nil, fmt.Errorf("%s isn't ready for %s: %w", to, p.Name, err)
-	}
-	var pub json.RawMessage
-	if w.Kind == cluster.KindApp {
-		var pc PublishConfig
-		if err := m.Peers.Call(ctx, from, http.MethodGet, cluster.PeerPathPrefix+PathPublishExport+"?app="+url.QueryEscape(w.ID), nil, &pc); err == nil {
-			pub = pc.Config
-		}
-	}
-	release := m.hold(ctx, w, from, to)
-	defer release()
+	// The move is in the log first: every step on the two servers is
+	// accepted only from the member whose move.begin this is.
 	if err := m.propose(ctx, cluster.CmdMoveBegin, state.MoveBegin{Workload: w, Generation: gen, To: to, Mode: cluster.MoveOffline}, actor); err != nil {
 		return nil, err
 	}
@@ -277,6 +284,16 @@ func (m *Mover) offline(ctx context.Context, p *cluster.Placement, to cluster.No
 		_ = m.propose(context.WithoutCancel(ctx), cluster.CmdMoveEnd, state.MoveEnd{Workload: w, Generation: gen, OK: false, Problem: err.Error()}, actor)
 		return nil, err
 	}
+	m.progress(o, 5, "Getting "+string(to)+" ready")
+	prep := PrepareRequest{Workload: w, Mode: cluster.MoveOffline, Images: req.Images}
+	if pinned {
+		prep.Devices = devs
+	}
+	if err := m.call(ctx, to, PathPrepare, prep); err != nil {
+		return fail(fmt.Errorf("%s isn't ready for %s: %w", to, p.Name, err))
+	}
+	release := m.hold(ctx, w, from, to)
+	defer release()
 	started := m.now()
 	m.progress(o, 15, "Stopping "+p.Name+" on "+string(from))
 	if err := m.call(ctx, from, PathStop, StepRequest{Workload: w, Generation: gen}); err != nil {
@@ -307,8 +324,10 @@ func (m *Mover) offline(ctx context.Context, p *cluster.Placement, to cluster.No
 		m.endAfterHandover(ctx, w, newGen, actor, "the storage server hasn't given "+string(to)+" the storage yet")
 		return nil, fmt.Errorf("it's now placed on %s, but the storage server hasn't granted its storage there yet (%v); it starts once it does", to, err)
 	}
-	if pub != nil {
-		if err := m.call(ctx, to, PathPublishImport, PublishConfig{App: w.ID, Config: pub}); err != nil {
+	if w.Kind == cluster.KindApp {
+		// The destination fetched the publishing settings from the source
+		// while the move was in progress; they take effect there now.
+		if err := m.call(ctx, to, PathPublishImport, PublishConfig{App: w.ID}); err != nil {
 			m.log().Warn("moves: handing over the app's publishing", "app", w.ID, "err", err)
 		}
 	}
@@ -348,21 +367,19 @@ func (m *Mover) live(ctx context.Context, s *cluster.Snapshot, p *cluster.Placem
 	if !s.StorageSubnet.IsValid() || !s.StorageSubnet.Contains(dest.Addresses.Storage) {
 		return nil, fmt.Errorf("%s's storage address isn't on the cluster's storage network", to)
 	}
-	release := m.hold(ctx, w, from, to)
-	defer release()
 	m.progress(o, 5, "Giving "+string(to)+" the VM's storage as well")
 	if err := m.propose(ctx, cluster.CmdMoveBegin, state.MoveBegin{Workload: w, Generation: gen, To: to, Mode: cluster.MoveLive}, actor); err != nil {
 		return nil, err
 	}
+	release := m.hold(ctx, w, from, to)
+	defer release()
 	mig := gen + 1
 	abort := func(cause error) (*cluster.MoveResult, error) {
-		cctx := context.WithoutCancel(ctx)
-		_ = m.call(cctx, to, PathDetach, StepRequest{Workload: w, Generation: mig, Force: true})
-		err := m.propose(cctx, cluster.CmdPlacementSet, state.PlacementSet{Workload: w, Expected: mig, Owner: from, State: cluster.PlacementRunning, Reason: "migration-failed"}, actor)
+		owner, err := m.ResolveMigration(context.WithoutCancel(ctx), w, mig, from, to, actor, "migration-failed")
 		if err != nil {
-			return nil, fmt.Errorf("%w; ending the migration in the log failed too (the HA coordinator ends it): %v", cause, err)
+			return nil, fmt.Errorf("%w; ending the migration failed too (the HA coordinator ends it once it can ask both servers): %v", cause, err)
 		}
-		return nil, fmt.Errorf("%w (it keeps running on %s)", cause, from)
+		return nil, fmt.Errorf("%w (it runs on %s)", cause, owner)
 	}
 	if _, err := m.waitPlacement(ctx, w, m.grantWait(), func(p *cluster.Placement, g *cluster.Grant) bool {
 		return p.Generation == mig && g != nil && g.Mode == cluster.GrantMigration && g.Applied
@@ -374,6 +391,14 @@ func (m *Mover) live(ctx context.Context, s *cluster.Snapshot, p *cluster.Placem
 			return abort(fmt.Errorf("attaching the VM's storage on %s: %w", n, err))
 		}
 	}
+	// TODO(integration, phase8/fix-storage 151d122, decision 392): open the
+	// destination's QEMU migration port to the source's storage address for
+	// this migration only, before the destination admits it:
+	//   storagesvc.Service.AllowMigration(ctx, from, 0, deadline)
+	// on the destination (root op san.firewall.migration; port 0 = the
+	// whole 49152-49215 range for that source), and RevokeMigration(ctx,
+	// from) at the end and in ResolveMigration's abort below. The e2e fake
+	// root then needs a san.firewall.migration handler.
 	token := NewToken()
 	m.progress(o, 20, "Preparing "+string(to))
 	if err := m.call(ctx, to, PathAccept, AcceptRequest{VM: w.ID, From: from, Token: token, Generation: mig}); err != nil {
@@ -387,6 +412,8 @@ func (m *Mover) live(ctx context.Context, s *cluster.Snapshot, p *cluster.Placem
 	}
 	sendErr := m.call(ctx, from, PathSend, SendRequest{VM: w.ID, To: to, Token: token, Generation: mig, MigrateURI: uri})
 	_ = m.call(context.WithoutCancel(ctx), to, PathEnd, EndRequest{VM: w.ID, Token: token})
+	// TODO(integration, decision 392): RevokeMigration(ctx, from) on the
+	// destination here (see AllowMigration above).
 	if sendErr != nil {
 		return abort(fmt.Errorf("the live migration failed: %w", sendErr))
 	}
@@ -416,7 +443,13 @@ func (m *Mover) startElsewhere(ctx context.Context, s *cluster.Snapshot, p *clus
 	if err != nil {
 		return nil, err
 	}
+	// What the workload needs, as its owner last said (the owner is down).
 	req := cluster.Requirements{}
+	if m.Scheduler != nil && m.Scheduler.Requirements != nil {
+		if r := m.Scheduler.Requirements(p.Workload); r != nil {
+			req = *r
+		}
+	}
 	to := r.To
 	if to == "" {
 		if to, _, err = m.Scheduler.Place(s, health, r.Workload, req, []cluster.NodeID{p.Owner}); err != nil {
@@ -437,6 +470,82 @@ func (m *Mover) startElsewhere(ctx context.Context, s *cluster.Snapshot, p *clus
 	}
 	m.progress(o, 100, "Placed on "+string(to)+"; it starts once the storage server gives it the storage")
 	return &cluster.MoveResult{Workload: p.Workload, From: from, To: to, Mode: cluster.MoveOffline, Generation: gen + 1}, nil
+}
+
+// ResolveMigration ends a live migration that didn't finish cleanly (it
+// failed, or its grant stood too long): it asks root on both servers what
+// runs, and only then collapses the two-node grant onto one of them. The
+// destination's copy is destroyed by its root first when the VM stays on
+// the source; when only the destination runs it (the migration finished
+// but its end wasn't recorded), it stays there. Without an answer from
+// both servers nothing changes (the HA coordinator tries again, or ends it
+// once a node's fence holds). It returns the node the VM is placed on.
+func (m *Mover) ResolveMigration(ctx context.Context, w cluster.WorkloadRef, gen uint64, from, to cluster.NodeID, actor cluster.Actor, reason string) (cluster.NodeID, error) {
+	ask := func(n cluster.NodeID) (StateResult, error) {
+		var res struct {
+			StateResult
+			OK      *bool  `json:"ok,omitempty"`
+			Message string `json:"message,omitempty"`
+		}
+		if err := m.Peers.Call(ctx, n, http.MethodPost, m.stepPath(PathState), StateRequest{VM: w.ID}, &res); err != nil {
+			return StateResult{}, err
+		}
+		if res.OK != nil && !*res.OK {
+			return StateResult{}, errors.New(res.Message)
+		}
+		return res.StateResult, nil
+	}
+	src, err := ask(from)
+	if err != nil {
+		return "", fmt.Errorf("asking %s whether the VM runs there: %w", from, err)
+	}
+	dst, err := ask(to)
+	if err != nil {
+		return "", fmt.Errorf("asking %s whether the VM runs there: %w", to, err)
+	}
+	s := m.Cluster.State().Snapshot()
+	p := s.Placements[w]
+	if p == nil || p.Generation != gen {
+		return "", cluster.ErrStaleGeneration
+	}
+	body := state.PlacementSet{Workload: w, Expected: gen, Reason: reason}
+	if dst.Runs && !src.Runs {
+		// The memory arrived and the source stopped: the destination has
+		// the only copy.
+		body.Owner, body.State = to, cluster.PlacementRunning
+		if dst.Paused {
+			body.Problem = "it is paused on " + string(to) + " after a live migration that didn't finish cleanly"
+		}
+	} else {
+		// The source keeps (or gets back) the VM: the destination's copy
+		// goes first, by its root, whatever the grant says.
+		// TODO(integration, decision 392): RevokeMigration(ctx, from) on the
+		// destination with the abort (phase8/fix-storage's firewall hook).
+		if err := m.call(ctx, to, PathAbort, AbortRequest{VM: w.ID, Generation: gen}); err != nil {
+			return "", fmt.Errorf("destroying the copy on %s: %w", to, err)
+		}
+		if again, err := ask(to); err != nil || again.Runs {
+			return "", fmt.Errorf("the copy on %s is still there", to)
+		}
+		body.Owner = from
+		switch {
+		case src.Runs:
+			body.State = cluster.PlacementRunning
+		case p.Requested == cluster.RequestRunning:
+			body.State = cluster.PlacementStarting
+		default:
+			body.State = cluster.PlacementStopped
+		}
+	}
+	if err := m.propose(ctx, cluster.CmdPlacementSet, body, actor); err != nil {
+		return "", err
+	}
+	other := from
+	if body.Owner == from {
+		other = to
+	}
+	_ = m.call(ctx, other, PathDetach, StepRequest{Workload: w, Generation: gen + 1, Force: true})
+	return body.Owner, nil
 }
 
 func ownerFencedConfirmed(s *cluster.Snapshot, n cluster.NodeID) bool {

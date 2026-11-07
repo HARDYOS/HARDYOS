@@ -1,0 +1,24 @@
+[Unit]
+Description=HardyOS: load the server's hardware watchdog driver (cluster fencing)
+Documentation=file:///usr/share/doc/hardyos/cluster.md
+# Debian blacklists every watchdog driver (/lib/modprobe.d/blacklist_linux_*.conf)
+# so that none loads by alias, and systemd-modules-load honours that
+# blacklist, so a modules-load.d entry wouldn't load them. modprobe named
+# explicitly does. Loading a driver doesn't start the watchdog: only
+# hardyd-priv opens /dev/watchdog0, and only on a cluster compute node
+# running HA workloads (decision 391).
+DefaultDependencies=no
+After=systemd-modules-load.service
+Before=hardyd-priv.service
+ConditionVirtualization=!container
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The ACPI watchdog table, Intel's TCO, AMD's SP5100 TCO, QEMU's i6300esb and
+# the BMC's IPMI watchdog. Drivers for hardware the server doesn't have
+# fail to load; that is fine. softdog is never loaded here.
+ExecStart=/bin/sh -c 'for m in wdat_wdt iTCO_wdt sp5100_tco i6300esb ipmi_watchdog; do /sbin/modprobe -q "$m" || true; done'
+
+[Install]
+WantedBy=multi-user.target

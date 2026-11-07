@@ -38,10 +38,18 @@ type Reconciler struct {
 	Cluster  Cluster
 	Attacher cluster.StorageAttacher
 	Runtimes []cluster.Runtime
-	// BootID is this boot's id (/proc/sys/kernel/random/boot_id).
+	// BootID is this boot's id (/proc/sys/kernel/random/boot_id). Nothing
+	// starts here until the state records it for this node (member.update
+	// at every hardyd start), so a fence always knows this boot.
 	BootID func() string
-	Now    func() time.Time
-	Log    *slog.Logger
+	// FenceReady says whether the fence agent has armed the watchdog: an
+	// HA workload starts only then (nil: always).
+	FenceReady func() bool
+	// CleanFence says whether the fence agent obeyed the node's fence of
+	// an epoch itself (node.rejoin's Clean; nil: never).
+	CleanFence func(epoch uint64) bool
+	Now        func() time.Time
+	Log        *slog.Logger
 
 	mu        sync.Mutex
 	busy      map[cluster.WorkloadRef]int
@@ -198,6 +206,15 @@ func (r *Reconciler) adoptable(s *cluster.Snapshot, self cluster.NodeID, w clust
 	return ok && mig+1 == p.Generation && (local == mig || local+1 == mig)
 }
 
+// migratingSource: w runs here under the generation just before a live
+// migration's (move.begin raised it) and this node is the migration's
+// source: the VM keeps running while the mover's hold is on its way.
+func migratingSource(s *cluster.Snapshot, self cluster.NodeID, w cluster.WorkloadRef, local uint64) bool {
+	p, g := s.Placements[w], s.Grants[w]
+	return p != nil && g != nil && g.Mode == cluster.GrantMigration && p.Owner == self &&
+		p.State == cluster.PlacementMigrating && local+1 == p.Generation && slices.Contains(g.Nodes, self)
+}
+
 // Step runs one round.
 func (r *Reconciler) Step(ctx context.Context) {
 	r.mu.Lock()
@@ -234,7 +251,7 @@ func (r *Reconciler) Step(ctx context.Context) {
 			running[w] = st
 			continue
 		}
-		allowed := !fenced && st.Problem == "" && state.MayRun(s, self.ID, w, st.Generation) == nil
+		allowed := !fenced && st.Problem == "" && (state.MayRun(s, self.ID, w, st.Generation) == nil || migratingSource(s, self.ID, w, st.Generation))
 		if !allowed && !fenced && st.Problem == "" && r.adoptable(s, self.ID, w, st.Generation) {
 			if r.adopt(ctx, s, self.ID, w) == nil {
 				st.Generation = s.Placements[w].Generation
@@ -263,6 +280,7 @@ func (r *Reconciler) Step(ctx context.Context) {
 	if !quorate || (node.State != cluster.NodeActive && node.State != cluster.NodeMaintenance && node.State != cluster.NodeRejoining) {
 		return
 	}
+	bootKnown := r.BootID == nil || r.BootID() == "" || node.BootID == r.BootID()
 
 	// 2. Workloads placed here.
 	for _, p := range state.SortedPlacements(s) {
@@ -280,6 +298,11 @@ func (r *Reconciler) Step(ctx context.Context) {
 		case p.Requested == cluster.RequestRunning && p.State == cluster.PlacementError:
 			// Gave up; the coordinator relocates it or the person retries.
 		case p.Requested == cluster.RequestRunning && !isRunning:
+			if !bootKnown {
+				// The announcer hasn't recorded this boot yet: a fence
+				// declared now would remember the previous one.
+				continue
+			}
 			r.startHere(ctx, s, self.ID, p)
 		case p.Requested == cluster.RequestRunning && isRunning && p.State != cluster.PlacementRunning:
 			r.report(ctx, self.ID, p, cluster.PlacementRunning, "")
@@ -326,6 +349,9 @@ func (r *Reconciler) startHere(ctx context.Context, s *cluster.Snapshot, self cl
 	if g == nil || !g.Applied || g.Generation != p.Generation || !slices.Contains(g.Nodes, self) {
 		return // the storage server hasn't applied the grant yet
 	}
+	if state.MayRunFor(s, self, w, p.Generation, state.IntentStart) != nil {
+		return // only the owner with an exclusive grant starts from cold
+	}
 	rt := r.runtime(w.Kind)
 	if rt == nil {
 		return
@@ -359,6 +385,11 @@ func (r *Reconciler) startHere(ctx context.Context, s *cluster.Snapshot, self cl
 	}
 	if p.State != cluster.PlacementStarting && p.State != cluster.PlacementRunning {
 		r.report(ctx, self, p, cluster.PlacementStarting, "")
+	}
+	if p.HA.Enabled && r.FenceReady != nil && !r.FenceReady() {
+		// The fence agent arms the watchdog for a workload placed here
+		// first (it sees it starting); the start follows next round.
+		return
 	}
 	if err := rt.Start(ctx, w, att); err != nil {
 		r.log().Warn("cluster: starting a workload", "workload", w.ID, "err", err)
@@ -449,7 +480,10 @@ func (r *Reconciler) fencedNode(ctx context.Context, s *cluster.Snapshot, self c
 	}
 	r.rejoinTry = r.now()
 	r.mu.Unlock()
-	body := state.NodeRejoinBody{Node: self.ID, Epoch: node.FenceEpoch, BootID: r.BootID(), Clean: true}
+	// Clean only when the fence agent itself obeyed this fence (an
+	// isolated node may then rejoin on the same boot).
+	clean := r.CleanFence != nil && r.CleanFence(node.FenceEpoch)
+	body := state.NodeRejoinBody{Node: self.ID, Epoch: node.FenceEpoch, BootID: r.BootID(), Clean: clean}
 	if _, err := r.Cluster.Propose(ctx, cluster.CmdNodeRejoin, body, actor(self.ID)); err != nil {
 		r.log().Info("cluster: rejoining isn't possible yet", "err", err)
 		return

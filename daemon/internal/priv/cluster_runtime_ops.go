@@ -22,6 +22,9 @@ const (
 	OpAppsClusterImages = "apps.cluster.images"
 	OpAppsPrepull       = "apps.cluster.prepull"
 	OpAppsHaveImages    = "apps.cluster.have"
+	// OpAppsClusterHash is the hash of a cluster app's approved settings
+	// (after the full policy check of its files on cluster storage).
+	OpAppsClusterHash = "apps.cluster.hash"
 )
 
 // ImagesResult lists images.
@@ -68,6 +71,10 @@ func RegisterClusterRuntime(s *Server, vmm *vms.Manager, am *apps.Manager) {
 			l, err := am.HaveImages(ctx, a.Images)
 			return ImagesResult{Images: l}, appsClusterErr(err)
 		}))
+		s.Handle(OpAppsClusterHash, typed(func(ctx context.Context, a AppRef) (any, error) {
+			h, err := am.ClusterHash(ctx, a.ID)
+			return SpecHashResult{Hash: h}, appsClusterErr(err)
+		}))
 	}
 }
 
@@ -76,7 +83,7 @@ func appsClusterErr(err error) error {
 		return nil
 	}
 	var p apps.Problems
-	if errors.As(err, &p) || errors.Is(err, apps.ErrGeneration) || errors.Is(err, apps.ErrClusterPlaced) ||
+	if errors.As(err, &p) || errors.Is(err, apps.ErrGeneration) || errors.Is(err, apps.ErrClusterPlaced) || errors.Is(err, apps.ErrSpecChanged) ||
 		errors.Is(err, apps.ErrNotInstalled) || errors.Is(err, apps.ErrClusterStorage) {
 		return Errorf(CodeBadArgs, "%v", err)
 	}

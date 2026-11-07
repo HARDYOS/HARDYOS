@@ -64,7 +64,10 @@ contents:
     dst: /lib/systemd/system/nfs-server.service.d/hardyos-cluster.conf
   - src: ./udev/59-hardyos-cluster-luns.rules
     dst: /lib/udev/rules.d/59-hardyos-cluster-luns.rules
-  # libvirt's qemu hook: incoming live migrations are checked by hardyd-priv (Phase 8 part C).
+  # Loads the hardware watchdog driver past Debian's blacklist (cluster fencing, decision 391).
+  - src: ./systemd/hardyos-watchdog.service
+    dst: /lib/systemd/system/hardyos-watchdog.service
+  # libvirt's qemu hook: incoming live migrations and every start of a cluster VM are checked by hardyd-priv (Phase 8 part C).
   - src: ./libvirt/hooks/qemu
     dst: /etc/libvirt/hooks/qemu
     file_info: { mode: 0755 }

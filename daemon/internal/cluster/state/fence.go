@@ -117,6 +117,11 @@ func (Fences) Apply(s *cluster.Snapshot, c cluster.Command) error {
 		if kind == "hardware" {
 			return fmt.Errorf("%s has a hardware watchdog; nothing to allow", b.Node)
 		}
+		if kind == "" {
+			// Without any watchdog nothing resets a hung server: only
+			// softdog may be allowed (decision 391).
+			return fmt.Errorf("%s has no watchdog at all; load its watchdog driver (or softdog) first", b.Node)
+		}
 		s.HAOverrides[b.Node] = &cluster.WatchdogOverride{Node: b.Node, Kind: kind, Actor: c.Actor, At: c.Time}
 		return nil
 	}
@@ -143,7 +148,9 @@ func applyDead(s *cluster.Snapshot, c cluster.Command, b NodeDeadBody, reason st
 	}
 	node.State = cluster.NodeDead
 	node.FenceEpoch = b.Epoch
-	s.Fences[b.Node] = &cluster.Fence{Node: b.Node, Epoch: b.Epoch, Reason: reason, Requested: c.Time}
+	// The boot the node had when it was declared dead: a rejoin must come
+	// from another one (member.update records the boot id at every start).
+	s.Fences[b.Node] = &cluster.Fence{Node: b.Node, Epoch: b.Epoch, Reason: reason, Requested: c.Time, BootID: node.BootID}
 	for _, p := range s.Placements {
 		g := s.Grants[p.Workload]
 		switch {
@@ -200,7 +207,11 @@ func applyRejoin(s *cluster.Snapshot, c cluster.Command, b NodeRejoinBody) error
 	if b.BootID == "" {
 		return errors.New("a rejoin carries the node's boot id")
 	}
-	if b.BootID == node.BootID && !(f.Reason == "isolated" && b.Clean) {
+	fencedBoot := f.BootID
+	if fencedBoot == "" {
+		fencedBoot = node.BootID
+	}
+	if b.BootID == fencedBoot && !(f.Reason == "isolated" && b.Clean) {
 		return fmt.Errorf("%s must restart before it rejoins (it was fenced as %s)", b.Node, f.Reason)
 	}
 	node.BootID = b.BootID
