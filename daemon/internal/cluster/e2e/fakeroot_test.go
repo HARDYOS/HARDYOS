@@ -547,7 +547,13 @@ func (h *computeRoot) clusterVMs() []vms.ClusterVM {
 	seen := map[string]bool{}
 	for ref, gen := range run {
 		if ref.Kind == cluster.KindVM {
-			_, a := att[ref]
+			// Like vms.ClusterStatus: the generation of the attachment when
+			// the storage is attached here (a migrated VM is adopted under
+			// the collapsed generation without a restart).
+			r, a := att[ref]
+			if a {
+				gen = r.Generation
+			}
 			out = append(out, vms.ClusterVM{ID: ref.ID, State: "running", Generation: gen, Attached: a})
 			seen[ref.ID] = true
 		}

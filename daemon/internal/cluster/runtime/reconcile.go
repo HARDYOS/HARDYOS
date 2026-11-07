@@ -206,6 +206,15 @@ func (r *Reconciler) adoptable(s *cluster.Snapshot, self cluster.NodeID, w clust
 	return ok && mig+1 == p.Generation && (local == mig || local+1 == mig)
 }
 
+// migratingSource: w runs here under the generation just before a live
+// migration's (move.begin raised it) and this node is the migration's
+// source: the VM keeps running while the mover's hold is on its way.
+func migratingSource(s *cluster.Snapshot, self cluster.NodeID, w cluster.WorkloadRef, local uint64) bool {
+	p, g := s.Placements[w], s.Grants[w]
+	return p != nil && g != nil && g.Mode == cluster.GrantMigration && p.Owner == self &&
+		p.State == cluster.PlacementMigrating && local+1 == p.Generation && slices.Contains(g.Nodes, self)
+}
+
 // Step runs one round.
 func (r *Reconciler) Step(ctx context.Context) {
 	r.mu.Lock()
@@ -242,7 +251,7 @@ func (r *Reconciler) Step(ctx context.Context) {
 			running[w] = st
 			continue
 		}
-		allowed := !fenced && st.Problem == "" && state.MayRun(s, self.ID, w, st.Generation) == nil
+		allowed := !fenced && st.Problem == "" && (state.MayRun(s, self.ID, w, st.Generation) == nil || migratingSource(s, self.ID, w, st.Generation))
 		if !allowed && !fenced && st.Problem == "" && r.adoptable(s, self.ID, w, st.Generation) {
 			if r.adopt(ctx, s, self.ID, w) == nil {
 				st.Generation = s.Placements[w].Generation

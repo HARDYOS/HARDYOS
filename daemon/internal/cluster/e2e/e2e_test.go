@@ -304,8 +304,16 @@ func (h *harness) running(w cluster.WorkloadRef, node cluster.NodeID) error {
 		return fmt.Errorf("%s: owner %s state %s generation %d grant %+v", wname(w), p.Owner, p.State, p.Generation, *g)
 	}
 	r := h.w.runners(w)
-	if len(r) != 1 || r[node] != p.Generation {
+	if len(r) != 1 {
 		return fmt.Errorf("%s runs on %v (want %s at %d)", wname(w), r, node, p.Generation)
+	}
+	if g, ok := r[node]; !ok || g != p.Generation {
+		// A VM migrated live keeps the process it started under an earlier
+		// generation; its attachment carries the current one.
+		rec, _, attached := h.nodes[node].root.record(w)
+		if !ok || !attached || rec.Generation != p.Generation {
+			return fmt.Errorf("%s runs on %v (want %s at %d)", wname(w), r, node, p.Generation)
+		}
 	}
 	return nil
 }
