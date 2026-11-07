@@ -391,6 +391,14 @@ func (m *Mover) live(ctx context.Context, s *cluster.Snapshot, p *cluster.Placem
 			return abort(fmt.Errorf("attaching the VM's storage on %s: %w", n, err))
 		}
 	}
+	// TODO(integration, phase8/fix-storage 151d122, decision 392): open the
+	// destination's QEMU migration port to the source's storage address for
+	// this migration only, before the destination admits it:
+	//   storagesvc.Service.AllowMigration(ctx, from, 0, deadline)
+	// on the destination (root op san.firewall.migration; port 0 = the
+	// whole 49152-49215 range for that source), and RevokeMigration(ctx,
+	// from) at the end and in ResolveMigration's abort below. The e2e fake
+	// root then needs a san.firewall.migration handler.
 	token := NewToken()
 	m.progress(o, 20, "Preparing "+string(to))
 	if err := m.call(ctx, to, PathAccept, AcceptRequest{VM: w.ID, From: from, Token: token, Generation: mig}); err != nil {
@@ -404,6 +412,8 @@ func (m *Mover) live(ctx context.Context, s *cluster.Snapshot, p *cluster.Placem
 	}
 	sendErr := m.call(ctx, from, PathSend, SendRequest{VM: w.ID, To: to, Token: token, Generation: mig, MigrateURI: uri})
 	_ = m.call(context.WithoutCancel(ctx), to, PathEnd, EndRequest{VM: w.ID, Token: token})
+	// TODO(integration, decision 392): RevokeMigration(ctx, from) on the
+	// destination here (see AllowMigration above).
 	if sendErr != nil {
 		return abort(fmt.Errorf("the live migration failed: %w", sendErr))
 	}
@@ -509,6 +519,8 @@ func (m *Mover) ResolveMigration(ctx context.Context, w cluster.WorkloadRef, gen
 	} else {
 		// The source keeps (or gets back) the VM: the destination's copy
 		// goes first, by its root, whatever the grant says.
+		// TODO(integration, decision 392): RevokeMigration(ctx, from) on the
+		// destination with the abort (phase8/fix-storage's firewall hook).
 		if err := m.call(ctx, to, PathAbort, AbortRequest{VM: w.ID, Generation: gen}); err != nil {
 			return "", fmt.Errorf("destroying the copy on %s: %w", to, err)
 		}

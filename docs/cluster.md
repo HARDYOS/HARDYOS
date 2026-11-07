@@ -210,9 +210,14 @@ watchdog, devices) and why not.
 - **Live migration** (running VMs without passthrough devices, to a server
   with a compatible CPU and the same bridge and VLANs): the VM keeps
   running while its memory is copied over the storage network. If it fails
-  the VM keeps running where it was. Cluster VMs use the cluster's CPU
-  baseline so they can migrate between servers with different CPUs; a VM
-  set to the host's exact CPU migrates only between identical CPUs.
+  the VM keeps running where it was: both servers are asked what really
+  runs, and a copy left on the new server is destroyed before the VM is
+  recorded on the old one (or, if the memory did arrive, it stays on the
+  new one). Cluster VMs use the cluster's CPU baseline so they can migrate
+  between servers with different CPUs; a VM set to the host's exact CPU
+  migrates only between servers with an identical CPU (same model, vendor
+  and features). Live migration needs the cluster port's own connection
+  (LAN or storage network); it never falls back to NetBird.
 - **VMs with passthrough devices** (GPU, USB) are pinned to their server:
   never HA, never migrated live. An offline move to a server you pick is
   possible once that server confirms it has matching devices (typed
@@ -249,7 +254,15 @@ on different servers when possible) and fail back.
 A VM or app is **never** run by two servers against the same disk: the log
 names one owner per generation, the NAS maps the disk to that owner only,
 recovery waits for the NAS's confirmed fence, and every server stops
-whatever the log no longer places on it.
+whatever the log no longer places on it. A server rejoins only from a boot
+other than the one that was declared dead (the boot id is recorded at
+every start).
+
+**Approved settings.** A cluster VM or app starts only with the settings an
+administrator approved: the log keeps a hash of them, and the server
+starting it checks the files on cluster storage against it (an app's
+compose file also passes the install policy check again). Changing a
+cluster workload's settings records the new hash.
 
 Other cases: a server that loses only the storage network while the others
 still reach the NAS is isolated and fenced the same way. If **every**
@@ -259,10 +272,16 @@ altogether, HA workloads stop everywhere and start again when quorum
 returns: that is the price of never running a disk twice.
 
 **Watchdogs.** HA needs a hardware watchdog on the compute server (most
-boards have one: `iTCO_wdt`, `sp5100_tco`, IPMI). A server with only the
-software watchdog (a kernel hang defeats it) or none is skipped for HA; an
+boards have one: `iTCO_wdt`, `sp5100_tco`, IPMI; `hardyos-watchdog.service`
+loads the driver, which Debian otherwise blacklists). A server with only
+the software watchdog (a kernel hang defeats it) is skipped for HA; an
 administrator can allow it per server (Compute servers › **Allow HA
-anyway…**, typed confirmation, behind a warning).
+anyway…**, typed confirmation, behind a warning). A server without any
+watchdog can't be allowed. A watchdog that can't be stopped once started
+(nowayout) stays armed and fed. Restarting hardyd keeps HA workloads
+running; if hardyd-priv restarts while they run, the watchdog is armed
+again at once and an alert is recorded (drain a server before updating
+it).
 
 **Timings** (Workloads and HA › Failover timings) can be changed within
 safe bounds: a server is declared dead no sooner than quorum lease +
@@ -289,7 +308,11 @@ until its probe is built, so LAN isolation never triggers.
   change this version doesn't understand. Update HardyOS on this server.
 - High-availability actions (a server declared dead or isolated,
   recoveries, workloads pending or in error) are recorded as finished jobs
-  (`cluster.ha.*`) and in the audit log.
+  (`cluster.ha.*`) and in the audit log; so is every step a server runs for
+  a move (`cluster.move.step`), with the member that asked.
+- *polkit isn't running* (critical, `cluster.polkit.down`): with live
+  migration set up, libvirt refuses every call until polkitd is back (a
+  forced stop still works).
 
 ## Security notes
 

@@ -9910,6 +9910,12 @@ export interface components {
             problem?: string;
             /** Format: date-time */
             changed: string;
+            /** @description Hash of the administrator-approved settings (sha256:<hex>); a node starts the workload only with matching files */
+            specHash?: string;
+            /** @description The member whose move.begin started the move in progress (or the last one) */
+            moveBy?: string;
+            /** @description The HA coordinator's relocations within the last hour */
+            relocated?: string[];
         };
         ClusterGrant: {
             workload: components["schemas"]["ClusterWorkloadRef"];
@@ -9969,6 +9975,10 @@ export interface components {
             lastFence?: string;
             fenceReason?: string;
             cleanStopped: boolean;
+            /** @description Armed with no HA workload here (nowayout, or root still sees cluster workloads) */
+            idle?: boolean;
+            /** @description hardyd-priv restarted while the watchdog was armed */
+            rootRestarted?: boolean;
         };
         ClusterWatchdog: {
             armed: boolean;
@@ -9978,6 +9988,11 @@ export interface components {
             /** Format: date-time */
             lastPet?: string;
             problem?: string;
+            /** @description Changes every time hardyd-priv starts */
+            instance?: string;
+            noWayOut?: boolean;
+            /** @description Root checks leader-signed lease statements */
+            leases?: boolean;
         };
         ClusterPrepull: {
             app: string;
@@ -10008,6 +10023,8 @@ export interface components {
             grants: {
                 [key: string]: components["schemas"]["ClusterGrant"];
             };
+            /** @description polkitd is down on this server: libvirt refuses every call */
+            polkitProblem?: string;
         };
         ClusterMoveCandidate: {
             id: string;

@@ -10712,6 +10712,9 @@ components:
         storage: { type: object, additionalProperties: true }
         problem: { type: string }
         changed: { type: string, format: date-time }
+        specHash: { type: string, description: "Hash of the administrator-approved settings (sha256:<hex>); a node starts the workload only with matching files" }
+        moveBy: { type: string, description: "The member whose move.begin started the move in progress (or the last one)" }
+        relocated: { type: array, items: { type: string, format: date-time }, description: "The HA coordinator's relocations within the last hour" }
     ClusterGrant:
       type: object
       required: [workload, nodes, mode, generation, applied]
@@ -10775,6 +10778,8 @@ components:
         lastFence: { type: string, format: date-time }
         fenceReason: { type: string }
         cleanStopped: { type: boolean }
+        idle: { type: boolean, description: "Armed with no HA workload here (nowayout, or root still sees cluster workloads)" }
+        rootRestarted: { type: boolean, description: "hardyd-priv restarted while the watchdog was armed" }
     ClusterWatchdog:
       type: object
       required: [armed, kind, pettingForMs]
@@ -10785,6 +10790,9 @@ components:
         pettingForMs: { type: integer }
         lastPet: { type: string, format: date-time }
         problem: { type: string }
+        instance: { type: string, description: "Changes every time hardyd-priv starts" }
+        noWayOut: { type: boolean }
+        leases: { type: boolean, description: "Root checks leader-signed lease statements" }
     ClusterPrepull:
       type: object
       required: [app, images, missing, checked]
@@ -10811,6 +10819,7 @@ components:
         leader: { type: string }
         cpuBaseline: { type: string }
         grants: { type: object, additionalProperties: { $ref: "#/components/schemas/ClusterGrant" } }
+        polkitProblem: { type: string, description: "polkitd is down on this server: libvirt refuses every call" }
     ClusterMoveCandidate:
       type: object
       required: [id, name, fits]

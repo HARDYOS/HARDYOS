@@ -719,6 +719,9 @@ type StatusView struct {
 	Leader      cluster.NodeID            `json:"leader,omitempty"`
 	CPUBaseline string                    `json:"cpuBaseline,omitempty"`
 	Grants      map[string]*cluster.Grant `json:"grants"`
+	// PolkitProblem: polkitd is down on this server (libvirt refuses
+	// every call while the polkit access driver is on).
+	PolkitProblem string `json:"polkitProblem,omitempty"`
 }
 
 // Status builds the HA page's data.
@@ -737,6 +740,9 @@ func (s *Service) Status(ctx context.Context) (*StatusView, error) {
 		v.Timings = cluster.DefaultTimings
 	}
 	v.CPUBaseline = snap.CPUBaseline
+	s.reqMu.Lock()
+	v.PolkitProblem = s.polkitProblem
+	s.reqMu.Unlock()
 	if l, ok := m.Leader(); ok {
 		v.Leader = l
 	}

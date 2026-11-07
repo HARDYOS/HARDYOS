@@ -63,7 +63,7 @@ func TestClusterHAAPI(t *testing.T) {
 	env, w := newClusterEnv(t, true)
 	vm := w.AddVM("web", "c1", false, 0)
 	gpu := cluster.WorkloadRef{Kind: cluster.KindVM, ID: "gpu"}
-	if err := w.Propose("c1", cluster.CmdWorkloadAdd, state.WorkloadAdd{Workload: gpu, Name: "Gaming", Owner: "c1", Pinned: true}); err != nil {
+	if err := w.Propose("c1", cluster.CmdWorkloadAdd, state.WorkloadAdd{SpecHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Workload: gpu, Name: "Gaming", Owner: "c1", Pinned: true}); err != nil {
 		t.Fatal(err)
 	}
 	admin := env.client(t)

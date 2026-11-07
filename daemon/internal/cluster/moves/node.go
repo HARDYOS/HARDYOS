@@ -759,9 +759,9 @@ func (n *Node) send(ctx context.Context, r *http.Request, caller cluster.Node) (
 		ln.Close()
 		stopRelay()
 		relays.Wait()
-		// TODO(storage, decision 392): call part B's per-migration nft hook
-		// for the QEMU migration ports once it lands, to open the port range
-		// to the destination's storage address only for this migration.
+		// The destination's migration ports are opened and closed by the
+		// mover (see the TODO in Mover.live: storagesvc AllowMigration /
+		// RevokeMigration on the destination).
 		return err
 	})
 }
