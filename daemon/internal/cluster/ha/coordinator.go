@@ -43,6 +43,12 @@ type LiveMover interface {
 	Move(ctx context.Context, r cluster.MoveRequest, actor cluster.Actor) (*cluster.MoveResult, error)
 }
 
+// MigrationResolver ends a live migration whose two-node grant stood too
+// long, after asking root on both nodes what runs (moves.Mover).
+type MigrationResolver interface {
+	ResolveMigration(ctx context.Context, w cluster.WorkloadRef, gen uint64, from, to cluster.NodeID, actor cluster.Actor, reason string) (cluster.NodeID, error)
+}
+
 // Job kinds of the coordinator's actions.
 const (
 	JobDead     = "cluster.ha.dead"
@@ -89,6 +95,9 @@ type Coordinator struct {
 	// Mover moves VMs live off LAN-isolated nodes and for fail back
 	// (optional).
 	Mover LiveMover
+	// Migrations ends live migrations whose grant stood longer than the
+	// source's send limit and a margin (state.MigrationGrantTimeout).
+	Migrations MigrationResolver
 	// EvacuateLANIsolated: live-migrate HA VMs off a node whose LAN alone
 	// failed (default on; section 7.4).
 	EvacuateLANIsolated *bool
@@ -111,6 +120,22 @@ type Coordinator struct {
 	recent       []Event
 	moving       map[cluster.WorkloadRef]bool
 	movesRunning sync.WaitGroup
+	// leadCtx ends this leader's background moves when it loses the lead.
+	leadCtx    context.Context
+	leadCancel context.CancelFunc
+	// migSeen: when this leader first saw each live migration's grant
+	// (restarts at its election, like lastHeard).
+	migSeen map[cluster.WorkloadRef]seenGen
+	migTry  map[cluster.WorkloadRef]time.Time
+	// timings change: the old dead time stays in force for one old F.
+	deadPrev    time.Duration
+	deadChanged time.Time
+	deadCur     time.Duration
+}
+
+type seenGen struct {
+	gen uint64
+	at  time.Time
 }
 
 func (c *Coordinator) now() time.Time {
@@ -222,6 +247,9 @@ func (c *Coordinator) Tick(ctx context.Context) {
 		// A new coordinator starts every node's clock at its election, so
 		// a leader change never shortens the time to "dead".
 		c.mu.Lock()
+		c.migSeen = map[cluster.WorkloadRef]seenGen{}
+		c.migTry = map[cluster.WorkloadRef]time.Time{}
+		c.deadPrev, c.deadChanged, c.deadCur = 0, time.Time{}, 0
 		c.lastHeard = map[cluster.NodeID]time.Time{}
 		c.storageBad = map[cluster.NodeID]time.Time{}
 		c.lanBad = map[cluster.NodeID]time.Time{}
@@ -254,6 +282,8 @@ func (c *Coordinator) Tick(ctx context.Context) {
 	s = c.Cluster.State().Snapshot()
 	c.collapseMigrations(ctx, self.ID, s, hv)
 	s = c.Cluster.State().Snapshot()
+	c.timeoutMigrations(ctx, self.ID, s, now)
+	s = c.Cluster.State().Snapshot()
 	c.recover(ctx, self.ID, s, health, t, now)
 	s = c.Cluster.State().Snapshot()
 	c.failBack(ctx, self.ID, s, health, now)
@@ -268,7 +298,13 @@ func (c *Coordinator) setLeader(on bool, now time.Time) bool {
 		return false
 	}
 	c.leader = on
+	if !on && c.leadCancel != nil {
+		// A former leader's background moves stop: the new leader decides.
+		c.leadCancel()
+		c.leadCtx, c.leadCancel = nil, nil
+	}
 	if on {
+		c.leadCtx, c.leadCancel = context.WithCancel(context.Background())
 		c.leaderSince = now
 		c.relocations = map[cluster.WorkloadRef][]time.Time{}
 		c.pendingTry = map[cluster.WorkloadRef]time.Time{}
@@ -298,8 +334,27 @@ func watched(n *cluster.Node) bool {
 	return false
 }
 
+// deadAfter is the time to "dead" in force: after the timings change, the
+// longer of the old and the new one for one old F, since nodes may still
+// run with the old quorum lease and watchdog timeout (decision 392).
+func (c *Coordinator) deadAfter(t cluster.Timings, now time.Time) time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.deadCur == 0 {
+		c.deadCur = t.Dead
+	}
+	if t.Dead != c.deadCur {
+		c.deadPrev, c.deadChanged, c.deadCur = c.deadCur, now, t.Dead
+	}
+	if c.deadPrev > 0 && now.Sub(c.deadChanged) < c.deadPrev {
+		return max(c.deadPrev, t.Dead)
+	}
+	return t.Dead
+}
+
 // detectDead declares compute nodes not heard from for F dead.
 func (c *Coordinator) detectDead(ctx context.Context, self cluster.NodeID, s *cluster.Snapshot, t cluster.Timings, now time.Time) {
+	t.Dead = c.deadAfter(t, now)
 	var suspect []cluster.NodeID
 	for _, n := range computeNodes(s) {
 		if !watched(n) || n.ID == self {
@@ -416,7 +471,14 @@ func (c *Coordinator) background(ctx context.Context, self cluster.NodeID, p *cl
 		return
 	}
 	c.moving[p.Workload] = true
+	lead := c.leadCtx
 	c.mu.Unlock()
+	if lead == nil {
+		c.mu.Lock()
+		delete(c.moving, p.Workload)
+		c.mu.Unlock()
+		return
+	}
 	c.movesRunning.Add(1)
 	req := cluster.MoveRequest{Workload: p.Workload, To: to, Mode: cluster.MoveLive, Generation: p.Generation}
 	go func() {
@@ -426,7 +488,7 @@ func (c *Coordinator) background(ctx context.Context, self cluster.NodeID, p *cl
 			delete(c.moving, p.Workload)
 			c.mu.Unlock()
 		}()
-		_ = c.act(context.WithoutCancel(ctx), kind, title, string(p.Workload.Kind)+":"+p.Workload.ID, func(ctx context.Context) error {
+		_ = c.act(lead, kind, title, string(p.Workload.Kind)+":"+p.Workload.ID, func(ctx context.Context) error {
 			_, err := c.Mover.Move(ctx, req, c.actor(self))
 			return err
 		})
@@ -631,17 +693,80 @@ func summarize(skipped map[cluster.NodeID]string) string {
 	return out
 }
 
+// relocationAllowed counts the relocations of the last hour recorded in
+// the log (Placement.Relocated), so a new leader counts the same, plus
+// this leader's own still being committed.
 func (c *Coordinator) relocationAllowed(p *cluster.Placement, now time.Time) bool {
+	n := 0
+	for _, t := range p.Relocated {
+		if now.Sub(t) < time.Hour {
+			n++
+		}
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	mine := 0
 	var keep []time.Time
 	for _, t := range c.relocations[p.Workload] {
 		if now.Sub(t) < time.Hour {
 			keep = append(keep, t)
+			mine++
 		}
 	}
 	c.relocations[p.Workload] = keep
-	return len(keep) < p.HA.MaxRelocations
+	return max(n, mine) < p.HA.MaxRelocations
+}
+
+// timeoutMigrations ends live migrations whose two-node grant this leader
+// has seen for longer than the source's send limit and a margin, with
+// both nodes up: it asks both nodes' root what runs and collapses the
+// grant onto the one that has the VM (the other's copy destroyed first).
+// Without an answer from both it tries again every 30 s; a node that is
+// gone is handled by collapseMigrations once its fence holds.
+func (c *Coordinator) timeoutMigrations(ctx context.Context, self cluster.NodeID, s *cluster.Snapshot, now time.Time) {
+	c.mu.Lock()
+	if c.migSeen == nil {
+		c.migSeen = map[cluster.WorkloadRef]seenGen{}
+		c.migTry = map[cluster.WorkloadRef]time.Time{}
+	}
+	for w, sg := range c.migSeen {
+		if g := s.Grants[w]; g == nil || g.Mode != cluster.GrantMigration || g.Generation != sg.gen {
+			delete(c.migSeen, w)
+		}
+	}
+	c.mu.Unlock()
+	for _, p := range byPriority(s) {
+		g := s.Grants[p.Workload]
+		if g == nil || g.Mode != cluster.GrantMigration || len(g.Nodes) != 2 || p.Target == "" {
+			continue
+		}
+		c.mu.Lock()
+		sg, ok := c.migSeen[p.Workload]
+		if !ok || sg.gen != p.Generation {
+			sg = seenGen{gen: p.Generation, at: now}
+			c.migSeen[p.Workload] = sg
+		}
+		last := c.migTry[p.Workload]
+		c.mu.Unlock()
+		if now.Sub(sg.at) < state.MigrationGrantTimeout || now.Sub(last) < 30*time.Second || c.Migrations == nil {
+			continue
+		}
+		fenced := false
+		for _, n := range g.Nodes {
+			fenced = fenced || state.MayRun(s, n, p.Workload, p.Generation) == cluster.ErrFenced
+		}
+		if fenced {
+			continue // collapseMigrations, once the fence holds
+		}
+		c.mu.Lock()
+		c.migTry[p.Workload] = now
+		c.mu.Unlock()
+		p := p
+		_ = c.act(ctx, JobCollapse, "End the stalled live migration of "+p.Name, ref(p.Workload), func(ctx context.Context) error {
+			_, err := c.Migrations.ResolveMigration(ctx, p.Workload, p.Generation, p.Owner, p.Target, c.actor(self), "migration-timeout")
+			return err
+		})
+	}
 }
 
 // failBack moves an HA VM back to its first preferred node once that node

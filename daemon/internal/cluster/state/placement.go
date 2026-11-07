@@ -231,7 +231,6 @@ func (Placements) Apply(s *cluster.Snapshot, c cluster.Command) error {
 			return fmt.Errorf("%s didn't begin this move (%s did)", c.Proposer, p.MoveBy)
 		}
 		p.Target = ""
-		p.MoveBy = ""
 		if !b.OK {
 			p.Problem = b.Problem
 		}
@@ -475,9 +474,10 @@ func setOwner(s *cluster.Snapshot, p *cluster.Placement, b PlacementSet, c clust
 	p.Generation++
 	p.Owner = b.Owner
 	p.Target = ""
-	if c.Proposer != p.MoveBy || (b.Reason != "move" && b.Reason != "move-confirmed" && b.Reason != "migrated") {
-		// The mover keeps driving the new owner's start step after its own
-		// hand-over; anyone else's change ends its say.
+	if c.Proposer != p.MoveBy {
+		// The mover keeps driving its last steps (the new owner's start,
+		// letting its holds go) after its own hand-over; anyone else's
+		// change ends its say.
 		p.MoveBy = ""
 	}
 	if b.Reason == "relocate" {

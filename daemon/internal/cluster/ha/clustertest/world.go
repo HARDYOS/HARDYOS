@@ -206,6 +206,8 @@ func (w *World) wire(n *Node) {
 	rts := []cluster.Runtime{&fakeRuntime{n: n, kind: cluster.KindVM}, &fakeRuntime{n: n, kind: cluster.KindApp}}
 	n.Rec = &runtime.Reconciler{Cluster: n, Attacher: &fakeAttacher{n: n}, Runtimes: rts, BootID: func() string { return n.BootID }, Now: w.Clock.Now}
 	n.Agent = &fence.Agent{Cluster: n, Watchdog: &fakeWatchdog{n: n}, Fencer: &fakeFencer{n: n}, Running: n.Rec.Local, Now: w.Clock.Now}
+	n.Rec.FenceReady = n.Agent.Ready
+	n.Rec.CleanFence = n.Agent.CleanFence
 	n.Coord = &ha.Coordinator{Cluster: n, Scheduler: &placement.Scheduler{ReservedMB: 1024}, Now: w.Clock.Now}
 }
 
@@ -858,6 +860,7 @@ func clone(s *cluster.Snapshot) *cluster.Snapshot {
 		x.Storage.Volumes = slices.Clone(v.Storage.Volumes)
 		x.Storage.Exports = slices.Clone(v.Storage.Exports)
 		x.Storage.Shares = slices.Clone(v.Storage.Shares)
+		x.Relocated = slices.Clone(v.Relocated)
 		c.Placements[k] = &x
 	}
 	c.Grants = map[cluster.WorkloadRef]*cluster.Grant{}

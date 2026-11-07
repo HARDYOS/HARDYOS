@@ -847,7 +847,10 @@ func (n *Core) routes() {
 	n.mux.handle(withPrefix("GET /ping"), all, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		peerJSON(w, http.StatusOK, map[string]any{"node": n.ID(), "time": time.Now().UTC()})
 	}))
-	n.mux.handle(withPrefix("POST /propose"), access{witness: true}, http.HandlerFunc(n.handlePropose))
+	// Fenced members reach /propose too, for node.rejoin only (part C,
+	// decision 389): without it a fenced node that isn't the leader could
+	// never ask to rejoin.
+	n.mux.handle(withPrefix("POST /propose"), access{witness: true, fenced: true}, http.HandlerFunc(n.handlePropose))
 	n.mux.handle(withPrefix("POST /heartbeat"), access{witness: true, fenced: true}, http.HandlerFunc(n.handleHeartbeat))
 	n.mux.handle(withPrefix("GET /health"), access{}, http.HandlerFunc(n.handleHealth))
 	n.mux.handle(withPrefix("POST /join"), access{public: true}, http.HandlerFunc(n.handleJoin))
@@ -867,6 +870,10 @@ func (n *Core) handlePropose(w http.ResponseWriter, r *http.Request) {
 	if err := json.Unmarshal(sc.Command, &c); err != nil || c.Proposer != caller.ID {
 		// A member forwards only what it signed itself.
 		peerError(w, http.StatusForbidden, "a member may only propose its own commands")
+		return
+	}
+	if isFenced(caller) && c.Type != CmdNodeRejoin {
+		peerError(w, http.StatusForbidden, "this server is fenced: it may only rejoin")
 		return
 	}
 	if !n.IsLeader() {

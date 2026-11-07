@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -33,13 +34,18 @@ type PublishHandoff interface {
 }
 
 // StreamDialer opens the relayed libvirt connection of one live migration
-// to the destination (the cluster port's hardyos-migrate/1, or a streamed
-// peer request).
+// to the destination (the cluster port's hardyos-migrate/1).
 type StreamDialer interface {
 	DialMigrate(ctx context.Context, node cluster.NodeID, token string) (io.ReadWriteCloser, error)
 }
 
 // Node serves the move steps on this node's peer API.
+//
+// Every step that changes something here is driven only by the member
+// whose move.begin started the move (Placement.MoveBy) or by the current
+// leader (the HA coordinator), for the generation the step names, and is
+// recorded as a finished job and an audit entry on this node (decision
+// 387). A step from any other member is refused.
 type Node struct {
 	Cluster    Cluster
 	Reconciler *runtime.Reconciler
@@ -49,8 +55,18 @@ type Node struct {
 	Images     runtime.Images
 	Publish    PublishHandoff
 	Stream     StreamDialer
+	// Peers lets the destination fetch an app's publishing settings from
+	// the source during a move (optional).
+	Peers cluster.PeerClient
 	// Caller is the member that sent a peer request (PeerMux.Caller).
 	Caller func(r *http.Request) (cluster.Node, bool)
+	// FenceReady says whether this node's fence agent armed the watchdog
+	// (HA workloads start or arrive only then; nil: always).
+	FenceReady func() bool
+	// SpecHash is a workload's approved-settings hash from the placement.
+	SpecHash func(w cluster.WorkloadRef) string
+	// Actions records each step as a finished job and an audit entry.
+	Actions Actions
 	// GrantWait bounds the wait for an applied grant (default 60 s).
 	GrantWait time.Duration
 	Poll      time.Duration
@@ -58,6 +74,7 @@ type Node struct {
 
 	mu       sync.Mutex
 	admitted map[string]*incoming
+	publish  map[string]json.RawMessage // app -> settings fetched for a move here
 }
 
 // incoming is a migration this (destination) node admitted.
@@ -80,6 +97,9 @@ func (n *Node) log() *slog.Logger {
 type Mux interface {
 	Handle(pattern string, h http.Handler)
 }
+
+// ErrNotMover: a move step from a member that isn't driving the move.
+var ErrNotMover = errors.New("this server isn't the one moving the workload (nor the leader)")
 
 // Register adds the move steps to the peer API.
 func (n *Node) Register(mux Mux) {
@@ -111,11 +131,12 @@ func (n *Node) Register(mux Mux) {
 	h(PathAccept, n.accept)
 	h(PathSend, n.send)
 	h(PathEnd, n.end)
+	h(PathAbort, n.abort)
+	h(PathState, n.vmState)
 	h(PathPublishExport, n.publishExport)
 	h(PathPublishImport, n.publishImport)
 	h(PathRequirements, n.requirements)
 	h(PathImages, n.images)
-	mux.Handle(cluster.PeerPathPrefix+PathStream, http.HandlerFunc(n.stream))
 }
 
 func decodeBody(r *http.Request, v any) error {
@@ -135,13 +156,51 @@ func (n *Node) runtime(k cluster.WorkloadKind) (cluster.Runtime, error) {
 
 func (n *Node) self() (cluster.Node, error) { return n.Cluster.Self() }
 
-func (n *Node) hold(_ context.Context, r *http.Request, _ cluster.Node) (any, error) {
+// authorize: the caller drives the move of w (its move.begin is the
+// placement's MoveBy) or is the leader.
+func (n *Node) authorize(caller cluster.Node, w cluster.WorkloadRef) (*cluster.Snapshot, *cluster.Placement, error) {
+	s := n.Cluster.State().Snapshot()
+	p := s.Placements[w]
+	if p == nil {
+		return nil, nil, fmt.Errorf("%s isn't a cluster workload", w.ID)
+	}
+	if p.MoveBy != "" && caller.ID == p.MoveBy {
+		return s, p, nil
+	}
+	if l, ok := n.Cluster.Leader(); ok && l == caller.ID {
+		return s, p, nil
+	}
+	n.log().Warn("moves: refused a move step from a member that isn't moving the workload", "workload", w.ID, "caller", caller.ID, "mover", p.MoveBy)
+	return nil, nil, ErrNotMover
+}
+
+// act runs a step as a recorded job (and audit entry) on this node.
+func (n *Node) act(ctx context.Context, caller cluster.Node, title string, w cluster.WorkloadRef, fn func(ctx context.Context) error) error {
+	title += " (asked by " + string(caller.ID) + ")"
+	if n.Actions == nil {
+		return fn(ctx)
+	}
+	return n.Actions.Run(ctx, StepKind, title, string(w.Kind)+":"+w.ID, fn)
+}
+
+func (n *Node) hold(ctx context.Context, r *http.Request, caller cluster.Node) (any, error) {
 	var req HoldRequest
 	if err := decodeBody(r, &req); err != nil {
 		return nil, err
 	}
 	if req.Seconds < 0 || req.Seconds > 3600 {
 		return nil, errors.New("a hold lasts at most an hour")
+	}
+	_, p, err := n.authorize(caller, req.Workload)
+	if err != nil {
+		return nil, err
+	}
+	self, err := n.self()
+	if err != nil {
+		return nil, err
+	}
+	if req.Seconds > 0 && p.Owner != self.ID && p.Target != self.ID {
+		return nil, errors.New("the workload isn't moving from or to this server")
 	}
 	if req.Seconds == 0 {
 		n.Reconciler.Release(req.Workload)
@@ -151,11 +210,26 @@ func (n *Node) hold(_ context.Context, r *http.Request, _ cluster.Node) (any, er
 	return nil, nil
 }
 
-// prepare (destination): its own devices for a pinned VM, an app's images.
-func (n *Node) prepare(ctx context.Context, r *http.Request, _ cluster.Node) (any, error) {
+// prepare (destination): its own devices for a pinned VM, an app's images,
+// and an app's publishing settings fetched from the source.
+func (n *Node) prepare(ctx context.Context, r *http.Request, caller cluster.Node) (any, error) {
 	var req PrepareRequest
 	if err := decodeBody(r, &req); err != nil {
 		return nil, err
+	}
+	_, p, err := n.authorize(caller, req.Workload)
+	if err != nil {
+		return nil, err
+	}
+	self, err := n.self()
+	if err != nil {
+		return nil, err
+	}
+	if p.Target != self.ID {
+		return nil, errors.New("the log doesn't hold a move of this workload to this server")
+	}
+	if len(req.Images) > 64 {
+		return nil, errors.New("too many images")
 	}
 	if len(req.Devices) > 0 && string(req.Devices) != "null" {
 		var ds []devices.Device
@@ -193,49 +267,71 @@ func (n *Node) prepare(ctx context.Context, r *http.Request, _ cluster.Node) (an
 			}
 		}
 	}
+	if req.Workload.Kind == cluster.KindApp && n.Peers != nil && n.Publish != nil {
+		var pc PublishConfig
+		path := cluster.PeerPathPrefix + PathPublishExport + "?app=" + url.QueryEscape(req.Workload.ID)
+		if err := n.Peers.Call(ctx, p.Owner, http.MethodGet, path, nil, &pc); err != nil {
+			n.log().Warn("moves: fetching the app's publishing from its server", "app", req.Workload.ID, "err", err)
+		} else if len(pc.Config) > 0 {
+			n.mu.Lock()
+			if n.publish == nil {
+				n.publish = map[string]json.RawMessage{}
+			}
+			n.publish[req.Workload.ID] = pc.Config
+			n.mu.Unlock()
+		}
+	}
 	return nil, nil
 }
 
 // stop (source of an offline move): stop gracefully, detach, report it
 // stopped for the generation.
-func (n *Node) stop(ctx context.Context, r *http.Request, _ cluster.Node) (any, error) {
+func (n *Node) stop(ctx context.Context, r *http.Request, caller cluster.Node) (any, error) {
 	var req StepRequest
 	if err := decodeBody(r, &req); err != nil {
+		return nil, err
+	}
+	_, p, err := n.authorize(caller, req.Workload)
+	if err != nil {
 		return nil, err
 	}
 	self, err := n.self()
 	if err != nil {
 		return nil, err
 	}
-	s := n.Cluster.State().Snapshot()
-	p := s.Placements[req.Workload]
-	if p == nil || p.Owner != self.ID || p.Generation != req.Generation {
+	if p.Owner != self.ID || p.Generation != req.Generation {
 		return nil, cluster.ErrStaleGeneration
+	}
+	if p.Target == "" {
+		return nil, errors.New("no move of this workload is in progress")
 	}
 	rt, err := n.runtime(req.Workload.Kind)
 	if err != nil {
 		return nil, err
 	}
-	release := n.Reconciler.Hold(req.Workload)
-	defer release()
-	if err := rt.Stop(ctx, req.Workload, cluster.StopGraceful); err != nil {
-		return nil, err
-	}
-	if n.Attacher != nil {
-		if err := n.Attacher.Detach(ctx, req.Workload, false); err != nil {
-			return nil, fmt.Errorf("detaching its storage: %w", err)
+	return nil, n.act(ctx, caller, "Stop "+p.Name+" for its move to "+string(p.Target), req.Workload, func(ctx context.Context) error {
+		release := n.Reconciler.Hold(req.Workload)
+		defer release()
+		if err := rt.Stop(ctx, req.Workload, cluster.StopGraceful); err != nil {
+			return err
 		}
-	}
-	body := state.WorkloadStateReport{Workload: req.Workload, Generation: req.Generation, State: cluster.PlacementStopped}
-	idx, err := n.Cluster.Propose(ctx, cluster.CmdWorkloadState, body, cluster.Actor{Kind: "system", Name: "HardyOS", Via: self.ID})
-	if err != nil {
-		return nil, err
-	}
-	return nil, n.Cluster.WaitApplied(ctx, idx)
+		if n.Attacher != nil {
+			if err := n.Attacher.Detach(ctx, req.Workload, false); err != nil {
+				return fmt.Errorf("detaching its storage: %w", err)
+			}
+		}
+		body := state.WorkloadStateReport{Workload: req.Workload, Generation: req.Generation, State: cluster.PlacementStopped}
+		idx, err := n.Cluster.Propose(ctx, cluster.CmdWorkloadState, body, cluster.Actor{Kind: "system", Name: "HardyOS", Via: self.ID})
+		if err != nil {
+			return err
+		}
+		return n.Cluster.WaitApplied(ctx, idx)
+	})
 }
 
-// waitGrant waits until this node's grant for w at gen is applied.
-func (n *Node) waitGrant(ctx context.Context, w cluster.WorkloadRef, gen uint64) (*cluster.Placement, *cluster.Grant, error) {
+// waitGrant waits until this node may do intent with w at gen with the
+// grant applied.
+func (n *Node) waitGrant(ctx context.Context, w cluster.WorkloadRef, gen uint64, intent state.Intent) (*cluster.Placement, *cluster.Grant, error) {
 	self, err := n.self()
 	if err != nil {
 		return nil, nil, err
@@ -252,7 +348,7 @@ func (n *Node) waitGrant(ctx context.Context, w cluster.WorkloadRef, gen uint64)
 	for {
 		s := n.Cluster.State().Snapshot()
 		p, g := s.Placements[w], s.Grants[w]
-		if err := state.MayRun(s, self.ID, w, gen); err == nil {
+		if err := state.MayRunFor(s, self.ID, w, gen, intent); err == nil {
 			return p, g, nil
 		} else if !errors.Is(err, cluster.ErrStorageUnavailable) {
 			return nil, nil, err
@@ -268,8 +364,8 @@ func (n *Node) waitGrant(ctx context.Context, w cluster.WorkloadRef, gen uint64)
 	}
 }
 
-func (n *Node) attachAt(ctx context.Context, w cluster.WorkloadRef, gen uint64) (*cluster.Attachment, error) {
-	p, g, err := n.waitGrant(ctx, w, gen)
+func (n *Node) attachAt(ctx context.Context, w cluster.WorkloadRef, gen uint64, intent state.Intent) (*cluster.Attachment, error) {
+	p, g, err := n.waitGrant(ctx, w, gen, intent)
 	if err != nil {
 		return nil, err
 	}
@@ -286,78 +382,122 @@ func (n *Node) attachAt(ctx context.Context, w cluster.WorkloadRef, gen uint64) 
 	return a, nil
 }
 
-// attach: attach under gen (a live migration's two nodes).
-func (n *Node) attach(ctx context.Context, r *http.Request, _ cluster.Node) (any, error) {
+func (n *Node) fenceReady(p *cluster.Placement) error {
+	if p.HA.Enabled && n.FenceReady != nil && !n.FenceReady() {
+		return errors.New("this server's watchdog isn't armed yet for an HA workload; try again in a moment")
+	}
+	return nil
+}
+
+// attach: attach under gen as one of a live migration's two nodes.
+func (n *Node) attach(ctx context.Context, r *http.Request, caller cluster.Node) (any, error) {
 	var req StepRequest
 	if err := decodeBody(r, &req); err != nil {
 		return nil, err
 	}
-	if _, err := n.attachAt(ctx, req.Workload, req.Generation); err != nil {
+	_, p, err := n.authorize(caller, req.Workload)
+	if err != nil {
 		return nil, err
 	}
-	if req.Migration {
-		n.Reconciler.TookPart(req.Workload, req.Generation)
+	if !req.Migration {
+		return nil, errors.New("a node attaches on request only for a live migration")
 	}
-	return nil, nil
+	self, err := n.self()
+	if err != nil {
+		return nil, err
+	}
+	intent := state.IntentKeep
+	if p.Target == self.ID {
+		intent = state.IntentReceive
+	}
+	return nil, n.act(ctx, caller, "Attach "+p.Name+"'s storage for its live migration", req.Workload, func(ctx context.Context) error {
+		if _, err := n.attachAt(ctx, req.Workload, req.Generation, intent); err != nil {
+			return err
+		}
+		n.Reconciler.TookPart(req.Workload, req.Generation)
+		return nil
+	})
 }
 
 // start (destination of an offline move): attach, start if asked, report.
-func (n *Node) start(ctx context.Context, r *http.Request, _ cluster.Node) (any, error) {
+// Only the owner with an exclusive grant starts from cold.
+func (n *Node) start(ctx context.Context, r *http.Request, caller cluster.Node) (any, error) {
 	var req StepRequest
 	if err := decodeBody(r, &req); err != nil {
+		return nil, err
+	}
+	_, p, err := n.authorize(caller, req.Workload)
+	if err != nil {
 		return nil, err
 	}
 	self, err := n.self()
 	if err != nil {
 		return nil, err
 	}
-	release := n.Reconciler.Hold(req.Workload)
-	defer release()
-	a, err := n.attachAt(ctx, req.Workload, req.Generation)
-	if err != nil {
-		return nil, err
+	if req.Start {
+		if err := n.fenceReady(p); err != nil {
+			return nil, err
+		}
 	}
-	if !req.Start {
-		return nil, nil
-	}
-	rt, err := n.runtime(req.Workload.Kind)
-	if err != nil {
-		return nil, err
-	}
-	if err := rt.Start(ctx, req.Workload, a); err != nil {
-		return nil, err
-	}
-	n.Reconciler.Started(req.Workload, req.Generation)
-	body := state.WorkloadStateReport{Workload: req.Workload, Generation: req.Generation, State: cluster.PlacementRunning}
-	if _, err := n.Cluster.Propose(ctx, cluster.CmdWorkloadState, body, cluster.Actor{Kind: "system", Name: "HardyOS", Via: self.ID}); err != nil {
-		n.log().Warn("moves: reporting a started workload", "workload", req.Workload.ID, "err", err)
-	}
-	return nil, nil
+	return nil, n.act(ctx, caller, "Start "+p.Name+" after its move", req.Workload, func(ctx context.Context) error {
+		release := n.Reconciler.Hold(req.Workload)
+		defer release()
+		a, err := n.attachAt(ctx, req.Workload, req.Generation, state.IntentStart)
+		if err != nil {
+			return err
+		}
+		if !req.Start {
+			return nil
+		}
+		rt, err := n.runtime(req.Workload.Kind)
+		if err != nil {
+			return err
+		}
+		if err := rt.Start(ctx, req.Workload, a); err != nil {
+			return err
+		}
+		n.Reconciler.Started(req.Workload, req.Generation)
+		body := state.WorkloadStateReport{Workload: req.Workload, Generation: req.Generation, State: cluster.PlacementRunning}
+		if _, err := n.Cluster.Propose(ctx, cluster.CmdWorkloadState, body, cluster.Actor{Kind: "system", Name: "HardyOS", Via: self.ID}); err != nil {
+			n.log().Warn("moves: reporting a started workload", "workload", req.Workload.ID, "err", err)
+		}
+		return nil
+	})
 }
 
-func (n *Node) detach(ctx context.Context, r *http.Request, _ cluster.Node) (any, error) {
+// detach: let a workload's storage go once this node may no longer run
+// it; whatever of it still runs here is stopped first.
+func (n *Node) detach(ctx context.Context, r *http.Request, caller cluster.Node) (any, error) {
 	var req StepRequest
 	if err := decodeBody(r, &req); err != nil {
 		return nil, err
 	}
+	s, p, err := n.authorize(caller, req.Workload)
+	if err != nil {
+		return nil, err
+	}
+	self, err := n.self()
+	if err != nil {
+		return nil, err
+	}
+	if state.MayRun(s, self.ID, req.Workload, p.Generation) == nil {
+		return nil, errors.New("this server still runs the workload under its placement")
+	}
 	if n.Attacher == nil {
 		return nil, nil
 	}
-	if req.Force {
+	return nil, n.act(ctx, caller, "Let "+p.Name+"'s storage go", req.Workload, func(ctx context.Context) error {
 		if rt, err := n.runtime(req.Workload.Kind); err == nil {
-			// Whatever a failed migration left here goes first.
 			if l, err := rt.Status(ctx); err == nil {
 				for _, st := range l {
 					if st.Workload == req.Workload && (st.Running || st.Paused) {
-						if self, err := n.self(); err == nil && state.MayRun(n.Cluster.State().Snapshot(), self.ID, req.Workload, st.Generation) != nil {
-							_ = rt.Stop(ctx, req.Workload, cluster.StopForce)
-						}
+						_ = rt.Stop(ctx, req.Workload, cluster.StopForce)
 					}
 				}
 			}
 		}
-	}
-	return nil, n.Attacher.Detach(ctx, req.Workload, req.Force)
+		return n.Attacher.Detach(ctx, req.Workload, req.Force)
+	})
 }
 
 // accept (destination of a live migration): root admits the VM and hands
@@ -368,20 +508,37 @@ func (n *Node) accept(ctx context.Context, r *http.Request, caller cluster.Node)
 	if err := decodeBody(r, &req); err != nil {
 		return nil, err
 	}
-	s := n.Cluster.State().Snapshot()
+	w := cluster.WorkloadRef{Kind: cluster.KindVM, ID: req.VM}
+	s, p, err := n.authorize(caller, w)
+	if err != nil {
+		return nil, err
+	}
 	self, err := n.self()
 	if err != nil {
 		return nil, err
 	}
-	w := cluster.WorkloadRef{Kind: cluster.KindVM, ID: req.VM}
-	p, g := s.Placements[w], s.Grants[w]
-	if p == nil || g == nil || g.Mode != cluster.GrantMigration || p.Generation != req.Generation ||
-		p.Owner != req.From || p.Target != self.ID || !g.Applied {
+	g := s.Grants[w]
+	if g == nil || g.Mode != cluster.GrantMigration || p.Generation != req.Generation || p.Owner != req.From || p.Target != self.ID ||
+		state.MayRunFor(s, self.ID, w, req.Generation, state.IntentReceive) != nil {
 		return nil, errors.New("the log doesn't hold a live migration of this VM to this server")
 	}
+	if err := n.fenceReady(p); err != nil {
+		return nil, err
+	}
+	hash := ""
+	if n.SpecHash != nil {
+		hash = n.SpecHash(w)
+	} else {
+		hash = p.SpecHash
+	}
 	const deadline = 2 * time.Minute
-	f, err := n.Priv.CallFile(ctx, priv.OpVMsMigrateAccept, vms.MigrateAcceptArgs{VM: req.VM, From: string(req.From), Token: req.Token,
-		DeadlineSec: int(deadline / time.Second), Generation: req.Generation}, nil)
+	var f *os.File
+	err = n.act(ctx, caller, "Admit the live migration of "+p.Name+" from "+string(req.From), w, func(ctx context.Context) error {
+		var err error
+		f, err = n.Priv.CallFile(ctx, priv.OpVMsMigrateAccept, vms.MigrateAcceptArgs{VM: req.VM, From: string(req.From), Token: req.Token,
+			DeadlineSec: int(deadline / time.Second), Generation: req.Generation, SpecHash: hash}, nil)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -397,67 +554,17 @@ func (n *Node) accept(ctx context.Context, r *http.Request, caller cluster.Node)
 	}
 	n.admitted[req.Token] = &incoming{vm: req.VM, from: req.From, conn: f, deadline: time.Now().Add(deadline)}
 	n.mu.Unlock()
-	n.log().Info("moves: admitted a live migration", "vm", req.VM, "from", req.From, "by", caller.ID)
 	return nil, nil
 }
 
-// stream (destination): the source's relayed libvirt connection, piped to
-// the connection root handed over. Only the source named at accept, once,
-// before the deadline.
-func (n *Node) stream(w http.ResponseWriter, r *http.Request) {
-	rc := http.NewResponseController(w)
-	_ = rc.EnableFullDuplex()
-	refuse := func(msg string) {
-		// Answer at once: the caller's body is a stream that never ends.
-		http.Error(w, msg, http.StatusForbidden)
-		_ = rc.Flush()
-		_ = r.Body.Close()
-	}
-	caller, ok := n.Caller(r)
-	if !ok || r.Method != http.MethodPost {
-		refuse("not allowed")
-		return
-	}
-	in := n.take(r.URL.Query().Get("token"), caller.ID)
-	if in == nil {
-		refuse("no such migration")
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-	_ = rc.Flush()
-	conn, err := net.FileConn(in.conn)
-	if err != nil {
-		return
-	}
-	defer conn.Close()
-	done := make(chan struct{})
-	go func() {
-		_, _ = io.Copy(conn, r.Body)
-		if c, ok := conn.(interface{ CloseWrite() error }); ok {
-			_ = c.CloseWrite()
-		}
-		close(done)
-	}()
-	buf := make([]byte, 64<<10)
-	for {
-		k, err := conn.Read(buf)
-		if k > 0 {
-			if _, werr := w.Write(buf[:k]); werr != nil {
-				break
-			}
-			_ = rc.Flush()
-		}
-		if err != nil {
-			break
-		}
-	}
-	<-done
-}
-
 // end (destination): the migration is over; drop the admission.
-func (n *Node) end(ctx context.Context, r *http.Request, _ cluster.Node) (any, error) {
+func (n *Node) end(ctx context.Context, r *http.Request, caller cluster.Node) (any, error) {
 	var req EndRequest
 	if err := decodeBody(r, &req); err != nil {
+		return nil, err
+	}
+	w := cluster.WorkloadRef{Kind: cluster.KindVM, ID: req.VM}
+	if _, _, err := n.authorize(caller, w); err != nil {
 		return nil, err
 	}
 	n.mu.Lock()
@@ -469,70 +576,154 @@ func (n *Node) end(ctx context.Context, r *http.Request, _ cluster.Node) (any, e
 	return nil, n.Priv.Call(ctx, priv.OpVMsMigrateEnd, vms.MigrateEndArgs{VM: req.VM, Token: req.Token}, nil)
 }
 
-// send (source of a live migration): root's one-shot socket is relayed to
-// the destination while root runs the migration.
-func (n *Node) send(ctx context.Context, r *http.Request, _ cluster.Node) (any, error) {
-	var req SendRequest
+// abort (destination of a failed live migration): whatever of the VM runs
+// here is destroyed by root at once, then its storage goes. Unlike
+// detach, this doesn't wait for the grant to move away: the mover or the
+// leader collapses the migration onto the source right after, and the
+// copy here must be gone before the source can be the only runner again.
+func (n *Node) abort(ctx context.Context, r *http.Request, caller cluster.Node) (any, error) {
+	var req AbortRequest
 	if err := decodeBody(r, &req); err != nil {
+		return nil, err
+	}
+	w := cluster.WorkloadRef{Kind: cluster.KindVM, ID: req.VM}
+	s, p, err := n.authorize(caller, w)
+	if err != nil {
 		return nil, err
 	}
 	self, err := n.self()
 	if err != nil {
 		return nil, err
 	}
-	s := n.Cluster.State().Snapshot()
+	g := s.Grants[w]
+	if p.Owner == self.ID || g == nil || g.Mode != cluster.GrantMigration || p.Generation != req.Generation || p.Target != self.ID {
+		return nil, errors.New("only the destination of this live migration aborts it")
+	}
+	return nil, n.act(ctx, caller, "Destroy the incoming copy of "+p.Name+" (its live migration failed)", w, func(ctx context.Context) error {
+		release := n.Reconciler.Hold(w)
+		defer release()
+		if err := n.Priv.Call(ctx, priv.OpVMsClusterStop, vms.ClusterStopArgs{ID: req.VM, Force: true, Undefine: true}, nil); err != nil {
+			return fmt.Errorf("destroying the incoming copy: %w", err)
+		}
+		n.mu.Lock()
+		for t, in := range n.admitted {
+			if in.vm == req.VM {
+				in.conn.Close()
+				delete(n.admitted, t)
+			}
+		}
+		n.mu.Unlock()
+		if n.Attacher != nil {
+			if err := n.Attacher.Detach(ctx, w, true); err != nil {
+				n.log().Warn("moves: detaching after an aborted migration", "vm", req.VM, "err", err)
+			}
+		}
+		return nil
+	})
+}
+
+// vmState (either node of a migration): root's view of the VM here.
+func (n *Node) vmState(ctx context.Context, r *http.Request, caller cluster.Node) (any, error) {
+	var req StateRequest
+	if err := decodeBody(r, &req); err != nil {
+		return nil, err
+	}
 	w := cluster.WorkloadRef{Kind: cluster.KindVM, ID: req.VM}
-	p, g := s.Placements[w], s.Grants[w]
-	if p == nil || g == nil || g.Mode != cluster.GrantMigration || p.Generation != req.Generation || p.Owner != self.ID || p.Target != req.To {
+	if _, _, err := n.authorize(caller, w); err != nil {
+		return nil, err
+	}
+	return LocalVMState(ctx, n.Runtimes, w)
+}
+
+// LocalVMState is what root reports of a VM on this node.
+func LocalVMState(ctx context.Context, rts []cluster.Runtime, w cluster.WorkloadRef) (StateResult, error) {
+	for _, rt := range rts {
+		if rt.Kind() != w.Kind {
+			continue
+		}
+		l, err := rt.Status(ctx)
+		if err != nil {
+			return StateResult{}, err
+		}
+		for _, st := range l {
+			if st.Workload == w && (st.Running || st.Paused) {
+				return StateResult{Runs: true, Paused: st.Paused, Generation: st.Generation}, nil
+			}
+		}
+		return StateResult{}, nil
+	}
+	return StateResult{}, runtime.ErrNoRuntime
+}
+
+// send (source of a live migration): root's one-shot socket is relayed to
+// the destination while root runs the migration.
+func (n *Node) send(ctx context.Context, r *http.Request, caller cluster.Node) (any, error) {
+	var req SendRequest
+	if err := decodeBody(r, &req); err != nil {
+		return nil, err
+	}
+	w := cluster.WorkloadRef{Kind: cluster.KindVM, ID: req.VM}
+	s, p, err := n.authorize(caller, w)
+	if err != nil {
+		return nil, err
+	}
+	self, err := n.self()
+	if err != nil {
+		return nil, err
+	}
+	g := s.Grants[w]
+	if g == nil || g.Mode != cluster.GrantMigration || p.Generation != req.Generation || p.Owner != self.ID || p.Target != req.To {
 		return nil, errors.New("the log doesn't hold a live migration of this VM from this server")
 	}
 	if n.Stream == nil {
 		return nil, errors.New("this server can't relay migrations")
 	}
-	lf, err := n.Priv.CallFile(ctx, priv.OpVMsMigrateListen, vms.MigrateListenArgs{VM: req.VM, Token: req.Token}, nil)
-	if err != nil {
-		return nil, err
-	}
-	ln, err := net.FileListener(lf)
-	lf.Close()
-	if err != nil {
-		return nil, err
-	}
-	defer ln.Close()
-	relayCtx, stopRelay := context.WithCancel(ctx)
-	defer stopRelay()
-	var relays sync.WaitGroup
-	relays.Add(1)
-	go func() {
-		defer relays.Done()
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			relays.Add(1)
-			go func() {
-				defer relays.Done()
-				defer c.Close()
-				up, err := n.Stream.DialMigrate(relayCtx, req.To, req.Token)
+	return nil, n.act(ctx, caller, "Send "+p.Name+" live to "+string(req.To), w, func(ctx context.Context) error {
+		lf, err := n.Priv.CallFile(ctx, priv.OpVMsMigrateListen, vms.MigrateListenArgs{VM: req.VM, Token: req.Token}, nil)
+		if err != nil {
+			return err
+		}
+		ln, err := net.FileListener(lf)
+		lf.Close()
+		if err != nil {
+			return err
+		}
+		defer ln.Close()
+		relayCtx, stopRelay := context.WithCancel(ctx)
+		defer stopRelay()
+		var relays sync.WaitGroup
+		relays.Add(1)
+		go func() {
+			defer relays.Done()
+			for {
+				c, err := ln.Accept()
 				if err != nil {
-					n.log().Warn("moves: relaying the migration", "vm", req.VM, "err", err)
 					return
 				}
-				defer up.Close()
-				pipe(relayCtx, c, up)
-			}()
-		}
-	}()
-	err = n.Priv.Call(ctx, priv.OpVMsMigrateSend, vms.MigrateSendArgs{VM: req.VM, To: string(req.To), Token: req.Token,
-		MigrateURI: req.MigrateURI, Generation: req.Generation}, nil)
-	ln.Close()
-	stopRelay()
-	relays.Wait()
-	if err != nil {
-		return nil, err
-	}
-	return nil, nil
+				relays.Add(1)
+				go func() {
+					defer relays.Done()
+					defer c.Close()
+					up, err := n.Stream.DialMigrate(relayCtx, req.To, req.Token)
+					if err != nil {
+						n.log().Warn("moves: relaying the migration", "vm", req.VM, "err", err)
+						return
+					}
+					defer up.Close()
+					pipe(relayCtx, c, up)
+				}()
+			}
+		}()
+		err = n.Priv.Call(ctx, priv.OpVMsMigrateSend, vms.MigrateSendArgs{VM: req.VM, To: string(req.To), Token: req.Token,
+			MigrateURI: req.MigrateURI, Generation: req.Generation}, nil)
+		ln.Close()
+		stopRelay()
+		relays.Wait()
+		// TODO(storage, decision 392): call part B's per-migration nft hook
+		// for the QEMU migration ports once it lands, to open the port range
+		// to the destination's storage address only for this migration.
+		return err
+	})
 }
 
 // take claims an admitted migration for its source, once, before the
@@ -557,11 +748,13 @@ func MigrateTokenLine(token string) string { return "token " + token + "\n" }
 
 // ServeMigrateConn (destination) takes a live migration's relayed libvirt
 // connection on the cluster port's hardyos-migrate/1 (part A's transport
-// hands over the connection and the member that dialled it): the first
-// line names the admission token; the rest is piped to the connection
-// root handed over at accept. Only the source named at accept, once,
-// before the deadline.
-func (n *Node) ServeMigrateConn(conn *tls.Conn, from cluster.Node) {
+// hands over the connection and the member that dialled it).
+func (n *Node) ServeMigrateConn(conn *tls.Conn, from cluster.Node) { n.ServeMigrate(conn, from.ID) }
+
+// ServeMigrate serves one relayed connection: the first line names the
+// admission token; the rest is piped to the connection root handed over
+// at accept. Only the source named at accept, once, before the deadline.
+func (n *Node) ServeMigrate(conn net.Conn, from cluster.NodeID) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	br := bufio.NewReaderSize(conn, 512)
@@ -571,7 +764,7 @@ func (n *Node) ServeMigrateConn(conn *tls.Conn, from cluster.Node) {
 		_, _ = io.WriteString(conn, "no bad request\n")
 		return
 	}
-	in := n.take(token, from.ID)
+	in := n.take(token, from)
 	if in == nil {
 		_, _ = io.WriteString(conn, "no such migration\n")
 		return
@@ -609,8 +802,19 @@ func pipe(ctx context.Context, a io.ReadWriteCloser, b io.ReadWriteCloser) {
 	b.Close()
 }
 
-func (n *Node) publishExport(ctx context.Context, r *http.Request, _ cluster.Node) (any, error) {
+// publishExport (source): an app's publishing settings, to the move's
+// destination only, while the move is in progress.
+func (n *Node) publishExport(ctx context.Context, r *http.Request, caller cluster.Node) (any, error) {
 	app := r.URL.Query().Get("app")
+	s := n.Cluster.State().Snapshot()
+	p := s.Placements[cluster.WorkloadRef{Kind: cluster.KindApp, ID: app}]
+	self, err := n.self()
+	if err != nil {
+		return nil, err
+	}
+	if p == nil || p.Owner != self.ID || p.Target == "" || p.Target != caller.ID {
+		return nil, errors.New("only the destination of this app's move gets its publishing settings")
+	}
 	if n.Publish == nil {
 		return PublishConfig{App: app}, nil
 	}
@@ -621,15 +825,35 @@ func (n *Node) publishExport(ctx context.Context, r *http.Request, _ cluster.Nod
 	return PublishConfig{App: app, Config: cfg}, nil
 }
 
-func (n *Node) publishImport(ctx context.Context, r *http.Request, _ cluster.Node) (any, error) {
+// publishImport (destination, after the hand-over): the settings fetched
+// from the source during prepare take effect here.
+func (n *Node) publishImport(ctx context.Context, r *http.Request, caller cluster.Node) (any, error) {
 	var req PublishConfig
 	if err := decodeBody(r, &req); err != nil {
 		return nil, err
 	}
-	if n.Publish == nil || len(req.Config) == 0 {
+	w := cluster.WorkloadRef{Kind: cluster.KindApp, ID: req.App}
+	_, p, err := n.authorize(caller, w)
+	if err != nil {
+		return nil, err
+	}
+	self, err := n.self()
+	if err != nil {
+		return nil, err
+	}
+	if p.Owner != self.ID {
+		return nil, errors.New("the app isn't placed on this server")
+	}
+	n.mu.Lock()
+	cfg := n.publish[req.App]
+	delete(n.publish, req.App)
+	n.mu.Unlock()
+	if n.Publish == nil || len(cfg) == 0 {
 		return nil, nil
 	}
-	return nil, n.Publish.Import(ctx, req.App, req.Config)
+	return nil, n.act(ctx, caller, "Publish "+p.Name+" from this server", w, func(ctx context.Context) error {
+		return n.Publish.Import(ctx, req.App, cfg)
+	})
 }
 
 // requirements (owner): what a workload needs, and a VM's devices.

@@ -7,6 +7,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/hardyos/hardyos/daemon/internal/apps"
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
+	"github.com/hardyos/hardyos/daemon/internal/cluster/fence"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/vms"
 )
@@ -68,6 +70,34 @@ func (w PrivWatchdog) Expire(ctx context.Context) error {
 	return w.Priv.Call(ctx, priv.OpClusterWatchdogExpire, nil, nil)
 }
 
+var (
+	_ fence.LeaseWatchdog  = PrivWatchdog{}
+	_ fence.StatusWatchdog = PrivWatchdog{}
+)
+
+// Status implements fence.StatusWatchdog.
+func (w PrivWatchdog) Status(ctx context.Context) (fence.Status, error) {
+	ctx, cancel := short(ctx)
+	defer cancel()
+	var st fence.Status
+	err := w.Priv.Call(ctx, priv.OpClusterWatchdogStatus, nil, &st)
+	return st, err
+}
+
+// PetWithLease implements fence.LeaseWatchdog.
+func (w PrivWatchdog) PetWithLease(ctx context.Context, validFor time.Duration, statement []byte) error {
+	ctx, cancel := short(ctx)
+	defer cancel()
+	return w.Priv.Call(ctx, priv.OpClusterWatchdogPet, priv.WatchdogPetArgs{ValidForMs: validFor.Milliseconds(), Lease: json.RawMessage(statement)}, nil)
+}
+
+// PinLeaseKeys implements fence.LeaseWatchdog.
+func (w PrivWatchdog) PinLeaseKeys(ctx context.Context, keys fence.LeaseKeys) error {
+	ctx, cancel := short(ctx)
+	defer cancel()
+	return w.Priv.Call(ctx, priv.OpClusterWatchdogKeys, keys, nil)
+}
+
 // ---- self-fencing --------------------------------------------------------------------
 
 // SelfFencer kills HA workloads through hardyd-priv and then detaches their
@@ -78,11 +108,10 @@ type SelfFencer struct {
 	Log      *slog.Logger
 }
 
-// SelfFence stops ws by force; nil only when every one stopped.
+// SelfFence stops ws by force; nil only when every one stopped. Root is
+// asked even with nothing to stop: its record of the self-fence is what
+// lets it disarm with the node's other workloads still running.
 func (f SelfFencer) SelfFence(ctx context.Context, epoch uint64, ws []cluster.WorkloadRef) error {
-	if len(ws) == 0 {
-		return nil
-	}
 	a := priv.SelfFenceArgs{Epoch: epoch, VMs: []string{}, Apps: []string{}}
 	for _, w := range ws {
 		if w.Kind == cluster.KindVM {
@@ -106,9 +135,15 @@ func (f SelfFencer) SelfFence(ctx context.Context, epoch uint64, ws []cluster.Wo
 
 // ---- VMs -------------------------------------------------------------------------------
 
+// SpecHashes gives the approved-settings hash of a workload from the
+// replicated placement (root refuses to start anything else).
+type SpecHashes func(w cluster.WorkloadRef) string
+
 // VMRuntime is cluster.Runtime for VMs.
 type VMRuntime struct {
 	Priv Priv
+	// SpecHash is the placement's approved hash (decision 386).
+	SpecHash SpecHashes
 	// HostModel is this node's CPU model (for host-passthrough VMs).
 	HostModel func() string
 	// GracefulTimeout bounds a graceful stop before it is forced
@@ -145,8 +180,12 @@ func (r *VMRuntime) hostModel() string {
 func VMRequirements(s *vms.Spec, bridge, hostModel string) *cluster.Requirements {
 	req := &cluster.Requirements{MemoryMB: s.Memory.MB, CPUs: s.CPU.VCPUs(), KVM: true}
 	if s.CPUModel == "" {
-		// host-passthrough: only a server with the same CPU.
+		// host-passthrough: only a server with the same CPU. A server that
+		// doesn't know its own CPU model fits nowhere else.
 		req.CPUModel = hostModel
+		if req.CPUModel == "" {
+			req.CPUModel = UnknownCPU
+		}
 	}
 	if s.NeedsBridge() {
 		if bridge == "" {
@@ -171,8 +210,19 @@ func (r *VMRuntime) Start(ctx context.Context, w cluster.WorkloadRef, a *cluster
 	if a == nil || a.Generation == 0 {
 		return cluster.ErrStorageUnavailable
 	}
-	return r.Priv.Call(ctx, priv.OpVMsClusterStart, vms.ClusterStartArgs{ID: w.ID, Generation: a.Generation}, nil)
+	return r.Priv.Call(ctx, priv.OpVMsClusterStart, vms.ClusterStartArgs{ID: w.ID, Generation: a.Generation, SpecHash: r.hash(w)}, nil)
 }
+
+func (r *VMRuntime) hash(w cluster.WorkloadRef) string {
+	if r.SpecHash == nil {
+		return ""
+	}
+	return r.SpecHash(w)
+}
+
+// UnknownCPU is the CPU model a host-passthrough VM requires when its
+// server couldn't tell its own: no other server matches it.
+const UnknownCPU = "?unknown"
 
 // Stop implements cluster.Runtime: graceful waits up to GracefulTimeout,
 // then forces.
@@ -211,7 +261,9 @@ func (r *VMRuntime) Status(ctx context.Context) ([]cluster.WorkloadStatus, error
 
 // AppRuntime is cluster.Runtime for apps.
 type AppRuntime struct {
-	Priv            Priv
+	Priv Priv
+	// SpecHash is the placement's approved hash (decision 386).
+	SpecHash        SpecHashes
 	GracefulTimeout time.Duration
 	Poll            time.Duration
 }
@@ -236,7 +288,11 @@ func (r *AppRuntime) Start(ctx context.Context, w cluster.WorkloadRef, a *cluste
 	if a == nil || a.Generation == 0 {
 		return cluster.ErrStorageUnavailable
 	}
-	return r.Priv.Call(ctx, priv.OpAppsClusterStart, apps.ClusterStartArgs{ID: w.ID, Generation: a.Generation}, nil)
+	h := ""
+	if r.SpecHash != nil {
+		h = r.SpecHash(w)
+	}
+	return r.Priv.Call(ctx, priv.OpAppsClusterStart, apps.ClusterStartArgs{ID: w.ID, Generation: a.Generation, SpecHash: h}, nil)
 }
 
 // Stop implements cluster.Runtime.

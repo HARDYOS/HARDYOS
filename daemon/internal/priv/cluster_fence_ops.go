@@ -24,6 +24,9 @@ const (
 	OpClusterWatchdogDisarm = "cluster.watchdog.disarm"
 	OpClusterWatchdogExpire = "cluster.watchdog.expire"
 	OpClusterSelfFence      = "cluster.selffence"
+	// OpClusterWatchdogKeys pins the voter keys root checks lease
+	// statements with (only while the watchdog isn't armed).
+	OpClusterWatchdogKeys = "cluster.watchdog.keys"
 )
 
 // WatchdogArmArgs arms the watchdog with a timeout (5-60 s).
@@ -39,6 +42,10 @@ type WatchdogArmResult struct {
 // WatchdogPetArgs lets root pet for ValidForMs more (at most 2 minutes).
 type WatchdogPetArgs struct {
 	ValidForMs int64 `json:"validForMs"`
+	// Lease is the leader's signed answer to this node's last heartbeat
+	// (fence.SignedLease): with keys pinned, root derives the deadline
+	// from it (decision 389).
+	Lease json.RawMessage `json:"lease,omitempty"`
 }
 
 // SelfFenceArgs stops cluster workloads by force: the HA workloads of a
@@ -55,15 +62,52 @@ type SelfFenceResult struct {
 	Failed  map[string]string `json:"failed"`
 }
 
+// clusterRunning is root's own view of whether any cluster VM or app runs
+// here (attached or stale).
+func clusterRunning(ctx context.Context, vmm *vms.Manager, am *apps.Manager) (bool, error) {
+	if vmm != nil {
+		l, err := vmm.ClusterStatus(ctx)
+		if err != nil {
+			return true, err
+		}
+		for _, v := range l {
+			if v.State == "running" || v.State == "paused" {
+				return true, nil
+			}
+		}
+	}
+	if am != nil {
+		l, err := am.ClusterStatus(ctx)
+		if err != nil {
+			return true, err
+		}
+		for _, a := range l {
+			if a.Running {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
 // MaxSelfFence bounds one self-fence request.
 const MaxSelfFence = 256
 
 // RegisterClusterFence adds the fencing operations. vmm and am may be nil
 // (no VMs or apps on this build).
 func RegisterClusterFence(s *Server, f *fence.Feeder, vmm *vms.Manager, am *apps.Manager) {
+	if f.Running == nil && (vmm != nil || am != nil) {
+		f.Running = func(ctx context.Context) (bool, error) { return clusterRunning(ctx, vmm, am) }
+	}
 	s.Handle(OpClusterWatchdogStatus, func(context.Context, json.RawMessage) (any, error) {
 		return f.Status(), nil
 	})
+	s.Handle(OpClusterWatchdogKeys, typed(func(_ context.Context, a fence.LeaseKeys) (any, error) {
+		if err := f.PinKeys(a); err != nil {
+			return nil, Errorf(CodeBadArgs, "%v", err)
+		}
+		return map[string]bool{"ok": true}, nil
+	}))
 	s.Handle(OpClusterWatchdogArm, typed(func(_ context.Context, a WatchdogArmArgs) (any, error) {
 		kind, err := f.Arm(time.Duration(a.TimeoutSec) * time.Second)
 		if errors.Is(err, fence.ErrNoWatchdog) {
@@ -74,11 +118,14 @@ func RegisterClusterFence(s *Server, f *fence.Feeder, vmm *vms.Manager, am *apps
 		}
 		return WatchdogArmResult{Kind: kind}, nil
 	}))
-	s.Handle(OpClusterWatchdogPet, typed(func(_ context.Context, a WatchdogPetArgs) (any, error) {
+	s.Handle(OpClusterWatchdogPet, typed(func(ctx context.Context, a WatchdogPetArgs) (any, error) {
 		if a.ValidForMs <= 0 || a.ValidForMs > (2*time.Minute).Milliseconds() {
 			return nil, Errorf(CodeBadArgs, "a pet is valid for 1 ms to 2 minutes")
 		}
-		if err := f.Pet(time.Duration(a.ValidForMs) * time.Millisecond); err != nil {
+		if len(a.Lease) > 8<<10 {
+			return nil, Errorf(CodeBadArgs, "the lease statement is too large")
+		}
+		if err := f.PetLease(ctx, time.Duration(a.ValidForMs)*time.Millisecond, a.Lease); err != nil {
 			return nil, Errorf(CodeFailed, "%v", err)
 		}
 		return map[string]bool{"ok": true}, nil
@@ -87,8 +134,8 @@ func RegisterClusterFence(s *Server, f *fence.Feeder, vmm *vms.Manager, am *apps
 		f.Expire()
 		return map[string]bool{"ok": true}, nil
 	})
-	s.Handle(OpClusterWatchdogDisarm, func(context.Context, json.RawMessage) (any, error) {
-		if err := f.Disarm(); err != nil {
+	s.Handle(OpClusterWatchdogDisarm, func(ctx context.Context, _ json.RawMessage) (any, error) {
+		if err := f.DisarmChecked(ctx); err != nil {
 			return nil, Errorf(CodeFailed, "%v", err)
 		}
 		return map[string]bool{"ok": true}, nil
@@ -129,6 +176,11 @@ func RegisterClusterFence(s *Server, f *fence.Feeder, vmm *vms.Manager, am *apps
 				continue
 			}
 			res.Stopped = append(res.Stopped, "app:"+id)
+		}
+		if len(res.Failed) == 0 {
+			// Root's own record: the disarm that follows is accepted with
+			// the node's non-HA workloads still running.
+			f.SelfFenced()
 		}
 		if len(res.Failed) > 0 {
 			var b strings.Builder

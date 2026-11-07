@@ -12,6 +12,9 @@
 package fence
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -56,6 +59,14 @@ type Status struct {
 	PettingForMs int64     `json:"pettingForMs"`
 	LastPet      time.Time `json:"lastPet,omitzero"`
 	Problem      string    `json:"problem,omitempty"`
+	// Instance changes every time hardyd-priv starts: hardyd notices a
+	// restart (which closed the device without the magic character).
+	Instance string `json:"instance"`
+	// NoWayOut: the driver can't be stopped once opened (the magic close
+	// doesn't disarm it); the agent then keeps it petted instead.
+	NoWayOut bool `json:"noWayOut,omitempty"`
+	// Leases: root checks leader-signed lease statements (keys pinned).
+	Leases bool `json:"leases,omitempty"`
 }
 
 // Feeder pets the watchdog for hardyd, within the deadline it was given.
@@ -63,30 +74,84 @@ type Feeder struct {
 	Open Opener
 	// Detect reports the server's watchdog kind without opening it.
 	Detect func() string
-	// Now is the clock (monotonic; tests fake it).
+	// Now is the clock (default CLOCK_BOOTTIME, which counts through a
+	// suspend; tests fake it).
 	Now func() time.Time
+	// Mono is the monotonic clock (CLOCK_MONOTONIC, which stops while
+	// suspended): when the two drift apart the server was suspended and
+	// every deadline is void (decision 392). Default MonoNow.
+	Mono func() time.Time
+	// NoWayOut reports whether the device can't be stopped (default: the
+	// driver's sysfs flag).
+	NoWayOut func() bool
+	// Running reports whether any cluster workload runs here (root's own
+	// view: vms and apps ClusterStatus). Disarming is refused while one
+	// does, and once lease keys are pinned an unsigned pet is accepted
+	// only while none does. nil: nothing is checked (tests).
+	Running func(ctx context.Context) (bool, error)
+	// Verifier checks lease statements (default ES256Leases).
+	Verifier LeaseVerifier
+	// SelfFenceGrace is how long after root's own self-fence a disarm is
+	// accepted with non-HA workloads still running (default 2 minutes).
+	SelfFenceGrace time.Duration
 	// Interval between pets (default 1 s).
 	Interval time.Duration
 	// MaxValid bounds a single Pet's validity (default 2 minutes, the
 	// largest quorum lease).
 	MaxValid time.Duration
 
-	mu      sync.Mutex
-	dev     Device
-	kind    string
-	timeout int
-	until   time.Time
-	lastPet time.Time
-	problem string
-	stop    chan struct{}
-	done    chan struct{}
+	mu        sync.Mutex
+	dev       Device
+	kind      string
+	timeout   int
+	until     time.Time
+	lastPet   time.Time
+	problem   string
+	stop      chan struct{}
+	done      chan struct{}
+	instance  string
+	nowayout  bool
+	keys      *LeaseKeys
+	selfFence time.Time
+	// the clocks at the last tick (suspend detection)
+	lastBoot, lastMono time.Time
 }
 
 func (f *Feeder) now() time.Time {
 	if f.Now != nil {
 		return f.Now()
 	}
-	return time.Now()
+	return BootNow()
+}
+
+func (f *Feeder) mono() time.Time {
+	if f.Mono != nil {
+		return f.Mono()
+	}
+	if f.Now != nil {
+		return f.Now() // a faked clock: no suspends
+	}
+	return MonoNow()
+}
+
+func (f *Feeder) instanceID() string {
+	if f.instance == "" {
+		b := make([]byte, 8)
+		_, _ = rand.Read(b)
+		f.instance = hex.EncodeToString(b)
+	}
+	return f.instance
+}
+
+// suspendedLocked notices a suspend since the last call: the boot clock
+// ran on while the monotonic one stood still.
+func (f *Feeder) suspendedLocked() bool {
+	b, m := f.now(), f.mono()
+	defer func() { f.lastBoot, f.lastMono = b, m }()
+	if f.lastBoot.IsZero() {
+		return false
+	}
+	return b.Sub(f.lastBoot)-m.Sub(f.lastMono) > time.Second
 }
 
 func (f *Feeder) interval() time.Duration {
@@ -122,7 +187,9 @@ func (f *Feeder) Arm(timeout time.Duration) (string, error) {
 			return "", err
 		}
 		f.dev, f.kind = dev, kind
+		f.nowayout = f.NoWayOut != nil && f.NoWayOut()
 		f.until = f.now()
+		f.lastBoot = time.Time{}
 		f.stop, f.done = make(chan struct{}), make(chan struct{})
 		go f.loop(f.stop, f.done)
 	}
@@ -151,11 +218,73 @@ func (f *Feeder) Arm(timeout time.Duration) (string, error) {
 // Pet lets root keep petting for validFor more (from now). The deadline
 // only ever comes from here: root never extends it by itself.
 func (f *Feeder) Pet(validFor time.Duration) error {
+	return f.PetLease(context.Background(), validFor, nil)
+}
+
+// ErrLeaseNeeded: root has lease keys pinned and a cluster workload runs,
+// so a pet must carry a leader-signed statement.
+var ErrLeaseNeeded = errors.New("a pet must carry the leader's signed lease statement while cluster workloads run here")
+
+// PinKeys pins the keys lease statements are checked with. Only while the
+// watchdog isn't armed: an armed server's keys can't be swapped.
+func (f *Feeder) PinKeys(k LeaseKeys) error {
+	if k.Cluster == "" || k.Node == "" || len(k.Voters) == 0 || len(k.Voters) > 16 {
+		return errors.New("lease keys need the cluster, this server and 1-16 voters")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.keys != nil && f.dev != nil {
+		return errors.New("the watchdog is armed: its lease keys stay as they are until it is disarmed")
+	}
+	c := k
+	c.Voters = map[string][]byte{}
+	for id, key := range k.Voters {
+		c.Voters[id] = append([]byte(nil), key...)
+	}
+	f.keys = &c
+	return nil
+}
+
+// PetLease is Pet with the leader's signed statement: with keys pinned,
+// the deadline is what the statement grants on root's clock (never more
+// than validFor), and while a cluster workload runs a pet without a valid
+// statement is refused.
+func (f *Feeder) PetLease(ctx context.Context, validFor time.Duration, statement []byte) error {
 	if validFor <= 0 {
 		return errors.New("a pet needs a positive validity")
 	}
 	if validFor > f.maxValid() {
 		validFor = f.maxValid()
+	}
+	f.mu.Lock()
+	keys := f.keys
+	armed := f.dev != nil
+	f.mu.Unlock()
+	if !armed {
+		return errors.New("the watchdog isn't armed")
+	}
+	if keys != nil {
+		if len(statement) > 0 {
+			v := f.Verifier
+			if v == nil {
+				f.mu.Lock()
+				if f.Verifier == nil {
+					f.Verifier = &ES256Leases{}
+				}
+				v = f.Verifier
+				f.mu.Unlock()
+			}
+			granted, err := v.Verify(statement, keys, time.Now())
+			if err != nil {
+				return fmt.Errorf("%w: %v", ErrLeaseNeeded, err)
+			}
+			validFor = min(validFor, granted)
+		} else if f.Running != nil {
+			running, err := f.Running(ctx)
+			if err != nil || running {
+				return ErrLeaseNeeded
+			}
+		}
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -180,9 +309,52 @@ func (f *Feeder) Expire() {
 	f.until = time.Time{}
 }
 
+// ErrStillRunning: root refuses to disarm while cluster workloads run.
+var ErrStillRunning = errors.New("cluster workloads still run on this server: the watchdog stays armed")
+
+// ErrNoWayOut: the driver can't be disarmed once opened.
+var ErrNoWayOut = errors.New("this watchdog can't be stopped once started (nowayout): it stays armed and petted")
+
+// SelfFenced records that root finished a self-fence now: for a while a
+// disarm is accepted with the node's non-HA workloads still running.
+func (f *Feeder) SelfFenced() {
+	f.mu.Lock()
+	f.selfFence = f.now()
+	f.mu.Unlock()
+}
+
+// DisarmChecked disarms only when root sees no cluster workload running
+// (or right after its own self-fence of the HA ones), and never a
+// nowayout device (decisions 389 and 391).
+func (f *Feeder) DisarmChecked(ctx context.Context) error {
+	f.mu.Lock()
+	armed, nowayout, sf := f.dev != nil, f.nowayout, f.selfFence
+	f.mu.Unlock()
+	if !armed {
+		return nil
+	}
+	if nowayout {
+		return ErrNoWayOut
+	}
+	grace := f.SelfFenceGrace
+	if grace <= 0 {
+		grace = 2 * time.Minute
+	}
+	if f.Running != nil && (sf.IsZero() || f.now().Sub(sf) > grace) {
+		running, err := f.Running(ctx)
+		if err != nil {
+			return fmt.Errorf("%w (root couldn't list them: %v)", ErrStillRunning, err)
+		}
+		if running {
+			return ErrStillRunning
+		}
+	}
+	return f.Disarm()
+}
+
 // Disarm stops the loop and closes the device with the magic character.
 // hardyd only disarms with no HA workload running here (its fence agent
-// is DISARMED).
+// is DISARMED); the operation goes through DisarmChecked.
 func (f *Feeder) Disarm() error {
 	f.mu.Lock()
 	dev, stop, done := f.dev, f.stop, f.done
@@ -202,7 +374,8 @@ func (f *Feeder) Disarm() error {
 func (f *Feeder) Status() Status {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	st := Status{Armed: f.dev != nil, Kind: f.kind, TimeoutSec: f.timeout, LastPet: f.lastPet, Problem: f.problem}
+	st := Status{Armed: f.dev != nil, Kind: f.kind, TimeoutSec: f.timeout, LastPet: f.lastPet, Problem: f.problem,
+		Instance: f.instanceID(), NoWayOut: f.nowayout, Leases: f.keys != nil}
 	if f.dev == nil {
 		if f.Detect != nil {
 			st.Kind = f.Detect()
@@ -221,6 +394,13 @@ func (f *Feeder) Tick() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.dev == nil {
+		return
+	}
+	if f.suspendedLocked() {
+		// Suspended: whatever deadline hardyd gave was measured before;
+		// the cluster may have declared this server dead meanwhile.
+		f.until = time.Time{}
+		f.problem = "the server was suspended; the watchdog isn't petted until hardyd renews the lease"
 		return
 	}
 	now := f.now()
@@ -271,6 +451,20 @@ func DetectKind(root fs.FS) string {
 		return KindNone
 	}
 	return KindHardware
+}
+
+// DetectNoWayOut reads the device's nowayout flag (the driver's or the
+// watchdog core's).
+func DetectNoWayOut(root fs.FS) bool {
+	for _, p := range []string{"sys/class/watchdog/watchdog0/nowayout", "sys/module/watchdog/parameters/nowayout"} {
+		if b, err := fs.ReadFile(root, p); err == nil {
+			v := strings.TrimSpace(string(b))
+			if v == "1" || v == "Y" || v == "y" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // SystemOpener opens /dev/watchdog0 (the kind from sysfs).

@@ -60,8 +60,9 @@ type Service struct {
 	Node        *moves.Node
 	Announcer   *Announcer
 
-	reqMu sync.Mutex
-	reqs  map[cluster.WorkloadRef]*cluster.Requirements
+	reqMu         sync.Mutex
+	reqs          map[cluster.WorkloadRef]*cluster.Requirements
+	polkitProblem string
 }
 
 // ErrNotMember: this server isn't in a cluster (or part A isn't there).
@@ -95,18 +96,36 @@ func (s *Service) Init() {
 	}
 	m.Register(state.Placements{})
 	m.Register(state.Fences{})
-	vmRT := &runtime.VMRuntime{Priv: s.Priv, HostModel: func() string {
+	// Root starts a workload only with the settings an administrator
+	// approved: the hash in the replicated placement (decision 386).
+	specHash := func(w cluster.WorkloadRef) string {
+		if p, ok := m.State().Placement(w); ok && p != nil {
+			return p.SpecHash
+		}
+		return ""
+	}
+	vmRT := &runtime.VMRuntime{Priv: s.Priv, SpecHash: specHash, HostModel: func() string {
 		if n, err := m.Self(); err == nil && n.Compute != nil {
 			return n.Compute.CPUModel
 		}
 		return ""
 	}}
-	appRT := &runtime.AppRuntime{Priv: s.Priv}
+	appRT := &runtime.AppRuntime{Priv: s.Priv, SpecHash: specHash}
 	rts := []cluster.Runtime{vmRT, appRT}
 	s.Reconciler = &runtime.Reconciler{Cluster: m, Attacher: s.Parts.Attacher, Runtimes: rts, BootID: bootID, Log: s.Log}
 	s.Agent = &fence.Agent{Cluster: m, Watchdog: runtime.PrivWatchdog{Priv: s.Priv},
 		Fencer: runtime.SelfFencer{Priv: s.Priv, Attacher: s.Parts.Attacher, Log: s.Log}, Running: s.Reconciler.Local, Log: s.Log,
-		OnChange: func(st fence.AgentStatus) { s.audit("cluster.fence."+string(st.State), "this server", st.Problem) }}
+		OnChange: func(st fence.AgentStatus) {
+			action := "cluster.fence." + string(st.State)
+			if st.RootRestarted {
+				action = "cluster.fence.privrestart"
+			}
+			s.audit(action, "this server", st.Problem)
+		}}
+	// HA workloads start only once the watchdog is armed; a rejoin says
+	// "clean" only when the agent itself obeyed the fence.
+	s.Reconciler.FenceReady = s.Agent.Ready
+	s.Reconciler.CleanFence = s.Agent.CleanFence
 	images := runtime.PrivImages{Priv: s.Priv}
 	if s.Parts.Peers != nil {
 		s.Mover = &moves.Mover{Cluster: m, Peers: s.Parts.Peers, Scheduler: s.Scheduler, Log: s.Log}
@@ -116,12 +135,12 @@ func (s *Service) Init() {
 				return n.ID
 			}}}
 	}
-	stream := s.Parts.Stream
-	if stream == nil && s.Parts.Peers != nil {
-		stream = moves.PeerStream{Peers: s.Parts.Peers}
-	}
+	// Live migration only over the cluster port's own stream (LAN or the
+	// storage network); there is no fallback through the peer API, which
+	// may run over NetBird (decision 332).
 	s.Node = &moves.Node{Cluster: m, Reconciler: s.Reconciler, Attacher: s.Parts.Attacher, Runtimes: rts, Priv: s.Priv,
-		Images: images, Publish: s.Publish, Stream: stream, Log: s.Log}
+		Images: images, Publish: s.Publish, Stream: s.Parts.Stream, Peers: s.Parts.Peers, Log: s.Log,
+		FenceReady: s.Agent.Ready, SpecHash: specHash, Actions: s}
 	if s.Parts.Mux != nil {
 		s.Node.Caller = s.Parts.Mux.Caller
 		s.Node.Register(s.Parts.Mux)
@@ -129,10 +148,11 @@ func (s *Service) Init() {
 	s.Coordinator = &Coordinator{Cluster: m, Scheduler: s.Scheduler, Actions: s, Requirements: s.cachedRequirements,
 		Power: s.Parts.Power, Log: s.Log}
 	if s.Priv != nil {
-		s.Announcer = &Announcer{Cluster: m, Priv: s.Priv}
+		s.Announcer = &Announcer{Cluster: m, Priv: s.Priv, BootID: bootID}
 	}
 	if s.Mover != nil {
 		s.Coordinator.Mover = s.Mover
+		s.Coordinator.Migrations = s.Mover
 	}
 }
 
@@ -157,7 +177,104 @@ func (s *Service) Start(ctx context.Context) {
 	if s.Announcer != nil {
 		run(s.Announcer.Run)
 	}
+	if s.Priv != nil {
+		run(s.watchPolkit)
+	}
 	wg.Wait()
+}
+
+// watchPolkit alerts when polkitd stops on a compute node set up for live
+// migration: with libvirt's polkit access driver every libvirt call then
+// fails, root's own included (a forced stop falls back to killing QEMU).
+func (s *Service) watchPolkit(ctx context.Context) {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		if s.Member() {
+			if self, err := s.Parts.Membership.Self(); err == nil && self.Role == cluster.RoleCompute {
+				var res struct {
+					OK      bool   `json:"ok"`
+					Problem string `json:"problem"`
+				}
+				cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				err := s.Priv.Call(cctx, priv.OpVMsMigrateHealth, nil, &res)
+				cancel()
+				problem := ""
+				if err == nil && !res.OK {
+					problem = res.Problem
+				}
+				s.setPolkitProblem(problem)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+func (s *Service) setPolkitProblem(p string) {
+	s.reqMu.Lock()
+	changed := s.polkitProblem != p
+	s.polkitProblem = p
+	s.reqMu.Unlock()
+	if !changed {
+		return
+	}
+	if p != "" {
+		s.log().Error("cluster: polkit is down; libvirt refuses every call", "problem", p)
+		s.auditOutcome("cluster.polkit.down", "this server", p, errors.New(p))
+	} else {
+		s.audit("cluster.polkit.up", "this server", "polkit runs again")
+	}
+}
+
+// SpecHash asks root for the hash of a workload's settings as they are on
+// the cluster storage attached here (after an administrator approved
+// them: before workload.add, and for ApproveSpec).
+func (s *Service) SpecHash(ctx context.Context, w cluster.WorkloadRef) (string, error) {
+	if s.Priv == nil {
+		return "", ErrNotMember
+	}
+	op := priv.OpVMsClusterHash
+	var args any = priv.VMRef{ID: w.ID}
+	if w.Kind == cluster.KindApp {
+		op, args = priv.OpAppsClusterHash, priv.AppRef{ID: w.ID}
+	}
+	var res priv.SpecHashResult
+	if err := s.Priv.Call(ctx, op, args, &res); err != nil {
+		return "", err
+	}
+	return res.Hash, state.ValidSpecHash(res.Hash)
+}
+
+// ApproveSpec records the settings of a workload placed here, as they are
+// now on its storage, as the approved ones (workload.spec). The flows that
+// change a cluster workload's settings for an administrator (VM settings,
+// app updates and reconfiguration) call it on the owner afterwards.
+func (s *Service) ApproveSpec(ctx context.Context, w cluster.WorkloadRef, actor cluster.Actor) error {
+	if !s.Member() {
+		return ErrNotMember
+	}
+	snap := s.Parts.Membership.State().Snapshot()
+	p := snap.Placements[w]
+	self, _ := s.Parts.Membership.Self()
+	if p == nil || p.Owner != self.ID {
+		return fmt.Errorf("%s isn't placed on this server", w.ID)
+	}
+	h, err := s.SpecHash(ctx, w)
+	if err != nil {
+		return err
+	}
+	if h == p.SpecHash {
+		return nil
+	}
+	if err := s.propose(ctx, cluster.CmdWorkloadSpec, state.WorkloadSpecSet{Workload: w, Generation: p.Generation, SpecHash: h}, actor); err != nil {
+		return err
+	}
+	s.audit("cluster.spec.approved", string(w.Kind)+":"+w.ID, h)
+	return nil
 }
 
 func bootID() string {
@@ -231,7 +348,7 @@ const (
 // systemKinds are the coordinator's actions: run at once by the
 // coordinator (failover can't wait behind other jobs) and recorded as
 // finished jobs.
-var systemKinds = []string{JobDead, JobIsolate, JobRecover, JobRelocate, JobPending, JobCollapse, JobEvacuate, JobFailBack}
+var systemKinds = []string{JobDead, JobIsolate, JobRecover, JobRelocate, JobPending, JobCollapse, JobEvacuate, JobFailBack, moves.StepKind}
 
 // systemOutcome is a coordinator action's recorded outcome.
 type systemOutcome struct {

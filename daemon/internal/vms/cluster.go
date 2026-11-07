@@ -9,6 +9,8 @@ package vms
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
@@ -273,6 +275,11 @@ type HostCPU struct {
 	HostModel string `json:"hostModel"`
 	// Usable are the named models this server can run as they are.
 	Usable []string `json:"usable"`
+	// Signature identifies this exact CPU for host-passthrough VMs: the
+	// host model, its vendor and the features libvirt adds or removes
+	// ("Skylake-Client-IBRS/Intel/<hash>"). Two servers with the same
+	// signature run a host-passthrough VM alike (decision 393).
+	Signature string `json:"signature,omitempty"`
 }
 
 type domCapsXML struct {
@@ -285,6 +292,11 @@ type domCapsXML struct {
 				Usable string `xml:"usable,attr"`
 				Name   string `xml:",chardata"`
 			} `xml:"model"`
+			Vendor   string `xml:"vendor"`
+			Features []struct {
+				Policy string `xml:"policy,attr"`
+				Name   string `xml:"name,attr"`
+			} `xml:"feature"`
 		} `xml:"mode"`
 	} `xml:"cpu"`
 }
@@ -308,6 +320,13 @@ func ParseDomainCapabilities(b []byte) (*HostCPU, error) {
 			switch mode.Name {
 			case "host-model":
 				h.HostModel = name
+				var fs []string
+				for _, f := range mode.Features {
+					fs = append(fs, f.Policy+":"+f.Name)
+				}
+				slices.Sort(fs)
+				sum := sha256.Sum256([]byte(strings.Join(fs, ",")))
+				h.Signature = name + "/" + strings.TrimSpace(mode.Vendor) + "/" + hex.EncodeToString(sum[:6])
 			case "custom":
 				if mo.Usable == "yes" {
 					h.Usable = append(h.Usable, name)
