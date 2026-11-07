@@ -2093,7 +2093,8 @@ cloud backups).
 ## Cluster
 
 Phase 8 (user guide: [cluster.md](cluster.md); design and the parts' split:
-[plans/cluster.md](plans/cluster.md); decisions 320-359). Part A, the
+[plans/cluster.md](plans/cluster.md); decisions 320-359, security fixes and
+integration 365-398). Part A, the
 cluster core, is below; parts B (storage node) and C (placement, moves,
 HA, fencing) add subsections.
 

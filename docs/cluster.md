@@ -4,7 +4,7 @@ Phase 8. Join three or more HardyOS servers into one cluster: sign in once
 and manage every server from one desktop, keep VM and app data on one
 storage server, move workloads between servers and restart them elsewhere
 when a server dies. Architecture: [architecture.md](architecture.md#cluster);
-design: [plans/cluster.md](plans/cluster.md); decisions 320-359.
+design: [plans/cluster.md](plans/cluster.md); decisions 320-359 and 365-398.
 
 This guide covers the cluster core (part A: creating and joining a
 cluster, the witness on the VPS, the server switcher and how the servers
@@ -262,7 +262,9 @@ on different servers when possible) and fail back.
 2. The server itself, if it still runs but is cut off, loses its quorum
    lease after 15 seconds and **stops its HA workloads at once**; it also
    stops feeding its hardware watchdog, so if stopping hangs the watchdog
-   resets the machine within 10 seconds.
+   resets the machine within 10 seconds. (The root helper that feeds the
+   watchdog doesn't take hardyd's word for the lease: it checks the
+   leader's signed answer to the server's own heartbeat each time.)
 3. After 40 seconds the leader declares it **dead**; the NAS cuts it off
    (above) and confirms.
 4. Only then are its HA workloads started on other servers, by priority,
@@ -284,7 +286,8 @@ every start).
 administrator approved: the log keeps a hash of them, and the server
 starting it checks the files on cluster storage against it (an app's
 compose file also passes the install policy check again). Changing a
-cluster workload's settings records the new hash.
+cluster VM's settings (on the server it is placed on) records the new
+hash; a cluster app's settings can't be changed yet.
 
 Other cases: a server that loses only the storage network while the others
 still reach the NAS is isolated and fenced the same way. If **every**
