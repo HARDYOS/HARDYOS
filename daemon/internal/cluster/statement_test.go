@@ -58,26 +58,26 @@ func TestHeartbeatStatement(t *testing.T) {
 		return &HeartbeatAnswer{Statement: raw, Signature: sig}
 	}
 	good := LeaderStatement{Cluster: "abc", Leader: "nas", Node: "c1", Term: 3, Commit: 10, Sent: 42}
-	if err := n.verifyStatement("nas", 42, answer(leaderID, good)); err != nil {
+	if _, err := n.verifyStatement("nas", 42, answer(leaderID, good)); err != nil {
 		t.Fatalf("good answer: %v", err)
 	}
-	if err := n.verifyStatement("nas", 43, answer(leaderID, good)); err == nil {
+	if _, err := n.verifyStatement("nas", 43, answer(leaderID, good)); err == nil {
 		t.Fatal("an old answer was accepted")
 	}
 	other := good
 	other.Node = "c2"
-	if err := n.verifyStatement("nas", 42, answer(leaderID, other)); err == nil {
+	if _, err := n.verifyStatement("nas", 42, answer(leaderID, other)); err == nil {
 		t.Fatal("another node's answer was accepted")
 	}
-	if err := n.verifyStatement("nas", 42, answer(witnessID, good)); err == nil {
+	if _, err := n.verifyStatement("nas", 42, answer(witnessID, good)); err == nil {
 		t.Fatal("an answer signed with another key was accepted")
 	}
 	w := good
 	w.Leader = "witness"
-	if err := n.verifyStatement("witness", 42, answer(witnessID, w)); err == nil {
+	if _, err := n.verifyStatement("witness", 42, answer(witnessID, w)); err == nil {
 		t.Fatal("the witness's answer was accepted")
 	}
-	if err := n.verifyStatement("nas", 42, &HeartbeatAnswer{}); err == nil {
+	if _, err := n.verifyStatement("nas", 42, &HeartbeatAnswer{}); err == nil {
 		t.Fatal("an unsigned answer was accepted")
 	}
 }

@@ -133,7 +133,7 @@ func newLeader(t *testing.T) leader {
 
 func (l leader) sign(t *testing.T, st LeaseStatement) []byte {
 	b, _ := json.Marshal(st)
-	sum := sha256.Sum256(b)
+	sum := sha256.Sum256(append([]byte(cluster.StatementDomain), b...))
 	sig, err := ecdsa.SignASN1(rand.Reader, l.key, sum[:])
 	if err != nil {
 		t.Fatal(err)
@@ -142,11 +142,18 @@ func (l leader) sign(t *testing.T, st LeaseStatement) []byte {
 	return out
 }
 
+// Root checks part A's own heartbeat statements (one format, decision
+// 389): signed by a pinned key for this cluster and node, measured from
+// the node's own send time.
 func TestLeaseStatementsPinnedInRoot(t *testing.T) {
 	l, other := newLeader(t), newLeader(t)
 	keys := LeaseKeys{Cluster: "abc", Node: "c1", Voters: map[string][]byte{"c2": l.der}}
 	now := time.Now()
-	st := LeaseStatement{Cluster: "abc", Leader: "c2", Node: "c1", Term: 3, IssuedMs: now.UnixMilli(), ValidMs: 15000}
+	stmt := func(cl, leader, node string, sent time.Time, lease time.Duration) LeaseStatement {
+		return LeaseStatement{Cluster: cluster.ClusterID(cl), Leader: cluster.NodeID(leader), Node: cluster.NodeID(node), Term: 3,
+			Sent: sent.UnixNano(), LeaseMs: lease.Milliseconds()}
+	}
+	st := stmt("abc", "c2", "c1", now, 15*time.Second)
 	v := &ES256Leases{}
 	d, err := v.Verify(l.sign(t, st), &keys, now.Add(time.Second))
 	if err != nil || d > 14*time.Second || d < 13*time.Second {
@@ -154,17 +161,29 @@ func TestLeaseStatementsPinnedInRoot(t *testing.T) {
 	}
 	bad := map[string][]byte{
 		"another key":     other.sign(t, st),
-		"another node":    l.sign(t, LeaseStatement{Cluster: "abc", Leader: "c2", Node: "c3", IssuedMs: now.UnixMilli(), ValidMs: 15000}),
-		"another cluster": l.sign(t, LeaseStatement{Cluster: "xyz", Leader: "c2", Node: "c1", IssuedMs: now.UnixMilli(), ValidMs: 15000}),
-		"not a voter":     l.sign(t, LeaseStatement{Cluster: "abc", Leader: "c9", Node: "c1", IssuedMs: now.UnixMilli(), ValidMs: 15000}),
-		"stale":           l.sign(t, LeaseStatement{Cluster: "abc", Leader: "c2", Node: "c1", IssuedMs: now.Add(-time.Minute).UnixMilli(), ValidMs: 15000}),
-		"older replay":    l.sign(t, LeaseStatement{Cluster: "abc", Leader: "c2", Node: "c1", IssuedMs: now.Add(-2 * time.Second).UnixMilli(), ValidMs: 15000}),
+		"another node":    l.sign(t, stmt("abc", "c2", "c3", now, 15*time.Second)),
+		"another cluster": l.sign(t, stmt("xyz", "c2", "c1", now, 15*time.Second)),
+		"not pinned":      l.sign(t, stmt("abc", "c9", "c1", now, 15*time.Second)),
+		"run out":         l.sign(t, stmt("abc", "c2", "c1", now.Add(-time.Minute), 15*time.Second)),
+		"from the future": l.sign(t, stmt("abc", "c2", "c1", now.Add(time.Minute), 15*time.Second)),
+		"too long":        l.sign(t, stmt("abc", "c2", "c1", now, time.Hour)),
+		"no lease":        l.sign(t, stmt("abc", "c2", "c1", now, 0)),
+		"older replay":    l.sign(t, stmt("abc", "c2", "c1", now.Add(-2*time.Second), 15*time.Second)),
 		"garbage":         []byte(`{"statement":"x"}`),
 	}
 	for name, raw := range bad {
 		if _, err := v.Verify(raw, &keys, now.Add(time.Second)); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+	// Without the heartbeat domain prefix (a signature made for anything
+	// else with the cluster key) it doesn't verify.
+	b, _ := json.Marshal(st)
+	sum := sha256.Sum256(b)
+	sig, _ := ecdsa.SignASN1(rand.Reader, l.key, sum[:])
+	raw, _ := json.Marshal(SignedLease{Statement: b, Signature: sig})
+	if _, err := (&ES256Leases{}).Verify(raw, &keys, now); err == nil {
+		t.Error("a signature without the statement domain was accepted")
 	}
 
 	// In root: with keys pinned and workloads running, an unsigned pet is
@@ -178,14 +197,32 @@ func TestLeaseStatementsPinnedInRoot(t *testing.T) {
 	if _, err := f.Arm(10 * time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.PinKeys(LeaseKeys{Cluster: "abc", Node: "c1", Voters: map[string][]byte{"c9": other.der}}); err == nil {
-		t.Fatal("keys were swapped while armed")
+	if got := f.Status().KeySet; got != keys.Hash() {
+		t.Fatalf("root reports key set %q", got)
+	}
+	swapped := LeaseKeys{Cluster: "abc", Node: "c1", Voters: map[string][]byte{"c9": other.der}}
+	if err := f.PinKeys(swapped); err == nil {
+		t.Fatal("keys were swapped while armed without the leader's word")
+	}
+	// A statement from a pinned key for another key set doesn't vouch.
+	wrong := stmt("abc", "c2", "c1", time.Now(), 15*time.Second)
+	wrong.Keys = keys.Hash()
+	swapped.Lease = l.sign(t, wrong)
+	if err := f.PinKeys(swapped); err == nil {
+		t.Fatal("keys were swapped while armed with a statement for another key set")
+	}
+	// A key that isn't pinned can't vouch for itself.
+	grown := LeaseKeys{Cluster: "abc", Node: "c1", Voters: map[string][]byte{"c2": l.der, "c9": other.der}}
+	self := stmt("abc", "c9", "c1", time.Now(), 15*time.Second)
+	self.Keys = grown.Hash()
+	grown.Lease = other.sign(t, self)
+	if err := f.PinKeys(grown); err == nil {
+		t.Fatal("a new key vouched for itself")
 	}
 	if err := f.PetLease(context.Background(), time.Minute, nil); !errors.Is(err, ErrLeaseNeeded) {
 		t.Fatalf("an unsigned pet with workloads running: %v", err)
 	}
-	st.IssuedMs = time.Now().UnixMilli()
-	st.ValidMs = 5000
+	st = stmt("abc", "c2", "c1", time.Now(), 5*time.Second)
 	if err := f.PetLease(context.Background(), time.Minute, l.sign(t, st)); err != nil {
 		t.Fatal(err)
 	}
@@ -194,6 +231,17 @@ func TestLeaseStatementsPinnedInRoot(t *testing.T) {
 	}
 	if err := f.PetLease(context.Background(), time.Minute, other.sign(t, st)); err == nil {
 		t.Fatal("a statement signed by an unknown key was accepted")
+	}
+	// The pinned leader vouches for a grown key set: root takes it, and
+	// the new server's statements count from then on.
+	vouch := stmt("abc", "c2", "c1", time.Now(), 15*time.Second)
+	vouch.Keys = grown.Hash()
+	grown.Lease = l.sign(t, vouch)
+	if err := f.PinKeys(grown); err != nil {
+		t.Fatalf("the leader's statement for the new keys: %v", err)
+	}
+	if err := f.PetLease(context.Background(), time.Minute, other.sign(t, stmt("abc", "c9", "c1", time.Now(), 5*time.Second))); err != nil {
+		t.Fatalf("a statement of the newly pinned server: %v", err)
 	}
 	// Nothing runs: unsigned pets are fine (an idle armed watchdog).
 	f.Running = func(context.Context) (bool, error) { return false, nil }

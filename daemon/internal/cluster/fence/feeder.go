@@ -22,6 +22,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/hardyos/hardyos/daemon/internal/cluster"
 )
 
 // Device is an open watchdog device.
@@ -67,6 +69,8 @@ type Status struct {
 	NoWayOut bool `json:"noWayOut,omitempty"`
 	// Leases: root checks leader-signed lease statements (keys pinned).
 	Leases bool `json:"leases,omitempty"`
+	// KeySet is the cluster.KeySetHash of the pinned keys.
+	KeySet string `json:"keySet,omitempty"`
 }
 
 // Feeder pets the watchdog for hardyd, within the deadline it was given.
@@ -225,18 +229,39 @@ func (f *Feeder) Pet(validFor time.Duration) error {
 // so a pet must carry a leader-signed statement.
 var ErrLeaseNeeded = errors.New("a pet must carry the leader's signed lease statement while cluster workloads run here")
 
-// PinKeys pins the keys lease statements are checked with. Only while the
-// watchdog isn't armed: an armed server's keys can't be swapped.
+// PinKeys pins the keys lease statements are checked with. While the
+// watchdog is armed the keys change only for the same cluster and node and
+// with a statement, signed by a key already pinned and still within its
+// lease, whose key set hash is the new set's: the cluster's leader vouches
+// for a server that joined or left.
 func (f *Feeder) PinKeys(k LeaseKeys) error {
-	if k.Cluster == "" || k.Node == "" || len(k.Voters) == 0 || len(k.Voters) > 16 {
-		return errors.New("lease keys need the cluster, this server and 1-16 voters")
+	if k.Cluster == "" || k.Node == "" || len(k.Voters) == 0 || len(k.Voters) > 64 {
+		return errors.New("lease keys need the cluster, this server and 1-64 servers that may lead")
+	}
+	for id, key := range k.Voters {
+		if _, err := cluster.ParsePublicKey(key); err != nil {
+			return fmt.Errorf("%s's key: %w", id, err)
+		}
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.keys != nil && f.dev != nil {
-		return errors.New("the watchdog is armed: its lease keys stay as they are until it is disarmed")
+		if k.Cluster != f.keys.Cluster || k.Node != f.keys.Node {
+			return errors.New("the watchdog is armed: its lease keys stay for this cluster and server")
+		}
+		if len(k.Lease) == 0 {
+			return errors.New("the watchdog is armed: new lease keys need the leader's statement for them")
+		}
+		st, _, err := CheckLease(k.Lease, f.keys, time.Now())
+		if err != nil {
+			return fmt.Errorf("the watchdog is armed: %w", err)
+		}
+		if st.Keys != k.Hash() {
+			return errors.New("the watchdog is armed: the leader's statement doesn't vouch for these keys")
+		}
 	}
 	c := k
+	c.Lease = nil
 	c.Voters = map[string][]byte{}
 	for id, key := range k.Voters {
 		c.Voters[id] = append([]byte(nil), key...)
@@ -376,6 +401,9 @@ func (f *Feeder) Status() Status {
 	defer f.mu.Unlock()
 	st := Status{Armed: f.dev != nil, Kind: f.kind, TimeoutSec: f.timeout, LastPet: f.lastPet, Problem: f.problem,
 		Instance: f.instanceID(), NoWayOut: f.nowayout, Leases: f.keys != nil}
+	if f.keys != nil {
+		st.KeySet = f.keys.Hash()
+	}
 	if f.dev == nil {
 		if f.Detect != nil {
 			st.Kind = f.Detect()

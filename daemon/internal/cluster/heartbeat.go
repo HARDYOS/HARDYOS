@@ -59,68 +59,128 @@ type HeartbeatAnswer struct {
 
 // LeaderStatement is what a leader signs in a heartbeat answer: it leads
 // in Term with Commit committed, and heard Node's heartbeat sent at Sent.
+// It is also the quorum lease root checks before it pets the watchdog
+// (lease.go): Node is quorate until Sent + LeaseMs on its own clock.
 type LeaderStatement struct {
 	Cluster ClusterID `json:"cluster"`
 	Leader  NodeID    `json:"leader"`
 	Node    NodeID    `json:"node"`
 	Term    uint64    `json:"term"`
 	Commit  uint64    `json:"commit"`
-	Sent    int64     `json:"sent"`
+	// Sent is the node's own send time of the heartbeat (Unix ns).
+	Sent int64 `json:"sent"`
+	// LeaseMs is the quorum lease the leader grants from Sent (Q).
+	LeaseMs int64 `json:"leaseMs"`
+	// Keys is the KeySetHash of the leader's LeaseKeySet: the members that
+	// may lead, as the leader knows them.
+	Keys string `json:"keys,omitempty"`
 }
-
-// statementDomain separates heartbeat signatures from every other use of
-// the cluster key.
-const statementDomain = "hardyos-heartbeat/1\n"
 
 func signStatement(id *Identity, st LeaderStatement) (json.RawMessage, []byte, error) {
 	raw, err := json.Marshal(st)
 	if err != nil {
 		return nil, nil, err
 	}
-	sum := sha256.Sum256(append([]byte(statementDomain), raw...))
+	sum := sha256.Sum256(append([]byte(StatementDomain), raw...))
 	sig, err := ecdsa.SignASN1(rand.Reader, id.Key, sum[:])
 	return raw, sig, err
+}
+
+// statementFor is the statement this node (the leader) signs for node's
+// heartbeat sent at sent.
+func (n *Core) statementFor(node NodeID, sent int64) LeaderStatement {
+	st := LeaderStatement{Leader: n.ID(), Node: node, Sent: sent, LeaseMs: n.timings().QuorumLease.Milliseconds(), Keys: n.keySetHash()}
+	if info := n.Info(); info != nil {
+		st.Cluster = info.Cluster
+	}
+	if r := n.r(); r != nil {
+		st.Term, _ = strconv.ParseUint(r.Stats()["term"], 10, 64)
+		st.Commit = r.CommitIndex()
+	}
+	return st
+}
+
+// keySetHash is the KeySetHash of the current LeaseKeySet, cached per
+// applied index.
+func (n *Core) keySetHash() string {
+	idx := n.cfg.Machine.Index()
+	n.live.mu.Lock()
+	if n.live.keysAt == idx && n.live.keys != "" {
+		h := n.live.keys
+		n.live.mu.Unlock()
+		return h
+	}
+	n.live.mu.Unlock()
+	h := KeySetHash(LeaseKeySet(n.cfg.Machine.Snapshot()))
+	n.live.mu.Lock()
+	n.live.keysAt, n.live.keys = idx, h
+	n.live.mu.Unlock()
+	return h
+}
+
+// LeaseStatement implements fence.LeaseSource: the latest leader-signed
+// statement for this node's heartbeat (SignedStatement JSON), while the
+// lease it grants hasn't run out.
+func (n *Core) LeaseStatement() ([]byte, bool) {
+	n.live.mu.Lock()
+	sst, sent, lease := n.live.statement, n.live.stmtSent, n.live.stmtLease
+	n.live.mu.Unlock()
+	if sst == nil || time.Now().After(time.Unix(0, sent).Add(lease)) {
+		return nil, false
+	}
+	raw, err := json.Marshal(sst)
+	if err != nil {
+		return nil, false
+	}
+	return raw, true
+}
+
+// keepStatement remembers a verified statement for this node.
+func (n *Core) keepStatement(raw json.RawMessage, sig []byte, st *LeaderStatement) {
+	n.live.mu.Lock()
+	defer n.live.mu.Unlock()
+	if st.Sent < n.live.stmtSent {
+		return
+	}
+	n.live.statement = &SignedStatement{Statement: raw, Signature: sig}
+	n.live.stmtSent, n.live.stmtLease = st.Sent, time.Duration(st.LeaseMs)*time.Millisecond
 }
 
 // verifyStatement checks a heartbeat answer: signed by the leader that was
 // asked, a member that may lead by this node's state (never the witness),
 // for this node and this very heartbeat.
-func (n *Core) verifyStatement(leader NodeID, sent int64, ans *HeartbeatAnswer) error {
+func (n *Core) verifyStatement(leader NodeID, sent int64, ans *HeartbeatAnswer) (*LeaderStatement, error) {
 	info := n.Info()
 	if info == nil {
-		return ErrNotMember
+		return nil, ErrNotMember
 	}
 	m, ok := n.Member(leader)
 	if !ok || !MayLead(m) {
-		return fmt.Errorf("%s may not answer heartbeats", leader)
+		return nil, fmt.Errorf("%s may not answer heartbeats", leader)
 	}
-	k, err := ParsePublicKey(m.PublicKey)
+	st, err := VerifyStatement(m.PublicKey, ans.Statement, ans.Signature)
 	if err != nil {
-		return err
-	}
-	if len(ans.Statement) == 0 || len(ans.Statement) > 4096 {
-		return errors.New("no leader statement")
-	}
-	sum := sha256.Sum256(append([]byte(statementDomain), ans.Statement...))
-	if !ecdsa.VerifyASN1(k, sum[:], ans.Signature) {
-		return errors.New("bad leader signature")
-	}
-	var st LeaderStatement
-	if err := json.Unmarshal(ans.Statement, &st); err != nil {
-		return err
+		return nil, err
 	}
 	if st.Cluster != info.Cluster || st.Leader != leader || st.Node != info.Node || st.Sent != sent {
-		return errors.New("the leader's statement is for another heartbeat")
+		return nil, errors.New("the leader's statement is for another heartbeat")
 	}
-	return nil
+	return st, nil
 }
 
 type liveness struct {
-	mu        sync.Mutex
-	lease     time.Time // quorate until (monotonic)
-	quorate   bool
-	elected   time.Time // when this node last became leader
-	verified  time.Time // last successful VerifyLeader
+	mu       sync.Mutex
+	lease    time.Time // quorate until (monotonic)
+	quorate  bool
+	elected  time.Time // when this node last became leader
+	verified time.Time // last successful VerifyLeader
+	// the latest leader-signed statement for this node (LeaseStatement)
+	statement *SignedStatement
+	stmtSent  int64
+	stmtLease time.Duration
+	// the KeySetHash cache (keySetHash)
+	keysAt    uint64
+	keys      string
 	lastHeard map[NodeID]time.Time
 	heard     map[NodeID]bool // heard since this node's election
 	reports   map[NodeID]Health
@@ -130,6 +190,7 @@ func (l *liveness) reset() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.lease, l.quorate = time.Time{}, false
+	l.statement, l.stmtSent, l.stmtLease = nil, 0, 0
 	l.lastHeard, l.heard, l.reports = map[NodeID]time.Time{}, map[NodeID]bool{}, map[NodeID]Health{}
 }
 
@@ -227,6 +288,12 @@ func (n *Core) beat(ctx context.Context, t Timings) {
 		if n.verifyLeader() {
 			n.extendLease(sent)
 			n.record(req, time.Now())
+			// The leader's own lease, signed like every other member's,
+			// for its root (fence.LeaseSource).
+			st := n.statementFor(self, req.Sent)
+			if raw, sig, err := signStatement(n.cfg.Identity, st); err == nil {
+				n.keepStatement(raw, sig, &st)
+			}
 		}
 		return
 	}
@@ -241,11 +308,13 @@ func (n *Core) beat(ctx context.Context, t Timings) {
 		n.log.Debug("cluster: heartbeat", "leader", leader, "err", err)
 		return
 	}
-	if err := n.verifyStatement(leader, req.Sent, &ans); err != nil {
+	st, err := n.verifyStatement(leader, req.Sent, &ans)
+	if err != nil {
 		n.log.Debug("cluster: heartbeat answer refused", "leader", leader, "err", err)
 		return
 	}
 	n.extendLease(sent)
+	n.keepStatement(ans.Statement, ans.Signature, st)
 }
 
 func (n *Core) record(req HeartbeatRequest, at time.Time) {
@@ -273,15 +342,8 @@ func (n *Core) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n.record(req, time.Now())
-	ans := HeartbeatAnswer{Leader: n.ID()}
-	st := LeaderStatement{Leader: n.ID(), Node: caller.ID, Sent: req.Sent}
-	if info := n.Info(); info != nil {
-		st.Cluster = info.Cluster
-	}
-	if r := n.r(); r != nil {
-		ans.Term, _ = strconv.ParseUint(r.Stats()["term"], 10, 64)
-		st.Term, st.Commit = ans.Term, r.CommitIndex()
-	}
+	st := n.statementFor(caller.ID, req.Sent)
+	ans := HeartbeatAnswer{Leader: n.ID(), Term: st.Term}
 	var err error
 	if ans.Statement, ans.Signature, err = signStatement(n.cfg.Identity, st); err != nil {
 		peerError(w, http.StatusInternalServerError, "couldn't sign the answer")

@@ -520,6 +520,12 @@ type computeRoot struct {
 	petUntil time.Time
 	pets     int
 	fences   int
+	// feed is root's real lease check (fence.Feeder on a no-op device):
+	// pinned keys, leader-signed pets, unsigned pets refused while a
+	// cluster workload runs here.
+	feed        *fence.Feeder
+	signedPets  int
+	refusedPets int
 	// live migration: the one-shot sockets (token -> path) and what the
 	// destination's libvirt saw over the relay.
 	listen  map[string]string
@@ -613,6 +619,14 @@ func (h *computeRoot) startW(ref cluster.WorkloadRef, gen uint64) error {
 	return h.w.start(h.node, ref, gen, ws)
 }
 
+// nopDevice is the e2e's watchdog device: root's feeder pets it, nothing
+// resets.
+type nopDevice struct{}
+
+func (nopDevice) SetTimeout(s int) (int, error) { return s, nil }
+func (nopDevice) Keepalive() error              { return nil }
+func (nopDevice) Close(bool) error              { return nil }
+
 const testImage = "ghcr.io/hardyos/notes:1.0"
 
 // computeServer is a compute node's hardyd-priv: sanclient, runtime and
@@ -627,6 +641,8 @@ func computeServer(w *world, node cluster.NodeID) (*priv.Server, *computeRoot) {
 	w.mu.Unlock()
 	s := &priv.Server{AllowedUIDs: []uint32{uint32(os.Getuid())}}
 	type none struct{}
+	h.feed = &fence.Feeder{Open: func() (fence.Device, string, error) { return nopDevice{}, fence.KindHardware, nil },
+		Running: func(context.Context) (bool, error) { return len(w.runsOn(node)) > 0, nil }}
 
 	// Hardware and the watchdog.
 	handle(s, priv.OpVMsCapabilities, func(context.Context, none) (any, error) {
@@ -635,13 +651,23 @@ func computeServer(w *world, node cluster.NodeID) (*priv.Server, *computeRoot) {
 	handle(s, priv.OpClusterWatchdogStatus, func(context.Context, none) (any, error) {
 		h.mu.Lock()
 		defer h.mu.Unlock()
-		st := fence.Status{Armed: h.armed, Kind: fence.KindHardware}
+		fs := h.feed.Status()
+		st := fence.Status{Armed: h.armed, Kind: fence.KindHardware, Leases: fs.Leases, KeySet: fs.KeySet}
 		if left := time.Until(h.petUntil); h.armed && left > 0 {
 			st.PettingForMs = left.Milliseconds()
 		}
 		return st, nil
 	})
+	handle(s, priv.OpClusterWatchdogKeys, func(_ context.Context, a fence.LeaseKeys) (any, error) {
+		if err := h.feed.PinKeys(a); err != nil {
+			return nil, priv.Errorf(priv.CodeBadArgs, "%v", err)
+		}
+		return map[string]bool{"ok": true}, nil
+	})
 	handle(s, priv.OpClusterWatchdogArm, func(_ context.Context, a priv.WatchdogArmArgs) (any, error) {
+		if _, err := h.feed.Arm(time.Duration(a.TimeoutSec) * time.Second); err != nil {
+			return nil, err
+		}
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		if !h.armed {
@@ -650,17 +676,27 @@ func computeServer(w *world, node cluster.NodeID) (*priv.Server, *computeRoot) {
 		h.armed = true
 		return priv.WatchdogArmResult{Kind: fence.KindHardware}, nil
 	})
-	handle(s, priv.OpClusterWatchdogPet, func(_ context.Context, a priv.WatchdogPetArgs) (any, error) {
+	handle(s, priv.OpClusterWatchdogPet, func(ctx context.Context, a priv.WatchdogPetArgs) (any, error) {
+		if err := h.feed.PetLease(ctx, time.Duration(a.ValidForMs)*time.Millisecond, a.Lease); err != nil {
+			h.mu.Lock()
+			h.refusedPets++
+			h.mu.Unlock()
+			return nil, priv.Errorf(priv.CodeFailed, "%v", err)
+		}
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		if !h.armed {
 			return nil, errors.New("the watchdog isn't armed")
+		}
+		if len(a.Lease) > 0 {
+			h.signedPets++
 		}
 		h.petUntil = time.Now().Add(time.Duration(a.ValidForMs) * time.Millisecond)
 		h.pets++
 		return nil, nil
 	})
 	handle(s, priv.OpClusterWatchdogDisarm, func(context.Context, none) (any, error) {
+		_ = h.feed.Disarm()
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		if h.armed {
@@ -670,6 +706,7 @@ func computeServer(w *world, node cluster.NodeID) (*priv.Server, *computeRoot) {
 		return nil, nil
 	})
 	handle(s, priv.OpClusterWatchdogExpire, func(context.Context, none) (any, error) {
+		h.feed.Expire()
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		h.petUntil = time.Time{}

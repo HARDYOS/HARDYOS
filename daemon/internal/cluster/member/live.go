@@ -156,6 +156,15 @@ func (l *Live) Quorate() (bool, time.Time) {
 	return false, time.Time{}
 }
 
+// LeaseStatement implements fence.LeaseSource: the leader's latest signed
+// answer to this node's heartbeat, which root checks before each pet.
+func (l *Live) LeaseStatement() ([]byte, bool) {
+	if c := l.svc.Core(); c != nil {
+		return c.LeaseStatement()
+	}
+	return nil, false
+}
+
 // Health implements cluster.Membership.
 func (l *Live) Health(ctx context.Context) ([]cluster.Health, error) {
 	c, err := l.core()

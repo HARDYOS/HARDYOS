@@ -99,6 +99,7 @@ type Agent struct {
 	instance   string // hardyd-priv's instance at the last status
 	rootGone   bool
 	keysPinned bool
+	keySet     string // the cluster.KeySetHash root has pinned
 	// suspend detection
 	lastBoot, lastMono time.Time
 	voidBefore         time.Time // a lease ending before voidBefore+Q is void
@@ -294,6 +295,11 @@ func (a *Agent) rootStatus(ctx context.Context) (*Status, bool) {
 			a.keysPinned = st.Leases
 		}
 	}
+	if st.Leases {
+		a.keySet = st.KeySet
+	} else {
+		a.keysPinned, a.keySet = false, ""
+	}
 	if restarted && (state == cluster.FenceArmed || state == cluster.FenceSelfFencing) {
 		a.rootGone = !st.Armed
 	}
@@ -433,6 +439,10 @@ func (a *Agent) Step(ctx context.Context) {
 				a.rootGone, a.armedW = false, t.Watchdog
 				a.mu.Unlock()
 			}
+		} else if a.keysStale(s) {
+			// A server that may lead joined or left: root takes the new
+			// keys only on the leader's word (the current statement).
+			a.pinKeys(ctx, s, self)
 		} else if a.armedTimeout() != t.Watchdog {
 			// The cluster's watchdog timeout changed: the device follows.
 			if _, err := a.Watchdog.Arm(ctx, t.Watchdog); err != nil {
@@ -541,32 +551,48 @@ func (a *Agent) petIdle(ctx context.Context, t cluster.Timings) {
 	}
 }
 
-// pinKeys hands root the voters' keys before it arms (when both sides
-// support leader-signed lease statements).
+// pinKeys hands root the keys of the servers that may lead
+// (cluster.LeaseKeySet) before it arms, and again when they change while
+// armed, with the leader's current statement vouching for them (when both
+// sides support leader-signed lease statements).
 func (a *Agent) pinKeys(ctx context.Context, s *cluster.Snapshot, self cluster.Node) {
 	lw, ok := a.Watchdog.(LeaseWatchdog)
 	if !ok {
 		return
 	}
-	if _, ok := a.Cluster.(LeaseSource); !ok {
+	src, ok := a.Cluster.(LeaseSource)
+	if !ok {
 		return
 	}
-	k := LeaseKeys{Cluster: string(s.Cluster), Node: string(self.ID), Voters: map[string][]byte{}}
-	for id, n := range s.Nodes {
-		if n.Suffrage == cluster.Voter && len(n.PublicKey) > 0 && n.Role != cluster.RoleWitness {
-			k.Voters[string(id)] = n.PublicKey
-		}
-	}
+	k := LeaseKeys{Cluster: string(s.Cluster), Node: string(self.ID), Voters: cluster.LeaseKeySet(s)}
 	if len(k.Voters) == 0 {
 		return
 	}
+	if stmt, ok := src.LeaseStatement(); ok {
+		k.Lease = stmt
+	}
 	if err := lw.PinLeaseKeys(ctx, k); err != nil {
-		a.log().Warn("fence: pinning the voters' keys in root", "err", err)
+		a.log().Warn("fence: pinning the lease keys in root", "err", err)
 		return
 	}
 	a.mu.Lock()
-	a.keysPinned = true
+	a.keysPinned, a.keySet = true, k.Hash()
 	a.mu.Unlock()
+}
+
+// keysStale: root checks statements with keys that are no longer the
+// cluster's set of servers that may lead.
+func (a *Agent) keysStale(s *cluster.Snapshot) bool {
+	if _, ok := a.Watchdog.(LeaseWatchdog); !ok {
+		return false
+	}
+	if _, ok := a.Cluster.(LeaseSource); !ok {
+		return false
+	}
+	a.mu.Lock()
+	pinned, set := a.keysPinned, a.keySet
+	a.mu.Unlock()
+	return pinned && set != cluster.KeySetHash(cluster.LeaseKeySet(s))
 }
 
 func (a *Agent) pet(ctx context.Context, until, now time.Time, t cluster.Timings) {

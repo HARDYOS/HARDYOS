@@ -457,6 +457,21 @@ func TestClusterEndToEnd(t *testing.T) {
 		}
 		return nil
 	})
+	// Root pinned the keys of the servers that may lead and pets only on
+	// the leader's signed answers to the node's own heartbeats (decisions
+	// 367 and 389: one statement for the lease and the watchdog).
+	h.eventually("root pets c1's and c2's watchdogs on leader-signed statements", 10*time.Second, func() error {
+		for _, n := range []*hnode{c1, c2} {
+			st := n.root.feed.Status()
+			n.root.mu.Lock()
+			signed := n.root.signedPets
+			n.root.mu.Unlock()
+			if !st.Leases || st.KeySet != cluster.KeySetHash(cluster.LeaseKeySet(h.snap())) || signed == 0 || st.PettingForMs <= 0 {
+				return fmt.Errorf("%s's root: %+v, %d signed pets", n.id, st, signed)
+			}
+		}
+		return nil
+	})
 
 	// ---- an offline move of the app, c2 -> c3, started on c1 (a third server) ----------
 	p, _ := placed(h.snap(), notes)
@@ -616,6 +631,11 @@ func TestClusterEndToEnd(t *testing.T) {
 	}
 	t.Logf("c1 stopped its HA VM %.1fs after the cut; the VM ran again on %s after %.1fs (dead after %s)",
 		selfFenced.Seconds(), p.Owner, recovered.Seconds(), testTimings.Dead)
+	for _, n := range []*hnode{c1, c2, c3} {
+		n.root.mu.Lock()
+		t.Logf("%s's root: %d signed pets, %d refused", n.id, n.root.signedPets, n.root.refusedPets)
+		n.root.mu.Unlock()
+	}
 
 	// ---- c1 comes back on the same boot: it starts nothing ----------------------------
 	for _, o := range h.nodes {
