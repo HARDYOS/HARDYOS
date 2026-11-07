@@ -65,7 +65,7 @@ func TestClusterVMStartsOnlyWithItsGeneration(t *testing.T) {
 	if _, err := e.m.ClusterStart(ctx, ClusterStartArgs{ID: "web"}); !errors.Is(err, ErrGeneration) {
 		t.Fatalf("a start without a generation: %v", err)
 	}
-	if _, err := e.m.ClusterStart(ctx, ClusterStartArgs{ID: "web", Generation: 3}); err != nil {
+	if _, err := e.m.ClusterStart(ctx, ClusterStartArgs{ID: "web", Generation: 3, SpecHash: webHash(t, e)}); err != nil {
 		t.Fatal(err)
 	}
 	x := e.sim.defined["web"]
@@ -123,7 +123,7 @@ func TestClusterVMStateFolderMustBeUnderMountRoot(t *testing.T) {
 func TestClusterForceStopWithoutStorage(t *testing.T) {
 	e, _ := clusterEnv(t)
 	ctx := context.Background()
-	if _, err := e.m.ClusterStart(ctx, ClusterStartArgs{ID: "web", Generation: 3}); err != nil {
+	if _, err := e.m.ClusterStart(ctx, ClusterStartArgs{ID: "web", Generation: 3, SpecHash: webHash(t, e)}); err != nil {
 		t.Fatal(err)
 	}
 	// A fence took the storage away: the domain still runs and is listed
@@ -262,7 +262,7 @@ func TestMigrationAdmission(t *testing.T) {
 	if _, err := e.m.MigrateAccept(ctx, MigrateAcceptArgs{VM: "web", From: "c1", Token: "short", DeadlineSec: 60, Generation: 3}); err == nil {
 		t.Fatal("a bad token was accepted")
 	}
-	f, err := e.m.MigrateAccept(ctx, MigrateAcceptArgs{VM: "web", From: "c1", Token: token, DeadlineSec: 60, Generation: 3})
+	f, err := e.m.MigrateAccept(ctx, MigrateAcceptArgs{VM: "web", From: "c1", Token: token, DeadlineSec: 60, Generation: 3, SpecHash: webHash(t, e)})
 	if err != nil || f == nil {
 		t.Fatalf("accept: %v", err)
 	}

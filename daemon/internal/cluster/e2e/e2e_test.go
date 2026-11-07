@@ -386,9 +386,9 @@ func TestClusterEndToEnd(t *testing.T) {
 		t.Fatalf("app storage %+v", appStorage)
 	}
 	haOn := cluster.HAPolicy{Enabled: true, Priority: 80, MaxRestarts: 3, MaxRelocations: 2}
-	h.propose(c1, cluster.CmdWorkloadAdd, state.WorkloadAdd{Workload: web, Name: "Web server", Owner: "c1", Requested: cluster.RequestRunning,
+	h.propose(c1, cluster.CmdWorkloadAdd, state.WorkloadAdd{SpecHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Workload: web, Name: "Web server", Owner: "c1", Requested: cluster.RequestRunning,
 		HA: haOn, Storage: *vmStorage})
-	h.propose(c2, cluster.CmdWorkloadAdd, state.WorkloadAdd{Workload: notes, Name: "Notes", Owner: "c2", Requested: cluster.RequestRunning,
+	h.propose(c2, cluster.CmdWorkloadAdd, state.WorkloadAdd{SpecHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Workload: notes, Name: "Notes", Owner: "c2", Requested: cluster.RequestRunning,
 		HA: haOn, Storage: *appStorage})
 	h.eventually("the storage node grants them and their owners start them", 30*time.Second, func() error {
 		if err := h.running(web, "c1"); err != nil {

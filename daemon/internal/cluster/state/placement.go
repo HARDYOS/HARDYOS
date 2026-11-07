@@ -26,6 +26,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
 )
@@ -43,6 +44,19 @@ type WorkloadAdd struct {
 	HA        cluster.HAPolicy        `json:"ha"`
 	Pinned    bool                    `json:"pinned,omitempty"`
 	Storage   cluster.WorkloadStorage `json:"storage"`
+	// SpecHash is root's hash of the settings the administrator approved
+	// (vms.cluster.hash / apps.cluster.hash on the proposer, which holds
+	// the workload's storage). Required: a node starts the workload only
+	// when its own root computes the same hash (decision 386).
+	SpecHash string `json:"specHash"`
+}
+
+// WorkloadSpecSet records the hash of a workload's newly approved settings
+// (its owner, after an administrator changed them).
+type WorkloadSpecSet struct {
+	Workload   cluster.WorkloadRef `json:"workload"`
+	Generation uint64              `json:"generation"`
+	SpecHash   string              `json:"specHash"`
 }
 
 // WorkloadRemove forgets a workload (its storage is destroyed by part B
@@ -128,6 +142,7 @@ func (Placements) Types() []cluster.CommandType {
 	return []cluster.CommandType{
 		cluster.CmdWorkloadAdd, cluster.CmdWorkloadRemove, cluster.CmdPlacementSet, cluster.CmdRequested,
 		cluster.CmdWorkloadState, cluster.CmdMoveBegin, cluster.CmdMoveEnd, cluster.CmdHAPolicy, cluster.CmdCPUBaseline,
+		cluster.CmdWorkloadSpec,
 	}
 }
 
@@ -136,7 +151,7 @@ var hardyOSMembers = []cluster.Role{cluster.RoleCompute, cluster.RoleStorage}
 
 // Signers implements cluster.Applier.
 func (Placements) Signers(t cluster.CommandType) []cluster.Role {
-	if t == cluster.CmdWorkloadState {
+	if t == cluster.CmdWorkloadState || t == cluster.CmdWorkloadSpec {
 		// The owner's report: the applier checks it is the owner.
 		return []cluster.Role{cluster.RoleCompute}
 	}
@@ -211,10 +226,36 @@ func (Placements) Apply(s *cluster.Snapshot, c cluster.Command) error {
 		if g := s.Grants[p.Workload]; g != nil && g.Mode == cluster.GrantMigration {
 			return errors.New("a live migration ends with placement.set, not move.end")
 		}
+		// The member that began the move ends it (or one of its two nodes).
+		if c.Proposer != p.MoveBy && c.Proposer != p.Owner && c.Proposer != p.Target {
+			return fmt.Errorf("%s didn't begin this move (%s did)", c.Proposer, p.MoveBy)
+		}
 		p.Target = ""
+		p.MoveBy = ""
 		if !b.OK {
 			p.Problem = b.Problem
 		}
+		p.Changed = c.Time
+		return nil
+	case cluster.CmdWorkloadSpec:
+		var b WorkloadSpecSet
+		if err := decode(c, &b); err != nil {
+			return err
+		}
+		p, err := current(s, b.Workload, b.Generation)
+		if err != nil {
+			return err
+		}
+		if c.Proposer != p.Owner {
+			return fmt.Errorf("only %s's owner records its approved settings", ref(b.Workload))
+		}
+		if p.Target != "" {
+			return errors.New("finish the move first")
+		}
+		if err := ValidSpecHash(b.SpecHash); err != nil {
+			return err
+		}
+		p.SpecHash = b.SpecHash
 		p.Changed = c.Time
 		return nil
 	case cluster.CmdHAPolicy:
@@ -254,6 +295,16 @@ func ValidCPUModel(name string) bool { return cpuModelRE.MatchString(name) }
 
 var workloadIDRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 
+var specHashRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// ValidSpecHash checks a workload's approved-settings hash.
+func ValidSpecHash(h string) error {
+	if !specHashRE.MatchString(h) {
+		return errors.New("a workload needs the hash of its approved settings (sha256:<hex>)")
+	}
+	return nil
+}
+
 func validRef(w cluster.WorkloadRef) error {
 	if w.Kind != cluster.KindVM && w.Kind != cluster.KindApp {
 		return fmt.Errorf("unknown workload kind %q", w.Kind)
@@ -274,13 +325,16 @@ func applyWorkloadAdd(s *cluster.Snapshot, c cluster.Command, b WorkloadAdd) err
 	if err := runnableOn(s, b.Owner); err != nil {
 		return err
 	}
+	if err := ValidSpecHash(b.SpecHash); err != nil {
+		return err
+	}
 	if b.Requested == "" {
 		b.Requested = cluster.RequestStopped
 	}
 	p := &cluster.Placement{
 		Workload: b.Workload, Name: b.Name, Owner: b.Owner, Generation: 1,
 		Requested: b.Requested, State: cluster.PlacementStopped,
-		Pinned: b.Pinned, Storage: b.Storage, Changed: c.Time,
+		Pinned: b.Pinned, Storage: b.Storage, Changed: c.Time, SpecHash: b.SpecHash,
 	}
 	pol := NormalizePolicy(b.HA)
 	if err := ValidatePolicy(s, p, pol); err != nil {
@@ -322,6 +376,14 @@ func applyPlacementSet(s *cluster.Snapshot, c cluster.Command, b PlacementSet) e
 	case cluster.PlacementStopped, cluster.PlacementStarting, cluster.PlacementPending, cluster.PlacementRunning, cluster.PlacementRecovering:
 	default:
 		return fmt.Errorf("placement.set can't leave a workload %s", b.State)
+	}
+	// A move in progress is ended by the member that began it, unless one
+	// of its nodes is fenced (the HA coordinator collapses or recovers
+	// it). Outside a move any member may propose (pending, decision 394).
+	if (p.Target != "" || g.Mode == cluster.GrantMigration) && c.Proposer != p.MoveBy &&
+		!ownerFenced(s, p.Owner) && (p.Target == "" || !ownerFenced(s, p.Target)) &&
+		!(g.Mode == cluster.GrantMigration && b.Reason == "migration-timeout" && c.Time.Sub(p.Changed) >= MigrationGrantTimeout) {
+		return fmt.Errorf("%s is being moved by %s; only it can hand it over", p.Name, p.MoveBy)
 	}
 	// End of a live migration: the grant collapses to one of its two
 	// nodes (libvirt stops the source when a migration succeeds and keeps
@@ -377,6 +439,12 @@ func applyPlacementSet(s *cluster.Snapshot, c cluster.Command, b PlacementSet) e
 	return setOwner(s, p, b, c)
 }
 
+// MigrationGrantTimeout is how long a live migration's two-node grant may
+// stand before the HA coordinator (on the leader) ends it after asking
+// both nodes what runs (the source's send limit, 10 minutes, and a
+// margin; decision 388).
+const MigrationGrantTimeout = 12 * time.Minute
+
 // ownerReleased: the current owner can't be running the workload: it
 // reported it stopped (or in error, which the owner reports after
 // stopping) for this generation, it has no owner, or its owner's fence is
@@ -407,6 +475,23 @@ func setOwner(s *cluster.Snapshot, p *cluster.Placement, b PlacementSet, c clust
 	p.Generation++
 	p.Owner = b.Owner
 	p.Target = ""
+	if c.Proposer != p.MoveBy || (b.Reason != "move" && b.Reason != "move-confirmed" && b.Reason != "migrated") {
+		// The mover keeps driving the new owner's start step after its own
+		// hand-over; anyone else's change ends its say.
+		p.MoveBy = ""
+	}
+	if b.Reason == "relocate" {
+		keep := []time.Time{}
+		for _, t := range p.Relocated {
+			if c.Time.Sub(t) < time.Hour {
+				keep = append(keep, t)
+			}
+		}
+		if len(keep) >= 20 {
+			keep = keep[len(keep)-19:]
+		}
+		p.Relocated = append(keep, c.Time)
+	}
 	p.State = b.State
 	p.Problem = b.Problem
 	p.Changed = c.Time
@@ -476,6 +561,7 @@ func applyMoveBegin(s *cluster.Snapshot, c cluster.Command, b MoveBegin) error {
 	case cluster.MoveOffline:
 		p.State = cluster.PlacementMoving
 		p.Target = b.To
+		p.MoveBy = c.Proposer
 		p.Changed = c.Time
 		return nil
 	case cluster.MoveLive:
@@ -494,6 +580,7 @@ func applyMoveBegin(s *cluster.Snapshot, c cluster.Command, b MoveBegin) error {
 		p.Generation++
 		p.State = cluster.PlacementMigrating
 		p.Target = b.To
+		p.MoveBy = c.Proposer
 		p.Changed = c.Time
 		s.Grants[b.Workload] = &cluster.Grant{Workload: b.Workload, Nodes: []cluster.NodeID{p.Owner, b.To},
 			Mode: cluster.GrantMigration, Generation: p.Generation}
@@ -599,7 +686,7 @@ func HAEligible(s *cluster.Snapshot, n cluster.NodeID) (bool, string) {
 	if kind == "hardware" {
 		return true, ""
 	}
-	if o := s.HAOverrides[n]; o != nil && o.Kind == kind {
+	if o := s.HAOverrides[n]; o != nil && o.Kind == kind && kind != "" {
 		return true, ""
 	}
 	if kind == "softdog" {
@@ -666,11 +753,50 @@ func SortedPlacements(s *cluster.Snapshot) []*cluster.Placement {
 	return out
 }
 
-// MayRun is the check every node makes before it starts (or keeps
-// running) a workload: the applied placement names it as owner (or as a
-// node of a live migration) with gen, and the storage grant for gen is
-// applied and names it (decision 326).
+// Intent is what a node wants to do with a workload (MayRunFor).
+type Intent int
+
+const (
+	// IntentKeep: keep a running workload running (the owner, or either
+	// node of a live migration).
+	IntentKeep Intent = iota
+	// IntentStart: start it from cold. Only the owner, with an exclusive
+	// grant: a live migration's destination never starts the VM itself.
+	IntentStart
+	// IntentReceive: take part in a live migration as its destination
+	// (attach, admit the incoming VM).
+	IntentReceive
+)
+
+// MayRun is MayRunFor with IntentKeep.
 func MayRun(s *cluster.Snapshot, n cluster.NodeID, w cluster.WorkloadRef, gen uint64) error {
+	return MayRunFor(s, n, w, gen, IntentKeep)
+}
+
+// MayRunFor is the check every node makes before it starts, receives or
+// keeps running a workload: the applied placement names it as owner (or as
+// a node of a live migration, for keeping and receiving only) with gen,
+// and the storage grant for gen is applied and names it (decisions 326
+// and 387).
+func MayRunFor(s *cluster.Snapshot, n cluster.NodeID, w cluster.WorkloadRef, gen uint64, intent Intent) error {
+	if err := mayRun(s, n, w, gen); err != nil {
+		return err
+	}
+	p, g := s.Placements[w], s.Grants[w]
+	switch intent {
+	case IntentStart:
+		if p.Owner != n || g.Mode != cluster.GrantExclusive || len(g.Nodes) != 1 {
+			return cluster.ErrNotOwner
+		}
+	case IntentReceive:
+		if g.Mode != cluster.GrantMigration || p.Target != n || p.Owner == n {
+			return cluster.ErrNotOwner
+		}
+	}
+	return nil
+}
+
+func mayRun(s *cluster.Snapshot, n cluster.NodeID, w cluster.WorkloadRef, gen uint64) error {
 	node, ok := s.Nodes[n]
 	if !ok {
 		return cluster.ErrNotMember

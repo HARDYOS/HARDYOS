@@ -85,7 +85,12 @@ type Manager struct {
 	// MigrateUser (default: a helper process with that user's identity;
 	// tests replace it).
 	MigrateConnector func(ctx context.Context) (*os.File, error)
-	migr             *migrations
+	// MigrateRunAs runs a command as MigrateUser (MigrateSetup's check that
+	// the access driver refuses that user; tests replace it).
+	MigrateRunAs func(ctx context.Context, name string, args ...string) ([]byte, error)
+	migr         *migrations
+	// killPID kills a process (tests replace it).
+	killPID func(pid int) error
 	// Arch overrides the server's architecture (tests).
 	Arch *ArchInfo
 	// Mounts verifies dataset mounts (default: /proc/self/mountinfo).
@@ -1278,6 +1283,8 @@ func (m *Manager) define(ctx context.Context, st *stored, devs []devices.Prepare
 	if err != nil {
 		return err
 	}
+	// The hook lets a cluster VM start only with what root defined.
+	m.recordDefined(st, x)
 	dir := m.sys("/run/hardyos/vms")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err

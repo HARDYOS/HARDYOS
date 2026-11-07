@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,6 +98,50 @@ const (
 	libvirtdBlock = libvirtdBegin + "\n# Every libvirt API call is checked with polkit (60/61/69-hardyos-*.rules).\naccess_drivers = [ \"polkit\" ]\n" + libvirtdEnd + "\n"
 )
 
+// QEMUConf is libvirt's QEMU driver configuration (migration_address).
+const QEMUConf = "/etc/libvirt/qemu.conf"
+
+const (
+	qemuBegin = "# BEGIN HardyOS cluster migration address (decision 392)"
+	qemuEnd   = "# END HardyOS cluster migration address"
+)
+
+// withMigrationAddress returns qemu.conf with HardyOS's block binding
+// incoming migrations to addr ("" removes the block), and no other
+// migration_address line.
+func withMigrationAddress(conf []byte, addr string) []byte {
+	var out []string
+	skip := false
+	for _, l := range strings.Split(string(conf), "\n") {
+		t := strings.TrimSpace(l)
+		switch {
+		case t == qemuBegin:
+			skip = true
+			continue
+		case t == qemuEnd:
+			skip = false
+			continue
+		case skip:
+			continue
+		case addr != "" && strings.HasPrefix(t, "migration_address"):
+			out = append(out, "#"+l+" # replaced by HardyOS")
+			continue
+		}
+		out = append(out, l)
+	}
+	s := strings.TrimRight(strings.Join(out, "\n"), "\n")
+	if addr == "" {
+		if s != "" {
+			s += "\n"
+		}
+		return []byte(s)
+	}
+	if s != "" {
+		s += "\n\n"
+	}
+	return []byte(s + qemuBegin + "\n# QEMU accepts incoming migrations on the storage network only.\nmigration_address = \"" + addr + "\"\n" + qemuEnd + "\n")
+}
+
 // withAccessDriver returns libvirtd.conf with HardyOS's block (and no
 // other access_drivers line).
 func withAccessDriver(conf []byte) []byte {
@@ -126,7 +171,8 @@ func withAccessDriver(conf []byte) []byte {
 	return []byte(s + libvirtdBlock)
 }
 
-// migrationReady reports whether MigrateSetup has run.
+// migrationReady reports whether MigrateSetup has run and polkit, which
+// every libvirt call now goes through, is running.
 func (m *Manager) migrationReady() error {
 	if m.MigrateConnector != nil {
 		return nil // tests
@@ -136,11 +182,64 @@ func (m *Manager) migrationReady() error {
 			return Problems{"live migration isn't set up on this server yet"}
 		}
 	}
-	b, err := os.ReadFile(m.sys(LibvirtdConf))
-	if err != nil || !bytes.Contains(b, []byte(libvirtdBegin)) {
+	ok := false
+	for _, d := range m.libvirtDaemons(context.Background()) {
+		b, err := os.ReadFile(m.sys(d.conf))
+		ok = ok || err == nil && bytes.Contains(b, []byte(libvirtdBegin))
+	}
+	if !ok {
 		return Problems{"live migration isn't set up on this server yet"}
 	}
+	if err := m.PolkitHealth(context.Background()); err != nil {
+		return err
+	}
 	return nil
+}
+
+// libvirtDaemon is a libvirt daemon whose configuration takes the access
+// driver.
+type libvirtDaemon struct {
+	unit string // systemd unit restarted after a change
+	conf string // its configuration file
+}
+
+// libvirtDaemons are the daemons that check API calls here: libvirtd, or
+// with libvirt's modular daemons virtqemud (and virtproxyd, which serves
+// libvirt-sock and forwards to it).
+func (m *Manager) libvirtDaemons(ctx context.Context) []libvirtDaemon {
+	modular := false
+	if _, err := os.Stat(m.sys("/etc/libvirt/virtqemud.conf")); err == nil {
+		for _, u := range []string{"virtqemud.socket", "virtqemud.service"} {
+			if _, err := m.run(ctx, "systemctl", "is-enabled", "--quiet", u); err == nil {
+				modular = true
+			}
+		}
+	}
+	if !modular {
+		return []libvirtDaemon{{unit: "libvirtd.service", conf: LibvirtdConf}}
+	}
+	out := []libvirtDaemon{{unit: "virtqemud.service", conf: "/etc/libvirt/virtqemud.conf"}}
+	if _, err := os.Stat(m.sys("/etc/libvirt/virtproxyd.conf")); err == nil {
+		out = append(out, libvirtDaemon{unit: "virtproxyd.service", conf: "/etc/libvirt/virtproxyd.conf"})
+	}
+	return out
+}
+
+// PolkitHealth reports whether polkitd is running: with the polkit access
+// driver every libvirt call needs it (root's own too; a forced stop then
+// kills QEMU by pid instead).
+func (m *Manager) PolkitHealth(ctx context.Context) error {
+	if _, err := m.run(ctx, "systemctl", "is-active", "--quiet", "polkit.service"); err != nil {
+		return Problems{"polkit (polkitd) isn't running: libvirt refuses every call until it is back; start it with systemctl start polkit"}
+	}
+	return nil
+}
+
+// MigrateSetupArgs sets live migration up on this server.
+type MigrateSetupArgs struct {
+	// StorageAddress is this server's storage network address: QEMU
+	// accepts incoming migrations only there (qemu.conf migration_address).
+	StorageAddress string `json:"storageAddress,omitempty"`
 }
 
 // MigrateSetup prepares this server to receive live migrations: the
@@ -148,14 +247,33 @@ func (m *Manager) migrationReady() error {
 // Idempotent; libvirtd restarts only when its configuration changed
 // (running VMs keep running), and the change is undone if root can't use
 // libvirt afterwards.
-func (m *Manager) MigrateSetup(ctx context.Context) error {
+func (m *Manager) MigrateSetup(ctx context.Context, a MigrateSetupArgs) error {
+	var storage netip.Addr
+	if a.StorageAddress != "" {
+		ip, err := netip.ParseAddr(a.StorageAddress)
+		if err != nil || ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() ||
+			netip.MustParsePrefix("100.64.0.0/10").Contains(ip.Unmap()) {
+			return Problems{"the storage address isn't a storage network address"}
+		}
+		storage = ip.Unmap()
+	}
 	if _, err := os.Stat(m.sys("/usr/lib/polkit-1/polkitd")); err != nil {
 		return Problems{"polkit isn't installed, so libvirt can't limit the migration connection; install the polkitd package"}
 	}
+	if err := m.PolkitHealth(ctx); err != nil {
+		return err
+	}
 	if _, err := m.run(ctx, "id", "-u", MigrateUser); err != nil {
+		// Not in libvirt's group: root's helper adds that group to the one
+		// process that connects; the user itself has no standing access.
 		if _, err := m.run(ctx, "useradd", "--system", "--no-create-home", "--home-dir", "/nonexistent",
-			"--shell", "/usr/sbin/nologin", "--groups", "libvirt", MigrateUser); err != nil {
+			"--shell", "/usr/sbin/nologin", MigrateUser); err != nil {
 			return fmt.Errorf("adding the %s user: %w", MigrateUser, err)
+		}
+	} else if out, err := m.run(ctx, "id", "-nG", MigrateUser); err == nil && hasWord(string(out), "libvirt") {
+		// An earlier setup put it in libvirt's group.
+		if _, err := m.run(ctx, "gpasswd", "-d", MigrateUser, "libvirt"); err != nil {
+			return fmt.Errorf("taking %s out of libvirt's group: %w", MigrateUser, err)
 		}
 	}
 	dir := m.sys(PolkitRulesDir)
@@ -167,32 +285,104 @@ func (m *Manager) MigrateSetup(ctx context.Context) error {
 			return err
 		}
 	}
-	confPath := m.sys(LibvirtdConf)
-	old, err := os.ReadFile(confPath)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+	type change struct {
+		path      string
+		old, next []byte
 	}
-	next := withAccessDriver(old)
-	if bytes.Equal(old, next) {
-		return nil
-	}
-	if err := writeAtomic(confPath, next, 0o644); err != nil {
-		return err
-	}
-	check := func() error {
-		if _, err := m.run(ctx, "systemctl", "restart", "libvirtd.service"); err != nil {
+	var changes []change
+	units := map[string]bool{}
+	daemons := m.libvirtDaemons(ctx)
+	for _, d := range daemons {
+		p := m.sys(d.conf)
+		old, err := os.ReadFile(p)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		_, err := m.virsh(ctx, "version")
-		return err
+		if next := withAccessDriver(old); !bytes.Equal(old, next) {
+			changes = append(changes, change{p, old, next})
+			units[d.unit] = true
+		}
 	}
-	if err := check(); err != nil {
-		_ = writeAtomic(confPath, old, 0o644)
-		_, _ = m.run(context.Background(), "systemctl", "restart", "libvirtd.service")
+	if storage.IsValid() {
+		p := m.sys(QEMUConf)
+		old, err := os.ReadFile(p)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if next := withMigrationAddress(old, storage.String()); !bytes.Equal(old, next) {
+			changes = append(changes, change{p, old, next})
+			units[daemons[0].unit] = true
+		}
+	}
+	restart := func(ctx context.Context) error {
+		for _, d := range daemons {
+			if units[d.unit] {
+				if _, err := m.run(ctx, "systemctl", "restart", d.unit); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	revert := func() {
+		for _, c := range changes {
+			_ = writeAtomic(c.path, c.old, 0o644)
+		}
+		_ = restart(context.Background())
+	}
+	for _, c := range changes {
+		if err := writeAtomic(c.path, c.next, 0o644); err != nil {
+			revert()
+			return err
+		}
+	}
+	if len(changes) > 0 {
+		if err := restart(ctx); err != nil {
+			revert()
+			return fmt.Errorf("libvirt didn't restart with the polkit access driver, so it was left as it was: %w", err)
+		}
+	}
+	// Root still uses libvirt, and the migration user gets nothing
+	// without an admission: the access driver really is in force.
+	if _, err := m.virsh(ctx, "version"); err != nil {
+		revert()
 		return fmt.Errorf("libvirt didn't work with the polkit access driver, so it was left as it was: %w", err)
 	}
-	m.log().Info("vms: libvirt now checks every call with polkit (live migration set up)")
+	if err := m.migrateUserDenied(ctx); err != nil {
+		revert()
+		return err
+	}
+	m.log().Info("vms: libvirt checks every call with polkit (live migration set up)", "storageAddress", a.StorageAddress)
 	return nil
+}
+
+// migrateUserDenied checks, as the migration user, that libvirt refuses
+// it an ordinary call (listing domains) while no migration is admitted.
+func (m *Manager) migrateUserDenied(ctx context.Context) error {
+	run := m.MigrateRunAs
+	if run == nil {
+		run = runAsMigrate
+	}
+	out, err := run(ctx, "virsh", "-c", "qemu:///system", "-q", "list", "--all", "--name")
+	if err == nil {
+		return fmt.Errorf("libvirt let %s list the VMs without an admitted migration: the polkit access driver isn't in force, so live migration stays off", MigrateUser)
+	}
+	msg := strings.ToLower(string(out) + " " + err.Error())
+	for _, s := range []string{"access denied", "authentication", "not authorized", "permission denied", "polkit"} {
+		if strings.Contains(msg, s) {
+			return nil
+		}
+	}
+	return fmt.Errorf("checking that libvirt refuses %s failed for another reason: %s", MigrateUser, strings.TrimSpace(string(out)))
+}
+
+func hasWord(s, w string) bool {
+	for _, f := range strings.Fields(s) {
+		if f == w {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) connectAsMigrate(ctx context.Context) (*os.File, error) {

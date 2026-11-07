@@ -134,3 +134,32 @@ func MigrateConnectMain(args []string) int {
 	}
 	return 0
 }
+
+// killProcess sends SIGKILL.
+func killProcess(pid int) error { return syscall.Kill(pid, syscall.SIGKILL) }
+
+// runAsMigrate runs a command with MigrateUser's identity (and libvirt's
+// group for that one process, to reach the socket).
+func runAsMigrate(ctx context.Context, name string, args ...string) ([]byte, error) {
+	u, err := user.Lookup(MigrateUser)
+	if err != nil {
+		return nil, err
+	}
+	uid, _ := strconv.ParseUint(u.Uid, 10, 32)
+	gid, _ := strconv.ParseUint(u.Gid, 10, 32)
+	if uid == 0 {
+		return nil, errors.New("the migration user must not be root")
+	}
+	groups := []uint32{}
+	if g, err := user.LookupGroup("libvirt"); err == nil {
+		n, _ := strconv.ParseUint(g.Gid, 10, 32)
+		groups = append(groups, uint32(n))
+	}
+	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, name, args...)
+	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/nonexistent"}
+	cmd.Dir = "/"
+	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid), Groups: groups}}
+	return cmd.CombinedOutput()
+}

@@ -905,7 +905,7 @@ func (w *World) SetCompute(id cluster.NodeID, f func(*cluster.ComputeInfo)) {
 // AddVM adds an HA (or not) VM placed on owner, asked to run.
 func (w *World) AddVM(id string, owner cluster.NodeID, ha bool, priority int) cluster.WorkloadRef {
 	ref := cluster.WorkloadRef{Kind: cluster.KindVM, ID: id}
-	err := w.Propose(owner, cluster.CmdWorkloadAdd, state.WorkloadAdd{Workload: ref, Name: id, Owner: owner, Requested: cluster.RequestRunning,
+	err := w.Propose(owner, cluster.CmdWorkloadAdd, state.WorkloadAdd{SpecHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Workload: ref, Name: id, Owner: owner, Requested: cluster.RequestRunning,
 		HA: cluster.HAPolicy{Enabled: ha, Priority: priority}, Storage: cluster.WorkloadStorage{Pool: "tank"}})
 	if err != nil {
 		w.T.Fatalf("adding %s: %v", id, err)

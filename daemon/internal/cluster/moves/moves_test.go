@@ -342,7 +342,7 @@ func TestPassthroughVMMoves(t *testing.T) {
 	e := newEnv(t)
 	ref := cluster.WorkloadRef{Kind: cluster.KindVM, ID: "gaming"}
 	e.w.Requirements = map[cluster.WorkloadRef]*cluster.Requirements{ref: {MemoryMB: 2048, Devices: []string{"gpu:0000:01:00.0"}}}
-	if err := e.w.Propose("c1", cluster.CmdWorkloadAdd, state.WorkloadAdd{Workload: ref, Name: "Gaming", Owner: "c1", Requested: cluster.RequestRunning, Pinned: true}); err != nil {
+	if err := e.w.Propose("c1", cluster.CmdWorkloadAdd, state.WorkloadAdd{SpecHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Workload: ref, Name: "Gaming", Owner: "c1", Requested: cluster.RequestRunning, Pinned: true}); err != nil {
 		t.Fatal(err)
 	}
 	e.w.Run(2 * time.Second)
@@ -396,7 +396,7 @@ func TestDrain(t *testing.T) {
 	a := e.w.AddVM("a", "c1", true, 90)
 	b := e.w.AddVM("b", "c1", false, 0)
 	pinned := cluster.WorkloadRef{Kind: cluster.KindVM, ID: "gpu"}
-	_ = e.w.Propose("c1", cluster.CmdWorkloadAdd, state.WorkloadAdd{Workload: pinned, Name: "gpu", Owner: "c1", Requested: cluster.RequestRunning, Pinned: true})
+	_ = e.w.Propose("c1", cluster.CmdWorkloadAdd, state.WorkloadAdd{SpecHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Workload: pinned, Name: "gpu", Owner: "c1", Requested: cluster.RequestRunning, Pinned: true})
 	e.w.Run(2 * time.Second)
 	res, err := e.mover.Drain(context.Background(), "c1", false, actor)
 	if err == nil || !strings.Contains(err.Error(), "pinned") {
