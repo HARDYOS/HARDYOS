@@ -140,7 +140,20 @@ func TestClusterStorageIntegration(t *testing.T) {
 	}
 	sec1, _ := r.CHAP(ctx, CHAPArgs{Node: "c1"})
 
-	// An initiator in a namespace with its own iscsid and /etc/iscsi.
+	// An initiator with its own iscsid and /etc/iscsi. The kernel's iSCSI
+	// initiator (scsi_transport_iscsi's netlink) only serves the initial
+	// network namespace, so an iscsid inside a namespace dies as soon as it
+	// asks the kernel for a session (the target sees the TCP connection
+	// close before the first login PDU). The initiators therefore run in
+	// the initial network namespace, each in a private mount namespace
+	// with its own node records and a private iscsid that is stopped after
+	// every run (iscsid's control socket is per network namespace, so two
+	// at once would share one daemon). The target's ACLs are by initiator
+	// name, which is what these runs check; NFS, which is namespace-aware,
+	// still runs from the namespaces below.
+	if out, err := sh("pgrep", "-x", "iscsid"); err == nil {
+		t.Skipf("an iscsid is already running on this machine (%s); this test runs its own", strings.TrimSpace(out))
+	}
 	initiator := func(ns, initName, target string, s Secrets, script string) (string, error) {
 		etc := filepath.Join(dir, ns, "etc")
 		lib := filepath.Join(dir, ns, "lib")
@@ -155,9 +168,19 @@ func TestClusterStorageIntegration(t *testing.T) {
 			"node.session.timeo.replacement_timeout = 5", "node.conn[0].address = 10.177.0.10", "node.conn[0].port = 3260",
 			"node.conn[0].startup = manual", "# END RECORD", ""}, "\n")
 		_ = os.WriteFile(filepath.Join(etc, "nodes", target, "10.177.0.10,3260,1", "default"), []byte(rec), 0o600)
-		full := "set -e; mount --bind " + etc + " /etc/iscsi; mkdir -p /var/lib/iscsi /run/lock/iscsi; mount --bind " + lib + " /var/lib/iscsi; " +
-			"mount -t tmpfs tmpfs /run/lock/iscsi; (iscsid -f -n >/dev/null 2>&1 &); sleep 1; " + script
-		return sh("ip", "netns", "exec", ns, "sh", "-c", full)
+		logf := filepath.Join(dir, ns, "iscsid.log")
+		full := "set -e; mount --make-rprivate /; mkdir -p /etc/iscsi /var/lib/iscsi /run/lock/iscsi; mount --bind " + etc + " /etc/iscsi; " +
+			"mount --bind " + lib + " /var/lib/iscsi; mount -t tmpfs tmpfs /run/lock/iscsi; " +
+			"iscsid -f -n -d 1 >>" + logf + " 2>&1 & pid=$!; trap 'kill $pid 2>/dev/null; wait $pid 2>/dev/null || true' EXIT; " +
+			"for i in $(seq 1 20); do rc=0; iscsiadm -m session >/dev/null 2>&1 || rc=$?; if [ $rc -eq 0 ] || [ $rc -eq 21 ]; then break; fi; sleep 0.25; done; " +
+			script
+		out, err := sh("unshare", "-m", "sh", "-c", full)
+		if err != nil {
+			if l, rerr := os.ReadFile(logf); rerr == nil {
+				out += "\n--- iscsid log ---\n" + string(l)
+			}
+		}
+		return out, err
 	}
 	t1 := TargetIQN(cl, "c1")
 	login := "iscsiadm -m node -T " + t1 + " -p 10.177.0.10:3260 --login"
