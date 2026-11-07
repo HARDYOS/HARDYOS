@@ -466,13 +466,22 @@ func ensureTarget(fsys FS, d Desired, t Target, chap Secrets) error {
 			return err
 		}
 	}
+	// The kernel names an ACL's mutual CHAP attributes userid_mutual and
+	// password_mutual (discovery_auth's are userid_mut and password_mut),
+	// and sets the read-only authenticate_target once both are set.
 	for _, a := range []struct{ n, v string }{
 		{"userid", chap.User}, {"password", chap.Password},
-		{"userid_mut", chap.MutualUser}, {"password_mut", chap.MutualPassword},
+		{"userid_mutual", chap.MutualUser}, {"password_mutual", chap.MutualPassword},
 	} {
 		if err := setAttr(fsys, acl+"/auth/"+a.n, a.v); err != nil {
+			if errors.Is(err, fs.ErrNotExist) && strings.HasSuffix(a.n, "_mutual") {
+				return fmt.Errorf("CHAP: this kernel's iSCSI target has no mutual CHAP for initiators (%s missing); HardyOS doesn't fall back to one-way CHAP", a.n)
+			}
 			return fmt.Errorf("CHAP: %w", err)
 		}
+	}
+	if v, err := fsys.Read(acl + "/auth/authenticate_target"); err != nil || strings.TrimSpace(v) != "1" {
+		return fmt.Errorf("CHAP: the kernel didn't turn on mutual authentication for %s (authenticate_target %q)", init, strings.TrimSpace(v))
 	}
 	// LUNs.
 	cur, err := tpgLUNs(fsys, tpg)

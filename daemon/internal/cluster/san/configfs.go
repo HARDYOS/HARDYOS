@@ -173,7 +173,7 @@ func (f *FakeFS) autoChildren(p string) (dirs []string, files map[string]string)
 		}
 	case n == 5 && parts[0] == "iscsi" && parts[3] == "acls":
 		return []string{"auth"}, map[string]string{
-			"auth/userid": "", "auth/password": "", "auth/userid_mut": "", "auth/password_mut": "",
+			"auth/userid": "", "auth/password": "", "auth/userid_mutual": "", "auth/password_mutual": "", "auth/authenticate_target": "0",
 		}
 	}
 	return nil, nil
@@ -295,6 +295,17 @@ func (f *FakeFS) Write(p, value string) error {
 		iqn := strings.Split(p, "/")[1]
 		delete(f.Sessions, iqn)
 		n.value = value
+	case strings.Contains(p, "/acls/") && (strings.HasSuffix(p, "/auth/userid_mutual") || strings.HasSuffix(p, "/auth/password_mutual")):
+		// The kernel turns on mutual authentication once both are set.
+		n.value = value
+		dir := path.Dir(p)
+		u, pw := f.nodes[dir+"/userid_mutual"], f.nodes[dir+"/password_mutual"]
+		if at := f.nodes[dir+"/authenticate_target"]; at != nil && u != nil && pw != nil {
+			at.value = "0"
+			if u.value != "" && pw.value != "" {
+				at.value = "1"
+			}
+		}
 	default:
 		n.value = value
 	}

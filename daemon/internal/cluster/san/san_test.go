@@ -140,7 +140,7 @@ func TestReconcileBuildsTargetsAndIsIdempotent(t *testing.T) {
 		}
 	}
 	acl := tpg + "/acls/" + InitiatorIQN(testCluster, "c1")
-	if f.Value(acl+"/auth/password") != p.CHAP["c1"].Password || f.Value(acl+"/auth/password_mut") != p.CHAP["c1"].MutualPassword {
+	if f.Value(acl+"/auth/password") != p.CHAP["c1"].Password || f.Value(acl+"/auth/password_mutual") != p.CHAP["c1"].MutualPassword {
 		t.Error("CHAP secrets weren't set on the ACL")
 	}
 	acls, _ := f.List(tpg + "/acls")
