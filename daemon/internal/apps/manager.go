@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	portreg "github.com/hardyos/hardyos/daemon/internal/ports"
 	"github.com/hardyos/hardyos/daemon/internal/rootfile"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 	"github.com/hardyos/hardyos/daemon/internal/zfs"
@@ -1148,7 +1149,7 @@ func (m *Manager) SuggestPorts(ctx context.Context, wanted []PortCheck, forID st
 		}
 		for i := 0; i < 2000; i++ {
 			key := fmt.Sprintf("%d/%s", p, proto)
-			if !used[key] && !reservedPorts[p] {
+			if !used[key] && !reservedPorts[p] && !portreg.Reserved(p) {
 				break
 			}
 			p++
@@ -1242,7 +1243,7 @@ func (m *Manager) choosePorts(ctx context.Context, mf Manifest, asked, prev map[
 			p.addf("%s: %s uses the server's network directly, so this port is fixed at %d", pt.Label, mf.Name, pt.Default)
 		case port < minPort(mf.Permissions.HostNetwork) || port > 65535:
 			p.addf("%s: port %d must be 1024-65535", pt.Label, port)
-		case reservedPorts[port]:
+		case reservedPorts[port] || portreg.Reserved(port):
 			p.addf("%s: port %d is kept for HardyOS", pt.Label, port)
 		case used[key]:
 			p.addf("%s: port %d is already in use", pt.Label, port)

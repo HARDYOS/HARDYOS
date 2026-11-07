@@ -45,7 +45,7 @@ const (
 
 // WebmailAppID is the catalog app the Mail app is (Roundcube): its window
 // proxy signs the person in to their mailbox.
-const WebmailAppID = "roundcube"
+const WebmailAppID = apps.WebmailAppID
 
 // RegisterMailJobs adds the mail server's job kinds.
 func RegisterMailJobs(m *jobs.Manager, svc *manage.Service, pc *priv.Client) {
@@ -93,8 +93,11 @@ func RegisterMailJobs(m *jobs.Manager, svc *manage.Service, pc *priv.Client) {
 		if mb.Address != p.Address {
 			return nil, errors.New("the mailbox's address changed; delete it again")
 		}
+		// Off the server first, then its files, and the row last (decision
+		// 306): if deleting the files fails, the mailbox is still listed
+		// (as being deleted) and the job can run again.
 		jc.Progress(20, "Removing the mailbox from the mail server")
-		if err := svc.Store.DeleteMailboxRow(jc, p.ID); err != nil {
+		if err := svc.Store.SetDeleting(jc, p.ID); err != nil {
 			return nil, err
 		}
 		if err := svc.Store.PruneGroups(jc, mb.Address); err != nil {
@@ -106,12 +109,15 @@ func RegisterMailJobs(m *jobs.Manager, svc *manage.Service, pc *priv.Client) {
 			}
 		}
 		if st.Pool != "" {
-			jc.Progress(70, "Deleting its messages")
-			if err := pc.Call(jc, mail.OpDelete, mail.DeleteArgs{Pool: st.Pool, Address: mb.Address, Confirm: mb.Address}, nil); err != nil {
+			jc.Progress(70, "Deleting its messages, calendars and contacts")
+			if err := pc.Call(jc, mail.OpDelete, mail.DeleteArgs{Pool: st.Pool, Key: mb.Key, Address: mb.Address, Confirm: mb.Address}, nil); err != nil {
 				return nil, err
 			}
 		}
-		return map[string]string{"message": "Deleted " + mb.Address + " and its messages."}, nil
+		if err := svc.Store.DeleteMailboxRow(jc, p.ID); err != nil {
+			return nil, err
+		}
+		return map[string]string{"message": "Deleted " + mb.Address + " with its messages, calendars and contacts."}, nil
 	}})
 	m.Register(jobs.Kind{Name: JobKindMailCert, AdminOnly: true, LockKey: lock, Run: func(jc *jobs.Context) (any, error) {
 		var p struct {
@@ -293,6 +299,15 @@ type MailOverview struct {
 	PublishedURL     string          `json:"publishedUrl"`
 }
 
+// mailNetBirdNet is the NetBird network and interface ("" when unknown).
+func (s *Server) mailNetBirdNet(ctx context.Context) (string, string) {
+	_, st, _ := remoteInputs(ctx, s.cfg.Priv, s.cfg.DB)
+	if st == nil {
+		return "", ""
+	}
+	return st.Network, st.Interface
+}
+
 func (s *Server) mailNetBirdAddr(ctx context.Context) string {
 	in, _, _ := remoteInputs(ctx, s.cfg.Priv, s.cfg.DB)
 	return in.NetBirdIP
@@ -376,6 +391,9 @@ func (s *Server) handleMailSettings(w http.ResponseWriter, r *http.Request, u *a
 		return
 	}
 	st, err := manage.ValidateSettings(req.Settings, doms)
+	if err == nil {
+		err = svc.Store.CheckNotifyFrom(ctx, st.NotifyFrom)
+	}
 	if err != nil {
 		s.record(r, u, "mail.settings", "", audit.Failure, err.Error())
 		s.writeMailError(w, err)
@@ -1023,31 +1041,58 @@ func (s *Server) handleMailDAV(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sign in with your mail address and password", http.StatusUnauthorized)
 		return
 	}
+	// Through the app gateway it's the internet's, whatever address it
+	// claims (decision 303).
 	remote, _ := netip.ParseAddr(s.clientIP(r))
-	if v := svc.Throttle.Check(login, remote); v.Block || v.Wait > 0 {
-		w.Header().Set("Retry-After", fmt.Sprint(int(v.Wait.Seconds())+1))
+	src := mail.From(remote, gatewayInfo(r) != nil)
+	unauthorized := func() {
+		w.Header().Set("WWW-Authenticate", `Basic realm="HardyOS calendars and contacts", charset="UTF-8"`)
+		http.Error(w, "wrong address or password", http.StatusUnauthorized)
+	}
+	// Only a mailbox's address and its own password: never the
+	// notification sign-in, never a webmail token (decision 302).
+	if login == mail.NotifyLogin || !mail.SignInName(login) || strings.HasPrefix(pw, mail.WebmailTokenPrefix) {
+		if svc.Throttle.ResultDAV(login, src, false) {
+			svc.AuthEvent(mail.AuthEvent{Login: login, Remote: src.Addr.String(), Protocol: "dav", Blocked: true})
+		}
+		unauthorized()
+		return
+	}
+	v := svc.Throttle.CheckDAV(login, src)
+	if v.Refuse {
+		w.Header().Set("Retry-After", fmt.Sprint(int(v.RetryAfter.Seconds())+1))
 		http.Error(w, "too many failed sign-ins; try again later", http.StatusTooManyRequests)
 		return
+	}
+	if v.Delay > 0 {
+		select {
+		case <-time.After(v.Delay):
+		case <-r.Context().Done():
+			return
+		}
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	err := svc.CheckLogin(ctx, login, pw)
 	cancel()
-	blocked := svc.Throttle.Result(login, remote, err == nil)
-	if blocked {
-		svc.AuthEvent(mail.AuthEvent{Login: login, Remote: remote.String(), Protocol: "dav", Blocked: true})
+	if svc.Throttle.ResultDAV(login, src, err == nil) {
+		svc.AuthEvent(mail.AuthEvent{Login: login, Remote: src.Addr.String(), Protocol: "dav", Blocked: true})
 	}
-	if err != nil || login == mail.NotifyLogin {
-		w.Header().Set("WWW-Authenticate", `Basic realm="HardyOS calendars and contacts", charset="UTF-8"`)
-		http.Error(w, "wrong address or password", http.StatusUnauthorized)
+	if err != nil {
+		unauthorized()
 		return
 	}
-	dav, err := svc.DAVPassword(r.Context(), login)
+	mb, err := svc.Store.MailboxByAddress(r.Context(), login)
+	if err != nil {
+		unauthorized()
+		return
+	}
+	dav, err := svc.DAVPassword(r.Context(), mb.Key)
 	if err != nil {
 		internalError(s, w, err)
 		return
 	}
 	r2 := r.Clone(r.Context())
-	r2.SetBasicAuth(login, dav)
+	r2.SetBasicAuth(mb.Key, dav)
 	r2.Body = http.MaxBytesReader(w, r.Body, 50<<20)
 	davProxy.ServeHTTP(w, r2)
 }
@@ -1056,40 +1101,57 @@ func (s *Server) handleMailDAV(w http.ResponseWriter, r *http.Request) {
 
 // MailOptions configures RunMail.
 type MailOptions struct {
-	// Addr is the listener (default 127.0.0.1:44250).
-	Addr string
+	// Listener is the mail sign-in socket systemd handed over
+	// (hardyd-mail-auth.socket, mail.AuthSocket: owner hardyd, group
+	// dovecot, 0660). Without it, Socket names a path hardyd listens on
+	// itself (development; nothing but its folder's permissions guards it).
+	Listener net.Listener
+	Socket   string
 }
 
-// RunMail serves Dovecot's sign-in questions on 127.0.0.1 and keeps the
-// mail server's accounts and alerts going until ctx ends.
+// RunMail serves Dovecot's sign-in questions on the mail sign-in socket
+// (decision 301) and keeps the mail server's accounts and alerts going
+// until ctx ends. Without the socket nobody can sign in to mail: that's an
+// alert (mail.service) while the mail server is on.
 func (s *Server) RunMail(ctx context.Context, opts MailOptions) {
 	svc := s.mailSvc()
 	if svc == nil {
 		return
 	}
-	if opts.Addr == "" {
-		opts.Addr = fmt.Sprintf("127.0.0.1:%d", mail.DefaultAuthPort)
+	go svc.Run(ctx)
+	ln := opts.Listener
+	if ln == nil && opts.Socket != "" {
+		var err error
+		if ln, err = net.Listen("unix", opts.Socket); err != nil {
+			svc.SetAuthListener(fmt.Errorf("listening on %s: %w", opts.Socket, err))
+			s.log.Warn("mail sign-in socket", "err", err)
+			return
+		}
+	}
+	if ln == nil {
+		svc.SetAuthListener(errors.New("systemd didn't hand hardyd the mail sign-in socket " + mail.AuthSocket))
+		s.log.Warn("mail sign-in socket missing", "socket", mail.AuthSocket)
+		return
+	}
+	if ln.Addr().Network() != "unix" {
+		_ = ln.Close()
+		svc.SetAuthListener(errors.New("the mail sign-in listener isn't a Unix socket"))
+		return
 	}
 	as := &mail.AuthServer{Secret: func() string { return svc.AuthSecret(context.Background()) },
 		Checker: svc, Limits: svc.Throttle, OnEvent: svc.AuthEvent, Log: s.log}
-	srv := &http.Server{Addr: opts.Addr, Handler: as, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+	srv := &http.Server{Handler: as, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 	go func() {
 		<-ctx.Done()
 		_ = srv.Close()
 	}()
-	go svc.Run(ctx)
-	for {
-		err := srv.ListenAndServe()
-		if errors.Is(err, http.ErrServerClosed) || ctx.Err() != nil {
-			return
-		}
-		s.log.Warn("mail sign-in listener", "err", err)
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(30 * time.Second):
-		}
+	svc.SetAuthListener(nil)
+	err := srv.Serve(ln)
+	if errors.Is(err, http.ErrServerClosed) || ctx.Err() != nil {
+		return
 	}
+	svc.SetAuthListener(err)
+	s.log.Warn("mail sign-in socket", "err", err)
 }
 
 // mailPasswords checks domain passwords for the mail server like a desktop
@@ -1136,7 +1198,7 @@ func (d mailDirectory) Users(ctx context.Context) ([]manage.DirUser, error) {
 	users := make([]manage.DirUser, 0, len(out.Users))
 	for _, u := range out.Users {
 		users = append(users, manage.DirUser{Username: u.Username, GivenName: u.GivenName, DisplayName: u.DisplayName,
-			Enabled: u.Enabled, Builtin: u.Builtin})
+			Enabled: u.Enabled, Builtin: u.Builtin, GUID: u.ObjectGUID, SID: u.SID})
 	}
 	return users, nil
 }
@@ -1184,6 +1246,9 @@ func (s *Server) configureMail() {
 	}
 	if svc.NetBirdAddr == nil {
 		svc.NetBirdAddr = s.mailNetBirdAddr
+	}
+	if svc.NetBirdNet == nil {
+		svc.NetBirdNet = s.mailNetBirdNet
 	}
 	if svc.SessionAlive == nil {
 		svc.SessionAlive = s.proxy.sessionAlive

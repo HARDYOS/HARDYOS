@@ -20,7 +20,31 @@ import (
 type appFilter func(r *http.Request) string
 
 var appFilters = map[string]appFilter{
-	"immich": immichFilter,
+	"immich":     immichFilter,
+	WebmailAppID: webmailFilter,
+}
+
+// webmailFilter keeps Roundcube's own sign-in form shut (decision 302):
+// HardyOS signs people in with a webmail token, and a password typed into
+// the form must never reach the mail server from the webmail app (hardyd
+// refuses it there anyway).
+func webmailFilter(r *http.Request) string {
+	if r.Method != http.MethodPost {
+		return ""
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), r.Body))
+	if err != nil {
+		return ""
+	}
+	form, _ := url.ParseQuery(string(body))
+	q := r.URL.Query()
+	task := form.Get("_task") + q.Get("_task")
+	action := form.Get("_action") + q.Get("_action")
+	if strings.EqualFold(task, "login") && strings.EqualFold(action, "login") || form.Has("_pass") {
+		return "Webmail signs you in with your HardyOS sign-in; open Mail from the HardyOS desktop"
+	}
+	return ""
 }
 
 // filterAppRequest answers a refused request and reports whether it did.

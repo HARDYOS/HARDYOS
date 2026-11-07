@@ -4,8 +4,13 @@ Documentation=https://github.com/HARDYOS/HARDYOS
 # On installed systems /var/lib/hardyos is a ZFS dataset (rpool/hardyos):
 # start only after ZFS has mounted it, or the database would land underneath.
 After=network-online.target hardyd-priv.service zfs-mount.service
-Wants=network-online.target
+Wants=network-online.target hardyd-mail-auth.socket
 Requires=hardyd-priv.service
+# The mail server's sign-in socket (made by systemd with its owner, group
+# and mode; see hardyd-mail-auth.socket). Without it hardyd still runs and
+# alerts while mail is on.
+After=hardyd-mail-auth.socket
+Sockets=hardyd-mail-auth.socket
 
 [Service]
 Type=simple

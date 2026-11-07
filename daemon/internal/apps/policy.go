@@ -3,11 +3,14 @@ package apps
 import (
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+
+	portreg "github.com/hardyos/hardyos/daemon/internal/ports"
 )
 
 // The policy below is checked against the compose file as Docker Compose
@@ -204,6 +207,10 @@ var refusedHint = map[string]string{
 	"container_name_prefix": "HardyOS names the containers itself",
 }
 
+// WebmailAppID is the catalog's webmail app (Roundcube): its network is
+// ports.WebmailSubnet, which no other app may take.
+const WebmailAppID = "roundcube"
+
 // Resolved is a compose project after `docker compose config --format json`.
 type Resolved map[string]any
 
@@ -350,6 +357,23 @@ func checkNetwork(p *Problems, project, name string, n map[string]any) {
 				ipam, _ := v.(map[string]any)
 				if d, _ := ipam["driver"].(string); d != "" && d != "default" {
 					p.addf("network %s: custom IPAM drivers aren't allowed", name)
+				}
+				// The webmail app's network is the only place hardyd's
+				// mail sign-in takes webmail tokens from (decision 302).
+				for _, c := range anyList(ipam["config"]) {
+					cm, _ := c.(map[string]any)
+					sub, _ := cm["subnet"].(string)
+					if sub == "" {
+						continue
+					}
+					pre, err := netip.ParsePrefix(sub)
+					if err != nil {
+						p.addf("network %s: subnet %q isn't valid", name, sub)
+						continue
+					}
+					if pre.Overlaps(portreg.WebmailSubnet) && project != ProjectName(WebmailAppID) {
+						p.addf("network %s: %s is kept for the webmail app", name, portreg.WebmailSubnet)
+					}
 				}
 			}
 		default:

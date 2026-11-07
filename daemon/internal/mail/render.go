@@ -103,10 +103,10 @@ func Render(c RootConfig, s RootSecrets, e Env) []File {
 	var files []File
 	files = append(files, renderPostfix(c, s, e)...)
 	files = append(files, renderDovecot(c, s, e)...)
-	files = append(files, renderRspamd(c, e)...)
+	files = append(files, renderRspamd(c, s, e)...)
 	files = append(files, renderRadicale(c, s, e)...)
 	files = append(files, File{Path: RedisConf, Mode: 0o640, Group: "redis", Content: renderRedis()})
-	files = append(files, File{Path: NFTFile, Mode: 0o644, Content: RenderNFT(c.VPSPeer)})
+	files = append(files, File{Path: NFTFile, Mode: 0o644, Content: RenderNFT(c.VPSPeer, c.NetBirdIface)})
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	return files
 }
@@ -123,25 +123,18 @@ func mapFile(lines [][2]string) string {
 
 func renderPostfix(c RootConfig, s RootSecrets, e Env) []File {
 	maps := func(name string) string { return "texthash:" + path.Join(PostfixMapsDir, name) }
-	var domains, mailboxes, aliases, senders [][2]string
+	var domains, mailboxes, aliases [][2]string
 	for _, d := range c.Domains {
 		domains = append(domains, [2]string{d.Name, "OK"})
 	}
 	for _, m := range c.Mailboxes {
-		local, dom, _ := SplitAddress(m.Address)
-		mailboxes = append(mailboxes, [2]string{m.Address, dom + "/" + local + "/"})
-		// Who may send as what: the address and its aliases belong to the
-		// person who signs in with the address.
-		senders = append(senders, [2]string{m.Address, m.Address})
+		mailboxes = append(mailboxes, [2]string{m.Address, m.Key + "/"})
 		for _, a := range m.Aliases {
 			aliases = append(aliases, [2]string{a, m.Address})
-			senders = append(senders, [2]string{a, m.Address})
 		}
 	}
 	for _, g := range c.GroupAliases {
 		aliases = append(aliases, [2]string{g.Address, strings.Join(g.Targets, ",")})
-		// Anyone in the group may send as it.
-		senders = append(senders, [2]string{g.Address, strings.Join(g.Targets, ",")})
 	}
 	if c.Postmaster != "" {
 		for _, d := range c.Domains {
@@ -153,13 +146,9 @@ func renderPostfix(c RootConfig, s RootSecrets, e Env) []File {
 			}
 		}
 	}
-	if c.NotifyFrom != "" {
-		senders = append(senders, [2]string{c.NotifyFrom, NotifyLogin})
-	}
 	sort.Slice(aliases, func(i, j int) bool { return aliases[i][0] < aliases[j][0] })
-	sort.Slice(senders, func(i, j int) bool { return senders[i][0] < senders[j][0] })
-	// Several owners for one sender address: one line, comma separated.
-	senders = mergeKeys(senders)
+	// Who may send as what (several owners: one line, comma separated).
+	senders := senderOwners(c)
 
 	relay := "retry:outgoing mail isn't set up yet (Control Panel > Mail > Sending)"
 	ses := ""
@@ -205,6 +194,11 @@ mailbox_size_limit = 0
 authorized_submit_users = root
 maximal_queue_lifetime = 5d
 bounce_queue_lifetime = 5d
+# No bounces to the internet (decision 307): a message without a return
+# address (a bounce or delivery notice) is only ever for mail that came in
+# from outside, often with a forged sender, so it's dropped here instead of
+# going out through Amazon SES. People signed in can't send without one.
+sender_dependent_default_transport_maps = %s
 
 # Mailboxes (delivered by Dovecot over LMTP).
 virtual_mailbox_domains = %s
@@ -246,8 +240,10 @@ smtpd_data_restrictions = reject_unauth_pipelining
 smtpd_sender_login_maps = %s
 smtpd_recipient_limit = 100
 
-# Rspamd: spam score, DKIM signing, viruses (ClamAV, when on).
-smtpd_milters = inet:127.0.0.1:%d
+# Rspamd: spam score, DKIM signing, viruses (ClamAV, when on), and that
+# signed-in people write only From addresses of their own. A Unix socket
+# only Postfix may use.
+smtpd_milters = unix:%s
 non_smtpd_milters = $smtpd_milters
 milter_default_action = tempfail
 milter_protocol = 6
@@ -266,10 +262,11 @@ smtpd_soft_error_limit = 5
 smtpd_hard_error_limit = 10
 smtpd_error_sleep_time = 5s
 `, generatedHeader, c.Hostname, e.inetProtocols(), int64(c.MaxMessageMB)<<20,
+		maps("bounce_transport"),
 		maps("domains"), maps("mailboxes"), maps("aliases"),
 		defaultTransport, ses,
 		"/run/hardyos-mail/tls/key.pem", "/run/hardyos-mail/tls/fullchain.pem",
-		maps("senders"), PortRspamdMilter, c.VPSPeer)
+		maps("senders"), RspamdMilterSocket, c.VPSPeer)
 	// Postfix and Dovecot read the key from /run/hardyos-mail/tls (root's
 	// copy made by apply; see Root.installTLS), never from the pool.
 	if strings.Contains(c.VPSPeer, ":") {
@@ -285,17 +282,20 @@ smtpd_error_sleep_time = 5s
 		}
 		if proxy {
 			b.WriteString("  -o smtpd_upstream_proxy_protocol=haproxy\n")
+			// Sign-ins here are the internet's, whatever the PROXY header
+			// says (hardyd's auth policy reads the service name).
+			b.WriteString("  -o smtpd_sasl_service=" + ProxySASLService + "\n")
 		}
-		b.WriteString(`  -o smtpd_tls_security_level=encrypt
+		fmt.Fprintf(&b, `  -o smtpd_tls_security_level=encrypt
   -o smtpd_sasl_auth_enable=yes
   -o smtpd_tls_auth_only=yes
   -o smtpd_client_restrictions=permit_sasl_authenticated,reject
   -o smtpd_helo_restrictions=
-  -o smtpd_sender_restrictions=reject_non_fqdn_sender,reject_sender_login_mismatch
+  -o smtpd_sender_restrictions=reject_non_fqdn_sender,check_sender_access,%s,reject_sender_login_mismatch
   -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
   -o smtpd_recipient_restrictions=reject_non_fqdn_recipient,permit_sasl_authenticated,reject
   -o milter_macro_daemon_name=ORIGINATING
-`)
+`, maps("null_sender"))
 		return b.String()
 	}
 	master := fmt.Sprintf(`# %s
@@ -307,7 +307,7 @@ smtpd_error_sleep_time = 5s
   -o smtpd_client_restrictions=check_client_access,cidr:%s,reject
   -o smtpd_sasl_auth_enable=no
   -o smtpd_relay_restrictions=reject_unauth_destination
-  -o smtpd_recipient_restrictions=reject_non_fqdn_recipient,reject_unlisted_recipient,reject_unauth_destination
+  -o smtpd_recipient_restrictions=reject_non_fqdn_recipient,reject_unlisted_recipient,reject_unauth_destination,check_policy_service,unix:private/quota-status
 %s%s%s%spickup    unix  n       -       n       60      1       pickup
 cleanup   unix  n       -       n       -       0       cleanup
 qmgr      unix  n       -       n       300     1       qmgr
@@ -351,6 +351,10 @@ postlog   unix-dgram n  -       n       -       1       postlogd
 		{Path: path.Join(PostfixMapsDir, "aliases"), Mode: 0o644, Content: mapFile(aliases)},
 		{Path: path.Join(PostfixMapsDir, "senders"), Mode: 0o644, Content: mapFile(senders)},
 		{Path: path.Join(PostfixMapsDir, "vps.cidr"), Mode: 0o644, Content: mapFile([][2]string{{vps, "OK"}})},
+		// Signed-in senders need a return address (the login map can't
+		// vouch for an empty one).
+		{Path: path.Join(PostfixMapsDir, "null_sender"), Mode: 0o644, Content: mapFile([][2]string{{"<>", "REJECT Signed-in senders need a return address"}})},
+		{Path: path.Join(PostfixMapsDir, "bounce_transport"), Mode: 0o644, Content: mapFile([][2]string{{"<>", "discard:"}})},
 	}
 	sasl := [][2]string{}
 	if c.SES != nil {
@@ -383,7 +387,7 @@ func mergeKeys(in [][2]string) [][2]string {
 }
 
 func renderDovecot(c RootConfig, s RootSecrets, e Env) []File {
-	authURL := fmt.Sprintf("http://127.0.0.1:%d", c.AuthPort)
+	authURL := AuthURL
 	conf := fmt.Sprintf(`# %s
 dovecot_config_version = 2.4.0
 dovecot_storage_version = 2.4.0
@@ -402,7 +406,8 @@ first_valid_uid = %d
 last_valid_uid = %d
 first_valid_gid = %d
 last_valid_gid = %d
-mail_home = %s/%%{user | domain}/%%{user | username}
+# Each mailbox's home (vmail/<key>) comes from the user list; there's no
+# fallback made from the address (decision 306).
 mail_driver = maildir
 mail_path = ~/Maildir
 mail_plugins {
@@ -419,6 +424,7 @@ namespace inbox {
   mailbox Junk {
     special_use = \Junk
     auto = subscribe
+    autoexpunge = 30 days
   }
   mailbox Trash {
     special_use = \Trash
@@ -437,6 +443,16 @@ namespace inbox {
 quota "User quota" {
   driver = count
 }
+# A full mailbox defers delivery (Postfix retries; nothing bounces), and the
+# relay port asks first (quota-status), so a full mailbox keeps new mail
+# waiting on the VPS instead of here.
+quota_full_tempfail = yes
+lmtp_rcpt_check_quota = yes
+quota_exceeded_message = The mailbox is full.
+quota_status_success = DUNNO
+quota_status_nouser = DUNNO
+quota_status_overquota = 452 4.2.2 The mailbox is full
+quota_status_toolarge = 552 5.2.3 The message is bigger than this mailbox may hold
 
 # TLS for everyone: no plain-text sign-in, ever.
 ssl = required
@@ -454,9 +470,10 @@ haproxy_trusted_networks = %s
 # (auth policy: rate limits, turned-off mailboxes).
 auth_mechanisms = plain login
 auth_username_format = %%{user | lower}
-auth_cache_size = 10M
-auth_cache_ttl = 5 mins
-auth_cache_negative_ttl = 0
+# No sign-in cache: hardyd decides every time, with the client's address
+# (a cached success would let a webmail token work from anywhere, and a
+# turned-off mailbox keep working until the cache expires).
+auth_cache_size = 0
 auth_failure_delay = 2 secs
 
 auth_policy_server_url = %s/policy
@@ -466,8 +483,13 @@ auth_policy_reject_on_fail = yes
 auth_policy_request_attributes {
   login = %%{requested_username}
   remote = %%{remote_ip}
+  local_port = %%{local_port}
   protocol = %%{protocol}
   fail_type = %%{fail_type}
+}
+# hardyd answers on a Unix socket only Dovecot may use (decision 301).
+auth_policy {
+  http_client_proxy_socket_path = %s
 }
 
 # Every password typed into a mail app becomes a password grant to hardyd;
@@ -475,6 +497,7 @@ auth_policy_request_attributes {
 passdb oauth2 {
   mechanisms_filter = plain login
   oauth2 {
+    http_client_proxy_socket_path = %s
     grant_url = %s/token
     introspection_mode = post
     introspection_url = %s/introspect
@@ -491,15 +514,34 @@ userdb passwd-file {
   passwd_file_path = %s/users
 }
 
+# Sockets: only who needs one may use it (the defaults let anyone on the
+# server look mailboxes up and deliver mail).
 service auth {
   unix_listener /var/spool/postfix/private/auth {
     mode = 0660
     user = postfix
     group = postfix
   }
+  unix_listener auth-userdb {
+    mode = 0600
+    user = %s
+  }
 }
 service lmtp {
   unix_listener /var/spool/postfix/private/dovecot-lmtp {
+    mode = 0600
+    user = postfix
+    group = postfix
+  }
+  unix_listener lmtp {
+    mode = 0600
+  }
+}
+service quota-status {
+  executable = quota-status -p postfix
+  user = %s
+  client_limit = 1
+  unix_listener /var/spool/postfix/private/quota-status {
     mode = 0600
     user = postfix
     group = postfix
@@ -576,19 +618,19 @@ imapsieve_from Junk {
   }
 }
 `, generatedHeader, e.listen(), e.logSettings(),
-		e.VMailUID, e.VMailGID, e.VMailUID, e.VMailUID, e.VMailGID, e.VMailGID, e.VMailDir(),
+		e.VMailUID, e.VMailGID, e.VMailUID, e.VMailUID, e.VMailGID, e.VMailGID,
 		c.VPSPeer,
-		authURL, s.AuthSecret, derive(s.AuthSecret, "policy-nonce"),
-		authURL, authURL, s.AuthSecret,
+		authURL, s.AuthSecret, derive(s.AuthSecret, "policy-nonce"), AuthSocket,
+		AuthSocket, authURL, authURL, s.AuthSecret,
 		DovecotDir,
+		VMailUser, VMailUser,
 		PortIMAPS, PortProxyIMAPS,
 		DovecotDir, DovecotDir, DovecotDir, DovecotDir)
 
 	var users strings.Builder
 	users.WriteString("# " + generatedHeader + "\n")
 	for _, m := range c.Mailboxes {
-		local, dom, _ := SplitAddress(m.Address)
-		home := path.Join(e.VMailDir(), dom, local)
+		home := path.Join(e.VMailDir(), m.Key)
 		extra := ""
 		if m.QuotaMB > 0 {
 			extra = fmt.Sprintf("userdb_quota_storage_size=%dM", m.QuotaMB)
@@ -622,24 +664,106 @@ pipe :copy "rspamd-learn" ["ham"];
 	learn := fmt.Sprintf(`#!/bin/sh
 # %s
 # Teaches Rspamd from a message moved into or out of Junk (run by Dovecot
-# as the mail user; Rspamd's controller accepts learning from localhost).
+# as the mail user; Rspamd's controller is a Unix socket only the mail user
+# and root may use, and wants its password too).
 case "$1" in
-spam) exec /usr/bin/rspamc -h 127.0.0.1:%d learn_spam ;;
-ham) exec /usr/bin/rspamc -h 127.0.0.1:%d learn_ham ;;
+spam) exec /usr/bin/rspamc -h %s -P %s learn_spam ;;
+ham) exec /usr/bin/rspamc -h %s -P %s learn_ham ;;
 esac
 exit 64
-`, generatedHeader, PortRspamdCtl, PortRspamdCtl)
+`, generatedHeader, RspamdCtlSocket, rspamdPassword(s), RspamdCtlSocket, rspamdPassword(s))
 	return []File{
 		{Path: DovecotConf, Mode: 0o640, Group: "dovecot", Content: conf},
 		{Path: path.Join(DovecotDir, "users"), Mode: 0o640, Group: "dovecot", Content: users.String()},
 		{Path: path.Join(DovecotDir, "sieve", "junk.sieve"), Mode: 0o644, Content: junk},
 		{Path: path.Join(DovecotDir, "sieve", "report-spam.sieve"), Mode: 0o644, Content: reportSpam},
 		{Path: path.Join(DovecotDir, "sieve", "report-ham.sieve"), Mode: 0o644, Content: reportHam},
-		{Path: path.Join(DovecotDir, "sieve-pipe", "rspamd-learn"), Mode: 0o755, Content: learn},
+		{Path: path.Join(DovecotDir, "sieve-pipe", "rspamd-learn"), Mode: 0o750, Group: VMailUser, Content: learn},
 	}
 }
 
-func renderRspamd(c RootConfig, e Env) []File {
+// rspamdPassword is the controller's password (made from the auth secret).
+func rspamdPassword(s RootSecrets) string { return derive(s.AuthSecret, "rspamd-controller")[:40] }
+
+// senderOwners is who may send as each address: the address itself and its
+// aliases belong to the mailbox, a group's address to its members, the
+// notification sender to HardyOS's notifications. Postfix checks the
+// envelope (smtpd_sender_login_maps) and Rspamd the From header with it.
+func senderOwners(c RootConfig) [][2]string {
+	var senders [][2]string
+	for _, m := range c.Mailboxes {
+		senders = append(senders, [2]string{m.Address, m.Address})
+		for _, a := range m.Aliases {
+			senders = append(senders, [2]string{a, m.Address})
+		}
+	}
+	for _, g := range c.GroupAliases {
+		senders = append(senders, [2]string{g.Address, strings.Join(g.Targets, ",")})
+	}
+	if c.NotifyFrom != "" {
+		senders = append(senders, [2]string{c.NotifyFrom, NotifyLogin})
+	}
+	sort.Slice(senders, func(i, j int) bool { return senders[i][0] < senders[j][0] })
+	return mergeKeys(senders)
+}
+
+// fromCheckLua makes Rspamd refuse a signed-in person's message whose From
+// header isn't one of their own addresses (decision 304): Postfix only
+// checks the envelope, and the From header is what people see and what
+// DKIM signs for.
+const fromCheckLua = `-- %s
+local owners = rspamd_config:add_map({
+  type = "map",
+  url = %q,
+  description = "HardyOS: who may send as each address",
+})
+
+rspamd_config:register_symbol({
+  name = "HARDYOS_FROM_NOT_OWNED",
+  type = "prefilter",
+  priority = 10,
+  callback = function(task)
+    local user = task:get_user()
+    if not user then
+      return false
+    end
+    user = string.lower(user)
+    local from = task:get_from({"mime", "orig"})
+    local why
+    if not from or #from ~= 1 or not from[1].addr or from[1].addr == "" then
+      why = "A message needs exactly one From address"
+    else
+      local addr = string.lower(from[1].addr)
+      local allowed = owners:get_key(addr)
+      local ok = false
+      if allowed then
+        for o in string.gmatch(allowed, "[^,%%s]+") do
+          if o == user then
+            ok = true
+          end
+        end
+      end
+      if not ok then
+        why = "You may not send as " .. addr
+      end
+    end
+    if why then
+      task:insert_result("HARDYOS_FROM_NOT_OWNED", 1.0, why)
+      task:set_pre_result("reject", why, "hardyos")
+      return true
+    end
+    return false
+  end,
+})
+`
+
+// Rspamd's files outside local.d.
+const (
+	RspamdLocalLua   = "/etc/rspamd/rspamd.local.lua"
+	RspamdSendersMap = "/etc/rspamd/hardyos/senders.map"
+)
+
+func renderRspamd(c RootConfig, s RootSecrets, e Env) []File {
 	f := func(name, content string) File {
 		return File{Path: path.Join(RspamdLocalDir, name), Mode: 0o644, Content: "# " + generatedHeader + "\n" + content}
 	}
@@ -649,12 +773,14 @@ func renderRspamd(c RootConfig, e Env) []File {
 		fmt.Fprintf(&domains, "  %q {\n    selector = %q;\n    path = %q;\n  }\n", d.Name, d.Selector, e.DKIMKeyPath(d.Name, d.Selector))
 	}
 	dkim := fmt.Sprintf(`enabled = true;
-allow_envfrom_empty = true;
+allow_envfrom_empty = false;
 allow_hdrfrom_mismatch = false;
 allow_hdrfrom_multiple = false;
 allow_username_mismatch = true;
 sign_authenticated = true;
-sign_local = true;
+# Only mail people sent signed in is signed, never mail merely because it
+# came from this host.
+sign_local = false;
 sign_inbound = false;
 use_domain = "header";
 use_esld = false;
@@ -670,19 +796,27 @@ domain {
 gtube_patterns = "all";
 enable_test_patterns = true;
 `),
-		f("worker-proxy.inc", fmt.Sprintf(`bind_socket = "127.0.0.1:%d";
+		// Unix sockets only (decision 305). Their folders are setgid to the
+		// group that may connect (Root.layout), so the sockets get it too.
+		f("worker-proxy.inc", fmt.Sprintf(`bind_socket = "%s mode=0660";
 milter = yes;
 timeout = 120s;
 upstream "local" {
   default = yes;
   self_scan = yes;
 }
-`, PortRspamdMilter)),
-		f("worker-controller.inc", fmt.Sprintf(`bind_socket = "127.0.0.1:%d";
-secure_ip = ["127.0.0.1", "::1"];
-`, PortRspamdCtl)),
-		f("worker-normal.inc", `bind_socket = "127.0.0.1:11333";
+`, RspamdMilterSocket)),
+		{Path: path.Join(RspamdLocalDir, "worker-controller.inc"), Mode: 0o640, Group: "_rspamd", Content: "# " + generatedHeader + "\n" +
+			fmt.Sprintf(`bind_socket = "%s mode=0660";
+secure_ip = [];
+password = %q;
+enable_password = %q;
+`, RspamdCtlSocket, rspamdPassword(s), rspamdPassword(s))},
+		// The milter worker scans by itself; no other worker listens.
+		f("worker-normal.inc", `enabled = false;
 `),
+		{Path: RspamdLocalLua, Mode: 0o644, Content: fmt.Sprintf(fromCheckLua, generatedHeader, RspamdSendersMap)},
+		{Path: RspamdSendersMap, Mode: 0o644, Content: mapFile(senderOwners(c))},
 		f("redis.conf", fmt.Sprintf(`servers = %q;
 `, RedisSocket)),
 		f("classifier-bayes.conf", `backend = "redis";
@@ -837,14 +971,16 @@ collection: family/[^/]+
 permissions: rw
 `
 	}
+	// Radicale's users are the mailboxes' keys (decision 306): hardyd signs
+	// in as the key for the person.
 	var users strings.Builder
-	addrs := make([]string, 0, len(s.DAV))
-	for a := range s.DAV {
-		addrs = append(addrs, a)
+	keys := make([]string, 0, len(s.DAV))
+	for k := range s.DAV {
+		keys = append(keys, k)
 	}
-	sort.Strings(addrs)
-	for _, a := range addrs {
-		users.WriteString(a + ":" + s.DAV[a] + "\n")
+	sort.Strings(keys)
+	for _, k := range keys {
+		users.WriteString(k + ":" + s.DAV[k] + "\n")
 	}
 	dropIn := fmt.Sprintf(`# %s
 [Service]
@@ -859,9 +995,11 @@ ReadWritePaths=%s
 }
 
 // RenderNFT is the firewall table that keeps the PROXY-protocol and relay
-// ports to the VPS's NetBird address (Postfix believes any PROXY header it
-// gets, so only the VPS may reach those ports at all).
-func RenderNFT(vps string) string {
+// ports to the VPS's NetBird address arriving through the NetBird
+// interface (Postfix believes any PROXY header it gets, so only the VPS may
+// reach those ports at all, and a packet claiming its address from any
+// other interface is dropped).
+func RenderNFT(vps, iface string) string {
 	fam := "ip"
 	if strings.Contains(vps, ":") {
 		fam = "ip6"
@@ -872,11 +1010,11 @@ delete table inet hardyos_mail
 table inet hardyos_mail {
   chain input {
     type filter hook input priority filter - 5; policy accept;
-    tcp dport { %d, %d, %d, %d } %s saddr %s accept
+    tcp dport { %d, %d, %d, %d } iifname %q %s saddr %s accept
     tcp dport { %d, %d, %d, %d } drop
   }
 }
 `, generatedHeader,
-		PortRelay, PortProxySubm, PortProxySubms, PortProxyIMAPS, fam, vps,
+		PortRelay, PortProxySubm, PortProxySubms, PortProxyIMAPS, iface, fam, vps,
 		PortRelay, PortProxySubm, PortProxySubms, PortProxyIMAPS)
 }

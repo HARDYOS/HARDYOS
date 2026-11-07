@@ -274,11 +274,30 @@ func TestRootArgs(t *testing.T) {
 	if a.Config.SES == nil || a.Config.SES.Host != "email-smtp.eu-west-1.amazonaws.com" || a.Secrets.SESPassword == "" {
 		t.Fatalf("SES %+v", a.Config.SES)
 	}
-	if _, ok := a.Secrets.DAV["kid@example.net"]; ok {
+	alice, _ := s.Store.MailboxByAddress(ctx, "alice@example.net")
+	kid, _ := s.Store.MailboxByAddress(ctx, "kid@example.net")
+	if !mail.ValidMailboxKey(alice.Key) || alice.Key == kid.Key {
+		t.Fatalf("mailbox keys %q %q", alice.Key, kid.Key)
+	}
+	if _, ok := a.Secrets.DAV[kid.Key]; ok {
 		t.Error("a turned-off mailbox has a calendar password")
 	}
-	if _, ok := a.Secrets.DAV["alice@example.net"]; !ok {
+	if _, ok := a.Secrets.DAV[alice.Key]; !ok {
 		t.Error("alice has no calendar password")
+	}
+	if a.Config.NetBirdNet != DefaultNetBirdNet || a.Config.NetBirdIface != DefaultNetBirdIface {
+		t.Errorf("NetBird defaults %q %q", a.Config.NetBirdNet, a.Config.NetBirdIface)
+	}
+	// A mailbox being deleted leaves the configuration (and its group).
+	if err := s.Store.SetDeleting(ctx, kid.ID); err != nil {
+		t.Fatal(err)
+	}
+	a, _ = s.RootArgs(ctx)
+	if len(a.Config.Mailboxes) != 1 || len(a.Config.GroupAliases[0].Targets) != 1 {
+		t.Fatalf("deleting mailbox still configured: %+v", a.Config)
+	}
+	if _, err := a.Config.Normalize(a.Secrets); err != nil {
+		t.Fatalf("root would refuse: %v", err)
 	}
 	// Apply stores the DKIM keys root made.
 	if _, err := s.Apply(ctx, func(float64, string) {}); err != nil {

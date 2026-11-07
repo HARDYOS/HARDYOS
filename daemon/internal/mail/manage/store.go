@@ -9,11 +9,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/hardyos/hardyos/daemon/internal/mail"
 	"net/netip"
+	"slices"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/hardyos/hardyos/daemon/internal/mail"
 
 	"github.com/hardyos/hardyos/daemon/internal/secretbox"
 	"github.com/hardyos/hardyos/daemon/internal/store"
@@ -58,8 +60,12 @@ type Settings struct {
 	TLSMode     string `json:"tlsMode"`
 	ACMEEmail   string `json:"acmeEmail"`
 	ACMEStaging bool   `json:"acmeStaging"`
-	// NotifyFrom is the address HardyOS's notifications are sent from.
+	// NotifyFrom is the address HardyOS's notifications are sent from (an
+	// address of its own).
 	NotifyFrom string `json:"notifyFrom"`
+	// StorageLimitMB caps <pool>/mail (0: automatic, see
+	// mail.StorageLimitMB).
+	StorageLimitMB int `json:"storageLimitMb"`
 }
 
 // Defaults for a new setup.
@@ -120,14 +126,28 @@ type Mailbox struct {
 	Enabled bool `json:"enabled"`
 	// AccountState: active, disabled (turned off in the domain) or deleted
 	// (gone from the domain; the mailbox and its mail stay until deleted).
-	AccountState  string    `json:"accountState"`
-	CustomAddress bool      `json:"customAddress"`
-	CreatedAt     time.Time `json:"createdAt"`
-	UpdatedAt     time.Time `json:"updatedAt"`
+	AccountState  string `json:"accountState"`
+	CustomAddress bool   `json:"customAddress"`
+	// Deleting: taken off the server; its messages are being deleted.
+	Deleting  bool      `json:"deleting"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+	// Key names its storage (mail.RootMailbox.Key); AccountGUID and
+	// AccountSID are the domain account's objectGUID and objectSid.
+	Key         string `json:"-"`
+	AccountGUID string `json:"-"`
+	AccountSID  string `json:"-"`
 }
 
 // CanSignIn reports whether the mailbox may be used now.
-func (m *Mailbox) CanSignIn() bool { return m.Enabled && m.AccountState == "active" }
+func (m *Mailbox) CanSignIn() bool { return m.Enabled && m.AccountState == "active" && !m.Deleting }
+
+// NewMailboxKey makes a mailbox's storage key.
+func NewMailboxKey() string {
+	b := make([]byte, 12)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
 
 // Group delivers to several mailboxes.
 type Group struct {
@@ -436,16 +456,18 @@ func (s *Store) DeleteDomain(ctx context.Context, name string) error {
 
 // ---- mailboxes ----
 
-const mailboxCols = `id, account, address, display_name, aliases, quota_mb, enabled, account_state, custom_address, created_at, updated_at`
+const mailboxCols = `id, account, address, display_name, aliases, quota_mb, enabled, account_state, custom_address, created_at, updated_at,
+	storage_key, account_guid, account_sid, deleting`
 
 func scanMailbox(sc interface{ Scan(...any) error }) (*Mailbox, error) {
 	var m Mailbox
 	var aliases, created, updated string
-	var en, custom int
-	if err := sc.Scan(&m.ID, &m.Account, &m.Address, &m.DisplayName, &aliases, &m.QuotaMB, &en, &m.AccountState, &custom, &created, &updated); err != nil {
+	var en, custom, deleting int
+	if err := sc.Scan(&m.ID, &m.Account, &m.Address, &m.DisplayName, &aliases, &m.QuotaMB, &en, &m.AccountState, &custom, &created, &updated,
+		&m.Key, &m.AccountGUID, &m.AccountSID, &deleting); err != nil {
 		return nil, err
 	}
-	m.Enabled, m.CustomAddress = en == 1, custom == 1
+	m.Enabled, m.CustomAddress, m.Deleting = en == 1, custom == 1, deleting == 1
 	_ = json.Unmarshal([]byte(aliases), &m.Aliases)
 	if m.Aliases == nil {
 		m.Aliases = []string{}
@@ -523,6 +545,10 @@ func (s *Store) usedAddresses(ctx context.Context, skip int64) (map[string]bool,
 	for _, g := range gs {
 		used[g.Address] = true
 	}
+	// The notification sender is an address of its own (decision 304).
+	if st, err := s.LoadSettings(ctx); err == nil && st.NotifyFrom != "" {
+		used[st.NotifyFrom] = true
+	}
 	return used, nil
 }
 
@@ -533,9 +559,13 @@ func (s *Store) CreateMailbox(ctx context.Context, m Mailbox) (*Mailbox, error) 
 	if m.Aliases == nil {
 		al = []byte("[]")
 	}
-	res, err := s.DB.ExecContext(ctx, `INSERT INTO mail_mailboxes (account, address, display_name, aliases, quota_mb, enabled, account_state, custom_address, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, strings.ToLower(m.Account), m.Address, m.DisplayName, string(al), m.QuotaMB,
-		boolInt(m.Enabled), m.AccountState, boolInt(m.CustomAddress), now, now)
+	if m.Key == "" {
+		m.Key = NewMailboxKey()
+	}
+	res, err := s.DB.ExecContext(ctx, `INSERT INTO mail_mailboxes (account, address, display_name, aliases, quota_mb, enabled, account_state, custom_address, created_at, updated_at,
+		storage_key, account_guid, account_sid)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, strings.ToLower(m.Account), m.Address, m.DisplayName, string(al), m.QuotaMB,
+		boolInt(m.Enabled), m.AccountState, boolInt(m.CustomAddress), now, now, m.Key, strings.ToLower(m.AccountGUID), m.AccountSID)
 	if err != nil {
 		return nil, err
 	}
@@ -643,7 +673,30 @@ func (s *Store) SetAccountState(ctx context.Context, id int64, state, display st
 	return err
 }
 
-// DeleteMailboxRow forgets a mailbox (its messages are root's to delete).
+// SetAnchor records the domain account's objectGUID and objectSid.
+func (s *Store) SetAnchor(ctx context.Context, id int64, guid, sid string) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE mail_mailboxes SET account_guid = ?, account_sid = ?, updated_at = ? WHERE id = ?`,
+		strings.ToLower(guid), sid, store.FormatTime(time.Now()), id)
+	return err
+}
+
+// Detach parts a mailbox from its account for good (the account was
+// deleted, perhaps made again under the same name): it stays, deleted,
+// until an administrator deletes it, and the name is free for a new one.
+func (s *Store) Detach(ctx context.Context, id int64) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE mail_mailboxes SET account = ?, account_state = 'deleted', updated_at = ? WHERE id = ?`,
+		fmt.Sprintf("@%d", id), store.FormatTime(time.Now()), id)
+	return err
+}
+
+// SetDeleting marks a mailbox as being deleted: it leaves the server's
+// configuration, and its row stays until its files are gone.
+func (s *Store) SetDeleting(ctx context.Context, id int64) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE mail_mailboxes SET deleting = 1, updated_at = ? WHERE id = ?`, store.FormatTime(time.Now()), id)
+	return err
+}
+
+// DeleteMailboxRow forgets a mailbox (after root deleted its files).
 func (s *Store) DeleteMailboxRow(ctx context.Context, id int64) error {
 	res, err := s.DB.ExecContext(ctx, `DELETE FROM mail_mailboxes WHERE id = ?`, id)
 	if err != nil {
@@ -687,9 +740,12 @@ func (s *Store) SetGroup(ctx context.Context, g Group) (*Group, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, dom, _ := mail.SplitAddress(addr)
+	local, dom, _ := mail.SplitAddress(addr)
 	if _, err := s.GetDomain(ctx, dom); err != nil {
 		return nil, mail.Invalid("%s isn't one of the mail domains", dom)
+	}
+	if local == "postmaster" || local == "abuse" {
+		return nil, mail.Invalid("%s is kept for the postmaster", addr)
 	}
 	used, err := s.usedAddresses(ctx, 0)
 	if err != nil {
@@ -776,6 +832,41 @@ func (s *Store) PruneGroups(ctx context.Context, addr string) error {
 		b, _ := json.Marshal(keep)
 		if _, err := s.DB.ExecContext(ctx, `UPDATE mail_groups SET targets = ? WHERE address = ?`, string(b), g.Address); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// CheckNotifyFrom makes sure the notification sender is an address of its
+// own (decision 304): not postmaster@ or abuse@, no mailbox, alias or
+// group, so the notification sign-in can't send as a person.
+func (s *Store) CheckNotifyFrom(ctx context.Context, addr string) error {
+	if addr == "" {
+		return nil
+	}
+	local, _, err := mail.SplitAddress(addr)
+	if err != nil {
+		return err
+	}
+	if local == "postmaster" || local == "abuse" {
+		return mail.Invalid("%s is kept for the postmaster; choose an address of its own for notifications", addr)
+	}
+	mbs, err := s.Mailboxes(ctx)
+	if err != nil {
+		return err
+	}
+	for _, m := range mbs {
+		if m.Address == addr || slices.Contains(m.Aliases, addr) {
+			return mail.Invalid("%s belongs to %s; choose an unused address for notifications (like hardyos@)", addr, m.Address)
+		}
+	}
+	gs, err := s.Groups(ctx)
+	if err != nil {
+		return err
+	}
+	for _, g := range gs {
+		if g.Address == addr {
+			return mail.Invalid("%s is a group address; choose an unused address for notifications", addr)
 		}
 	}
 	return nil
