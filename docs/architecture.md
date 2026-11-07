@@ -2090,6 +2090,123 @@ cloud backups).
   (`TestImmichIntegration`: links followed and excluded, suspension ends
   sessions, restore, the package's `pg_dump`).
 
+## Cluster
+
+Phase 8 (user guide: [cluster.md](cluster.md); design and the parts' split:
+[plans/cluster.md](plans/cluster.md); decisions 320-359). Part A, the
+cluster core, is below; parts B (storage node) and C (placement, moves,
+HA, fencing) add subsections.
+
+### Packages
+
+| Package | What | Runs in |
+| --- | --- | --- |
+| `internal/cluster` (contract.go) | Types and interfaces the parts share | everywhere |
+| `internal/cluster` | `Core`: identity, signed commands, assertions, the 44500 listener (transport.go), paths, Raft (node.go), heartbeats and the quorum lease, join, relays | hardyd, witness |
+| `internal/cluster/state` | The pure FSM and part A's appliers (members.go, witness.go); B and C add files | hardyd, witness |
+| `internal/cluster/member` | hardyd's side: DB store (sealed identity, `cluster_join_codes`), jobs, address discovery, alerts, the witness script | hardyd |
+| `internal/cluster/witness` | The witness runtime, its file store, the install script template | witness |
+| `internal/cluster/clustertest` | In-memory network with cuttable links, memory store | tests |
+| `api/handlers_cluster.go`, `api/clusterproxy.go` | Cluster routes, `/api/v1/nodes/{node}/...`, relay target, merged events, remote app windows | hardyd |
+| `cmd/hardyos-witness` | The witness binary | VPS |
+
+The state package imports the contract; the core can't import the state
+package back, so the core drives the FSM through `cluster.StateMachine`
+and hardyd and the witness hand it `state.New()`.
+
+### The replicated state and the signed log
+
+- `hashicorp/raft` v1.7.3 with `raft-boltdb/v2` and a file snapshot store
+  in `/var/lib/hardyos/cluster/raft` (hardyd's; the witness's in its systemd
+  state directory). Pre-vote on. Raft server ids and addresses are node
+  ids; the stream layer resolves them to a path.
+- A log entry is a `SignedCommand`: the canonical JSON of a `Command`
+  (type, cluster, proposer, sequence, actor, time, body) and the
+  proposer's ES256 signature. Members' public keys are in the state
+  (`Node.PublicKey`, pin = its SHA-256); `cluster.create` carries its
+  creator's key. At apply every node checks, in order: decodable entry;
+  for the right cluster; proposer is a member; signature; known type
+  (unknown: the FSM halts, the node stops taking part and raises a
+  critical alert); sequence greater than the proposer's last; signer role;
+  then the applier on a copy of the state. A validly signed but refused
+  entry still uses up its sequence number, so it can't be replayed once its
+  preconditions would hold. Refusals are deterministic no-ops everywhere.
+- `Propose` serializes this node's proposals, persists the next sequence
+  number before signing, and hands the entry to the leader (`POST
+  /cluster/v1/propose`; the leader accepts only commands the calling
+  member signed itself). It is resent only when it surely wasn't appended.
+- A restarted node reaches its peers before Raft has replayed the log: the
+  members are saved in the membership record (`cluster.info`) after every
+  membership change.
+
+### The listener on 44500
+
+TLS 1.3, client certificates requested and checked per protocol against
+the pins in the state (a joining node's first connections use the members
+its join answer listed). ALPN:
+
+| Protocol | Use | Who |
+| --- | --- | --- |
+| `hardyos-raft/1` | Raft's stream layer | members (any state) |
+| `hardyos-peer/1` | HTTP/2 peer API: ping, propose, heartbeat, health, status, join; parts B/C register theirs | per path: `Handle` = unfenced HardyOS members, `AllowFenced`, the witness only where part A allows it, non-members only `POST /join` |
+| `hardyos-relay/1` | HTTP/1.1: forwarded desktop requests, WebSockets, app windows | unfenced HardyOS members |
+| `hardyos-migrate/1` | part C's live migration relay | compute members |
+| `http/1.1` (no certificate) | `GET /cluster/v1/witness/binary` only, only while a witness code is open | the install script's curl, which pins the member's key |
+
+Paths: each member is probed on every shared path (LAN, storage network,
+NetBird; the witness NetBird only) every second over a kept-alive HTTP/2
+connection per path; the path in use is left after 3 misses and a better
+one is taken back after 10 good probes. A switch closes the outgoing Raft
+and peer connections to that node so they redial on the new path. A
+live-migration connection is never dialled over NetBird.
+
+### Liveness
+
+Heartbeats every `Timings.Heartbeat` to the leader, which answers only
+after `VerifyLeader` (cached for the leader lease) and records when it last
+heard each node; a node is quorate until send time + Q of its last answered
+heartbeat. A new leader starts every node's clock at its election. The
+leader reconciles Raft's configuration with the state: new members join as
+non-voters, removed ones leave, and voter changes (promotion after
+`member.ready`, maintenance, the witness when the HardyOS voter count is
+even) happen only when every current voter has been heard since the
+election and within the suspect time. Nothing is removed because it is
+unreachable. A witness that leads transfers leadership at once.
+
+### The cluster desktop
+
+`/api/v1/nodes/{node}/<path>` on the entry node is the same handler for
+itself and otherwise a relay request: cookies, `Authorization`, `Origin`
+and forwarding headers dropped; `X-Hardyos-Cluster-Assertion` added (ES256
+compact JWS: issuer, audience, principal, session hash, 60 s, nonce,
+request hash over method, path, query and the body's SHA-256; bodies above
+8 MiB are spooled to a temporary file to be hashed). Sign-in, setup, the
+installer, health and the proxy itself are never forwarded. The target
+(`clusterproxy.go` relay handler) checks the TLS peer is the issuer, the
+signature with the issuer's key from the state, audience, freshness (5 s
+skew), the nonce (2 minutes) and the request hash, then authorizes: domain
+accounts by name and SID against its own directory (recorded like a domain
+sign-in), administrators of any member as a synthetic administrator
+`alice (via c1)` (never forwarded again), local non-admins refused. The
+request then runs through the normal API handler with that user;
+state-changing ones are also audited as `cluster.proxied`. `Set-Cookie`
+never comes back. WebSocket upgrades are relayed byte for byte after the
+same checks (the entry checks the Origin) and closed within 15 s of the
+session ending. `/cluster/events` merges this node's event stream with
+every member's (relayed as the person), each tagged with its node.
+
+App windows of apps on other members: `POST /nodes/{node}/apps/{id}/open`
+makes a window proxy listener on the entry node keyed `~<node>.<app>`
+whose upstream is a relay to `/cluster/v1/window/{app}/...` on the owner;
+the entry's desktop session and token rules apply as for local apps, and
+the owner checks the app's access list for the asserted person on every
+request.
+
+### Root operations
+
+Part A adds only `cluster.status` (read-only: boot id, watchdog devices,
+the state directory's owner). Raft's files are hardyd's.
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly
