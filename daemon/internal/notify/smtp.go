@@ -202,6 +202,11 @@ func (d *Dispatcher) sendSMTP(ctx context.Context, ch *channelRow, m message) er
 		tlsCfg = d.smtpTLS.Clone()
 		tlsCfg.ServerName = cfg.Host
 	}
+	if isLocalName(cfg.Host) && d.LoopbackTLS != nil {
+		if c := d.LoopbackTLS(ctx); c != nil {
+			tlsCfg = c
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	if !SMTPPorts[cfg.Port] && !cfg.AllowAnyPort {

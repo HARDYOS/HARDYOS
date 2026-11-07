@@ -23,6 +23,13 @@ recommends:
   - iputils-arping
   - docker.io
   - docker-compose
+  - postfix
+  - dovecot-imapd
+  - dovecot-lmtpd
+  - dovecot-sieve
+  - rspamd
+  - redis-server
+  - radicale
 contents:
   - src: ../dist/bin/hardyd
     dst: /usr/bin/hardyd

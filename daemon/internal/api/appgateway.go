@@ -347,7 +347,7 @@ func (rt *remoteRuntime) apply(ctx context.Context, in publish.Inputs, st *netbi
 			}
 			host := strings.ToLower(it.Domain)
 			public := it.Config.Mode == publish.ModePublic
-			if it.Key == publish.DesktopKey || it.Key == publish.SSOKey || it.Key == publish.FilesKey {
+			if it.Key == publish.DesktopKey || it.Key == publish.SSOKey || it.Key == publish.FilesKey || it.Key == publish.MailKey {
 				// hardyd's own handler (the sign-in provider takes its host;
 				// files.<base> serves share link pages only).
 				routes[host] = &gwRoute{key: it.Key, host: host, public: public}
@@ -494,6 +494,10 @@ func (rt *remoteRuntime) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if route.key == publish.FilesKey && !strings.HasPrefix(r.URL.Path, "/s/") {
 		proxyPage(w, http.StatusNotFound, "Nothing here", "This address only opens share links.")
+		return
+	}
+	if route.key == publish.MailKey && !mailPublicPath(r.URL.Path) {
+		proxyPage(w, http.StatusNotFound, "Nothing here", "This address is for mail apps, calendars and contacts.")
 		return
 	}
 	r = r.WithContext(context.WithValue(r.Context(), gwKey{}, &gwInfo{client: client, public: route.public}))

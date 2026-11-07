@@ -1,0 +1,21 @@
+{
+  "format": 1,
+  "id": "roundcube",
+  "name": "Mail (Roundcube)",
+  "version": "1.7.4",
+  "summary": "Read and write the family's mail in the HardyOS desktop.",
+  "description": "Webmail for HardyOS's own mail server (Control Panel › Mail). Opened from the desktop it signs each person in to their own mailbox by itself: no second password, and the sign-in ends when they sign out of HardyOS.\n\nTurn the mail server on first. Folders, the Junk folder (moving mail in and out of it teaches the spam filter), archiving and downloading attachments as a zip are ready to use. Calendars and contacts are on the Mail page of the desktop (Set up my phone or computer).\n\nPublished through Remote Access with HardyOS sign-in in front, people sign in with their mail address and domain password instead.",
+  "publisher": "Roundcube project (packaged by HardyOS)",
+  "website": "https://roundcube.net",
+  "icon": "icon.svg",
+  "arch": ["amd64", "arm64"],
+  "minMemoryMB": 256,
+  "web": { "port": "WEB", "path": "/" },
+  "ports": [
+    { "name": "WEB", "label": "Webmail", "default": 8590 }
+  ],
+  "folders": [
+    { "path": "db", "mode": "0700" },
+    { "path": "config", "mode": "0755" }
+  ]
+}

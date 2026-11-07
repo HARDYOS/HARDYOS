@@ -139,6 +139,11 @@ type Dispatcher struct {
 	Hostname func() string
 	// Now is the clock (tests).
 	Now func() time.Time
+	// LoopbackTLS is the TLS configuration for an SMTP channel on this
+	// server (127.0.0.1, ::1, localhost): HardyOS's own mail server, whose
+	// certificate is for its public name, pinned instead (nil: verified
+	// like any other server).
+	LoopbackTLS func(ctx context.Context) *tls.Config
 
 	// For tests: talk to httptest servers on loopback, trust a test CA for
 	// SMTP, point SES elsewhere, skip retry delays.

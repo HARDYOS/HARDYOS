@@ -49,6 +49,9 @@ type Inputs struct {
 	// ShareLinks: at least one share link is active (files.<base> is
 	// published for it).
 	ShareLinks bool
+	// MailHost is the mail server's name while it's on (published when it
+	// is directly under the base domain).
+	MailHost string
 }
 
 // Item is one published (or publishable) thing.
@@ -171,7 +174,7 @@ func (p *Publisher) Items(ctx context.Context, in Inputs) ([]Item, error) {
 		return nil, err
 	}
 	var out []Item
-	for _, w := range p.plan(s, rows, in.Apps, in.ShareLinks, p.ssoReady(ctx, s)) {
+	for _, w := range p.plan(s, rows, in.Apps, in.ShareLinks, p.ssoReady(ctx, s), in.MailHost) {
 		out = append(out, w.item)
 	}
 	return out, nil
@@ -195,7 +198,7 @@ const ssoNotReady = "HardyOS sign-in's issuer isn't https://sso.<base domain> (C
 
 // plan lists the desktop and every app with what the settings ask for
 // (without the NetBird-side parts of the requests).
-func (p *Publisher) plan(s Settings, rows map[string]*row, apps []App, shareLinks, ssoReady bool) []want {
+func (p *Publisher) plan(s Settings, rows map[string]*row, apps []App, shareLinks, ssoReady bool, mailHost string) []want {
 	mk := func(key, label, name string) want {
 		r := rows[key]
 		it := Item{Key: key, Label: label, Name: name, Config: resolve(key, r, s)}
@@ -218,6 +221,9 @@ func (p *Publisher) plan(s Settings, rows map[string]*row, apps []App, shareLink
 		sso.item.Config.Mode = ModeOff
 	}
 	out := []want{mk(DesktopKey, s.DesktopName, "Desktop"), sso, files}
+	if label, ok := MailLabel(mailHost, s.BaseDomain); ok {
+		out = append(out, mk(MailKey, label, "Mail settings and calendars"))
+	}
 	sorted := slices.Clone(apps)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
 	for _, a := range sorted {
@@ -242,7 +248,7 @@ func (p *Publisher) Sync(ctx context.Context, in Inputs) (*Result, error) {
 	}
 	res := &Result{}
 	ssoReady := p.ssoReady(ctx, s)
-	plan := p.plan(s, rows, in.Apps, in.ShareLinks, ssoReady)
+	plan := p.plan(s, rows, in.Apps, in.ShareLinks, ssoReady, in.MailHost)
 	finish := func(problem string) (*Result, error) {
 		res.Problem = problem
 		for _, w := range plan {
@@ -663,4 +669,17 @@ func (p *Publisher) RemoveAll(ctx context.Context, in Inputs) (int, error) {
 	}
 	_, err = p.Store.DB.ExecContext(ctx, `UPDATE remote_services SET service_id = '', status = '', applied = '', error = '', synced_at = ?`, store.Now())
 	return n, err
+}
+
+// MailLabel is the mail server's label under the base domain, when its
+// name is directly under it.
+func MailLabel(host, base string) (string, bool) {
+	if host == "" || base == "" || !strings.HasSuffix(host, "."+base) {
+		return "", false
+	}
+	label := strings.TrimSuffix(host, "."+base)
+	if label == "" || strings.Contains(label, ".") {
+		return "", false
+	}
+	return label, true
 }
