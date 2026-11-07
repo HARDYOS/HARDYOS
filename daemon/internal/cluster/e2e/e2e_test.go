@@ -21,9 +21,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -74,6 +78,27 @@ type hnode struct {
 	ha      *ha.Service
 	root    *computeRoot // compute nodes
 	cancel  context.CancelFunc
+	// part C's loops run under their own context (a hardyd restart).
+	haCancel context.CancelFunc
+	haDone   chan struct{}
+	pc       *priv.Client
+	// boot is this server's boot id as part C sees it.
+	bootMu sync.Mutex
+	boot   string
+}
+
+func (n *hnode) bootID() string {
+	n.bootMu.Lock()
+	defer n.bootMu.Unlock()
+	return n.boot
+}
+
+// reboot gives the server a new boot id (what a reset does, as far as
+// rejoining is concerned).
+func (n *hnode) reboot() {
+	n.bootMu.Lock()
+	n.boot += "+"
+	n.bootMu.Unlock()
 }
 
 type harness struct {
@@ -101,6 +126,12 @@ func newHarness(t *testing.T) *harness {
 		}
 		return ""
 	}
+	h.w.snap = func() *cluster.Snapshot {
+		if l := h.storageLive.Load(); l != nil {
+			return l.State().Snapshot()
+		}
+		return nil
+	}
 	return h
 }
 
@@ -108,7 +139,7 @@ func (h *harness) add(id string, role cluster.Role, lan, stor, nb string) *hnode
 	t := h.t
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	n := &hnode{id: cluster.NodeID(id), role: role, cancel: cancel,
+	n := &hnode{id: cluster.NodeID(id), role: role, cancel: cancel, boot: "boot-" + id,
 		addrs: cluster.Addresses{LAN: addr(lan), Storage: addr(stor), NetBird: addr(nb)}}
 	h.nodes[n.id] = n
 	h.w.addrOf[n.addrs.Storage] = n.id
@@ -126,6 +157,7 @@ func (h *harness) add(id string, role cluster.Role, lan, stor, nb string) *hnode
 	}
 	ps.Logger = quiet
 	pc := priv.NewClient(servePriv(t, ctx, ps))
+	n.pc = pc
 
 	// Part A: the membership service and its live view.
 	n.svc = &member.Service{DB: db, Version: "1.0.0", Dir: t.TempDir(), Log: log,
@@ -148,7 +180,7 @@ func (h *harness) add(id string, role cluster.Role, lan, stor, nb string) *hnode
 	n.storage.RegisterPeer(n.live)
 
 	// Part C: placement, reconciler, fence agent, mover, coordinator.
-	n.ha = &ha.Service{Priv: pc, DB: db, Log: log, Parts: ha.Parts{Membership: n.live, Peers: n.live, Mux: n.live,
+	n.ha = &ha.Service{Priv: pc, DB: db, Log: log, BootID: n.bootID, Parts: ha.Parts{Membership: n.live, Peers: n.live, Mux: n.live,
 		Attacher: n.storage, Stream: moves.ALPNStream{Dial: n.live.DialMigrate}}}
 	n.ha.Init()
 	n.live.SetMigrate(n.ha.Node.ServeMigrateConn)
@@ -162,7 +194,9 @@ func (h *harness) add(id string, role cluster.Role, lan, stor, nb string) *hnode
 	}
 	go n.svc.Run(ctx)
 	go agent.Run(ctx)
-	go n.ha.Start(ctx)
+	hctx, hcancel := context.WithCancel(ctx)
+	n.haCancel, n.haDone = hcancel, make(chan struct{})
+	go func() { n.ha.Start(hctx); close(n.haDone) }()
 	go health.Run(ctx)
 	t.Cleanup(func() {
 		cancel()
@@ -431,6 +465,78 @@ func TestClusterEndToEnd(t *testing.T) {
 		t.Fatalf("after the move the app's storage reaches %v", r)
 	}
 
+	// ---- a member that isn't moving a workload can't drive its steps -------------------
+	var refused moves.StepResult
+	if err := c3.live.Call(tctx(t, 10*time.Second), "c1", http.MethodPost, cluster.PeerPathPrefix+moves.PathStop,
+		moves.StepRequest{Workload: web, Generation: h.snap().Placements[web].Generation}, &refused); err != nil {
+		t.Fatalf("calling c1's stop step: %v", err)
+	}
+	if refused.OK || !strings.Contains(refused.Message, "isn't the one moving") {
+		t.Fatalf("c3 stopped c1's VM without moving it: %+v", refused)
+	}
+	if err := h.running(web, "c1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// ---- live migration c1 -> c2 and back, with both nodes on the LUN -------------------
+	for _, hop := range [][2]*hnode{{c1, c2}, {c2, c1}} {
+		src, dst := hop[0], hop[1]
+		p, _ := placed(h.snap(), web)
+		res, err := c3.ha.Mover.Move(tctx(t, 90*time.Second), cluster.MoveRequest{Workload: web, To: dst.id, Mode: cluster.MoveLive, Generation: p.Generation}, admin)
+		if err != nil {
+			t.Fatalf("live migration %s -> %s: %v", src.id, dst.id, err)
+		}
+		if res.Mode != cluster.MoveLive || res.To != dst.id || res.Generation != p.Generation+2 {
+			t.Fatalf("live migration result %+v", res)
+		}
+		h.eventually("web runs on "+string(dst.id)+" only", 30*time.Second, func() error {
+			s := h.snap()
+			q, g := placed(s, web)
+			if q.Owner != dst.id || q.State != cluster.PlacementRunning || g.Mode != cluster.GrantExclusive || !g.Applied {
+				return fmt.Errorf("placement %+v grant %+v", q, g)
+			}
+			r := h.w.runners(web)
+			if g, ok := r[dst.id]; len(r) != 1 || !ok || g < p.Generation+1 {
+				return fmt.Errorf("web runs on %v", r)
+			}
+			return nil
+		})
+		dst.root.mu.Lock()
+		relayed := slices.Clone(dst.root.relayed)
+		dst.root.mu.Unlock()
+		if !slices.Contains(relayed, "migrate web") {
+			t.Fatalf("%s's libvirt didn't get the source's connection through the cluster port: %v", dst.id, relayed)
+		}
+	}
+	h.eventually("the storage node maps web to c1 alone again", 20*time.Second, func() error {
+		if r := h.w.reach(*vmStorage, web); len(r) != 1 || r[0] != "c1" {
+			return fmt.Errorf("web's storage reaches %v", r)
+		}
+		return nil
+	})
+
+	// ---- hardyd restarts on c1 (part C's loops start afresh) ---------------------------
+	fencesBefore := c1.root.fences
+	c1.haCancel()
+	<-c1.haDone
+	again := &ha.Service{Priv: c1.pc, DB: nil, Log: h.log.With("node", "c1", "hardyd", 2), BootID: c1.bootID,
+		Parts: ha.Parts{Membership: c1.live, Peers: c1.live, Attacher: c1.storage, Stream: moves.ALPNStream{Dial: c1.live.DialMigrate}}}
+	again.Init()
+	hctx, hcancel := context.WithCancel(context.Background())
+	t.Cleanup(hcancel)
+	c1.haCancel, c1.haDone = hcancel, make(chan struct{})
+	go func() { again.Start(hctx); close(c1.haDone) }()
+	time.Sleep(testTimings.QuorumLease + 2*time.Second)
+	if c1.root.fences != fencesBefore {
+		t.Fatal("a hardyd restart self-fenced c1")
+	}
+	if err := h.running(web, "c1"); err != nil {
+		t.Fatalf("after the hardyd restart: %v", err)
+	}
+	if st := again.Agent.State(); st != cluster.FenceArmed {
+		t.Fatalf("the restarted fence agent is %s", st)
+	}
+
 	// ---- c1 dies (cut off from everything, still powered) ----------------------------
 	h.w.notef("cutting c1 off")
 	before, _ := placed(h.snap(), web)
@@ -509,6 +615,25 @@ func TestClusterEndToEnd(t *testing.T) {
 	}
 	if st := h.snap().Nodes["c1"].State; st != cluster.NodeFenced {
 		t.Fatalf("c1 is %s after coming back on the same boot (a dead node needs a new boot to rejoin)", st)
+	}
+	if fb := h.snap().Fences["c1"].BootID; fb != c1.bootID() {
+		t.Fatalf("the fence remembers boot %q, c1 runs %q", fb, c1.bootID())
+	}
+
+	// ---- c1 reboots: a new boot id rejoins (through the leader, while fenced) ----------
+	c1.reboot()
+	h.eventually("c1 rejoins after its reboot and is active again", 90*time.Second, func() error {
+		s := h.snap()
+		if st := s.Nodes["c1"].State; st != cluster.NodeActive {
+			return fmt.Errorf("c1 is %s", st)
+		}
+		if s.Nodes["c1"].BootID != c1.bootID() {
+			return fmt.Errorf("c1's boot %q", s.Nodes["c1"].BootID)
+		}
+		return nil
+	})
+	if err := h.running(web, p.Owner); err != nil {
+		t.Fatalf("web after c1 rejoined: %v", err)
 	}
 
 	h.w.mu.Lock()

@@ -254,7 +254,7 @@ func newEnv(t *testing.T) *env {
 		node := &moves.Node{Cluster: n, Reconciler: n.Rec, Attacher: n.Rec.Attacher, Runtimes: n.Rec.Runtimes, Priv: fp,
 			Stream:    pipeStream(nodes, from),
 			Peers:     &peers{from: id, servers: servers},
-			GrantWait: 2 * time.Second, Poll: 5 * time.Millisecond,
+			GrantWait: 2 * time.Second, Poll: 5 * time.Millisecond, AuthorizeWait: 20 * time.Millisecond,
 			Caller: func(r *http.Request) (cluster.Node, bool) {
 				c := r.Header.Get("X-Test-Caller")
 				return cluster.Node{ID: cluster.NodeID(c)}, c != ""

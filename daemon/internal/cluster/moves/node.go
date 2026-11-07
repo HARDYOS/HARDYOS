@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -69,8 +70,11 @@ type Node struct {
 	Actions Actions
 	// GrantWait bounds the wait for an applied grant (default 60 s).
 	GrantWait time.Duration
-	Poll      time.Duration
-	Log       *slog.Logger
+	// AuthorizeWait bounds the wait for the caller's move.begin to apply
+	// here when the step didn't name its index (default 1 s).
+	AuthorizeWait time.Duration
+	Poll          time.Duration
+	Log           *slog.Logger
 
 	mu       sync.Mutex
 	admitted map[string]*incoming
@@ -109,6 +113,13 @@ func (n *Node) Register(mux Mux) {
 			if !ok {
 				http.Error(w, "not a member", http.StatusForbidden)
 				return
+			}
+			if idx, err := strconv.ParseUint(r.URL.Query().Get("idx"), 10, 64); err == nil && idx > 0 {
+				// The mover's proposals up to idx (its move.begin) apply
+				// here first.
+				wctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+				_ = n.Cluster.WaitApplied(wctx, idx)
+				cancel()
 			}
 			out, err := fn(r.Context(), r, caller)
 			w.Header().Set("Content-Type", "application/json")
@@ -159,19 +170,38 @@ func (n *Node) self() (cluster.Node, error) { return n.Cluster.Self() }
 // authorize: the caller drives the move of w (its move.begin is the
 // placement's MoveBy) or is the leader.
 func (n *Node) authorize(caller cluster.Node, w cluster.WorkloadRef) (*cluster.Snapshot, *cluster.Placement, error) {
-	s := n.Cluster.State().Snapshot()
-	p := s.Placements[w]
-	if p == nil {
-		return nil, nil, fmt.Errorf("%s isn't a cluster workload", w.ID)
+	// The mover's move.begin may not be applied here yet: give this node's
+	// log a moment to catch up before refusing.
+	poll := n.Poll
+	if poll <= 0 {
+		poll = 100 * time.Millisecond
 	}
-	if p.MoveBy != "" && caller.ID == p.MoveBy {
-		return s, p, nil
+	wait := n.AuthorizeWait
+	if wait <= 0 {
+		wait = time.Second
 	}
-	if l, ok := n.Cluster.Leader(); ok && l == caller.ID {
-		return s, p, nil
+	deadline := time.Now().Add(wait)
+	for {
+		s := n.Cluster.State().Snapshot()
+		p := s.Placements[w]
+		if p != nil && p.MoveBy != "" && caller.ID == p.MoveBy {
+			return s, p, nil
+		}
+		if l, ok := n.Cluster.Leader(); ok && l == caller.ID {
+			if p == nil {
+				return nil, nil, fmt.Errorf("%s isn't a cluster workload", w.ID)
+			}
+			return s, p, nil
+		}
+		if time.Now().After(deadline) {
+			if p == nil {
+				return nil, nil, fmt.Errorf("%s isn't a cluster workload", w.ID)
+			}
+			n.log().Warn("moves: refused a move step from a member that isn't moving the workload", "workload", w.ID, "caller", caller.ID, "mover", p.MoveBy)
+			return nil, nil, ErrNotMover
+		}
+		time.Sleep(poll)
 	}
-	n.log().Warn("moves: refused a move step from a member that isn't moving the workload", "workload", w.ID, "caller", caller.ID, "mover", p.MoveBy)
-	return nil, nil, ErrNotMover
 }
 
 // act runs a step as a recorded job (and audit entry) on this node.
@@ -382,9 +412,19 @@ func (n *Node) attachAt(ctx context.Context, w cluster.WorkloadRef, gen uint64, 
 	return a, nil
 }
 
+// fenceReady waits (briefly) for this node's fence agent to arm the
+// watchdog for an HA workload placed here: it arms within a second of
+// seeing the placement.
 func (n *Node) fenceReady(p *cluster.Placement) error {
-	if p.HA.Enabled && n.FenceReady != nil && !n.FenceReady() {
-		return errors.New("this server's watchdog isn't armed yet for an HA workload; try again in a moment")
+	if !p.HA.Enabled || n.FenceReady == nil {
+		return nil
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for !n.FenceReady() {
+		if time.Now().After(deadline) {
+			return errors.New("this server's watchdog isn't armed yet for an HA workload; try again in a moment")
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 	return nil
 }

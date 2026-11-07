@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hardyos/hardyos/daemon/internal/apps"
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/state"
 )
@@ -140,6 +141,9 @@ func (p *Prepuller) Step(ctx context.Context, full bool) {
 				continue
 			}
 		}
+		// The owner's list is another server's word: only valid image
+		// references, at most MaxImagesPerApp of them (decision 393).
+		imgs = limitImages(imgs)
 		slices.Sort(imgs)
 		p.mu.Lock()
 		if p.known == nil {
@@ -162,6 +166,23 @@ func (p *Prepuller) Step(ctx context.Context, full bool) {
 		}
 	}
 	p.mu.Unlock()
+}
+
+// MaxImagesPerApp bounds what one HA app's owner can make every other
+// node download.
+const MaxImagesPerApp = apps.MaxPrepull
+
+func limitImages(in []string) []string {
+	var out []string
+	for _, img := range in {
+		if apps.ValidImageRef(img) && !slices.Contains(out, img) {
+			out = append(out, img)
+		}
+		if len(out) == MaxImagesPerApp {
+			break
+		}
+	}
+	return out
 }
 
 func (p *Prepuller) ensure(ctx context.Context, app string, imgs []string) {

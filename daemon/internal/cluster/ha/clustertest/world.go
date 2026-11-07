@@ -896,6 +896,16 @@ func mustAddr(s string) netip.Addr     { return netip.MustParseAddr(s) }
 // Clone deep-copies a snapshot.
 func Clone(s *cluster.Snapshot) *cluster.Snapshot { return clone(s) }
 
+// Mutate changes the applied state directly (what another part's applier
+// would do; tests).
+func (w *World) Mutate(f func(*cluster.Snapshot)) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	next := clone(w.snap)
+	f(next)
+	w.snap = next
+}
+
 // SetCompute changes a node's hardware in the state (tests).
 func (w *World) SetCompute(id cluster.NodeID, f func(*cluster.ComputeInfo)) {
 	w.mu.Lock()

@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -57,10 +58,39 @@ type world struct {
 	// addrOf maps storage network addresses to nodes.
 	addrOf map[netip.Addr]cluster.NodeID
 
+	// snap is the storage node's applied state (for the LIO watcher: a
+	// LUN may be in two targets only under a live migration's grant).
+	snap func() *cluster.Snapshot
+	// computeRoots are the compute nodes' fake roots.
+	computeRoots map[cluster.NodeID]*computeRoot
+
 	mu         sync.Mutex
 	running    map[cluster.WorkloadRef]map[cluster.NodeID]uint64
 	violations []string
 	events     []string
+}
+
+// migrate hands a running VM from one node's hypervisor to another's at
+// the end of a live migration: both must have its storage attached under
+// the migration's generation, and nothing else may run it.
+func (w *world) migrate(from, to cluster.NodeID, ref cluster.WorkloadRef, gen uint64, toAttached bool) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, ok := w.running[ref][from]; !ok {
+		return fmt.Errorf("%s doesn't run on %s", wname(ref), from)
+	}
+	if !toAttached {
+		return fmt.Errorf("%s hasn't attached %s under generation %d", to, wname(ref), gen)
+	}
+	for other := range w.running[ref] {
+		if other != from {
+			w.violations = append(w.violations, fmt.Sprintf("%s migrated to %s while it runs on %s", wname(ref), to, other))
+		}
+	}
+	delete(w.running[ref], from)
+	w.running[ref][to] = gen
+	w.noteLocked("%s migrated live from %s to %s (generation %d)", wname(ref), from, to, gen)
+	return nil
 }
 
 func newWorld(t *testing.T) *world {
@@ -207,6 +237,7 @@ func (w *world) runsOn(node cluster.NodeID) map[cluster.WorkloadRef]uint64 {
 // watchLIO samples the storage node's configfs: a backstore mapped into
 // two enabled targets at once is a violation (no live migration here).
 func (w *world) watchLIO(ctx context.Context) {
+	migSeen := map[string]time.Time{}
 	t := time.NewTicker(10 * time.Millisecond)
 	defer t.Stop()
 	for {
@@ -228,12 +259,41 @@ func (w *world) watchLIO(ctx context.Context) {
 				by[l] = append(by[l], node)
 			}
 		}
+		var s *cluster.Snapshot
+		if w.snap != nil {
+			s = w.snap()
+		}
+		now := time.Now()
+		if s != nil {
+			for _, g := range s.Grants {
+				if g.Mode == cluster.GrantMigration && len(g.Nodes) == 2 {
+					migSeen[pairKey(g.Nodes)] = now
+				}
+			}
+		}
 		for l, nodes := range by {
+			if len(nodes) == 2 {
+				// A live migration's two-node grant, or the moment after it
+				// collapsed while the storage node takes the other target
+				// away (the state is ahead of configfs then).
+				if at, ok := migSeen[pairKey(nodes)]; ok && now.Sub(at) < 5*time.Second {
+					continue
+				}
+			}
 			if len(nodes) > 1 {
 				w.violatef("LUN %s mapped to %v at once", l, nodes)
 			}
 		}
 	}
+}
+
+// pairKey names two nodes in either order.
+func pairKey(n []cluster.NodeID) string {
+	a, b := n[0], n[1]
+	if b < a {
+		a, b = b, a
+	}
+	return string(a) + "|" + string(b)
 }
 
 func (w *world) dump() {
@@ -460,6 +520,12 @@ type computeRoot struct {
 	petUntil time.Time
 	pets     int
 	fences   int
+	// live migration: the one-shot sockets (token -> path) and what the
+	// destination's libvirt saw over the relay.
+	listen  map[string]string
+	relayed []string
+	admits  []vms.MigrateAcceptArgs
+	sockDir string
 }
 
 func (h *computeRoot) record(w cluster.WorkloadRef) (sanclient.Record, cluster.WorkloadStorage, bool) {
@@ -533,6 +599,12 @@ const testImage = "ghcr.io/hardyos/notes:1.0"
 // watchdog operations on the fake world.
 func computeServer(w *world, node cluster.NodeID) (*priv.Server, *computeRoot) {
 	h := &computeRoot{w: w, node: node, attached: map[cluster.WorkloadRef]sanclient.Record{}, storage: map[cluster.WorkloadRef]cluster.WorkloadStorage{}}
+	w.mu.Lock()
+	if w.computeRoots == nil {
+		w.computeRoots = map[cluster.NodeID]*computeRoot{}
+	}
+	w.computeRoots[node] = h
+	w.mu.Unlock()
 	s := &priv.Server{AllowedUIDs: []uint32{uint32(os.Getuid())}}
 	type none struct{}
 
@@ -626,6 +698,85 @@ func computeServer(w *world, node cluster.NodeID) (*priv.Server, *computeRoot) {
 	handle(s, priv.OpAppsPrepull, func(_ context.Context, a apps.PrepullArgs) (any, error) {
 		return apps.PrepullResult{Pulled: a.Images, Failed: map[string]string{}}, nil
 	})
+
+	// Live migration: the destination's libvirt connection (a socket pair
+	// whose far end answers each line), the source's one-shot socket, and
+	// send, which talks through the relay and then hands the VM over.
+	h.listen = map[string]string{}
+	handle(s, priv.OpVMsMigrateAccept, func(_ context.Context, a vms.MigrateAcceptArgs) (any, error) {
+		ref := cluster.WorkloadRef{Kind: cluster.KindVM, ID: a.VM}
+		if r, _, ok := h.record(ref); !ok || r.Generation != a.Generation {
+			return nil, priv.Errorf(priv.CodeBadArgs, "%s isn't attached here under generation %d", a.VM, a.Generation)
+		}
+		if a.SpecHash == "" {
+			return nil, priv.Errorf(priv.CodeBadArgs, "no approved settings hash")
+		}
+		fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+		if err != nil {
+			return nil, err
+		}
+		lib := os.NewFile(uintptr(fds[1]), "libvirt")
+		go func() {
+			defer lib.Close()
+			sc := bufio.NewScanner(lib)
+			for sc.Scan() {
+				h.mu.Lock()
+				h.relayed = append(h.relayed, sc.Text())
+				h.mu.Unlock()
+				_, _ = lib.Write([]byte("ack " + sc.Text() + "\n"))
+			}
+		}()
+		h.mu.Lock()
+		h.admits = append(h.admits, a)
+		h.mu.Unlock()
+		return &priv.FileResult{Data: map[string]bool{"ok": true}, File: os.NewFile(uintptr(fds[0]), "conn")}, nil
+	})
+	handle(s, priv.OpVMsMigrateListen, func(_ context.Context, a vms.MigrateListenArgs) (any, error) {
+		h.mu.Lock()
+		if h.sockDir == "" {
+			h.sockDir, _ = os.MkdirTemp("", "mig")
+		}
+		p := filepath.Join(h.sockDir, a.Token[:8]+".sock")
+		h.listen[a.Token] = p
+		h.mu.Unlock()
+		ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: p, Net: "unix"})
+		if err != nil {
+			return nil, err
+		}
+		ln.SetUnlinkOnClose(false)
+		f, err := ln.File()
+		ln.Close()
+		if err != nil {
+			return nil, err
+		}
+		return &priv.FileResult{Data: map[string]bool{"ok": true}, File: f}, nil
+	})
+	handle(s, priv.OpVMsMigrateSend, func(_ context.Context, a vms.MigrateSendArgs) (any, error) {
+		if err := vms.ValidMigrateURI(a.MigrateURI); err != nil {
+			return nil, err
+		}
+		h.mu.Lock()
+		sock := h.listen[a.Token]
+		h.mu.Unlock()
+		c, err := net.Dial("unix", sock)
+		if err != nil {
+			return nil, err
+		}
+		defer c.Close()
+		_ = c.SetDeadline(time.Now().Add(20 * time.Second))
+		if _, err := c.Write([]byte("migrate " + a.VM + "\n")); err != nil {
+			return nil, err
+		}
+		line, err := bufio.NewReader(c).ReadString('\n')
+		if err != nil || strings.TrimSpace(line) != "ack migrate "+a.VM {
+			return nil, fmt.Errorf("the destination's libvirt didn't answer through the relay: %q %v", line, err)
+		}
+		ref := cluster.WorkloadRef{Kind: cluster.KindVM, ID: a.VM}
+		dest := w.computeRoots[cluster.NodeID(a.To)]
+		r, _, ok := dest.record(ref)
+		return nil, w.migrate(node, cluster.NodeID(a.To), ref, a.Generation, ok && r.Generation == a.Generation)
+	})
+	handle(s, priv.OpVMsMigrateEnd, func(context.Context, vms.MigrateEndArgs) (any, error) { return nil, nil })
 
 	// Cluster storage, as the storage node allows it now.
 	handle(s, sanclient.OpStatus, func(context.Context, none) (any, error) {

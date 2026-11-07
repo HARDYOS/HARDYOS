@@ -37,6 +37,8 @@ func wireClusterC(s *priv.Server, vmm *vms.Manager, am *apps.Manager, log *slog.
 	feeder := &fence.Feeder{
 		Open:   fence.SystemOpener,
 		Detect: func() string { return fence.DetectKind(os.DirFS("/")) },
+		// A nowayout driver can't be disarmed: the agent keeps it petted.
+		NoWayOut: func() bool { return fence.DetectNoWayOut(os.DirFS("/")) },
 	}
 	priv.RegisterClusterFence(s, feeder, vmm, am)
 	priv.RegisterClusterRuntime(s, vmm, am)

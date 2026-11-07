@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
@@ -46,6 +48,11 @@ type Mover struct {
 	HoldFor time.Duration
 	Log     *slog.Logger
 	Now     func() time.Time
+
+	// applied is the highest log index this mover's proposals reached:
+	// every step names it, and the node waits until it has applied it
+	// (so it sees the move.begin that lets this node drive the step).
+	applied atomic.Uint64
 }
 
 var _ cluster.Mover = (*Mover)(nil)
@@ -90,12 +97,26 @@ func (m *Mover) propose(ctx context.Context, t cluster.CommandType, body any, ac
 	if err != nil {
 		return err
 	}
-	return m.Cluster.WaitApplied(ctx, idx)
+	if err := m.Cluster.WaitApplied(ctx, idx); err != nil {
+		return err
+	}
+	for {
+		cur := m.applied.Load()
+		if idx <= cur || m.applied.CompareAndSwap(cur, idx) {
+			return nil
+		}
+	}
+}
+
+// stepPath is a step's peer path with the log index the node must have
+// applied first.
+func (m *Mover) stepPath(path string) string {
+	return cluster.PeerPathPrefix + path + "?idx=" + strconv.FormatUint(m.applied.Load(), 10)
 }
 
 func (m *Mover) call(ctx context.Context, node cluster.NodeID, path string, in any) error {
 	var res StepResult
-	if err := m.Peers.Call(ctx, node, http.MethodPost, cluster.PeerPathPrefix+path, in, &res); err != nil {
+	if err := m.Peers.Call(ctx, node, http.MethodPost, m.stepPath(path), in, &res); err != nil {
 		return err
 	}
 	if !res.OK {
@@ -456,7 +477,7 @@ func (m *Mover) ResolveMigration(ctx context.Context, w cluster.WorkloadRef, gen
 			OK      *bool  `json:"ok,omitempty"`
 			Message string `json:"message,omitempty"`
 		}
-		if err := m.Peers.Call(ctx, n, http.MethodPost, cluster.PeerPathPrefix+PathState, StateRequest{VM: w.ID}, &res); err != nil {
+		if err := m.Peers.Call(ctx, n, http.MethodPost, m.stepPath(PathState), StateRequest{VM: w.ID}, &res); err != nil {
 			return StateResult{}, err
 		}
 		if res.OK != nil && !*res.OK {

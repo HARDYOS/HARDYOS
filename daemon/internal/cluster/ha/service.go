@@ -50,6 +50,8 @@ type Service struct {
 	Audit   *audit.Log
 	Publish moves.PublishHandoff
 	Log     *slog.Logger
+	// BootID is this boot's id (default /proc/sys/kernel/random/boot_id).
+	BootID func() string
 
 	Scheduler   *placement.Scheduler
 	Mover       *moves.Mover
@@ -112,7 +114,11 @@ func (s *Service) Init() {
 	}}
 	appRT := &runtime.AppRuntime{Priv: s.Priv, SpecHash: specHash}
 	rts := []cluster.Runtime{vmRT, appRT}
-	s.Reconciler = &runtime.Reconciler{Cluster: m, Attacher: s.Parts.Attacher, Runtimes: rts, BootID: bootID, Log: s.Log}
+	boot := s.BootID
+	if boot == nil {
+		boot = bootID
+	}
+	s.Reconciler = &runtime.Reconciler{Cluster: m, Attacher: s.Parts.Attacher, Runtimes: rts, BootID: boot, Log: s.Log}
 	s.Agent = &fence.Agent{Cluster: m, Watchdog: runtime.PrivWatchdog{Priv: s.Priv},
 		Fencer: runtime.SelfFencer{Priv: s.Priv, Attacher: s.Parts.Attacher, Log: s.Log}, Running: s.Reconciler.Local, Log: s.Log,
 		OnChange: func(st fence.AgentStatus) {
@@ -148,7 +154,7 @@ func (s *Service) Init() {
 	s.Coordinator = &Coordinator{Cluster: m, Scheduler: s.Scheduler, Actions: s, Requirements: s.cachedRequirements,
 		Power: s.Parts.Power, Log: s.Log}
 	if s.Priv != nil {
-		s.Announcer = &Announcer{Cluster: m, Priv: s.Priv, BootID: bootID}
+		s.Announcer = &Announcer{Cluster: m, Priv: s.Priv, BootID: boot}
 	}
 	if s.Mover != nil {
 		s.Coordinator.Mover = s.Mover
