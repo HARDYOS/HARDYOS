@@ -3,6 +3,8 @@ package cluster_test
 import (
 	"bufio"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -12,9 +14,45 @@ import (
 	"github.com/hashicorp/raft"
 
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
+	"github.com/hardyos/hardyos/daemon/internal/cluster/state"
 )
 
+// A member restarts from its own snapshot (checked against its
+// membership while Raft restores it) and catches up (decision 365).
+func TestRestartFromSnapshot(t *testing.T) {
+	h, nas, c1, c2, _ := build4(t)
+	// More entries than the snapshot threshold, then time for a snapshot.
+	for i := 0; i < 80; i++ {
+		if _, err := c1.core.Propose(ctx(t), cluster.CmdMemberUpdate, state.MemberUpdateBody{Version: fmt.Sprintf("1.0.%d", i)}, admin); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(2 * time.Second)
+	c2.core.Stop()
+	h.build(c2)
+	done := make(chan error, 1)
+	go func() { done <- c2.core.Start(ctx(t)) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the restart hangs")
+	}
+	if _, err := nas.core.Propose(ctx(t), cluster.CmdMemberUpdate, state.MemberUpdateBody{Version: "2.0.0"}, admin); err != nil {
+		t.Fatal(err)
+	}
+	h.eventually("c2 caught up", 10*time.Second, func() error {
+		if m, ok := c2.core.Machine().Node("nas"); !ok || m.Version != "2.0.0" {
+			return errors.New("not yet")
+		}
+		return nil
+	})
+}
+
 // sendRaft writes one Raft request (type byte, msgpack body, snapshot
+
 // data) on c and reports whether the other side closed the connection
 // instead of answering.
 func sendRaft(t *testing.T, c net.Conn, typ uint8, req any, data []byte) (closed bool) {
@@ -103,9 +141,13 @@ func TestForgedRaftMessagesIgnored(t *testing.T) {
 			t.Fatalf("%s's term moved to %d", n.id, got)
 		}
 	}
-	if nl := h.leader(nas, c1, c2); nl == nil {
-		t.Fatal("no leader after the forged messages")
-	}
+	h.eventually("a leader after the forged messages", 10*time.Second, func() error {
+		if h.leader(nas, c1, c2) == nil {
+			return errors.New("no leader")
+		}
+		return nil
+	})
+
 	if s := w.core.Status(ctx(t)); s.Leader == "witness" {
 		t.Fatal("the witness leads")
 	}

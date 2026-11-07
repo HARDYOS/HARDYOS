@@ -147,7 +147,12 @@ func TestRelayLimits(t *testing.T) {
 func TestRelayHostAndHeaders(t *testing.T) {
 	nas, c1 := twoNodeCluster(t)
 	c1.s.mux.HandleFunc("GET /api/v1/version/echo", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"host": r.Host, "scheme": requestScheme(r), "relayed": relayedFrom(r) != nil})
+		still := false
+		if rr := relayedFrom(r); rr != nil {
+			_, still = rr.still(r.Context())
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"host": r.Host, "scheme": requestScheme(r), "relayed": relayedFrom(r) != nil,
+			"base": apiBase(r), "still": still})
 	})
 	c1.s.mux.HandleFunc("GET /api/v1/version/page", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -164,13 +169,19 @@ func TestRelayHostAndHeaders(t *testing.T) {
 		Host    string `json:"host"`
 		Scheme  string `json:"scheme"`
 		Relayed bool   `json:"relayed"`
+		Base    string `json:"base"`
+		Still   bool   `json:"still"`
 	}
 	if code := cade.do("GET", "/api/v1/nodes/c1/version/echo", nil, &echo); code != 200 {
 		t.Fatalf("echo = %d", code)
 	}
-	if want := strings.TrimPrefix(nas.env.srv.URL, "http://"); echo.Host != want || echo.Scheme != "http" || !echo.Relayed {
+	// Paths handed back (a VM console's WebSocket) name the node; a long
+	// request (the console) can check the person again (decision 373).
+	if want := strings.TrimPrefix(nas.env.srv.URL, "http://"); echo.Host != want || echo.Scheme != "http" || !echo.Relayed ||
+		echo.Base != "/api/v1/nodes/c1" || !echo.Still {
 		t.Fatalf("echo %+v, want host %s", echo, want)
 	}
+
 	req, _ := http.NewRequest("GET", nas.env.srv.URL+"/api/v1/nodes/c1/version/page", nil)
 	resp, err := cade.http.Do(req)
 	if err != nil {

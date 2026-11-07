@@ -756,6 +756,7 @@ func (n *Core) Wipe(ctx context.Context) error {
 	n.info, n.halted = nil, nil
 	n.mu.Unlock()
 	n.cfg.Machine.Reset()
+	n.pins.Store(nil)
 	return nil
 }
 

@@ -53,7 +53,7 @@ func (s *Server) handleVMConsole(w http.ResponseWriter, r *http.Request, u *auth
 		return
 	}
 	writeJSON(w, http.StatusOK, VMConsoleSession{Token: t.Token, Expires: t.Expires,
-		Path: "/api/v1/vms/" + url.PathEscape(id) + "/console/ws?token=" + url.QueryEscape(t.Token)})
+		Path: apiBase(r) + "/vms/" + url.PathEscape(id) + "/console/ws?token=" + url.QueryEscape(t.Token)})
 }
 
 func (s *Server) handleVMConsoleWS(w http.ResponseWriter, r *http.Request, u *auth.User) {

@@ -55,8 +55,19 @@ type relayedRequest struct {
 	rel   *cluster.Relayed
 	still func(ctx context.Context) (*auth.User, bool)
 	// selfHost is this server's LAN address (its own origins, such as the
-	// office editor, are reached there).
+	// office editor, are reached there); self its node id.
 	selfHost string
+	self     cluster.NodeID
+}
+
+// apiBase is where the browser reaches this server's API for r: through
+// the entry node's node scope for a relayed request (paths handed back to
+// the browser, such as a VM console's WebSocket, must name this node).
+func apiBase(r *http.Request) string {
+	if rr := relayedFrom(r); rr != nil && rr.self != "" {
+		return "/api/v1/nodes/" + url.PathEscape(string(rr.self))
+	}
+	return "/api/v1"
 }
 
 // relayedFrom is the relayed request r is, or nil.
@@ -288,7 +299,7 @@ var sessionCheck = 15 * time.Second
 
 // relayUpgrade forwards a WebSocket (events, VM console) and closes it
 // within sessionCheck of the session ending or the person changing (signed
-// out, demoted, turned off; decision 372).
+// out, demoted, turned off; decision 370).
 func (c *clusterAPI) relayUpgrade(w http.ResponseWriter, r *http.Request, u *auth.User, p cluster.Principal, f *cluster.Forward, token string) {
 	if !sameOrigin(r) {
 		writeError(w, http.StatusForbidden, "forbidden", "cross-origin WebSocket refused")
@@ -411,7 +422,7 @@ func (c *clusterAPI) handleEvents(w http.ResponseWriter, r *http.Request, u *aut
 	token, _ := c.s.sessionToken(r)
 	p, perr := c.principal(ctx, u)
 	// Local accounts that aren't administrators exist only here: no member
-	// would accept them (decision 372).
+	// would accept them (decision 370).
 	if perr == nil && core.Info() != nil && (p.Kind == "domain" || p.Admin) {
 		var wg sync.WaitGroup
 		for _, m := range core.Machine().Snapshot().Nodes {
@@ -559,7 +570,8 @@ func (c *clusterAPI) relayHandler() http.Handler {
 		if self, err := c.core().Self(); err == nil && self.Addresses.LAN.IsValid() {
 			selfHost = self.Addresses.LAN.String()
 		}
-		r = r.WithContext(context.WithValue(r.Context(), relayedKey{}, &relayedRequest{rel: rel, selfHost: selfHost, still: func(ctx context.Context) (*auth.User, bool) {
+		r = r.WithContext(context.WithValue(r.Context(), relayedKey{}, &relayedRequest{rel: rel, selfHost: selfHost, self: c.core().ID(), still: func(ctx context.Context) (*auth.User, bool) {
+
 			// The member must still be one that may forward, and the
 			// person still usable here (decision 373).
 			from, ok := c.core().TLSPeer(cluster.RelayTLS(r))

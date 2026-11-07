@@ -6,6 +6,7 @@ import { Dialog } from "../../ui/Dialog";
 import { JobProgress } from "../shared";
 import { type ClusterNodeStatus, type ClusterStatus } from "../../cluster/scope";
 import { PathChips, nodeTone } from "./Overview";
+import { AdminTrust } from "./AdminTrust";
 
 /** Servers: leave this one, remove a dead one, dissolve from the last one. */
 export function Nodes({ st }: { st: ClusterStatus }) {
@@ -64,6 +65,7 @@ export function Nodes({ st }: { st: ClusterStatus }) {
           </tbody>
         </table>
       </Card>
+      {others > 0 && <AdminTrust />}
       {removing && <RemoveDialog n={removing} onClose={() => setRemoving(null)} />}
       {leaving && <LeaveDialog st={st} mode={leaving} onClose={() => setLeaving(null)} />}
     </div>

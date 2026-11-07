@@ -276,10 +276,16 @@ func (t *Transport) RecheckInbound() {
 // one that swaps a member's key, turns the witness into a server or
 // rolls this node back.
 func (n *Core) checkSnapshot(cur, next *Snapshot) error {
-	info := n.Info()
+	// Raft restores its latest snapshot inside startLocked, under n.mu:
+	// read the membership it was started with instead.
+	info := n.raftSelf.Load()
+	if info == nil {
+		info = n.Info()
+	}
 	if info == nil {
 		return ErrNotMember
 	}
+
 	if next.Cluster != info.Cluster {
 		return errors.New("it is another cluster's")
 	}
