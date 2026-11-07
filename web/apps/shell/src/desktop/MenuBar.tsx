@@ -15,6 +15,8 @@ import { Alert, Button, Field, TextInput } from "../ui";
 import { Dialog } from "../ui/Dialog";
 import { toast } from "../ui/toasts";
 import { useWM } from "../wm/store";
+import { ServerSwitcher } from "../cluster/ServerSwitcher";
+import "../cluster/cluster.css";
 
 const clockFmt = new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 
@@ -238,6 +240,7 @@ export function MenuBar({ user, connection }: { user: User; connection: string }
           Reconnecting…
         </span>
       )}
+      <ServerSwitcher user={user} />
       <NotificationCenter user={user} />
       <UserMenu user={user} />
       <Clock />

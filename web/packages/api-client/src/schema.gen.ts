@@ -5090,6 +5090,204 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/cluster": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** This server's view of its cluster (members, leader, quorum, live suffrage, health and control paths) */
+        get: operations["getClusterStatus"];
+        put?: never;
+        /** Create a cluster with this server as its first member (a job) */
+        post: operations["createCluster"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/nodes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The servers of the cluster for the server switcher (any signed-in person) */
+        get: operations["listClusterNodes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/nodes/{node}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Remove another (dead or gone) member; confirm is its name (a job). Its key is refused from then on */
+        delete: operations["removeClusterNode"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/join": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Join a cluster through a member with a join code made there (a job; the code is never stored here) */
+        post: operations["joinCluster"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/leave": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Take this server out of the cluster; confirm is the cluster's name (a job) */
+        post: operations["leaveCluster"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/dissolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** End the cluster from its last server; confirm is the cluster's name (a job) */
+        post: operations["dissolveCluster"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/join-codes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Open join codes on this member (without the codes) */
+        get: operations["listClusterJoinCodes"];
+        put?: never;
+        /** Make a one-time join code for a compute or storage server (30 minutes, 5 wrong tries; shown once) */
+        post: operations["createClusterJoinCode"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/join-codes/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Cancel an open join code */
+        delete: operations["deleteClusterJoinCode"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/witness/script": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Open a witness join code and render the install script for the VPS (shown once; valid 30 minutes) */
+        post: operations["createClusterWitnessScript"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** WebSocket of every member's job and alert events the person may see, each {node, event} */
+        get: operations["clusterEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/nodes/{node}/{path}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node: string;
+                /** @description any API path below /api/v1 (more than one segment), e.g. vms/abc */
+                path: string;
+            };
+            cookie?: never;
+        };
+        /** Forward a GET to a member (WebSocket upgrades too) */
+        get: operations["nodeProxyGet"];
+        put?: never;
+        /** Forward a POST to a member */
+        post: operations["nodeProxyPost"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -8990,6 +9188,146 @@ export interface components {
             settings?: components["schemas"]["MailManualSettings"];
             webmailInstalled: boolean;
             reason?: string;
+        };
+        ClusterAddresses: {
+            /** @description LAN address ("" for none) */
+            lan?: string;
+            netbird?: string;
+            storage?: string;
+            portals?: string[];
+        };
+        ClusterHealth: {
+            node: string;
+            /** Format: date-time */
+            lastHeard: string;
+            /** @enum {string} */
+            path: "lan" | "storage" | "netbird" | "none";
+            /** @description nanoseconds */
+            rtt: number;
+            suspect: boolean;
+            quorate: boolean;
+            storageOK: boolean;
+            lanOK: boolean;
+        };
+        ClusterPathProbe: {
+            /** @enum {string} */
+            path: "lan" | "storage" | "netbird" | "none";
+            up: boolean;
+            /** @description nanoseconds */
+            rtt: number;
+            good: number;
+            missed: number;
+        };
+        ClusterPeerPath: {
+            node: string;
+            /** @enum {string} */
+            current: "lan" | "storage" | "netbird" | "none";
+            /** @description nanoseconds */
+            rtt: number;
+            probes: components["schemas"]["ClusterPathProbe"][];
+            /** Format: date-time */
+            changed: string;
+        };
+        ClusterNodeStatus: {
+            id: string;
+            name: string;
+            /** @enum {string} */
+            role: "compute" | "storage" | "witness";
+            /** @description SHA-256 of the node's cluster key */
+            pin: string;
+            addresses: components["schemas"]["ClusterAddresses"];
+            /** @enum {string} */
+            state: "joining" | "active" | "maintenance" | "dead" | "fenced" | "rejoining" | "removed";
+            /** @enum {string} */
+            suffrage: "voter" | "nonvoter";
+            /**
+             * @description The suffrage in the log's configuration now
+             * @enum {string}
+             */
+            live: "voter" | "nonvoter";
+            version: string;
+            features?: string[];
+            /** Format: date-time */
+            joined: string;
+            health?: components["schemas"]["ClusterHealth"];
+            path?: components["schemas"]["ClusterPeerPath"];
+        };
+        ClusterStatus: {
+            member: boolean;
+            cluster?: string;
+            name?: string;
+            self?: string;
+            /** @enum {string} */
+            role?: "compute" | "storage" | "witness";
+            leader?: string;
+            quorate: boolean;
+            /** Format: date-time */
+            quorateUntil?: string;
+            term: number;
+            index: number;
+            featureLevel: number;
+            /** @description Why this server stopped following the log (it needs an update) */
+            halted?: string;
+            nodes: components["schemas"]["ClusterNodeStatus"][];
+        };
+        ClusterNode: {
+            id: string;
+            name: string;
+            /** @enum {string} */
+            role: "compute" | "storage" | "witness";
+            state: string;
+            self: boolean;
+            leader: boolean;
+            healthy: boolean;
+        };
+        ClusterNodes: {
+            member: boolean;
+            name: string;
+            quorate: boolean;
+            nodes: components["schemas"]["ClusterNode"][];
+        };
+        ClusterCreateRequest: {
+            name: string;
+            /** @enum {string} */
+            role: "compute" | "storage";
+            /** @description The storage network, e.g. 10.77.0.0/24 (optional) */
+            storageSubnet?: string;
+        };
+        ClusterJoinRequest: {
+            /** @description A member's address (host or host:port) */
+            address: string;
+            code: string;
+            /** @enum {string} */
+            role: "compute" | "storage";
+        };
+        ClusterConfirm: {
+            confirm: string;
+        };
+        ClusterJoinCodeRequest: {
+            /** @enum {string} */
+            role: "compute" | "storage";
+        };
+        ClusterJoinOffer: {
+            code: string;
+            /** @enum {string} */
+            role: "compute" | "storage" | "witness";
+            addresses: string[];
+            /** Format: date-time */
+            expires: string;
+        };
+        ClusterJoinCode: {
+            id: string;
+            /** @enum {string} */
+            role: "compute" | "storage" | "witness";
+            /** Format: date-time */
+            expires: string;
+            failures: number;
+            createdBy: string;
+        };
+        ClusterWitnessScript: {
+            script: string;
+            /** Format: date-time */
+            expires: string;
         };
     };
     responses: {
@@ -16921,6 +17259,328 @@ export interface operations {
                 };
             };
             404: components["responses"]["NotFound"];
+        };
+    };
+    getClusterStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Status (member is false outside a cluster) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClusterStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    createCluster: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClusterCreateRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listClusterNodes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Servers */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClusterNodes"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    removeClusterNode: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClusterConfirm"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    joinCluster: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClusterJoinRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    leaveCluster: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClusterConfirm"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    dissolveCluster: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClusterConfirm"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listClusterJoinCodes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Codes */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClusterJoinCode"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    createClusterJoinCode: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClusterJoinCodeRequest"];
+            };
+        };
+        responses: {
+            /** @description The code and this member's addresses */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClusterJoinOffer"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    deleteClusterJoinCode: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Cancelled */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    createClusterWitnessScript: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The script */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClusterWitnessScript"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    clusterEvents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Switching to WebSocket */
+            101: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    nodeProxyGet: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node: string;
+                /** @description any API path below /api/v1 (more than one segment), e.g. vms/abc */
+                path: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The member's answer */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description The member isn't answering */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    nodeProxyPost: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node: string;
+                /** @description any API path below /api/v1 (more than one segment), e.g. vms/abc */
+                path: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The member's answer */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description The member isn't answering */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
 }

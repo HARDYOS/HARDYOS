@@ -9,7 +9,7 @@ priority: optional
 maintainer: HardyOS <noreply@hardyos.local>
 description: |
   HardyOS control plane: hardyd (API and web desktop), hardyd-priv
-  (privileged helper) and hardyctl (CLI).
+  (privileged helper), hardyctl (CLI) and the cluster witness binary.
 license: Proprietary
 depends:
   - adduser
@@ -63,6 +63,11 @@ contents:
   - src: ../dist/bin/hardyos-nss
     dst: /usr/lib/hardyos/hardyos-nss
     file_info: { mode: 0755 }
+  # The cluster witness binary members hand to the witness install script
+  # over NetBird (never run on a member; docs/cluster.md).
+  - src: ../dist/witness/${ARCH}/hardyos-witness
+    dst: /usr/lib/hardyos/hardyos-witness
+    file_info: { mode: 0644 }
   # Console login screen: the server's web address, kept current by hardyos-issue.service.
   - src: ./console/hardyos-issue
     dst: /usr/lib/hardyos/hardyos-issue

@@ -47,6 +47,7 @@ tags:
   - name: monitor
   - name: ups
   - name: mail
+  - name: cluster
 paths:
   /health:
     get:
@@ -5702,6 +5703,204 @@ paths:
               schema: { type: string, format: binary }
         "404": { $ref: "#/components/responses/NotFound" }
   # ---- Phase 8 part A (cluster core): /cluster, /cluster/nodes, /cluster/join, /cluster/witness, /nodes/{node}/... below this line (tag cluster)
+  /cluster:
+    get:
+      operationId: getClusterStatus
+      summary: This server's view of its cluster (members, leader, quorum, live suffrage, health and control paths)
+      tags: [cluster]
+      responses:
+        "200":
+          description: Status (member is false outside a cluster)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClusterStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: createCluster
+      summary: Create a cluster with this server as its first member (a job)
+      tags: [cluster]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClusterCreateRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /cluster/nodes:
+    get:
+      operationId: listClusterNodes
+      summary: The servers of the cluster for the server switcher (any signed-in person)
+      tags: [cluster]
+      responses:
+        "200":
+          description: Servers
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClusterNodes" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /cluster/nodes/{node}:
+    parameters:
+      - { name: node, in: path, required: true, schema: { type: string } }
+    delete:
+      operationId: removeClusterNode
+      summary: Remove another (dead or gone) member; confirm is its name (a job). Its key is refused from then on
+      tags: [cluster]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClusterConfirm" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /cluster/join:
+    post:
+      operationId: joinCluster
+      summary: Join a cluster through a member with a join code made there (a job; the code is never stored here)
+      tags: [cluster]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClusterJoinRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /cluster/leave:
+    post:
+      operationId: leaveCluster
+      summary: Take this server out of the cluster; confirm is the cluster's name (a job)
+      tags: [cluster]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClusterConfirm" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /cluster/dissolve:
+    post:
+      operationId: dissolveCluster
+      summary: End the cluster from its last server; confirm is the cluster's name (a job)
+      tags: [cluster]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClusterConfirm" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /cluster/join-codes:
+    get:
+      operationId: listClusterJoinCodes
+      summary: Open join codes on this member (without the codes)
+      tags: [cluster]
+      responses:
+        "200":
+          description: Codes
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ClusterJoinCode" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: createClusterJoinCode
+      summary: Make a one-time join code for a compute or storage server (30 minutes, 5 wrong tries; shown once)
+      tags: [cluster]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClusterJoinCodeRequest" }
+      responses:
+        "201":
+          description: The code and this member's addresses
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClusterJoinOffer" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /cluster/join-codes/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    delete:
+      operationId: deleteClusterJoinCode
+      summary: Cancel an open join code
+      tags: [cluster]
+      responses:
+        "204": { description: Cancelled }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /cluster/witness/script:
+    post:
+      operationId: createClusterWitnessScript
+      summary: Open a witness join code and render the install script for the VPS (shown once; valid 30 minutes)
+      tags: [cluster]
+      responses:
+        "200":
+          description: The script
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClusterWitnessScript" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /cluster/events:
+    get:
+      operationId: clusterEvents
+      summary: WebSocket of every member's job and alert events the person may see, each {node, event}
+      tags: [cluster]
+      responses:
+        "101": { description: Switching to WebSocket }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /nodes/{node}/{path}:
+    parameters:
+      - { name: node, in: path, required: true, schema: { type: string } }
+      - { name: path, in: path, required: true, description: "any API path below /api/v1 (more than one segment), e.g. vms/abc", schema: { type: string } }
+    description: >
+      The node-scoped API: /api/v1/nodes/{node}/<path> is /api/v1/<path> on that member, forwarded with
+      a 60-second assertion bound to the request (sign-in, setup and the proxy itself are never forwarded).
+      Every method; answers are the member's own.
+    get:
+      operationId: nodeProxyGet
+      summary: Forward a GET to a member (WebSocket upgrades too)
+      tags: [cluster]
+      responses:
+        "200": { description: The member's answer }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { description: The member isn't answering }
+    post:
+      operationId: nodeProxyPost
+      summary: Forward a POST to a member
+      tags: [cluster]
+      responses:
+        "200": { description: The member's answer }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { description: The member isn't answering }
   #
   #
   # ---- Phase 8 part B (cluster storage): /cluster/storage/... below this line (tag cluster-storage)
@@ -9693,3 +9892,142 @@ components:
         webmailInstalled: { type: boolean }
         reason: { type: string }
     # ---- end of mail API schemas ----
+    # ---- Phase 8 part A (cluster core) schemas ----
+    ClusterAddresses:
+      type: object
+      properties:
+        lan: { type: string, description: "LAN address (\"\" for none)" }
+        netbird: { type: string }
+        storage: { type: string }
+        portals: { type: array, items: { type: string } }
+    ClusterHealth:
+      type: object
+      required: [node, lastHeard, path, rtt, suspect, quorate, storageOK, lanOK]
+      properties:
+        node: { type: string }
+        lastHeard: { type: string, format: date-time }
+        path: { type: string, enum: [lan, storage, netbird, none] }
+        rtt: { type: integer, description: nanoseconds }
+        suspect: { type: boolean }
+        quorate: { type: boolean }
+        storageOK: { type: boolean }
+        lanOK: { type: boolean }
+    ClusterPathProbe:
+      type: object
+      required: [path, up, rtt, good, missed]
+      properties:
+        path: { type: string, enum: [lan, storage, netbird, none] }
+        up: { type: boolean }
+        rtt: { type: integer, description: nanoseconds }
+        good: { type: integer }
+        missed: { type: integer }
+    ClusterPeerPath:
+      type: object
+      required: [node, current, rtt, probes, changed]
+      properties:
+        node: { type: string }
+        current: { type: string, enum: [lan, storage, netbird, none] }
+        rtt: { type: integer, description: nanoseconds }
+        probes: { type: array, items: { $ref: "#/components/schemas/ClusterPathProbe" } }
+        changed: { type: string, format: date-time }
+    ClusterNodeStatus:
+      type: object
+      required: [id, name, role, pin, addresses, state, suffrage, version, joined, live]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        role: { type: string, enum: [compute, storage, witness] }
+        pin: { type: string, description: SHA-256 of the node's cluster key }
+        addresses: { $ref: "#/components/schemas/ClusterAddresses" }
+        state: { type: string, enum: [joining, active, maintenance, dead, fenced, rejoining, removed] }
+        suffrage: { type: string, enum: [voter, nonvoter] }
+        live: { type: string, enum: [voter, nonvoter], description: The suffrage in the log's configuration now }
+        version: { type: string }
+        features: { type: array, items: { type: string } }
+        joined: { type: string, format: date-time }
+        health: { $ref: "#/components/schemas/ClusterHealth" }
+        path: { $ref: "#/components/schemas/ClusterPeerPath" }
+    ClusterStatus:
+      type: object
+      required: [member, quorate, term, index, featureLevel, nodes]
+      properties:
+        member: { type: boolean }
+        cluster: { type: string }
+        name: { type: string }
+        self: { type: string }
+        role: { type: string, enum: [compute, storage, witness] }
+        leader: { type: string }
+        quorate: { type: boolean }
+        quorateUntil: { type: string, format: date-time }
+        term: { type: integer }
+        index: { type: integer }
+        featureLevel: { type: integer }
+        halted: { type: string, description: Why this server stopped following the log (it needs an update) }
+        nodes: { type: array, items: { $ref: "#/components/schemas/ClusterNodeStatus" } }
+    ClusterNode:
+      type: object
+      required: [id, name, role, state, self, leader, healthy]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        role: { type: string, enum: [compute, storage, witness] }
+        state: { type: string }
+        self: { type: boolean }
+        leader: { type: boolean }
+        healthy: { type: boolean }
+    ClusterNodes:
+      type: object
+      required: [member, name, quorate, nodes]
+      properties:
+        member: { type: boolean }
+        name: { type: string }
+        quorate: { type: boolean }
+        nodes: { type: array, items: { $ref: "#/components/schemas/ClusterNode" } }
+    ClusterCreateRequest:
+      type: object
+      required: [name, role]
+      properties:
+        name: { type: string, maxLength: 64 }
+        role: { type: string, enum: [compute, storage] }
+        storageSubnet: { type: string, description: "The storage network, e.g. 10.77.0.0/24 (optional)" }
+    ClusterJoinRequest:
+      type: object
+      required: [address, code, role]
+      properties:
+        address: { type: string, description: A member's address (host or host:port) }
+        code: { type: string }
+        role: { type: string, enum: [compute, storage] }
+    ClusterConfirm:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: string }
+    ClusterJoinCodeRequest:
+      type: object
+      required: [role]
+      properties:
+        role: { type: string, enum: [compute, storage] }
+    ClusterJoinOffer:
+      type: object
+      required: [code, role, addresses, expires]
+      properties:
+        code: { type: string }
+        role: { type: string, enum: [compute, storage, witness] }
+        addresses: { type: array, items: { type: string } }
+        expires: { type: string, format: date-time }
+    ClusterJoinCode:
+      type: object
+      required: [id, role, expires, failures, createdBy]
+      properties:
+        id: { type: string }
+        role: { type: string, enum: [compute, storage, witness] }
+        expires: { type: string, format: date-time }
+        failures: { type: integer }
+        createdBy: { type: string }
+    ClusterWitnessScript:
+      type: object
+      required: [script, expires]
+      properties:
+        script: { type: string }
+        expires: { type: string, format: date-time }
+    # ---- end of cluster core schemas ----
