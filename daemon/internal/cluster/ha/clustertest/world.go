@@ -122,7 +122,7 @@ type World struct {
 	Rejected   []string
 	// Requirements override what the fake runtimes report per workload.
 	Requirements map[cluster.WorkloadRef]*cluster.Requirements
-	resets     map[cluster.NodeID]int
+	resets       map[cluster.NodeID]int
 }
 
 // Node is one member.
