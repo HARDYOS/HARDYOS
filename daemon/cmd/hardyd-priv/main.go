@@ -222,6 +222,7 @@ func main() {
 		devs.Assignments = vmm.Assignments
 		go reconcileDevices(ctx, devs, log)
 		priv.RegisterVMs(s, vmm)
+		wireClusterC(s, vmm, am, log)
 		// Versioned cloud backups (restic) of shared folders, apps, VMs and
 		// the settings; the destination an installer's "Restore from
 		// backup" left is taken over now (after the settings restore above).

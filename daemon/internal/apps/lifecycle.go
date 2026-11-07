@@ -74,6 +74,9 @@ func (m *Manager) Reconfigure(ctx context.Context, a ReconfigureArgs) (*PrepareR
 	if err != nil {
 		return nil, err
 	}
+	if ia.remote {
+		return nil, ErrClusterStorage
+	}
 	pkg, err := installedPackage(ia)
 	if err != nil {
 		return nil, err
@@ -143,6 +146,9 @@ func (m *Manager) Snapshot(ctx context.Context, a SnapshotArgs) (string, error) 
 	ia, _, err := m.app(ctx, a.ID)
 	if err != nil {
 		return "", err
+	}
+	if ia.remote {
+		return "", ErrClusterStorage
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -234,6 +240,9 @@ func (m *Manager) Rollback(ctx context.Context, a RollbackArgs) error {
 	ia, c, err := m.app(ctx, a.ID)
 	if err != nil {
 		return err
+	}
+	if ia.remote {
+		return ErrClusterStorage
 	}
 	if !confirmed(a.Confirm, ia) {
 		return Problems{fmt.Sprintf("type the app's name (%s) to confirm", ia.manifest.Name)}

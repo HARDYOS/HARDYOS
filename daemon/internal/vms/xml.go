@@ -32,6 +32,11 @@ type Paths struct {
 	// ROMDir is the only folder device fragments may name ROM files in
 	// (default RomRunDir).
 	ROMDir string
+	// Cluster: the VM's disks are LUNs from the storage server (Disks maps
+	// each disk name to its block device). An I/O error then pauses the
+	// VM instead of failing the guest (decision 328).
+	Cluster bool
+	Disks   map[string]string
 }
 
 // RomRunDir is where part D puts the QEMU-readable copies of GPU ROM
@@ -146,10 +151,17 @@ type spinlocksXML struct {
 }
 
 type cpuXML struct {
-	Mode       string      `xml:"mode,attr"`
-	Check      string      `xml:"check,attr"`
-	Migratable string      `xml:"migratable,attr"`
-	Topology   topologyXML `xml:"topology"`
+	Mode       string       `xml:"mode,attr"`
+	Match      string       `xml:"match,attr,omitempty"`
+	Check      string       `xml:"check,attr"`
+	Migratable string       `xml:"migratable,attr,omitempty"`
+	Model      *cpuModelXML `xml:"model"`
+	Topology   topologyXML  `xml:"topology"`
+}
+
+type cpuModelXML struct {
+	Fallback string `xml:"fallback,attr"`
+	Value    string `xml:",chardata"`
 }
 
 type topologyXML struct {
@@ -217,11 +229,13 @@ type diskXML struct {
 }
 
 type driverXML struct {
-	Name    string `xml:"name,attr"`
-	Type    string `xml:"type,attr"`
-	Cache   string `xml:"cache,attr,omitempty"`
-	IO      string `xml:"io,attr,omitempty"`
-	Discard string `xml:"discard,attr,omitempty"`
+	Name         string `xml:"name,attr"`
+	Type         string `xml:"type,attr"`
+	Cache        string `xml:"cache,attr,omitempty"`
+	IO           string `xml:"io,attr,omitempty"`
+	Discard      string `xml:"discard,attr,omitempty"`
+	ErrorPolicy  string `xml:"error_policy,attr,omitempty"`
+	RErrorPolicy string `xml:"rerror_policy,attr,omitempty"`
 }
 
 type diskSource struct {
@@ -424,6 +438,13 @@ func DomainXML(s *Spec, a ArchInfo, p Paths, devs []devices.Prepared) ([]byte, e
 
 	d.CPU = cpuXML{Mode: "host-passthrough", Check: "none", Migratable: "on",
 		Topology: topologyXML{Sockets: 1, Dies: 1, Cores: s.CPU.Cores, Threads: s.CPU.Threads}}
+	if s.CPUModel != "" {
+		// A named model (the cluster's baseline): the same virtual CPU on
+		// every server, so the VM can migrate between different CPUs.
+		d.CPU = cpuXML{Mode: "custom", Match: "exact", Check: "partial",
+			Model:    &cpuModelXML{Fallback: "forbid", Value: s.CPUModel},
+			Topology: topologyXML{Sockets: 1, Dies: 1, Cores: s.CPU.Cores, Threads: s.CPU.Threads}}
+	}
 
 	d.Clock.Offset = "utc"
 	if windows {
@@ -487,10 +508,19 @@ func DomainXML(s *Spec, a ArchInfo, p Paths, devs []devices.Prepared) ([]byte, e
 		}
 	}
 	for _, dk := range s.Disks {
+		drv := driverXML{Name: "qemu", Type: "raw", Cache: "none", IO: "native", Discard: "unmap"}
+		dev := ZvolPath(s.Pool, s.ID, dk.Name)
+		if p.Cluster {
+			dev = p.Disks[dk.Name]
+			if !ClusterDiskPath(dev) {
+				return nil, fmt.Errorf("the VM's %s isn't attached from cluster storage", dk.Name)
+			}
+			drv.ErrorPolicy, drv.RErrorPolicy = "stop", "stop"
+		}
 		dv.Disks = append(dv.Disks, diskXML{
 			Type: "block", Device: "disk",
-			Driver: driverXML{Name: "qemu", Type: "raw", Cache: "none", IO: "native", Discard: "unmap"},
-			Source: &diskSource{Dev: ZvolPath(s.Pool, s.ID, dk.Name)},
+			Driver: drv,
+			Source: &diskSource{Dev: dev},
 			Target: nextTarget(dk.Bus),
 			Serial: s.ID + "-" + dk.Name,
 			Boot:   bootFor("disk"),

@@ -78,6 +78,14 @@ type Manager struct {
 	Library Library
 	// Network sets up the bridge; nil: only NAT networking.
 	Network Bridger
+	// Backend finds VMs on cluster storage attached to this server (part B's
+	// sanclient); nil: only VMs on local pools (cluster.go).
+	Backend StorageBackend
+	// MigrateConnector opens the destination's libvirt connection as
+	// MigrateUser (default: a helper process with that user's identity;
+	// tests replace it).
+	MigrateConnector func(ctx context.Context) (*os.File, error)
+	migr             *migrations
 	// Arch overrides the server's architecture (tests).
 	Arch *ArchInfo
 	// Mounts verifies dataset mounts (default: /proc/self/mountinfo).
@@ -246,6 +254,9 @@ type stored struct {
 	dataset string
 	dir     string // mountpoint (host path)
 	dev     uint64 // verified mount
+	// cluster is the attached cluster storage of a VM on the storage
+	// server (nil for VMs on a local pool).
+	cluster *AttachedStorage
 }
 
 // datasets lists VM datasets: name -> mountpoint, for every pool.
@@ -295,6 +306,19 @@ func (m *Manager) all(ctx context.Context) ([]*stored, error) {
 		}
 		if other, dup := seenUUID[st.spec.UUID]; dup {
 			m.log().Warn("vms: skipping a VM with the same UUID as another", "id", st.spec.ID, "dataset", name, "uuid", st.spec.UUID, "other", other)
+			continue
+		}
+		seen[st.spec.ID] = true
+		seenUUID[st.spec.UUID] = st.spec.ID
+		out = append(out, st)
+	}
+	for _, st := range m.clusterStored(ctx) {
+		if seen[st.spec.ID] {
+			m.log().Warn("vms: a VM on cluster storage has the name of a local VM; using the local one", "id", st.spec.ID)
+			continue
+		}
+		if other, dup := seenUUID[st.spec.UUID]; dup {
+			m.log().Warn("vms: skipping a cluster VM with the same UUID as another", "id", st.spec.ID, "other", other)
 			continue
 		}
 		seen[st.spec.ID] = true
@@ -598,10 +622,17 @@ type VM struct {
 	RestartNeeded bool `json:"restartNeeded"`
 	// DiskUsage is how much of each disk is in use on the pool (bytes).
 	DiskUsage map[string]int64 `json:"diskUsage"`
+	// Backend is "local" or "cluster" (on the storage server); Generation
+	// is the cluster placement generation its storage was attached under.
+	Backend    string `json:"backend,omitempty"`
+	Generation uint64 `json:"generation,omitempty"`
 }
 
 func (m *Manager) view(st *stored, stats map[string]domStats) VM {
-	v := VM{Spec: st.spec, Dataset: st.dataset, State: "unknown", Addresses: []string{}, DiskUsage: map[string]int64{}}
+	v := VM{Spec: st.spec, Dataset: st.dataset, State: "unknown", Addresses: []string{}, DiskUsage: map[string]int64{}, Backend: BackendLocal}
+	if st.cluster != nil {
+		v.Backend, v.Generation = BackendCluster, st.cluster.Generation
+	}
 	if v.CloudInit != nil {
 		ci := *v.CloudInit
 		v.PasswordSet = ci.PasswordHash != ""
@@ -960,6 +991,9 @@ func (m *Manager) Update(ctx context.Context, a UpdateArgs) (*Result, error) {
 	if err := m.prepareSpec(ctx, &s, a.Password, &prev); err != nil {
 		return nil, err
 	}
+	if err := clusterUpdate(st, &prev, &s); err != nil {
+		return nil, err
+	}
 	var p Problems
 	if s.Pool != prev.Pool {
 		p = append(p, "a VM can't move to another pool")
@@ -1150,6 +1184,9 @@ func (m *Manager) Delete(ctx context.Context, a DeleteArgs) error {
 	if err != nil {
 		return err
 	}
+	if err := localOnly(st); err != nil {
+		return err
+	}
 	if !Confirms(a.Confirm, &st.spec) {
 		return Problems{fmt.Sprintf("type the VM's name (%s) to confirm", st.spec.Name)}
 	}
@@ -1293,6 +1330,10 @@ func (m *Manager) checkStateFiles(st *stored) error {
 // paths resolves the files a VM's domain uses.
 func (m *Manager) paths(ctx context.Context, st *stored) (Paths, error) {
 	p := Paths{StateDir: st.dir, ISOs: map[string]string{}, NATNetwork: "default"}
+	if st.cluster != nil {
+		p.Cluster = true
+		p.Disks = st.cluster.Disks
+	}
 	if m.Network != nil {
 		p.Bridge = m.Network.BridgeName()
 	}
