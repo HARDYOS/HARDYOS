@@ -194,7 +194,7 @@ mailbox_size_limit = 0
 authorized_submit_users = root
 maximal_queue_lifetime = 5d
 bounce_queue_lifetime = 5d
-# No bounces to the internet (decision 307): a message without a return
+# No bounces to the internet (decision 311): a message without a return
 # address (a bounce or delivery notice) is only ever for mail that came in
 # from outside, often with a forged sender, so it's dropped here instead of
 # going out through Amazon SES. People signed in can't send without one.
@@ -407,7 +407,7 @@ last_valid_uid = %d
 first_valid_gid = %d
 last_valid_gid = %d
 # Each mailbox's home (vmail/<key>) comes from the user list; there's no
-# fallback made from the address (decision 306).
+# fallback made from the address (decision 310).
 mail_driver = maildir
 mail_path = ~/Maildir
 mail_plugins {
@@ -487,7 +487,7 @@ auth_policy_request_attributes {
   protocol = %%{protocol}
   fail_type = %%{fail_type}
 }
-# hardyd answers on a Unix socket only Dovecot may use (decision 301).
+# hardyd answers on a Unix socket only Dovecot may use (decision 304).
 auth_policy {
   http_client_proxy_socket_path = %s
 }
@@ -708,7 +708,7 @@ func senderOwners(c RootConfig) [][2]string {
 }
 
 // fromCheckLua makes Rspamd refuse a signed-in person's message whose From
-// header isn't one of their own addresses (decision 304): Postfix only
+// header isn't one of their own addresses (decision 308): Postfix only
 // checks the envelope, and the From header is what people see and what
 // DKIM signs for.
 const fromCheckLua = `-- %s
@@ -796,7 +796,7 @@ domain {
 gtube_patterns = "all";
 enable_test_patterns = true;
 `),
-		// Unix sockets only (decision 305). Their folders are setgid to the
+		// Unix sockets only (decision 309). Their folders are setgid to the
 		// group that may connect (Root.layout), so the sockets get it too.
 		f("worker-proxy.inc", fmt.Sprintf(`bind_socket = "%s mode=0660";
 milter = yes;
@@ -971,7 +971,7 @@ collection: family/[^/]+
 permissions: rw
 `
 	}
-	// Radicale's users are the mailboxes' keys (decision 306): hardyd signs
+	// Radicale's users are the mailboxes' keys (decision 310): hardyd signs
 	// in as the key for the person.
 	var users strings.Builder
 	keys := make([]string, 0, len(s.DAV))

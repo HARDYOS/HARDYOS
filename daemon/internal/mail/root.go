@@ -220,7 +220,7 @@ func (r *Root) ensureDir(dir string, mode os.FileMode, uid, gid int) error {
 	return unix.Fchmod(fd, perm)
 }
 
-// socketDirs makes the folders of Rspamd's sockets (decision 305). Each is
+// socketDirs makes the folders of Rspamd's sockets (decision 309). Each is
 // setgid to the group that may connect, so the socket Rspamd makes in it
 // (mode 0660) belongs to that group: Postfix for the milter, the mail user
 // (Dovecot's learning script) for the controller.
@@ -243,7 +243,7 @@ func (r *Root) socketDirs(e Env, rspamdUID int) error {
 
 // migrateLayout moves mailboxes and calendars kept under their address
 // (vmail/<domain>/<local>, Radicale's collection-root/<address>; HardyOS
-// before decision 306) to their key, once.
+// before decision 310) to their key, once.
 func (r *Root) migrateLayout(e Env, cfg RootConfig) error {
 	vm, err := os.OpenRoot(e.VMailDir())
 	if err != nil {
@@ -292,7 +292,7 @@ func (r *Root) radicaleRoot(e Env) (*os.Root, error) {
 	return rr.OpenRoot("collections")
 }
 
-// StorageLimitMB is the quota on <pool>/mail (decision 307): the limit set
+// StorageLimitMB is the quota on <pool>/mail (decision 311): the limit set
 // in Control Panel › Mail, else a quarter more than all mailboxes' quotas
 // together plus 5 GB, and never more than 80% of the pool, which keeps room
 // for the system, the apps and snapshots. 0: no quota (the pool's size is
@@ -1184,7 +1184,7 @@ func (r *Root) DeleteMailbox(ctx context.Context, a DeleteArgs) error {
 	if err := root.RemoveAll(a.Key); err != nil {
 		return err
 	}
-	// Mail from before decision 306, if it was never moved.
+	// Mail from before decision 310, if it was never moved.
 	if err := root.RemoveAll(filepath.Join(dom, local)); err != nil {
 		return err
 	}

@@ -17,7 +17,7 @@ import (
 )
 
 // securityReview checks the fixes of the mail server's security review
-// (decisions 300-308) against the real programs; run by
+// (decisions 303-316) against the real programs; run by
 // TestMailServerIntegration once the server is up.
 func securityReview(t *testing.T) {
 	t.Run("no TCP listener between the mail programs", func(t *testing.T) {
@@ -173,7 +173,7 @@ func securityReview(t *testing.T) {
 		if !strings.Contains(string(main), "bounce_transport") {
 			t.Fatal("bounce transport not configured")
 		}
-		out, err := exec.Command("postmap", "-q", "<>", "texthash:"+filepath.Join(PostfixMapsDir, "bounce_transport")).CombinedOutput()
+		out, err := exec.Command("postmap", "-q", "<>", "texthash:"+filepath.Join(PostfixMapsDir, "bounce_transport")).Output()
 		if err != nil || strings.TrimSpace(string(out)) != "discard:" {
 			t.Fatalf("null sender transport: %v %q", err, out)
 		}

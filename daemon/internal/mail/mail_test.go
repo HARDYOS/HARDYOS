@@ -601,7 +601,7 @@ func TestVPSScript(t *testing.T) {
 		"mynetworks = 127.0.0.0/8 [::1]/128\n", "maximal_queue_lifetime = 14d\n",
 		"server home 100.90.1.7:10993 send-proxy-v2", "server home 100.90.1.7:10465 send-proxy-v2", "server home 100.90.1.7:10587 send-proxy-v2",
 		"set -euo pipefail", "postfix check", "haproxy -c -f",
-		// Per-client limits and postscreen (decision 308).
+		// Per-client limits and postscreen (decision 312).
 		"smtpd_client_recipient_rate_limit = 200\n", "smtpd_hard_error_limit = 5\n", "smtpd_client_connection_count_limit = 10\n",
 		"postscreen_greet_action = enforce\n", "smtp inet n - y - 1 postscreen", "smtpd pass - - y - - smtpd",
 		"tcp-request connection reject if { sc0_conn_cur gt 20 } || { sc0_conn_rate gt 60 }",

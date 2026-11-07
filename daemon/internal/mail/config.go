@@ -60,7 +60,7 @@ func ProxiedPort(p int) bool {
 // those sign-ins come from the internet (Postfix tells Dovecot no ports).
 const ProxySASLService = "smtp-vps"
 
-// Unix sockets between the mail programs and hardyd (decisions 301, 305).
+// Unix sockets between the mail programs and hardyd (decisions 304, 309).
 // Nothing on this server talks to them over TCP, so no local program can
 // take their place by binding a port first.
 const (
@@ -86,7 +86,7 @@ const (
 
 // WebmailTokenPrefix starts every webmail token (hardyd makes them for the
 // Mail app's window session): a password never does, and such a token is
-// only accepted from the webmail app's own network (decision 302).
+// only accepted from the webmail app's own network (decision 305).
 const WebmailTokenPrefix = "hwm1."
 
 // VMailUser owns every mailbox on disk; Dovecot's mail processes run as it.
@@ -190,7 +190,7 @@ type RootDomain struct {
 
 // RootMailbox is one mailbox as root needs it.
 type RootMailbox struct {
-	// Key names the mailbox's storage for good (decision 306): its folder
+	// Key names the mailbox's storage for good (decision 310): its folder
 	// (vmail/<key>) and its calendars (Radicale's user <key>). hardyd makes
 	// it at random with the mailbox; changing the address keeps it, and an
 	// address used again later never finds the old mailbox's mail.

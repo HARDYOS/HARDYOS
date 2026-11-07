@@ -359,7 +359,7 @@ func checkNetwork(p *Problems, project, name string, n map[string]any) {
 					p.addf("network %s: custom IPAM drivers aren't allowed", name)
 				}
 				// The webmail app's network is the only place hardyd's
-				// mail sign-in takes webmail tokens from (decision 302).
+				// mail sign-in takes webmail tokens from (decision 305).
 				for _, c := range anyList(ipam["config"]) {
 					cm, _ := c.(map[string]any)
 					sub, _ := cm["subnet"].(string)

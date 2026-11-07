@@ -24,7 +24,7 @@ var appFilters = map[string]appFilter{
 	WebmailAppID: webmailFilter,
 }
 
-// webmailFilter keeps Roundcube's own sign-in form shut (decision 302):
+// webmailFilter keeps Roundcube's own sign-in form shut (decision 305):
 // HardyOS signs people in with a webmail token, and a password typed into
 // the form must never reach the mail server from the webmail app (hardyd
 // refuses it there anyway).

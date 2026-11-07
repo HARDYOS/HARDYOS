@@ -22,7 +22,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/ports"
 )
 
-// Sign-in for the mail server (decisions 241, 301). Dovecot never checks a
+// Sign-in for the mail server (decisions 241, 304). Dovecot never checks a
 // password itself: every IMAP and SMTP sign-in becomes an OAuth2 password
 // grant to hardyd (passdb oauth2), and every attempt is first put to
 // hardyd's auth policy endpoint with the client's real address and the
@@ -107,7 +107,7 @@ func SignInName(login string) bool {
 	return err == nil
 }
 
-// Throttle limits failed mail sign-ins (decisions 241, 303). From the
+// Throttle limits failed mail sign-ins (decisions 241, 306). From the
 // internet: 10 failures in 15 minutes block an address (an IPv6 /64) for an
 // hour, and each mailbox is slowed down (doubling waits) on its own. From
 // inside: never blocked, only slowed down, per address and per mailbox, in
@@ -172,7 +172,7 @@ func (t *Throttle) Check(login string, src Source) Verdict {
 	return Verdict{}
 }
 
-// CheckDAV is Check for calendars and contacts (decision 303): only an
+// CheckDAV is Check for calendars and contacts (decision 307): only an
 // address's block refuses; a mailbox's failures from the internet only slow
 // it down (a short pause, then the attempt goes on), so nobody outside can
 // shut a person out of their calendar.
@@ -364,7 +364,7 @@ func parseRemote(s string) netip.Addr {
 	return a.Unmap()
 }
 
-// secretAllowed is decision 302: the webmail app's network signs in with
+// secretAllowed is decision 305: the webmail app's network signs in with
 // webmail tokens only, and webmail tokens work from there only. Mail sent
 // signed in as HardyOS's notifications comes from this server itself.
 func (s *AuthServer) secretAllowed(login, secret string, remote netip.Addr) bool {

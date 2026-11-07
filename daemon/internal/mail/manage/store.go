@@ -545,7 +545,7 @@ func (s *Store) usedAddresses(ctx context.Context, skip int64) (map[string]bool,
 	for _, g := range gs {
 		used[g.Address] = true
 	}
-	// The notification sender is an address of its own (decision 304).
+	// The notification sender is an address of its own (decision 315).
 	if st, err := s.LoadSettings(ctx); err == nil && st.NotifyFrom != "" {
 		used[st.NotifyFrom] = true
 	}
@@ -838,7 +838,7 @@ func (s *Store) PruneGroups(ctx context.Context, addr string) error {
 }
 
 // CheckNotifyFrom makes sure the notification sender is an address of its
-// own (decision 304): not postmaster@ or abuse@, no mailbox, alias or
+// own (decision 315): not postmaster@ or abuse@, no mailbox, alias or
 // group, so the notification sign-in can't send as a person.
 func (s *Store) CheckNotifyFrom(ctx context.Context, addr string) error {
 	if addr == "" {

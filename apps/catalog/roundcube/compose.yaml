@@ -10,7 +10,7 @@
 # Roundcube's bundled http_authentication plugin uses to sign in. hardyd
 # checks the token when Dovecot asks, and only from this app's own network
 # (172.16.253.0/28, below): from here no password is ever accepted, and a
-# token works nowhere else (decision 302). Roundcube's own sign-in form is
+# token works nowhere else (decision 305). Roundcube's own sign-in form is
 # shut: Apache answers nothing without the window proxy's credentials, and
 # HardyOS's proxies refuse the form's submission.
 #

@@ -27,7 +27,7 @@ decisions 239-249.
    │         :465/:587 (LAN)  ── Rspamd (spam, DKIM) ── Dovecot LMTP     │
    │ Dovecot :993 (LAN)  :10993 (PROXY, VPS only)  ── mailboxes on       │
    │                                                  <pool>/mail        │
-   │ hardyd: sign-ins (127.0.0.1:44250), /dav-mail/ → Radicale,          │
+   │ hardyd: sign-ins (Unix socket), /dav-mail/ → Radicale,              │
    │         autoconfig/autodiscover, Control Panel › Mail               │
    │ Roundcube (App Store) in the desktop, signed in by HardyOS          │
    └──────────────┬──────────────────────────────────────────────────────┘
@@ -210,18 +210,51 @@ connection and rate limits.
   ports at all.
 - **Sign-ins** are checked by hardyd: domain passwords with this server's own
   domain controller (like a desktop sign-in), webmail tokens against the
-  desktop session they were made for. Wrong passwords from the internet
-  block the address for an hour after 10 failures in 15 minutes and slow
-  down further guesses at that mailbox; sign-ins from the LAN, NetBird or
-  the server itself are only ever slowed down and never share a counter
-  with the internet, so an attacker can't lock anyone at home out.
+  desktop session they were made for. Dovecot asks hardyd over a Unix
+  socket that only Dovecot may open (`/run/hardyos-mail-auth.sock`, made by
+  `hardyd-mail-auth.socket`), never over a TCP port another program could
+  take first; nothing caches a sign-in. Wrong passwords from the internet
+  block the address (an IPv6 address's whole /64) for an hour after 10
+  failures in 15 minutes, and a mailbox guessed at is refused for a growing
+  wait; sign-ins from the LAN, NetBird or the server itself are only ever
+  refused for a short wait (per address and per mailbox) and never share a
+  counter with the internet, so an attacker can't lock anyone at home out.
+  Sign-ins through the VPS's forwarded ports or the published gateway count
+  as the internet's whatever address they claim. Calendars from the
+  internet: only the address is blocked; a guessed mailbox is just slowed
+  down. Alerts about blocked addresses come at most once an hour, grouped by
+  network.
+- **Senders**: signed-in people may only use their own addresses (and their
+  aliases and groups) as the envelope sender *and* in the From header
+  (Rspamd refuses the message otherwise), and always need a return address.
+  HardyOS's notifications send from an address of their own that no
+  mailbox, alias or group may use.
+- **Rspamd** talks to Postfix and Dovecot over Unix sockets only (the
+  milter: Postfix only; the controller, for learning from Junk: the mail
+  user only, with a password).
+- **Mailboxes** are kept by a key of their own (`vmail/<key>`, calendars too),
+  tied to the domain account's objectGUID: an account deleted and made again
+  under the same name gets a new, empty mailbox, never the old one's mail.
+  Deleting a mailbox removes its messages, calendars and contacts.
+- **Full disks**: `<pool>/mail` has a ZFS quota (set in Settings, or worked
+  out from the mailboxes' quotas, never over 80% of the pool); a full
+  mailbox makes new mail wait (on the VPS) instead of bouncing, and Junk
+  empties itself after 30 days. Nothing bounces to the internet from
+  home: a bounce would go out through SES to a sender that is often forged.
+- **The VPS** limits each client address (connections, messages,
+  recipients, errors; HAProxy: 20 connections at once, 60 a minute) and
+  turns away bots that talk before its greeting (postscreen). Relayed and
+  forwarded connections are accepted at home only from the VPS's NetBird
+  address through the NetBird interface.
 - **Secrets**: the SES secret key, the Cloudflare token, the notification
   sign-in and the Dovecot ↔ hardyd secret are sealed in hardyd's database.
   DKIM keys and the TLS key are made by the root helper on the mail dataset
   (DKIM `0640 root:_rspamd`, TLS `0600 root`) and never reach hardyd.
 - **Webmail** only opens through HardyOS's window proxy (Roundcube listens
   on 127.0.0.1), signed in with a token that lasts as long as the person's
-  desktop session.
+  desktop session. Tokens work only from the webmail app's own network
+  (172.16.253.0/28) and no password works from it; Roundcube's own sign-in
+  form is shut, and the app gateway never passes credentials to it.
 
 ## Backups
 

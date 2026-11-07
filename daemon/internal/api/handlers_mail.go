@@ -1042,7 +1042,7 @@ func (s *Server) handleMailDAV(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Through the app gateway it's the internet's, whatever address it
-	// claims (decision 303).
+	// claims (decision 306).
 	remote, _ := netip.ParseAddr(s.clientIP(r))
 	src := mail.From(remote, gatewayInfo(r) != nil)
 	unauthorized := func() {
@@ -1050,7 +1050,7 @@ func (s *Server) handleMailDAV(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "wrong address or password", http.StatusUnauthorized)
 	}
 	// Only a mailbox's address and its own password: never the
-	// notification sign-in, never a webmail token (decision 302).
+	// notification sign-in, never a webmail token (decision 305).
 	if login == mail.NotifyLogin || !mail.SignInName(login) || strings.HasPrefix(pw, mail.WebmailTokenPrefix) {
 		if svc.Throttle.ResultDAV(login, src, false) {
 			svc.AuthEvent(mail.AuthEvent{Login: login, Remote: src.Addr.String(), Protocol: "dav", Blocked: true})
@@ -1110,7 +1110,7 @@ type MailOptions struct {
 }
 
 // RunMail serves Dovecot's sign-in questions on the mail sign-in socket
-// (decision 301) and keeps the mail server's accounts and alerts going
+// (decision 304) and keeps the mail server's accounts and alerts going
 // until ctx ends. Without the socket nobody can sign in to mail: that's an
 // alert (mail.service) while the mail server is on.
 func (s *Server) RunMail(ctx context.Context, opts MailOptions) {

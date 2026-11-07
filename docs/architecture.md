@@ -1749,13 +1749,13 @@ Details: [monitoring.md](monitoring.md).
 
 ## Mail server
 
-User guide: [mail.md](mail.md); decisions 239-249.
+User guide: [mail.md](mail.md); decisions 239-249, security review 303-316 (the port registry, 303, is HardyOS-wide).
 
 ```
  internet ─25─► VPS Postfix (relay, verify, queue 14 d) ─NetBird─► Postfix :2525 ─► Rspamd milter ─► Dovecot LMTP ─► <pool>/mail/vmail
  apps ─993/465/587─► VPS HAProxy ─PROXY v2─► Dovecot :10993 / Postfix :10465 :10587       (nftables: VPS peer only)
  LAN apps ─993/465/587──────────────────────► Dovecot / Postfix                          Postfix ─587 STARTTLS─► Amazon SES
- Dovecot passdb oauth2 + auth policy ─127.0.0.1:44250─► hardyd (domain passwords: Kerberos with the local DC; webmail tokens; limits)
+ Dovecot passdb oauth2 + auth policy ─/run/hardyos-mail-auth.sock─► hardyd (domain passwords: Kerberos with the local DC; webmail tokens; limits)
  phones ─https://mail.<base>─► NetBird proxy ─► app gateway ─► hardyd /dav-mail/ (checks the password) ─► Radicale 127.0.0.1:5232
  desktop ─► window proxy (Basic: address + session token) ─► Roundcube (catalog app, 127.0.0.1) ─► Dovecot / Postfix on the host
 ```
@@ -1787,7 +1787,9 @@ User guide: [mail.md](mail.md); decisions 239-249.
   Dovecot read the certificate from root's copy in `/run/hardyos-mail/tls`.
 - **Sign-in.** Dovecot 2.4 has no checkpassword driver; every PLAIN/LOGIN
   sign-in (IMAP, and SMTP through Dovecot SASL) is an OAuth2 password grant
-  to hardyd's listener on 127.0.0.1:44250 (`/token`, client secret = the
+  to hardyd's Unix socket `/run/hardyos-mail-auth.sock` (systemd's
+  `hardyd-mail-auth.socket`, hardyd:dovecot 0660, handed to hardyd;
+  Dovecot reaches it as its HTTP proxy, decision 304) (`/token`, client secret = the
   shared secret), and every attempt is first put to the auth policy
   endpoint (`/policy`, bearer = the secret; fail closed) with the client's
   real address. hardyd (`manage.Service.CheckLogin`) accepts the mailbox's

@@ -572,7 +572,7 @@ func (rt *remoteRuntime) proxyFor(route *gwRoute, desktopHost string) *gwRoute {
 			gatewayRequestCookies(pr.Out.Header)
 			if route.appID == WebmailAppID {
 				// Only HardyOS's window proxy signs people in to webmail
-				// (decision 302): never credentials from the internet.
+				// (decision 305): never credentials from the internet.
 				pr.Out.Header.Del("Authorization")
 			}
 		},

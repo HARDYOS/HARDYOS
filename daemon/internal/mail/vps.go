@@ -159,7 +159,7 @@ smtpd_tls_protocols = >=TLSv1.2
 smtpd_tls_received_header = yes
 smtp_tls_security_level = may
 smtp_tls_loglevel = 1
-# Limits per client address (decision 308).
+# Limits per client address (decision 312).
 anvil_rate_time_unit = 60s
 smtpd_client_connection_count_limit = 10
 smtpd_client_connection_rate_limit = 30

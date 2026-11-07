@@ -91,7 +91,7 @@ type Service struct {
 	conds    map[string]string       // alert key -> last body
 	certPin  []byte                  // the server's leaf (DER), for LoopbackTLS
 	certTime time.Time
-	// Sign-in alerts, gathered (decision 303): blocked networks since the
+	// Sign-in alerts, gathered (decision 306): blocked networks since the
 	// last alert, and when it went out.
 	blockedNets map[string]bool
 	lastBlocked time.Time
@@ -522,7 +522,7 @@ func (s *Service) SyncAccounts(ctx context.Context) (*AccountSync, error) {
 		m := byAccount[acct]
 		if m != nil && !m.Deleting && u.GUID != "" && !strings.EqualFold(m.AccountGUID, u.GUID) {
 			// The mailbox belongs to the account itself, not its name
-			// (decision 306). Another account under the same name (the
+			// (decision 310). Another account under the same name (the
 			// old one deleted and made again), or a mailbox whose account
 			// can't be told apart any more: the mailbox stays, detached,
 			// and the new account gets one of its own. A mailbox made
@@ -702,7 +702,7 @@ const signinAlertEvery = time.Hour
 const maxConds = 500
 
 // AuthEvent gathers blocked internet addresses into one alert an hour at
-// most (decision 303), by network (IPv4 /24, IPv6 /48): an attack from many
+// most (decision 306), by network (IPv4 /24, IPv6 /48): an attack from many
 // addresses is one notification, not thousands.
 func (s *Service) AuthEvent(e mail.AuthEvent) {
 	if !e.Blocked {
