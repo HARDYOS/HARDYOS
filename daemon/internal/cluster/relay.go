@@ -43,7 +43,7 @@ func (n *Core) relayTransport() *http.Transport {
 				if err != nil {
 					host = addr
 				}
-				c, _, err := n.tr.DialNode(ctx, NodeID(host), ALPNRelay)
+				c, _, err := n.trn().DialNode(ctx, NodeID(host), ALPNRelay)
 				return c, err
 			},
 			ForceAttemptHTTP2:     false,
@@ -200,7 +200,7 @@ func (n *Core) RoundTripRelay(req *http.Request) (*http.Response, error) {
 
 // DialRelay opens a raw relay connection to a member (WebSocket upgrades).
 func (n *Core) DialRelay(ctx context.Context, node NodeID) (net.Conn, error) {
-	c, _, err := n.tr.DialNode(ctx, node, ALPNRelay)
+	c, _, err := n.trn().DialNode(ctx, node, ALPNRelay)
 	if err != nil {
 		return nil, unreachable(node, err)
 	}

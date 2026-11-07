@@ -107,10 +107,16 @@ type Config struct {
 type Core struct {
 	cfg  Config
 	log  *slog.Logger
-	tr   *Transport
 	mux  *peerMux
-	pc   *peerClient
 	path *Paths
+
+	// tr and pc are replaced by Stop (listeners can't be reopened); read
+	// them with trn and peerc, which other goroutines may call meanwhile.
+	swapMu sync.RWMutex
+	tr     *Transport
+	pc     *peerClient
+	// stopMu serializes Stop (hardyd's shutdown and a leave can meet).
+	stopMu sync.Mutex
 
 	mu        sync.Mutex
 	info      *Info
@@ -186,10 +192,24 @@ func New(ctx context.Context, cfg Config) (*Core, error) {
 func (n *Core) Mux() PeerMux { return n.mux }
 
 // Peers is the client for other members' peer APIs.
-func (n *Core) Peers() PeerClient { return n.pc }
+func (n *Core) Peers() PeerClient { return n.peerc() }
+
+// trn is the current transport.
+func (n *Core) trn() *Transport {
+	n.swapMu.RLock()
+	defer n.swapMu.RUnlock()
+	return n.tr
+}
+
+// peerc is the current peer client.
+func (n *Core) peerc() *peerClient {
+	n.swapMu.RLock()
+	defer n.swapMu.RUnlock()
+	return n.pc
+}
 
 // Transport is the cluster listener and dialer (relays use it).
-func (n *Core) Transport() *Transport { return n.tr }
+func (n *Core) Transport() *Transport { return n.trn() }
 
 // Paths is this node's path table.
 func (n *Core) Paths() *Paths { return n.path }
@@ -363,7 +383,8 @@ func (n *Core) startLocked(ctx context.Context, boot *raft.Configuration) error 
 		n.closeStores()
 		return err
 	}
-	layer := &streamLayer{t: n.tr, ln: n.tr.RaftListener()}
+	tr := n.trn()
+	layer := &streamLayer{t: tr, ln: tr.RaftListener()}
 	trans := raft.NewNetworkTransportWithConfig(&raft.NetworkTransportConfig{
 		Stream: layer, MaxPool: 3, Timeout: 10 * time.Second, Logger: hclogFor(n.log),
 	})
@@ -384,7 +405,7 @@ func (n *Core) startLocked(ctx context.Context, boot *raft.Configuration) error 
 	n.running = true
 	rctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	n.cancel = cancel
-	n.tr.Self = n.info.Node
+	n.trn().Self = n.info.Node
 	n.listen()
 	n.live.reset()
 	n.wg.Add(4)
@@ -405,7 +426,7 @@ func (n *Core) closeStores() {
 // listen binds the cluster port on this node's own addresses.
 func (n *Core) listen() {
 	a := n.cfg.Addresses()
-	n.tr.SetListen([]netip.Addr{a.LAN, a.Storage, a.NetBird})
+	n.trn().SetListen([]netip.Addr{a.LAN, a.Storage, a.NetBird})
 }
 
 func (n *Core) listenLoop(ctx context.Context) {
@@ -423,6 +444,8 @@ func (n *Core) listenLoop(ctx context.Context) {
 
 // Stop shuts the node down (it stays a member).
 func (n *Core) Stop() {
+	n.stopMu.Lock()
+	defer n.stopMu.Unlock()
 	n.mu.Lock()
 	r, cancel := n.raft, n.cancel
 	n.raft, n.cancel, n.running = nil, nil, false
@@ -433,8 +456,9 @@ func (n *Core) Stop() {
 	if r != nil {
 		_ = r.Shutdown().Error()
 	}
-	n.tr.Close()
-	n.pc.close()
+	oldTr := n.trn()
+	oldTr.Close()
+	n.peerc().close()
 	n.probeMu.Lock()
 	for k, t := range n.probes {
 		t.CloseIdleConnections()
@@ -449,18 +473,20 @@ func (n *Core) Stop() {
 	}
 	n.closeStores()
 	// A new transport for a later start (listeners can't be reopened).
-	n.tr = &Transport{ID: n.cfg.Identity, Net: n.cfg.Net, Book: n, Paths: n.path, Port: n.cfg.Port, Log: n.log,
-		Peer: n.mux, Relay: n.tr.Relay, Bootstrap: n.tr.Bootstrap, Migrate: n.tr.Migrate}
-	n.pc = newPeerClient(n.tr)
+	tr := &Transport{ID: n.cfg.Identity, Net: n.cfg.Net, Book: n, Paths: n.path, Port: n.cfg.Port, Log: n.log,
+		Peer: n.mux, Relay: oldTr.Relay, Bootstrap: oldTr.Bootstrap, Migrate: oldTr.Migrate}
+	n.swapMu.Lock()
+	n.tr, n.pc = tr, newPeerClient(tr)
+	n.swapMu.Unlock()
 	n.mu.Unlock()
 }
 
 // SetRelay sets the handler for ALPNRelay connections (the API proxy's
 // target side). Call before Start.
-func (n *Core) SetRelay(h http.Handler) { n.tr.Relay = h }
+func (n *Core) SetRelay(h http.Handler) { n.trn().Relay = h }
 
 // SetMigrate sets part C's live migration hook. Call before Start.
-func (n *Core) SetMigrate(f func(conn *tls.Conn, from Node)) { n.tr.Migrate = f }
+func (n *Core) SetMigrate(f func(conn *tls.Conn, from Node)) { n.trn().Migrate = f }
 
 // ---- raft glue ----------------------------------------------------------------
 
@@ -751,7 +777,7 @@ func (n *Core) submit(ctx context.Context, sc *SignedCommand) (uint64, error) {
 		} else if leader, ok := n.Leader(); ok {
 			var ans proposeAnswer
 			cctx, cancel := context.WithDeadline(ctx, deadline)
-			err := n.pc.Call(cctx, leader, http.MethodPost, "/propose", sc, &ans)
+			err := n.peerc().Call(cctx, leader, http.MethodPost, "/propose", sc, &ans)
 			cancel()
 			var pe *PeerError
 			switch {

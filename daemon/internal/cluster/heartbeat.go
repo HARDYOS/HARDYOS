@@ -165,7 +165,7 @@ func (n *Core) beat(ctx context.Context, t Timings) {
 	hctx, cancel := context.WithTimeout(ctx, t.Heartbeat*2)
 	defer cancel()
 	var ans HeartbeatAnswer
-	if err := n.pc.Call(hctx, leader, http.MethodPost, "/heartbeat", req, &ans); err != nil {
+	if err := n.peerc().Call(hctx, leader, http.MethodPost, "/heartbeat", req, &ans); err != nil {
 		n.log.Debug("cluster: heartbeat", "leader", leader, "err", err)
 		return
 	}
@@ -221,7 +221,7 @@ func (n *Core) Health(ctx context.Context) ([]Health, error) {
 		return nil, ErrNoQuorum
 	}
 	var out []Health
-	if err := n.pc.Call(ctx, leader, http.MethodGet, "/health", nil, &out); err != nil {
+	if err := n.peerc().Call(ctx, leader, http.MethodGet, "/health", nil, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -457,12 +457,12 @@ func (n *Core) probe(ctx context.Context, peer Node, p Path) (time.Duration, err
 		return 0, ErrUnreachable
 	}
 	key := string(peer.ID) + "/" + string(p) + "/" + peer.Pin
-	addr := net.JoinHostPort(a.String(), strconv.Itoa(n.tr.port()))
+	addr := net.JoinHostPort(a.String(), strconv.Itoa(n.trn().port()))
 	n.probeMu.Lock()
 	t := n.probes[key]
 	if t == nil {
 		pin := peer.Pin
-		tr := n.tr
+		tr := n.trn()
 		t = &http2.Transport{
 			DialTLSContext: func(ctx context.Context, _, _ string, _ *tls.Config) (net.Conn, error) {
 				return tr.DialAddr(ctx, addr, ALPNPeer, pin, nil)
@@ -497,7 +497,7 @@ func (n *Core) pathSwitched(id NodeID, from, to Path) {
 	if from != PathNone {
 		// Connections on the path left behind are redialled on the new one
 		// (the first choice keeps what is already connected).
-		n.tr.DropConns(id)
+		n.trn().DropConns(id)
 	}
 	n.events.publish(Event{Index: n.cfg.Machine.Index(), Node: id})
 }

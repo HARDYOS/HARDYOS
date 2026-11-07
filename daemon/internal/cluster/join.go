@@ -180,7 +180,7 @@ func (n *Core) OpenJoinCode(ctx context.Context, role Role, by string) (*JoinOff
 	off := &JoinOffer{Code: FormatCode(code), Role: role, Expires: jc.Expires}
 	for _, a := range []netip.Addr{self.Addresses.LAN, self.Addresses.NetBird} {
 		if a.IsValid() {
-			off.Addresses = append(off.Addresses, netip.AddrPortFrom(a, uint16(n.tr.port())))
+			off.Addresses = append(off.Addresses, netip.AddrPortFrom(a, uint16(n.trn().port())))
 		}
 	}
 	return off, nil
@@ -427,14 +427,14 @@ func (n *Core) Join(ctx context.Context, p JoinParams) (*JoinAnswer, error) {
 	}
 	addr := p.Address
 	if _, _, err := net.SplitHostPort(addr); err != nil {
-		addr = net.JoinHostPort(strings.Trim(addr, "[]"), strconv.Itoa(n.tr.port()))
+		addr = net.JoinHostPort(strings.Trim(addr, "[]"), strconv.Itoa(n.trn().port()))
 	}
 	me := Node{ID: p.Node, Name: p.Name, Role: p.Role, Pin: n.cfg.Identity.Pin, PublicKey: n.cfg.Identity.PublicKey,
 		Addresses: n.cfg.Addresses()}
 	var memberPin string
 	dctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	conn, err := n.tr.DialAddr(dctx, addr, ALPNPeer, "", &memberPin)
+	conn, err := n.trn().DialAddr(dctx, addr, ALPNPeer, "", &memberPin)
 	if err != nil {
 		return nil, fmt.Errorf("can't reach %s: %w", p.Address, err)
 	}
