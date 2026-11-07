@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +15,7 @@ import (
 )
 
 func TestLibvirtHookChecksOnlyMigrations(t *testing.T) {
-	s := &Server{}
+	s := &Server{AllowedUIDs: []uint32{uint32(os.Getuid())}}
 	var got []vms.MigrateCheckArgs
 	s.Handle(OpVMsMigrateCheck, typed(func(_ context.Context, a vms.MigrateCheckArgs) (any, error) {
 		got = append(got, a)
@@ -50,7 +51,7 @@ func (d *dev) Keepalive() error              { d.pets++; return nil }
 func (d *dev) Close(bool) error              { return nil }
 
 func TestWatchdogOps(t *testing.T) {
-	s := &Server{}
+	s := &Server{AllowedUIDs: []uint32{uint32(os.Getuid())}}
 	d := &dev{}
 	f := &fence.Feeder{Open: func() (fence.Device, string, error) { return d, fence.KindHardware, nil }, Interval: time.Hour}
 	RegisterClusterFence(s, f, nil, nil)
