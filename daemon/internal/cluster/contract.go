@@ -64,6 +64,11 @@ const (
 	ALPNRaft    = "hardyos-raft/1"    // Raft stream layer
 	ALPNPeer    = "hardyos-peer/1"    // HTTP/2: heartbeats, proposals, API proxy, storage control, join
 	ALPNMigrate = "hardyos-migrate/1" // the relayed libvirt connection of one live migration
+	// ALPNRelay is HTTP/1.1 for proxied desktop requests that need a
+	// connection of their own: WebSocket upgrades (events, VM console,
+	// terminal), app windows and plain API requests from the entry node
+	// (decision 331).
+	ALPNRelay = "hardyos-relay/1"
 
 	// PeerPathPrefix prefixes the peer API on ALPNPeer.
 	PeerPathPrefix = "/cluster/v1/"
@@ -154,7 +159,11 @@ type Node struct {
 	Role Role   `json:"role"`
 	// Pin is the SHA-256 (hex) of the node's cluster public key
 	// (SubjectPublicKeyInfo), as replication pins keys.
-	Pin       string    `json:"pin"`
+	Pin string `json:"pin"`
+	// PublicKey is the node's cluster public key (SubjectPublicKeyInfo,
+	// DER); Pin is its SHA-256. The FSM verifies signed commands with it
+	// (decision 330).
+	PublicKey []byte    `json:"publicKey"`
 	Addresses Addresses `json:"addresses"`
 	State     NodeState `json:"state"`
 	Suffrage  Suffrage  `json:"suffrage"`
@@ -189,7 +198,11 @@ type ComputeInfo struct {
 type Path string
 
 const (
-	PathLAN     Path = "lan"
+	PathLAN Path = "lan"
+	// PathStorage is the storage network used as the middle control path
+	// (heartbeats, Raft, peer API; never bulk traffic over NetBird) when
+	// the LAN fails: LAN, then storage network, then NetBird (decision 332).
+	PathStorage Path = "storage"
 	PathNetBird Path = "netbird"
 	PathNone    Path = "none"
 )
