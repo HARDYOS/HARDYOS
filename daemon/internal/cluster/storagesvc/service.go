@@ -552,17 +552,17 @@ func (s *Service) StorageInterface(ctx context.Context, subnet netip.Prefix) (st
 
 // NodeStatus is one node's storage status (the Cluster app's per-node view).
 type NodeStatus struct {
-	Node      cluster.NodeID    `json:"node"`
-	Role      cluster.Role      `json:"role"`
-	Reachable bool              `json:"reachable"`
-	Healthy   bool              `json:"healthy"`
-	Problem   string            `json:"problem,omitempty"`
-	Sessions  int               `json:"sessions"`
+	Node      cluster.NodeID     `json:"node"`
+	Role      cluster.Role       `json:"role"`
+	Reachable bool               `json:"reachable"`
+	Healthy   bool               `json:"healthy"`
+	Problem   string             `json:"problem,omitempty"`
+	Sessions  int                `json:"sessions"`
 	Attached  []sanclient.Record `json:"attached"`
-	Shares    map[string]string `json:"shares"`
-	Interface string            `json:"interface,omitempty"`
-	Address   string            `json:"address,omitempty"`
-	Checked   time.Time         `json:"checked"`
+	Shares    map[string]string  `json:"shares"`
+	Interface string             `json:"interface,omitempty"`
+	Address   string             `json:"address,omitempty"`
+	Checked   time.Time          `json:"checked"`
 }
 
 // LocalStatus reports this compute node's storage client.

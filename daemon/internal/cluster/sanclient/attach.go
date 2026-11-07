@@ -472,6 +472,9 @@ func (c *Client) Detach(ctx context.Context, a DetachArgs) error {
 // deleteSCSI removes every SCSI disk with that WWN (each path of it).
 func (c *Client) deleteSCSI(wwn string) error {
 	blocks, err := os.ReadDir(c.sys("/sys/block"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
