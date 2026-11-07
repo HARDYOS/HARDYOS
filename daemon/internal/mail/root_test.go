@@ -80,13 +80,25 @@ func TestDeleteMailboxByKeyWithCalendars(t *testing.T) {
 	}
 }
 
+// Decision 318: only a mailbox flagged as made under the old layout takes
+// its address's folder, once; every other old folder is put aside for the
+// administrator, never into a mailbox.
 func TestMigrateLayoutToKeys(t *testing.T) {
 	r, e := testRoot(t)
+	r.Write = func(p string, b []byte, m os.FileMode) error { return os.WriteFile(p, b, m) }
 	old := filepath.Join(e.VMailDir(), "example.net", "alice", "Maildir", "cur", "1")
 	oldCal := filepath.Join(e.RadicaleDir(), "collections", "collection-root", "alice@example.net", "calendar", "e.ics")
-	mkfile(t, old)
-	mkfile(t, oldCal)
-	cfg := RootConfig{Mailboxes: []RootMailbox{{Key: keyAlice, Address: "alice@example.net"}}}
+	// A deleted person's leftovers under an address someone new has now.
+	gone := filepath.Join(e.VMailDir(), "example.net", "bob", "Maildir", "cur", "1")
+	goneCal := filepath.Join(e.RadicaleDir(), "collections", "collection-root", "bob@example.net", "calendar", "e.ics")
+	family := filepath.Join(e.RadicaleDir(), "collections", "collection-root", "family", "calendar", "e.ics")
+	for _, p := range []string{old, oldCal, gone, goneCal, family} {
+		mkfile(t, p)
+	}
+	cfg := RootConfig{Mailboxes: []RootMailbox{
+		{Key: keyAlice, Address: "alice@example.net", Legacy: true},
+		{Key: keyBob, Address: "bob@example.net"}, // new owner of bob@
+	}}
 	if err := r.migrateLayout(e, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -96,13 +108,28 @@ func TestMigrateLayoutToKeys(t *testing.T) {
 	if !exists(filepath.Join(e.RadicaleDir(), "collections", "collection-root", keyAlice, "calendar", "e.ics")) {
 		t.Fatal("calendars not moved to the key")
 	}
-	// Again: nothing to do, nothing overwritten.
-	mkfile(t, old)
-	if err := r.migrateLayout(e, cfg); err != nil {
-		t.Fatal(err)
+	if exists(filepath.Join(e.VMailDir(), keyBob)) || exists(filepath.Join(e.RadicaleDir(), "collections", "collection-root", keyBob)) {
+		t.Fatal("the new owner of an address got the old one's mail")
 	}
-	if !exists(old) {
-		t.Fatal("a second old folder replaced the key's")
+	if exists(gone) || exists(goneCal) || !exists(family) {
+		t.Fatal("old folders not put aside (or the family calendar was)")
+	}
+	aside, _ := filepath.Glob(filepath.Join(e.VMailDir(), OrphanedDir, "*", "example.net", "bob"))
+	asideCal, _ := filepath.Glob(filepath.Join(e.RadicaleDir(), "collections", OrphanedDir, "*", "bob@example.net"))
+	if len(aside) != 1 || len(asideCal) != 1 {
+		t.Fatalf("put aside: %v %v", aside, asideCal)
+	}
+	if st, _ := os.Stat(filepath.Join(e.VMailDir(), OrphanedDir)); st.Mode().Perm() != 0o700 {
+		t.Fatalf("orphaned folder mode %o", st.Mode().Perm())
+	}
+	if readLayout(e) != LayoutVersion {
+		t.Fatal("layout version not recorded")
+	}
+	// Never again: a later old-looking folder stays where it is.
+	later := filepath.Join(e.VMailDir(), "example.net", "carol", "x")
+	mkfile(t, later)
+	if err := r.migrateLayout(e, cfg); err != nil || !exists(later) {
+		t.Fatalf("the move ran twice: %v", err)
 	}
 }
 

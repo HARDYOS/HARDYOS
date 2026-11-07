@@ -220,7 +220,8 @@ func (r *Root) ensureDir(dir string, mode os.FileMode, uid, gid int) error {
 	return unix.Fchmod(fd, perm)
 }
 
-// socketDirs makes the folders of Rspamd's sockets (decision 309). Each is
+// socketDirs makes the folders of Rspamd's and Radicale's sockets
+// (decisions 309, 319). Each is
 // setgid to the group that may connect, so the socket Rspamd makes in it
 // (mode 0660) belongs to that group: Postfix for the milter, the mail user
 // (Dovecot's learning script) for the controller.
@@ -238,23 +239,63 @@ func (r *Root) socketDirs(e Env, rspamdUID int) error {
 	if err := r.ensureDir(RspamdMilterDir, 0o750|os.ModeSetgid, rspamdUID, postfixGID); err != nil {
 		return err
 	}
-	return r.ensureDir(RspamdCtlDir, 0o750|os.ModeSetgid, rspamdUID, e.VMailGID)
+	if err := r.ensureDir(RspamdCtlDir, 0o750|os.ModeSetgid, rspamdUID, e.VMailGID); err != nil {
+		return err
+	}
+	// Radicale's socket: only hardyd's group (decision 319).
+	radUID, _, err := r.lookupUser("radicale")
+	if err != nil {
+		return err
+	}
+	hardydGID, err := r.lookupGroup("hardyd")
+	if err != nil {
+		return err
+	}
+	return r.ensureDir(RadicaleSocketDir, 0o750|os.ModeSetgid, radUID, hardydGID)
+}
+
+// LayoutVersion is the mail dataset's layout: 2 keeps mailboxes and
+// calendars under their key (decision 310). The version is recorded in
+// the dataset (layoutFile), so the move from the old layout runs once.
+const LayoutVersion = 2
+
+// OrphanedDir holds folders from the old layout that belonged to no
+// mailbox being moved (vmail/.orphaned/<time>/, root only; Radicale's in
+// radicale/collections/.orphaned/<time>/): the administrator decides.
+const OrphanedDir = ".orphaned"
+
+func layoutFile(e Env) string { return filepath.Join(e.MailRoot, ".hardyos-layout") }
+
+func readLayout(e Env) int {
+	b, err := readNoFollow(layoutFile(e), 64)
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	return n
 }
 
 // migrateLayout moves mailboxes and calendars kept under their address
 // (vmail/<domain>/<local>, Radicale's collection-root/<address>; HardyOS
-// before decision 310) to their key, once.
+// before decision 310) to their key, once (decision 318). Only mailboxes
+// hardyd flagged as made under the old layout (Legacy) take their address's
+// folder: a mailbox that has the address now might not be the person who
+// had it then. Every other address-named folder goes to OrphanedDir, never
+// into a mailbox.
 func (r *Root) migrateLayout(e Env, cfg RootConfig) error {
+	if readLayout(e) >= LayoutVersion {
+		return nil
+	}
+	stamp := time.Now().UTC().Format("20060102-150405")
 	vm, err := os.OpenRoot(e.VMailDir())
 	if err != nil {
 		return err
 	}
 	defer vm.Close()
-	rad, radErr := r.radicaleRoot(e)
-	if radErr == nil {
-		defer rad.Close()
-	}
 	for _, m := range cfg.Mailboxes {
+		if !m.Legacy {
+			continue
+		}
 		local, dom, _ := SplitAddress(m.Address)
 		old := filepath.Join(dom, local)
 		if st, err := vm.Lstat(old); err == nil && st.IsDir() {
@@ -265,17 +306,82 @@ func (r *Root) migrateLayout(e Env, cfg RootConfig) error {
 				r.log().Info("mail: moved a mailbox to its key", "address", m.Address, "key", m.Key)
 			}
 		}
-		if radErr != nil {
-			continue
-		}
-		oldCal := filepath.Join("collection-root", m.Address)
-		if st, err := rad.Lstat(oldCal); err == nil && st.IsDir() {
-			if _, err := rad.Lstat(filepath.Join("collection-root", m.Key)); errors.Is(err, fs.ErrNotExist) {
-				if err := rad.Rename(oldCal, filepath.Join("collection-root", m.Key)); err != nil {
-					return fmt.Errorf("moving %s's calendars: %w", m.Address, err)
+	}
+	// What's left of the old layout: every folder that isn't a key.
+	if err := r.orphan(vm, ".", stamp, func(name string) bool { return !keyRE.MatchString(name) }, 0); err != nil {
+		return fmt.Errorf("putting old mail folders aside: %w", err)
+	}
+	if rad, err := r.radicaleRoot(e); err == nil {
+		defer rad.Close()
+		for _, m := range cfg.Mailboxes {
+			if !m.Legacy {
+				continue
+			}
+			oldCal := filepath.Join("collection-root", m.Address)
+			if st, err := rad.Lstat(oldCal); err == nil && st.IsDir() {
+				if _, err := rad.Lstat(filepath.Join("collection-root", m.Key)); errors.Is(err, fs.ErrNotExist) {
+					if err := rad.Rename(oldCal, filepath.Join("collection-root", m.Key)); err != nil {
+						return fmt.Errorf("moving %s's calendars: %w", m.Address, err)
+					}
 				}
 			}
 		}
+		// Calendars of addresses (collection-root/<address>) nobody moved.
+		if _, err := rad.Lstat("collection-root"); err == nil {
+			if err := r.orphan(rad, "collection-root", stamp, func(name string) bool { return strings.Contains(name, "@") }, 1); err != nil {
+				return fmt.Errorf("putting old calendars aside: %w", err)
+			}
+		}
+	}
+	return r.write(layoutFile(e), []byte(strconv.Itoa(LayoutVersion)+"\n"), 0o600)
+}
+
+// orphan moves the entries of dir (inside root) that match into
+// <OrphanedDir>/<stamp>/ at depth levels above dir (0: dir itself), a folder
+// only root may open.
+func (r *Root) orphan(root *os.Root, dir, stamp string, match func(string) bool, up int) error {
+	f, err := root.Open(dir)
+	if err != nil {
+		return err
+	}
+	names, err := f.Readdirnames(-1)
+	f.Close()
+	if err != nil {
+		return err
+	}
+	base := dir
+	for i := 0; i < up; i++ {
+		base = filepath.Dir(base)
+	}
+	target := filepath.Join(base, OrphanedDir, stamp)
+	made := false
+	for _, n := range names {
+		if n == OrphanedDir || !match(n) {
+			continue
+		}
+		if st, err := root.Lstat(filepath.Join(dir, n)); err != nil || !st.IsDir() {
+			continue
+		}
+		if !made {
+			for _, d := range []string{filepath.Join(base, OrphanedDir), target} {
+				if err := root.Mkdir(d, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+					return err
+				}
+				if r.Chown == nil {
+					if err := root.Lchown(d, 0, 0); err != nil {
+						return err
+					}
+				}
+				if err := root.Chmod(d, 0o700); err != nil {
+					return err
+				}
+			}
+			made = true
+		}
+		if err := root.Rename(filepath.Join(dir, n), filepath.Join(target, n)); err != nil {
+			return err
+		}
+		r.log().Warn("mail: put a folder from the old layout aside", "folder", n, "to", filepath.Join(root.Name(), target))
 	}
 	return nil
 }

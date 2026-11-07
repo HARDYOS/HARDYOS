@@ -713,11 +713,83 @@ func senderOwners(c RootConfig) [][2]string {
 // checks the envelope, and the From header is what people see and what
 // DKIM signs for.
 const fromCheckLua = `-- %s
+local util = require "rspamd_util"
 local owners = rspamd_config:add_map({
   type = "map",
   url = %q,
   description = "HardyOS: who may send as each address",
 })
+
+local function owned(user, addr)
+  local allowed = owners:get_key(string.lower(addr))
+  if not allowed then
+    return false
+  end
+  for o in string.gmatch(allowed, "[^,%%s]+") do
+    if o == user then
+      return true
+    end
+  end
+  return false
+end
+
+-- Every address a header names, or nil when it names none.
+local function addresses(task, value)
+  local list = util.parse_mail_address(value, task:get_mempool())
+  if not list or #list == 0 then
+    return nil
+  end
+  local out = {}
+  for _, a in ipairs(list) do
+    if not a.addr or a.addr == "" then
+      return nil
+    end
+    out[#out + 1] = string.lower(a.addr)
+  end
+  return out
+end
+
+local function check(task, user)
+  local froms = task:get_header_full("From") or {}
+  if #froms ~= 1 then
+    return "A message needs exactly one From header"
+  end
+  local raw = froms[1].decoded or froms[1].value or ""
+  -- A group ("Friends: a@x;") isn't allowed in From.
+  if string.match(raw, '^[^"<@]*:') then
+    return "From can't be a group"
+  end
+  local from = task:get_from({"mime", "orig"})
+  if not from or #from ~= 1 or not from[1].addr or from[1].addr == "" then
+    return "A message needs exactly one From address"
+  end
+  local addr = string.lower(from[1].addr)
+  if not owned(user, addr) then
+    return "You may not send as " .. addr
+  end
+  -- A display name that shows another address ("bob@x" <alice@x>), also
+  -- when MIME-encoded.
+  local name = string.lower(from[1].name or "")
+  for other in string.gmatch(name, "[%%w%%._%%+%%-]+@[%%w%%.%%-]+") do
+    if other ~= addr then
+      return "The display name shows another address (" .. other .. ")"
+    end
+  end
+  for _, h in ipairs({"Sender", "Resent-From", "Resent-Sender"}) do
+    for _, hdr in ipairs(task:get_header_full(h) or {}) do
+      local list = addresses(task, hdr.decoded or hdr.value or "")
+      if not list then
+        return h .. " names no address"
+      end
+      for _, a in ipairs(list) do
+        if not owned(user, a) then
+          return "You may not send as " .. a .. " (" .. h .. ")"
+        end
+      end
+    end
+  end
+  return nil
+end
 
 rspamd_config:register_symbol({
   name = "HARDYOS_FROM_NOT_OWNED",
@@ -728,26 +800,7 @@ rspamd_config:register_symbol({
     if not user then
       return false
     end
-    user = string.lower(user)
-    local from = task:get_from({"mime", "orig"})
-    local why
-    if not from or #from ~= 1 or not from[1].addr or from[1].addr == "" then
-      why = "A message needs exactly one From address"
-    else
-      local addr = string.lower(from[1].addr)
-      local allowed = owners:get_key(addr)
-      local ok = false
-      if allowed then
-        for o in string.gmatch(allowed, "[^,%%s]+") do
-          if o == user then
-            ok = true
-          end
-        end
-      end
-      if not ok then
-        why = "You may not send as " .. addr
-      end
-    end
+    local why = check(task, string.lower(user))
     if why then
       task:insert_result("HARDYOS_FROM_NOT_OWNED", 1.0, why)
       task:set_pre_result("reject", why, "hardyos")
@@ -910,11 +963,11 @@ logfile ""
 
 func renderRadicale(c RootConfig, s RootSecrets, e Env) []File {
 	conf := fmt.Sprintf(`# %s
-# Calendars and contacts. Radicale listens on 127.0.0.1 only; hardyd checks
-# each person's own password and talks to it on their behalf.
+# Calendars and contacts. Radicale runs under gunicorn on a Unix socket
+# only hardyd may open (decision 319); hardyd checks each person's own
+# password and talks to it on their behalf. Radicale's own server (and its
+# TCP port) isn't used.
 [server]
-hosts = 127.0.0.1:%d
-max_connections = 40
 max_content_length = 100000000
 timeout = 30
 
@@ -940,7 +993,7 @@ type = none
 
 [logging]
 level = warning
-`, generatedHeader, PortRadicale, RadicaleUsers, RadicaleRights, e.RadicaleDir())
+`, generatedHeader, RadicaleUsers, RadicaleRights, e.RadicaleDir())
 	rights := fmt.Sprintf(`# %s
 # Everyone signed in may see the root and their own collections.
 [root]
@@ -985,8 +1038,10 @@ permissions: rw
 	}
 	dropIn := fmt.Sprintf(`# %s
 [Service]
-ReadWritePaths=%s
-`, generatedHeader, e.RadicaleDir())
+ExecStart=
+ExecStart=%s
+ReadWritePaths=%s %s
+`, generatedHeader, strings.Join(RadicaleCommand(), " "), e.RadicaleDir(), RadicaleSocketDir)
 	return []File{
 		{Path: RadicaleConf, Mode: 0o640, Group: "radicale", Content: conf},
 		{Path: RadicaleRights, Mode: 0o640, Group: "radicale", Content: rights},

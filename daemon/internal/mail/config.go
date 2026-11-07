@@ -45,7 +45,6 @@ const (
 	PortProxySubm   = ports.MailProxySubmission  // 587 forwarded by the VPS (PROXY v2)
 	PortProxySubms  = ports.MailProxySubmissions // 465 forwarded by the VPS (PROXY v2)
 	PortProxyIMAPS  = ports.MailProxyIMAPS       // 993 forwarded by the VPS (PROXY v2)
-	PortRadicale    = ports.MailRadicale         // Radicale on 127.0.0.1 (hardyd proxies /dav-mail/)
 )
 
 // ProxiedPort reports whether a local port is one the VPS forwards to: a
@@ -82,7 +81,19 @@ const (
 	// 0750: Dovecot's learning script, run as the mail user, and root).
 	RspamdCtlDir    = "/run/hardyos-mail/rspamd"
 	RspamdCtlSocket = RspamdCtlDir + "/controller.sock"
+	// RadicaleSocketDir holds Radicale's socket (gunicorn): setgid
+	// radicale:hardyd 0750, so only hardyd can reach Radicale and nothing
+	// can stand in for it (decision 319).
+	RadicaleSocketDir = "/run/hardyos-mail/radicale"
+	RadicaleSocket    = RadicaleSocketDir + "/radicale.sock"
 )
+
+// RadicaleCommand serves Radicale (its WSGI application) on RadicaleSocket
+// with gunicorn, as the radicale user (radicale.service's drop-in).
+func RadicaleCommand() []string {
+	return []string{"/usr/bin/gunicorn", "--bind", "unix:" + RadicaleSocket, "--umask", "0007",
+		"--workers", "2", "--threads", "8", "--timeout", "60", "--env", "RADICALE_CONFIG=" + RadicaleConf, "radicale"}
+}
 
 // WebmailTokenPrefix starts every webmail token (hardyd makes them for the
 // Mail app's window session): a password never does, and such a token is
@@ -195,6 +206,10 @@ type RootMailbox struct {
 	// it at random with the mailbox; changing the address keeps it, and an
 	// address used again later never finds the old mailbox's mail.
 	Key string `json:"key"`
+	// Legacy: the mailbox was made under the old layout (its mail may still
+	// be in vmail/<domain>/<local>); only such a mailbox takes that folder,
+	// once (decision 318).
+	Legacy bool `json:"legacy,omitempty"`
 	// Address is the mailbox's own address; it is also what people sign in
 	// with in mail apps.
 	Address string `json:"address"`
@@ -376,7 +391,7 @@ func (c RootConfig) Normalize(s RootSecrets) (RootConfig, error) {
 		if len(m.Aliases) > MaxAliases {
 			return out, invalid("%s: at most %d aliases", m.Address, MaxAliases)
 		}
-		nm := RootMailbox{Key: m.Key, Address: m.Address, QuotaMB: m.QuotaMB, Aliases: []string{}}
+		nm := RootMailbox{Key: m.Key, Legacy: m.Legacy, Address: m.Address, QuotaMB: m.QuotaMB, Aliases: []string{}}
 		for _, a := range m.Aliases {
 			if reserved(a) {
 				return out, invalid("%s is kept for the postmaster", a)

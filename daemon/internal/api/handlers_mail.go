@@ -1015,7 +1015,7 @@ func (s *Server) handleDAVWellKnown(w http.ResponseWriter, r *http.Request) {
 // davProxy forwards to Radicale.
 var davProxy = &httputil.ReverseProxy{
 	Rewrite: func(pr *httputil.ProxyRequest) {
-		pr.SetURL(&url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", fmt.Sprint(mail.PortRadicale))})
+		pr.SetURL(&url.URL{Scheme: "http", Host: "radicale"})
 		pr.Out.URL.Path = "/" + strings.TrimPrefix(pr.In.URL.Path, mail.DAVPath)
 		pr.Out.URL.RawPath = ""
 		pr.Out.Header.Set("X-Script-Name", strings.TrimSuffix(mail.DAVPath, "/"))
@@ -1023,6 +1023,9 @@ var davProxy = &httputil.ReverseProxy{
 		pr.Out.Header.Del("X-Remote-User")
 		pr.Out.Header.Del("X-Forwarded-For")
 	},
+	// Radicale's Unix socket, checked before every connection (decision
+	// 319).
+	Transport: &http.Transport{DialContext: mail.RadicaleDialer{}.DialContext, MaxIdleConns: 8, IdleConnTimeout: time.Minute},
 	ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
 		http.Error(w, "calendars aren't available right now", http.StatusBadGateway)
 	},

@@ -303,7 +303,7 @@ func (s *Service) RootArgs(ctx context.Context) (*mail.ApplyArgs, error) {
 			continue // leaving the server
 		}
 		live[m.Address] = true
-		cfg.Mailboxes = append(cfg.Mailboxes, mail.RootMailbox{Key: m.Key, Address: m.Address, Aliases: m.Aliases, QuotaMB: m.QuotaMB})
+		cfg.Mailboxes = append(cfg.Mailboxes, mail.RootMailbox{Key: m.Key, Legacy: m.Legacy, Address: m.Address, Aliases: m.Aliases, QuotaMB: m.QuotaMB})
 		if m.CanSignIn() {
 			if sec.DAV[m.Key], err = s.DAVPassword(ctx, m.Key); err != nil {
 				return nil, err
@@ -350,6 +350,10 @@ func (s *Service) Apply(ctx context.Context, progress func(float64, string)) (*m
 	progress(30, "Writing the mail server's settings and starting it")
 	var res mail.ApplyResult
 	if err := s.Priv.Call(ctx, mail.OpApply, args, &res); err != nil {
+		return nil, err
+	}
+	// Root moved the old layout's folders (once): the flags are done.
+	if err := s.Store.ClearLegacy(ctx); err != nil {
 		return nil, err
 	}
 	for _, d := range args.Config.Domains {

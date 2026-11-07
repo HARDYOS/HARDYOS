@@ -21,7 +21,7 @@ import (
 // TestMailServerIntegration once the server is up.
 func securityReview(t *testing.T) {
 	t.Run("no TCP listener between the mail programs", func(t *testing.T) {
-		for _, port := range []int{11332, 11333, 11334, 44250} {
+		for _, port := range []int{5232, 11332, 11333, 11334, 44250} {
 			if c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second); err == nil {
 				c.Close()
 				t.Errorf("something listens on 127.0.0.1:%d", port)
@@ -40,6 +40,7 @@ func securityReview(t *testing.T) {
 			{RspamdMilterSocket, "postfix", 0o660},
 			{RspamdCtlDir, VMailUser, 0o750},
 			{RspamdCtlSocket, VMailUser, 0o660},
+			{RadicaleSocketDir, "hardyd", 0o750},
 		} {
 			st, err := os.Stat(w.path)
 			if err != nil {
@@ -118,10 +119,8 @@ func securityReview(t *testing.T) {
 			t.Fatal("a forwarded attacker claiming a LAN address wasn't blocked")
 		}
 		// The forwarded submission port, which names itself to the policy.
-		blocked := false
-		for i := 0; i < 12 && !blocked; i++ {
-			err := proxiedSMTPAuth(t, PortProxySubms, "192.168.50.51", "bob@example.test", "guess")
-			blocked = err != nil && strings.Contains(strings.ToLower(err.Error()), "too many")
+		for i := 0; i < 12; i++ {
+			_ = proxiedSMTPAuth(t, PortProxySubms, "192.168.50.51", "bob@example.test", "guess")
 		}
 		if err := proxiedSMTPAuth(t, PortProxySubms, "192.168.50.51", "bob@example.test", "bob-password-1"); err == nil {
 			t.Fatal("forwarded submission: the attacker isn't blocked")
@@ -129,6 +128,37 @@ func securityReview(t *testing.T) {
 		// A real LAN client isn't.
 		if !imapLogin(t, itLAN, PortIMAPS, "", "bob@example.test", "bob-password-1") {
 			t.Fatal("the LAN was locked out")
+		}
+	})
+	t.Run("From header tricks", func(t *testing.T) {
+		send := func(headers string) error {
+			c := smtpFrom(t, "127.0.0.1", PortSubmissions, true)
+			defer c.Close()
+			mustOK(t, c.Auth(smtp.PlainAuth("", "alice@example.test", "alice-password-1", itHost)))
+			mustOK(t, c.Mail("alice@example.test"))
+			mustOK(t, c.Rcpt("bob@example.test"))
+			w, err := c.Data()
+			mustOK(t, err)
+			fmt.Fprintf(w, "%sTo: bob@example.test\r\nSubject: x\r\nMessage-ID: <%d@x>\r\n\r\nhi\r\n", headers, time.Now().UnixNano())
+			return w.Close()
+		}
+		for name, h := range map[string]string{
+			"two From headers": "From: alice@example.test\r\nFrom: bob@example.test\r\n",
+			"another address in the display name": "From: \"bob@example.test\" <alice@example.test>\r\n",
+			"an encoded display name":             "From: =?utf-8?b?Ym9iQGV4YW1wbGUudGVzdA==?= <alice@example.test>\r\n",
+			"group syntax":                        "From: Friends: alice@example.test, bob@example.test;\r\n",
+			"someone else's Sender":               "From: alice@example.test\r\nSender: bob@example.test\r\n",
+			"someone else's Resent-From":          "From: alice@example.test\r\nResent-From: bob@example.test\r\n",
+		} {
+			if err := send(h); err == nil || !strings.HasPrefix(err.Error(), "5") {
+				t.Errorf("%s: accepted (%v)", name, err)
+			}
+		}
+		if err := send("From: \"Alice (mom@example.test)\" <alice@example.test>\r\nSender: mom@example.test\r\n"); err == nil {
+			t.Error("a display name naming an address of hers was accepted (it shows another address)")
+		}
+		if err := send("From: Alice <alice@example.test>\r\nSender: mom@example.test\r\n"); err != nil {
+			t.Errorf("her own Sender address: %v", err)
 		}
 	})
 	t.Run("webmail tokens only from the webmail network, no passwords from it", func(t *testing.T) {
@@ -140,6 +170,16 @@ func securityReview(t *testing.T) {
 		}
 		if imapLogin(t, itLAN, PortIMAPS, "", "alice@example.test", itToken) {
 			t.Fatal("a webmail token from elsewhere was accepted")
+		}
+	})
+	t.Run("a forwarded connection claiming the webmail app or this server gets nothing", func(t *testing.T) {
+		// A compromised VPS can put any address in the PROXY header; the
+		// real local port gives it away (decision 317).
+		if imapLogin(t, itVPS, PortProxyIMAPS, itWebmail, "alice@example.test", itToken) {
+			t.Fatal("a forwarded webmail token was accepted")
+		}
+		if err := proxiedSMTPAuth(t, PortProxySubms, "127.0.0.1", NotifyLogin, "notify-password-1"); err == nil {
+			t.Fatal("the notification sign-in was accepted through the VPS")
 		}
 	})
 	t.Run("a full mailbox defers, it doesn't bounce", func(t *testing.T) {
@@ -200,7 +240,8 @@ func proxiedSMTPAuth(t *testing.T, port int, client, user, pass string) error {
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
-	if _, err := conn.Write(proxyV2(client, port)); err != nil {
+	// As HAProxy sends it: the VPS's own port (465), not the forwarded one.
+	if _, err := conn.Write(proxyV2(client, PortSubmissions)); err != nil {
 		return err
 	}
 	tc := tls.Client(conn, &tls.Config{InsecureSkipVerify: true})

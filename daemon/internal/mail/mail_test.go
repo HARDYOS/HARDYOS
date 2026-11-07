@@ -269,8 +269,14 @@ func TestRspamdAndRadicale(t *testing.T) {
 	if !strings.Contains(fs[RspamdLocalDir+"/antivirus.conf"].Content, ClamdSocket) {
 		t.Error("ClamAV on but not configured")
 	}
-	if !strings.Contains(fs[RadicaleConf].Content, "hosts = 127.0.0.1:5232\n") {
-		t.Error("Radicale listens beyond localhost")
+	// Radicale has no TCP port: gunicorn on a Unix socket only hardyd's
+	// group can reach (decision 319).
+	if strings.Contains(fs[RadicaleConf].Content, "hosts") {
+		t.Error("Radicale's own server is configured")
+	}
+	if d := fs[RadicaleDropIn].Content; !strings.Contains(d, "ExecStart=\nExecStart=/usr/bin/gunicorn --bind unix:/run/hardyos-mail/radicale/radicale.sock --umask 0007") ||
+		!strings.Contains(d, "RADICALE_CONFIG=/etc/radicale/config radicale\n") || !strings.Contains(d, RadicaleSocketDir) {
+		t.Errorf("Radicale drop-in: %s", d)
 	}
 	if !strings.Contains(fs[RadicaleRights].Content, "[family-collections]") {
 		t.Error("no family calendar rights")

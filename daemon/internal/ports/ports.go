@@ -16,12 +16,11 @@ const (
 	// The mail server (docs/mail.md). The 10xxx ports take connections the
 	// VPS forwards with the PROXY protocol; only the VPS's NetBird address
 	// may reach them. hardyd's mail sign-in is a Unix socket, not a port
-	// (decision 304).
+	// (decision 304), and Radicale a Unix socket too (decision 319).
 	MailSubmissions      = 465   // Postfix, implicit TLS submission
 	MailSubmission       = 587   // Postfix, STARTTLS submission
 	MailIMAPS            = 993   // Dovecot, IMAP over TLS
 	MailRelay            = 2525  // Postfix, mail relayed by the VPS
-	MailRadicale         = 5232  // Radicale on 127.0.0.1 (hardyd proxies /dav-mail/)
 	MailProxySubmissions = 10465 // 465 forwarded by the VPS
 	MailProxySubmission  = 10587 // 587 forwarded by the VPS
 	MailProxyIMAPS       = 10993 // 993 forwarded by the VPS
@@ -56,7 +55,6 @@ var Fixed = map[string]int{
 	"mail submission":           MailSubmission,
 	"mail imaps":                MailIMAPS,
 	"mail relay":                MailRelay,
-	"mail radicale":             MailRadicale,
 	"mail proxied submissions":  MailProxySubmissions,
 	"mail proxied submission":   MailProxySubmission,
 	"mail proxied imaps":        MailProxyIMAPS,

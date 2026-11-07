@@ -180,3 +180,34 @@ func TestMissingAuthSocketAlerts(t *testing.T) {
 		t.Fatalf("no alert: %v", n.kinds())
 	}
 }
+
+// Decision 318: only mailboxes from before the key layout are flagged, root
+// gets the flag once, and a successful apply clears it.
+func TestLegacyLayoutFlag(t *testing.T) {
+	s, _ := newSvc(t)
+	enable(t, s)
+	ctx := context.Background()
+	old, _ := s.Store.CreateMailbox(ctx, Mailbox{Account: "alice", Address: "alice@example.net", AccountState: "active", Enabled: true})
+	_, _ = s.Store.CreateMailbox(ctx, Mailbox{Account: "bob", Address: "bob@example.net", AccountState: "active", Enabled: true})
+	if _, err := s.Store.DB.ExecContext(ctx, `UPDATE mail_mailboxes SET legacy_layout = 1 WHERE id = ?`, old.ID); err != nil {
+		t.Fatal(err)
+	}
+	a, err := s.RootArgs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range a.Config.Mailboxes {
+		if m.Legacy != (m.Address == "alice@example.net") {
+			t.Fatalf("legacy flags: %+v", a.Config.Mailboxes)
+		}
+	}
+	if _, err := s.Apply(ctx, func(float64, string) {}); err != nil {
+		t.Fatal(err)
+	}
+	a, _ = s.RootArgs(ctx)
+	for _, m := range a.Config.Mailboxes {
+		if m.Legacy {
+			t.Fatal("the flag survived the apply")
+		}
+	}
+}

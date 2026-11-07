@@ -106,7 +106,9 @@ func startDaemons(t *testing.T) func(ctx context.Context, cfg RootConfig, res *A
 		t.Cleanup(func() { _ = rsp.Process.Kill() })
 		itDaemon(t, "dovecot")
 		itDaemon(t, "postfix", "start")
-		rad := exec.Command("runuser", "-u", "radicale", "--", "radicale", "--config", RadicaleConf)
+		// As radicale.service's drop-in runs it: gunicorn on the socket.
+		rad := exec.Command("runuser", append([]string{"-u", "radicale", "--"}, RadicaleCommand()...)...)
+		rad.Dir = "/" // as under systemd
 		rad.Stdout, rad.Stderr = os.Stderr, os.Stderr
 		if err := rad.Start(); err != nil {
 			return err
@@ -146,6 +148,8 @@ func TestMailServerIntegration(t *testing.T) {
 	}
 	stopDaemons()
 	defer stopDaemons()
+	// hardyd's group (Radicale's socket folder is its), as on HardyOS.
+	_ = exec.Command("groupadd", "--system", "-f", "hardyd").Run()
 
 	secret := "it-secret-0123456789abcdefghijklmnopqrstuvwxyz"
 	limits := NewThrottle()
@@ -323,10 +327,19 @@ func TestMailServerIntegration(t *testing.T) {
 		}
 	})
 	t.Run("calendar through Radicale", func(t *testing.T) {
-		req, _ := http.NewRequest("PROPFIND", fmt.Sprintf("http://127.0.0.1:%d/family/", PortRadicale), nil)
+		// Over Radicale's socket, checked the way hardyd does.
+		dav := &http.Client{Transport: &http.Transport{DialContext: RadicaleDialer{}.DialContext}}
+		req, _ := http.NewRequest("PROPFIND", "http://radicale/family/", nil)
 		req.SetBasicAuth(itKeyAlice, "dav-secret-alice-0123456789abcdefgh")
 		req.Header.Set("Depth", "1")
-		resp, err := http.DefaultClient.Do(req)
+		var resp *http.Response
+		var err error
+		for i := 0; i < 30; i++ { // gunicorn takes a moment
+			if resp, err = dav.Do(req); err == nil {
+				break
+			}
+			time.Sleep(time.Second)
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -335,7 +348,7 @@ func TestMailServerIntegration(t *testing.T) {
 			t.Fatalf("PROPFIND /family/: %d", resp.StatusCode)
 		}
 		req.SetBasicAuth(itKeyAlice, "wrong")
-		resp, err = http.DefaultClient.Do(req)
+		resp, err = dav.Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -427,7 +440,9 @@ func imapLogin(t *testing.T, src string, port int, proxied, user, pass string) b
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
 	if proxied != "" {
-		if _, err := conn.Write(proxyV2(proxied, port)); err != nil {
+		// As HAProxy sends it: the VPS's own port (993), not the forwarded
+		// one, so only the real local port shows it was forwarded.
+		if _, err := conn.Write(proxyV2(proxied, PortIMAPS)); err != nil {
 			return false
 		}
 	}

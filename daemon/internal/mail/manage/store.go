@@ -137,6 +137,8 @@ type Mailbox struct {
 	Key         string `json:"-"`
 	AccountGUID string `json:"-"`
 	AccountSID  string `json:"-"`
+	// Legacy: made under the old layout, its folder not moved yet.
+	Legacy bool `json:"-"`
 }
 
 // CanSignIn reports whether the mailbox may be used now.
@@ -457,17 +459,17 @@ func (s *Store) DeleteDomain(ctx context.Context, name string) error {
 // ---- mailboxes ----
 
 const mailboxCols = `id, account, address, display_name, aliases, quota_mb, enabled, account_state, custom_address, created_at, updated_at,
-	storage_key, account_guid, account_sid, deleting`
+	storage_key, account_guid, account_sid, deleting, legacy_layout`
 
 func scanMailbox(sc interface{ Scan(...any) error }) (*Mailbox, error) {
 	var m Mailbox
 	var aliases, created, updated string
-	var en, custom, deleting int
+	var en, custom, deleting, legacy int
 	if err := sc.Scan(&m.ID, &m.Account, &m.Address, &m.DisplayName, &aliases, &m.QuotaMB, &en, &m.AccountState, &custom, &created, &updated,
-		&m.Key, &m.AccountGUID, &m.AccountSID, &deleting); err != nil {
+		&m.Key, &m.AccountGUID, &m.AccountSID, &deleting, &legacy); err != nil {
 		return nil, err
 	}
-	m.Enabled, m.CustomAddress, m.Deleting = en == 1, custom == 1, deleting == 1
+	m.Enabled, m.CustomAddress, m.Deleting, m.Legacy = en == 1, custom == 1, deleting == 1, legacy == 1
 	_ = json.Unmarshal([]byte(aliases), &m.Aliases)
 	if m.Aliases == nil {
 		m.Aliases = []string{}
@@ -686,6 +688,12 @@ func (s *Store) SetAnchor(ctx context.Context, id int64, guid, sid string) error
 func (s *Store) Detach(ctx context.Context, id int64) error {
 	_, err := s.DB.ExecContext(ctx, `UPDATE mail_mailboxes SET account = ?, account_state = 'deleted', updated_at = ? WHERE id = ?`,
 		fmt.Sprintf("@%d", id), store.FormatTime(time.Now()), id)
+	return err
+}
+
+// ClearLegacy forgets the old-layout flags once root has moved the folders.
+func (s *Store) ClearLegacy(ctx context.Context) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE mail_mailboxes SET legacy_layout = 0 WHERE legacy_layout = 1`)
 	return err
 }
 

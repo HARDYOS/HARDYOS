@@ -8,6 +8,11 @@ ALTER TABLE mail_mailboxes ADD COLUMN storage_key TEXT NOT NULL DEFAULT '';
 ALTER TABLE mail_mailboxes ADD COLUMN account_guid TEXT NOT NULL DEFAULT '';
 ALTER TABLE mail_mailboxes ADD COLUMN account_sid TEXT NOT NULL DEFAULT '';
 ALTER TABLE mail_mailboxes ADD COLUMN deleting INTEGER NOT NULL DEFAULT 0;
+-- legacy_layout: made before decision 310, so its mail may still be under
+-- its address; only such a mailbox takes that folder on the next apply
+-- (decision 318), then hardyd clears the flag.
+ALTER TABLE mail_mailboxes ADD COLUMN legacy_layout INTEGER NOT NULL DEFAULT 0;
+UPDATE mail_mailboxes SET legacy_layout = 1;
 -- Existing mailboxes get a key now; hardyd-priv moves their folders to it
 -- on the next apply.
 UPDATE mail_mailboxes SET storage_key = lower(hex(randomblob(12))) WHERE storage_key = '';
