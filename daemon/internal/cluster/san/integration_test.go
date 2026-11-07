@@ -125,6 +125,7 @@ func TestClusterStorageIntegration(t *testing.T) {
 	if _, err := r.DatasetCreate(ctx, DatasetCreateArgs{WorkloadArgs: web}); err != nil {
 		t.Fatal(err)
 	}
+	t.Log("phase: creating the zvol")
 	vol, err := r.VolumeCreate(ctx, cl, VolumeArgs{WorkloadArgs: web, Disk: "disk0", SizeGB: 1})
 	if err != nil {
 		t.Fatal(err)
@@ -144,10 +145,12 @@ func TestClusterStorageIntegration(t *testing.T) {
 		ids[n], keys[n] = id, id.PublicKey
 	}
 	subnet := netip.MustParsePrefix("10.177.0.0/24")
+	t.Log("phase: first apply (LIO, pins, configfs lockdown)")
 	st, err := r.Apply(ctx, ApplyArgs{Desired: d, Addresses: addrs, Keys: keys, Subnet: subnet})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Log("phase: applied")
 	if fi, err := os.Stat(ConfigFSRoot); err != nil || fi.Mode().Perm() != 0o700 {
 		t.Fatalf("LIO's configfs folder isn't root's alone: %v %v", fi.Mode(), err)
 	}
@@ -203,6 +206,7 @@ func TestClusterStorageIntegration(t *testing.T) {
 	// Wrong secret: refused.
 	bad := *sec1
 	bad.Password = "WrongSecretWrongSecret12"
+	t.Log("phase: login with the wrong secrets")
 	if out, err := initiator("hcb-c1", InitiatorIQN(cl, "c1"), t1, bad, login); err == nil {
 		t.Fatalf("a login with the wrong CHAP secret worked:\n%s", out)
 	}
@@ -222,6 +226,7 @@ func TestClusterStorageIntegration(t *testing.T) {
 	done := make(chan struct{})
 	var out string
 	var lerr error
+	t.Log("phase: c1 logs in")
 	go func() {
 		defer close(done)
 		out, lerr = initiator("hcb-c1", InitiatorIQN(cl, "c1"), t1, *sec1, script)
