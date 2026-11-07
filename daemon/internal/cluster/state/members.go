@@ -358,6 +358,9 @@ func applyUpdate(s *cluster.Snapshot, c cluster.Command) error {
 		n.Features = slices.Clone(b.Features)
 	}
 	if b.BootID != "" {
+		if err := cluster.ValidBootID(b.BootID); err != nil {
+			return err
+		}
 		n.BootID = b.BootID
 	}
 	if b.Compute != nil {

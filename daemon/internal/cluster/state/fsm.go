@@ -312,6 +312,11 @@ func (f *FSM) Admit(sc *cluster.SignedCommand) error {
 	if proposer.Role == cluster.RoleWitness && c.Type != cluster.CmdWitnessHello {
 		return refused("the witness may only say hello")
 	}
+	if (proposer.State == cluster.NodeDead || proposer.State == cluster.NodeFenced) && c.Type != cluster.CmdNodeRejoin {
+		// A fenced member reaches the leader's /propose only to rejoin
+		// (decision 389); nothing else it signs enters the log.
+		return refused("%s is fenced: it may only rejoin", c.Proposer)
+	}
 	a := f.appliers[c.Type]
 	if a == nil {
 		return refused("unknown command type %q", c.Type)

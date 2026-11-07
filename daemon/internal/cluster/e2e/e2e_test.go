@@ -97,7 +97,7 @@ func (n *hnode) bootID() string {
 // rejoining is concerned).
 func (n *hnode) reboot() {
 	n.bootMu.Lock()
-	n.boot += "+"
+	n.boot += "-r"
 	n.bootMu.Unlock()
 }
 
@@ -181,7 +181,7 @@ func (h *harness) add(id string, role cluster.Role, lan, stor, nb string) *hnode
 
 	// Part C: placement, reconciler, fence agent, mover, coordinator.
 	n.ha = &ha.Service{Priv: pc, DB: db, Log: log, BootID: n.bootID, Parts: ha.Parts{Membership: n.live, Peers: n.live, Mux: n.live,
-		Attacher: n.storage, Stream: moves.ALPNStream{Dial: n.live.DialMigrate}}}
+		Attacher: n.storage, Migrations: n.storage, Stream: moves.ALPNStream{Dial: n.live.DialMigrate}}}
 	n.ha.Init()
 	n.live.SetMigrate(n.ha.Node.ServeMigrateConn)
 	n.ha.Announcer.Interval = time.Second
@@ -521,6 +521,14 @@ func TestClusterEndToEnd(t *testing.T) {
 		if !slices.Contains(relayed, "migrate web") {
 			t.Fatalf("%s's libvirt didn't get the source's connection through the cluster port: %v", dst.id, relayed)
 		}
+		// The destination's firewall let the source in for this migration
+		// only, and closed again when it ended (decision 384).
+		dst.root.mu.Lock()
+		opened, revoked := dst.root.migOpened, dst.root.migRevoked
+		dst.root.mu.Unlock()
+		if open := dst.root.allowsMigrationFrom(src.id); opened == 0 || revoked == 0 || open {
+			t.Fatalf("%s's migration ports: opened %d times, closed %d times, still open to %s: %v", dst.id, opened, revoked, src.id, open)
+		}
 	}
 	h.eventually("the storage node maps web to c1 alone again", 20*time.Second, func() error {
 		if r := h.w.reach(*vmStorage, web); len(r) != 1 || r[0] != "c1" {
@@ -534,7 +542,7 @@ func TestClusterEndToEnd(t *testing.T) {
 	c1.haCancel()
 	<-c1.haDone
 	again := &ha.Service{Priv: c1.pc, DB: nil, Log: h.log.With("node", "c1", "hardyd", 2), BootID: c1.bootID,
-		Parts: ha.Parts{Membership: c1.live, Peers: c1.live, Attacher: c1.storage, Stream: moves.ALPNStream{Dial: c1.live.DialMigrate}}}
+		Parts: ha.Parts{Membership: c1.live, Peers: c1.live, Attacher: c1.storage, Migrations: c1.storage, Stream: moves.ALPNStream{Dial: c1.live.DialMigrate}}}
 	again.Init()
 	hctx, hcancel := context.WithCancel(context.Background())
 	t.Cleanup(hcancel)
@@ -643,6 +651,19 @@ func TestClusterEndToEnd(t *testing.T) {
 		}
 		if s.Nodes["c1"].BootID != c1.bootID() {
 			return fmt.Errorf("c1's boot %q", s.Nodes["c1"].BootID)
+		}
+		return nil
+	})
+	// The storage node's root lifted its fence only with c1's own signed
+	// rejoin statement (decision 377): c1's target is on again, with
+	// nothing mapped (web stays on its new server).
+	h.eventually("the storage node unfences c1", 30*time.Second, func() error {
+		tg, ok := san.Current(h.w.storageFS, h.snap().Cluster)["c1"]
+		if !ok || !tg.Enabled {
+			return fmt.Errorf("c1's target %+v", tg)
+		}
+		if len(tg.LUNs) != 0 {
+			return fmt.Errorf("c1's target maps %v after the rejoin", tg.LUNs)
 		}
 		return nil
 	})

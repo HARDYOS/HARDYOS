@@ -26,6 +26,7 @@ func wireClusterC(db *store.DB, pc *priv.Client, manager *jobs.Manager, broker *
 	hp := ha.Parts{Membership: parts.M, Peers: parts.Peers, Mux: parts.Mux}
 	if storage != nil {
 		hp.Attacher = storage.Service
+		hp.Migrations = storage.Service
 	}
 	if parts.Live != nil {
 		hp.Stream = moves.ALPNStream{Dial: parts.Live.DialMigrate}

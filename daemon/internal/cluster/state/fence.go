@@ -207,6 +207,11 @@ func applyRejoin(s *cluster.Snapshot, c cluster.Command, b NodeRejoinBody) error
 	if b.BootID == "" {
 		return errors.New("a rejoin carries the node's boot id")
 	}
+	if err := cluster.ValidBootID(b.BootID); err != nil {
+		// The storage node's root verifies the same id in the node's
+		// signed rejoin statement before it lifts its fence.
+		return err
+	}
 	fencedBoot := f.BootID
 	if fencedBoot == "" {
 		fencedBoot = node.BootID

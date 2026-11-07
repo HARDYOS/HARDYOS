@@ -40,6 +40,14 @@ type StreamDialer interface {
 	DialMigrate(ctx context.Context, node cluster.NodeID, token string) (io.ReadWriteCloser, error)
 }
 
+// MigrationFirewall opens this (destination) node's live-migration ports
+// to one source's storage address for one migration (part B's
+// storagesvc.Service; decision 384).
+type MigrationFirewall interface {
+	AllowMigration(ctx context.Context, source cluster.NodeID, port int, ttl time.Duration) error
+	RevokeMigration(ctx context.Context, source cluster.NodeID) error
+}
+
 // Node serves the move steps on this node's peer API.
 //
 // Every step that changes something here is driven only by the member
@@ -56,6 +64,9 @@ type Node struct {
 	Images     runtime.Images
 	Publish    PublishHandoff
 	Stream     StreamDialer
+	// Firewall lets the source of an admitted migration (only it) reach
+	// this node's migration ports until the migration ends (nil: none).
+	Firewall MigrationFirewall
 	// Peers lets the destination fetch an app's publishing settings from
 	// the source during a move (optional).
 	Peers cluster.PeerClient
@@ -574,9 +585,21 @@ func (n *Node) accept(ctx context.Context, r *http.Request, caller cluster.Node)
 	const deadline = 2 * time.Minute
 	var f *os.File
 	err = n.act(ctx, caller, "Admit the live migration of "+p.Name+" from "+string(req.From), w, func(ctx context.Context) error {
+		// The source's storage address (only it) may reach the migration
+		// ports, before root admits the domain; the allowance outlives the
+		// admission by the send limit at most and is revoked at the end
+		// (decision 384).
+		if n.Firewall != nil {
+			if err := n.Firewall.AllowMigration(ctx, req.From, 0, migrationAllowance); err != nil {
+				return fmt.Errorf("opening the migration port to %s: %w", req.From, err)
+			}
+		}
 		var err error
 		f, err = n.Priv.CallFile(ctx, priv.OpVMsMigrateAccept, vms.MigrateAcceptArgs{VM: req.VM, From: string(req.From), Token: req.Token,
 			DeadlineSec: int(deadline / time.Second), Generation: req.Generation, SpecHash: hash}, nil)
+		if err != nil {
+			n.revokeMigration(context.WithoutCancel(ctx), req.From)
+		}
 		return err
 	})
 	if err != nil {
@@ -608,12 +631,34 @@ func (n *Node) end(ctx context.Context, r *http.Request, caller cluster.Node) (a
 		return nil, err
 	}
 	n.mu.Lock()
+	var from cluster.NodeID
 	if in := n.admitted[req.Token]; in != nil && in.vm == req.VM {
+		from = in.from
 		in.conn.Close()
 		delete(n.admitted, req.Token)
 	}
 	n.mu.Unlock()
-	return nil, n.Priv.Call(ctx, priv.OpVMsMigrateEnd, vms.MigrateEndArgs{VM: req.VM, Token: req.Token}, nil)
+	err := n.Priv.Call(ctx, priv.OpVMsMigrateEnd, vms.MigrateEndArgs{VM: req.VM, Token: req.Token}, nil)
+	if from != "" {
+		n.revokeMigration(context.WithoutCancel(ctx), from)
+	}
+	return nil, err
+}
+
+// migrationAllowance is how long a source may reach the migration ports
+// after the admission at most (the longest send, root's own limit of 600 s);
+// end or abort revokes it sooner, and established connections carry on.
+const migrationAllowance = vms.MaxMigrateDeadline
+
+// revokeMigration closes the migration ports to a source again (the
+// allowance would expire on its own; a failure is only logged).
+func (n *Node) revokeMigration(ctx context.Context, from cluster.NodeID) {
+	if n.Firewall == nil || from == "" {
+		return
+	}
+	if err := n.Firewall.RevokeMigration(ctx, from); err != nil {
+		n.log().Warn("moves: closing the migration port", "source", from, "err", err)
+	}
 }
 
 // abort (destination of a failed live migration): whatever of the VM runs
@@ -653,6 +698,7 @@ func (n *Node) abort(ctx context.Context, r *http.Request, caller cluster.Node) 
 			}
 		}
 		n.mu.Unlock()
+		n.revokeMigration(context.WithoutCancel(ctx), p.Owner)
 		if n.Attacher != nil {
 			if err := n.Attacher.Detach(ctx, w, true); err != nil {
 				n.log().Warn("moves: detaching after an aborted migration", "vm", req.VM, "err", err)
@@ -759,9 +805,8 @@ func (n *Node) send(ctx context.Context, r *http.Request, caller cluster.Node) (
 		ln.Close()
 		stopRelay()
 		relays.Wait()
-		// The destination's migration ports are opened and closed by the
-		// mover (see the TODO in Mover.live: storagesvc AllowMigration /
-		// RevokeMigration on the destination).
+		// The destination opened its migration ports to this server at
+		// accept and closes them at end or abort (decision 384).
 		return err
 	})
 }

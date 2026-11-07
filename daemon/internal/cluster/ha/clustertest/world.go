@@ -527,7 +527,7 @@ func (n *Node) Crash() {
 func (n *Node) Boot() {
 	n.mu.Lock()
 	n.Crashed = false
-	n.BootID += "+"
+	n.BootID += "-r"
 	n.mu.Unlock()
 	n.w.wire(n)
 }

@@ -292,6 +292,44 @@ func TestAdmitWitnessOnlyHello(t *testing.T) {
 	}
 }
 
+// A fenced (or dead) member reaches the leader's /propose only to rejoin:
+// the leader admits node.rejoin from it and nothing else (decision 389).
+func TestAdmitFencedOnlyRejoin(t *testing.T) {
+	h, nas, c1, _ := threeNodes(t)
+	h.mustApply(c1.sign(t, cluster.CmdMemberUpdate, MemberUpdateBody{BootID: "boot-1"}))
+	h.mustApply(nas.sign(t, cluster.CmdNodeDead, NodeDeadBody{Node: "c1", Epoch: 1, Reason: "dead"}))
+	admit := func(raw []byte) error {
+		var sc cluster.SignedCommand
+		if err := json.Unmarshal(raw, &sc); err != nil {
+			t.Fatal(err)
+		}
+		return h.f.Admit(&sc)
+	}
+	for _, st := range []cluster.NodeState{cluster.NodeDead, cluster.NodeFenced} {
+		h.f.mu.Lock()
+		h.f.s.Nodes["c1"].State = st
+		h.f.mu.Unlock()
+		if err := admit(c1.sign(t, cluster.CmdMemberUpdate, MemberUpdateBody{BootID: "boot-2"})); err == nil || !strings.Contains(err.Error(), "may only rejoin") {
+			t.Fatalf("%s: member.update admitted: %v", st, err)
+		}
+		if err := admit(c1.sign(t, cluster.CmdNodeRejoin, NodeRejoinBody{Node: "c1", Epoch: 1, BootID: "boot-2"})); err != nil {
+			t.Fatalf("%s: node.rejoin refused: %v", st, err)
+		}
+	}
+	// An active member proposes as before.
+	if err := admit(nas.sign(t, cluster.CmdMemberUpdate, MemberUpdateBody{Version: "1.0.1"})); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Boot ids have one format: the log refuses one the storage node's root
+// couldn't verify in a signed rejoin statement.
+func TestBootIDFormat(t *testing.T) {
+	h, _, c1, _ := threeNodes(t)
+	h.mustRefuse(c1.sign(t, cluster.CmdMemberUpdate, MemberUpdateBody{BootID: "boot 1+"}), "boot id isn't valid")
+	h.mustApply(c1.sign(t, cluster.CmdMemberUpdate, MemberUpdateBody{BootID: "6f1d8a52-6c39-4d0e-9a4e-2f8a3c1b7e90"}))
+}
+
 func TestMemberRules(t *testing.T) {
 	h, nas, c1, _ := threeNodes(t)
 	dup := newTNode(t, "c1", cluster.RoleCompute, "192.168.1.30")

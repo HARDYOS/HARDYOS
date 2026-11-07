@@ -33,7 +33,6 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
-	"regexp"
 	"strconv"
 	"time"
 
@@ -214,7 +213,9 @@ type RejoinStatement struct {
 	Signature []byte            `json:"signature"`
 }
 
-var bootRE = regexp.MustCompile(`^[0-9a-zA-Z-]{0,64}$`)
+// validBoot: the statement's boot id is the one the log recorded for the
+// node (cluster.ValidBootID), or none.
+func validBoot(id string) bool { return id == "" || cluster.ValidBootID(id) == nil }
 
 func (s RejoinStatement) digest() []byte {
 	sum := sha256.Sum256([]byte("hardyos-storage-unfence/1\n" + string(s.Cluster) + "\n" + string(s.Node) + "\n" +
@@ -227,7 +228,7 @@ func SignRejoin(key *ecdsa.PrivateKey, s RejoinStatement) (RejoinStatement, erro
 	if key == nil {
 		return s, errors.New("no cluster key")
 	}
-	if !bootRE.MatchString(s.BootID) {
+	if !validBoot(s.BootID) {
 		return s, errors.New("boot id isn't valid")
 	}
 	sig, err := ecdsa.SignASN1(rand.Reader, key, s.digest())
@@ -244,7 +245,7 @@ func (s RejoinStatement) Verify(spki []byte) error {
 	if err != nil {
 		return err
 	}
-	if !bootRE.MatchString(s.BootID) || len(s.Signature) == 0 || len(s.Signature) > 128 {
+	if !validBoot(s.BootID) || len(s.Signature) == 0 || len(s.Signature) > 128 {
 		return errors.New("malformed rejoin statement")
 	}
 	if !ecdsa.VerifyASN1(k, s.digest(), s.Signature) {

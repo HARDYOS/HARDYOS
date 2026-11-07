@@ -37,6 +37,9 @@ type Parts struct {
 	// nil: a streamed peer request (moves.PeerStream).
 	Stream moves.StreamDialer
 	Power  cluster.PowerFencer
+	// Migrations opens this node's live-migration ports to one source for
+	// one migration (part B's storagesvc.Service; decision 384).
+	Migrations moves.MigrationFirewall
 }
 
 // Service is part C on one node (hardyd): it registers the appliers, runs
@@ -145,7 +148,7 @@ func (s *Service) Init() {
 	// storage network); there is no fallback through the peer API, which
 	// may run over NetBird (decision 332).
 	s.Node = &moves.Node{Cluster: m, Reconciler: s.Reconciler, Attacher: s.Parts.Attacher, Runtimes: rts, Priv: s.Priv,
-		Images: images, Publish: s.Publish, Stream: s.Parts.Stream, Peers: s.Parts.Peers, Log: s.Log,
+		Images: images, Publish: s.Publish, Stream: s.Parts.Stream, Firewall: s.Parts.Migrations, Peers: s.Parts.Peers, Log: s.Log,
 		FenceReady: s.Agent.Ready, SpecHash: specHash, Actions: s}
 	if s.Parts.Mux != nil {
 		s.Node.Caller = s.Parts.Mux.Caller

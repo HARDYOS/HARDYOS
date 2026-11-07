@@ -526,6 +526,20 @@ type computeRoot struct {
 	relayed []string
 	admits  []vms.MigrateAcceptArgs
 	sockDir string
+	// The storage firewall's live-migration allowances (part B's
+	// san.firewall.migration): source node -> until.
+	migAllowed map[cluster.NodeID]time.Time
+	migOpened  int
+	migRevoked int
+}
+
+// allowsMigrationFrom says whether this destination's firewall lets the
+// source reach its migration ports now.
+func (h *computeRoot) allowsMigrationFrom(src cluster.NodeID) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	until, ok := h.migAllowed[src]
+	return ok && time.Now().Before(until)
 }
 
 func (h *computeRoot) record(w cluster.WorkloadRef) (sanclient.Record, cluster.WorkloadStorage, bool) {
@@ -779,6 +793,11 @@ func computeServer(w *world, node cluster.NodeID) (*priv.Server, *computeRoot) {
 		}
 		ref := cluster.WorkloadRef{Kind: cluster.KindVM, ID: a.VM}
 		dest := w.computeRoots[cluster.NodeID(a.To)]
+		if !dest.allowsMigrationFrom(node) {
+			// The memory stream goes straight to the destination's storage
+			// address: its firewall must let this source in (decision 384).
+			return nil, fmt.Errorf("%s's firewall drops the migration stream from %s", a.To, node)
+		}
 		r, _, ok := dest.record(ref)
 		return nil, w.migrate(node, cluster.NodeID(a.To), ref, a.Generation, ok && r.Generation == a.Generation)
 	})
@@ -807,6 +826,41 @@ func computeServer(w *world, node cluster.NodeID) (*priv.Server, *computeRoot) {
 	handle(s, sanclient.OpRescan, func(context.Context, sanclient.SessionArgs) (any, error) { return nil, nil })
 	handle(s, sanclient.OpMultipathApply, func(context.Context, sanclient.MultipathArgs) (any, error) { return nil, nil })
 	handle(s, san.OpFirewallApply, func(context.Context, san.FirewallSpec) (any, error) { return nil, nil })
+	handle(s, san.OpMigrationAllow, func(_ context.Context, a san.MigrationArgs) (any, error) {
+		src, ok := w.addrOf[a.Source]
+		if !ok || src == node {
+			return nil, priv.Errorf(priv.CodeBadArgs, "%s isn't a member's storage address", a.Source)
+		}
+		secs := a.Seconds
+		if secs == 0 {
+			secs = san.MigrationDefaultSeconds
+		}
+		if secs < 1 || secs > san.MigrationMaxSeconds {
+			return nil, priv.Errorf(priv.CodeBadArgs, "a migration allowance lasts 1-%d s", san.MigrationMaxSeconds)
+		}
+		h.mu.Lock()
+		if h.migAllowed == nil {
+			h.migAllowed = map[cluster.NodeID]time.Time{}
+		}
+		_, had := h.migAllowed[src]
+		if a.Revoke {
+			delete(h.migAllowed, src)
+			if had {
+				h.migRevoked++
+			}
+		} else {
+			h.migAllowed[src] = time.Now().Add(time.Duration(secs) * time.Second)
+			h.migOpened++
+		}
+		h.mu.Unlock()
+		switch {
+		case a.Revoke && had:
+			w.notef("%s closed its migration ports to %s", node, src)
+		case !a.Revoke:
+			w.notef("%s opened its migration ports to %s (%d s)", node, src, secs)
+		}
+		return map[string]bool{"allowed": !a.Revoke}, nil
+	})
 	handle(s, sanclient.OpAttach, func(_ context.Context, a sanclient.AttachArgs) (any, error) {
 		reach := w.reach(a.Storage, a.Workload)
 		if !slices.Contains(reach, node) {
