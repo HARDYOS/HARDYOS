@@ -170,12 +170,8 @@ func checkNewNode(s *cluster.Snapshot, n *cluster.Node) error {
 	if len(n.Name) == 0 || len(n.Name) > 64 {
 		return errors.New("a server name is 1-64 characters")
 	}
-	if n.Role == cluster.RoleWitness {
-		if !n.Addresses.NetBird.IsValid() {
-			return errors.New("the witness needs a NetBird address")
-		}
-	} else if !n.Addresses.LAN.IsValid() {
-		return errors.New("a server needs a LAN address")
+	if err := validAddresses(s, n.ID, &n.Addresses, n.Role); err != nil {
+		return err
 	}
 	for _, o := range s.Nodes {
 		switch {
@@ -208,12 +204,16 @@ func applyCreate(s *cluster.Snapshot, c cluster.Command) error {
 	if b.Node.Role == cluster.RoleWitness {
 		return errors.New("the witness can't create a cluster")
 	}
+	if b.StorageSubnet.IsValid() && (!b.StorageSubnet.Addr().Is4() || b.StorageSubnet.Bits() < 8 || b.StorageSubnet.Bits() > 30) {
+		return errors.New("the storage network is an IPv4 prefix between /8 and /30")
+	}
+	s.StorageSubnet = b.StorageSubnet.Masked()
 	n := b.Node
 	if err := checkNewNode(s, &n); err != nil {
+		s.StorageSubnet = netip.Prefix{}
 		return err
 	}
 	s.Cluster, s.Name, s.FeatureLevel = b.Cluster, b.Name, 1
-	s.StorageSubnet = b.StorageSubnet
 	s.Timings = cluster.DefaultTimings
 	n.State, n.Suffrage, n.Joined, n.FenceEpoch = cluster.NodeActive, cluster.Voter, c.Time, 0
 	s.Nodes[n.ID] = &n
@@ -254,15 +254,67 @@ func applyReady(s *cluster.Snapshot, c cluster.Command) error {
 	return nil
 }
 
-func validAddresses(a *cluster.Addresses, role cluster.Role) error {
-	if role != cluster.RoleWitness && !a.LAN.IsValid() {
+// validAddresses checks a member's addresses (decision 374): the witness
+// has a NetBird address only (it may not claim a LAN or storage address,
+// which the storage node's firewall would trust); a server has a LAN
+// address, and a storage address only inside the cluster's storage network
+// (without one, a storage address isn't recorded); only the storage node
+// has portals, on its storage address; and no address may be one another
+// member already uses.
+func validAddresses(s *cluster.Snapshot, self cluster.NodeID, a *cluster.Addresses, role cluster.Role) error {
+	if role == cluster.RoleWitness {
+		if !a.NetBird.IsValid() {
+			return errors.New("the witness needs a NetBird address")
+		}
+		if a.LAN.IsValid() || a.Storage.IsValid() || len(a.Portals) > 0 {
+			return errors.New("the witness has a NetBird address only")
+		}
+	} else if !a.LAN.IsValid() {
 		return errors.New("a server needs a LAN address")
 	}
-	if role == cluster.RoleWitness && !a.NetBird.IsValid() {
-		return errors.New("the witness needs a NetBird address")
+	if a.Storage.IsValid() {
+		if !s.StorageSubnet.IsValid() {
+			a.Storage = netip.Addr{}
+		} else if !s.StorageSubnet.Contains(a.Storage) || a.Storage == s.StorageSubnet.Masked().Addr() {
+			return fmt.Errorf("the storage address %s isn't on the storage network %s", a.Storage, s.StorageSubnet)
+		}
 	}
 	if len(a.Portals) > 4 {
 		return errors.New("at most four portals")
+	}
+	if len(a.Portals) > 0 && role != cluster.RoleStorage {
+		return errors.New("only the storage node has iSCSI portals")
+	}
+	for _, p := range a.Portals {
+		if !p.IsValid() || p.Addr() != a.Storage {
+			return errors.New("the iSCSI portals are on the storage node's storage address")
+		}
+	}
+	mine := []netip.Addr{a.LAN, a.Storage, a.NetBird}
+	for i, x := range mine {
+		if !x.IsValid() {
+			continue
+		}
+		if x.IsUnspecified() || x.IsMulticast() || x.IsLoopback() {
+			return fmt.Errorf("%s isn't a usable address", x)
+		}
+		for _, y := range mine[i+1:] {
+			if x == y {
+				return fmt.Errorf("%s is given for two paths", x)
+			}
+		}
+	}
+	for id, o := range s.Nodes {
+		if id == self {
+			continue
+		}
+		for _, y := range []netip.Addr{o.Addresses.LAN, o.Addresses.Storage, o.Addresses.NetBird} {
+			for _, x := range mine {
+				if x.IsValid() && x == y {
+					return fmt.Errorf("%s is %s's address", x, id)
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -286,11 +338,13 @@ func applyUpdate(s *cluster.Snapshot, c cluster.Command) error {
 	}
 	n := s.Nodes[c.Proposer]
 	if b.Addresses != nil {
-		if err := validAddresses(b.Addresses, n.Role); err != nil {
+		a := *b.Addresses
+		if err := validAddresses(s, n.ID, &a, n.Role); err != nil {
 			return err
 		}
-		n.Addresses = *b.Addresses
+		n.Addresses = a
 	}
+
 	if b.Version != "" {
 		if len(b.Version) > 64 {
 			return errors.New("invalid version")

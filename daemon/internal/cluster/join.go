@@ -755,7 +755,7 @@ func (n *Core) Wipe(ctx context.Context) error {
 	n.mu.Lock()
 	n.info, n.halted = nil, nil
 	n.mu.Unlock()
-	_ = n.cfg.Machine.Restore([]byte(`{"nodes":{},"fences":{},"seq":{}}`))
+	n.cfg.Machine.Reset()
 	return nil
 }
 

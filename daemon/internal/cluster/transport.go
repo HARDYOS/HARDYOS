@@ -78,18 +78,24 @@ type Transport struct {
 	Peer, Relay, Bootstrap http.Handler
 	// Migrate takes a live migration connection (part C); nil refuses.
 	Migrate func(conn *tls.Conn, from Node)
+	// RaftAdmit decides whether a Raft request read from a member's
+	// connection reaches Raft (raftguard.go); nil refuses every request.
+	RaftAdmit func(peer Node, rpc RaftRPC) error
 
-	mu        sync.Mutex
-	listeners map[string]net.Listener
-	raft      *connQueue
-	relay     *connQueue
-	boot      *connQueue
-	conns     map[NodeID]map[net.Conn]bool // outgoing raft and peer conns, closed on a path switch
-	closed    bool
-	wg        sync.WaitGroup
-	h2        *http2.Server
-	relaySrv  *http.Server
-	bootSrv   *http.Server
+	mu         sync.Mutex
+	listeners  map[string]net.Listener
+	raft       *connQueue
+	relay      *connQueue
+	boot       *connQueue
+	conns      map[NodeID]map[net.Conn]bool // outgoing raft and peer conns, closed on a path switch
+	inbound    map[*raftGuardConn]bool      // accepted raft conns (RecheckInbound)
+	raftLogged map[NodeID]time.Time
+	relays     map[NodeID]int // open relay connections per member
+	closed     bool
+	wg         sync.WaitGroup
+	h2         *http2.Server
+	relaySrv   *http.Server
+	bootSrv    *http.Server
 }
 
 func (t *Transport) log() *slog.Logger {
@@ -206,6 +212,9 @@ func (t *Transport) Close() {
 			conns = append(conns, c)
 		}
 	}
+	for g := range t.inbound {
+		conns = append(conns, g)
+	}
 	t.conns = map[NodeID]map[net.Conn]bool{}
 	t.mu.Unlock()
 	for _, c := range conns {
@@ -259,12 +268,15 @@ func (t *Transport) serveConn(c net.Conn) {
 	peer, member := t.peerOf(cs)
 	switch cs.NegotiatedProtocol {
 	case ALPNRaft:
-		if !member {
+		// Only members that may lead send Raft requests (decision 365);
+		// every request is checked again by the guard.
+		if !member || !MayLead(peer) {
 			tc.Close()
 			return
 		}
-		if !t.raft.push(&peerConn{Conn: tc, peer: peer}) {
-			tc.Close()
+		g := t.guardRaft(&peerConn{Conn: tc, peer: peer}, peer)
+		if g != nil && !t.raft.push(g) {
+			g.Close()
 		}
 	case ALPNPeer:
 		// Membership and roles are checked per request (the join path is
@@ -279,10 +291,18 @@ func (t *Transport) serveConn(c net.Conn) {
 			tc.Close()
 			return
 		}
+		// At most maxRelayConnsPerMember open relay connections per member
+		// (a compromised member can't exhaust this one; decision 371).
+		release, ok := t.takeRelay(peer.ID)
+		if !ok {
+			tc.Close()
+			return
+		}
 		// net/http would close a *tls.Conn with an ALPN protocol it doesn't
 		// know: hand it over wrapped, with its TLS state in the context.
-		if !t.relay.push(&relayConn{Conn: tc, state: cs}) {
-			tc.Close()
+		rc := &relayConn{Conn: tc, state: cs, release: release}
+		if !t.relay.push(rc) {
+			rc.Close()
 		}
 	case ALPNMigrate:
 		if !member || isFenced(peer) || peer.Role != RoleCompute || t.Migrate == nil {
@@ -520,7 +540,42 @@ func (q *connQueue) Addr() net.Addr { return q.addr }
 // relayConn is an accepted relay connection with its TLS state.
 type relayConn struct {
 	net.Conn
-	state tls.ConnectionState
+	state   tls.ConnectionState
+	release func()
+	once    sync.Once
+}
+
+func (c *relayConn) Close() error {
+	c.once.Do(func() {
+		if c.release != nil {
+			c.release()
+		}
+	})
+	return c.Conn.Close()
+}
+
+// maxRelayConnsPerMember bounds the relay connections one member may hold
+// open here (requests, WebSockets, app windows).
+const maxRelayConnsPerMember = 256
+
+func (t *Transport) takeRelay(id NodeID) (func(), bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.relays == nil {
+		t.relays = map[NodeID]int{}
+	}
+	if t.relays[id] >= maxRelayConnsPerMember {
+		return nil, false
+	}
+	t.relays[id]++
+	return func() {
+		t.mu.Lock()
+		t.relays[id]--
+		if t.relays[id] <= 0 {
+			delete(t.relays, id)
+		}
+		t.mu.Unlock()
+	}, true
 }
 
 type relayTLSKey struct{}
