@@ -244,6 +244,8 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		Alerts:      alerts, Monitor: mon, Mail: mailSvc,
 	})
 
+	_ = wireClusterA(ctx, live, db, manager, broker, secrets, alerts, handler, log) // phase 8 cluster core (cluster_a.go)
+
 	go housekeeping(ctx, log, &auth.Sessions{DB: db})
 	go collector.Run(ctx) // CPU, memory and network history
 	if !live {

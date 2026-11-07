@@ -133,7 +133,13 @@ func (t *Transport) init() {
 	t.h2 = &http2.Server{IdleTimeout: 2 * time.Minute, MaxReadFrameSize: 1 << 20}
 	quiet := log.New(io.Discard, "", 0)
 	if t.Relay != nil {
-		t.relaySrv = &http.Server{Handler: t.Relay, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, ErrorLog: quiet}
+		t.relaySrv = &http.Server{Handler: t.Relay, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, ErrorLog: quiet,
+			ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+				if rc, ok := c.(*relayConn); ok {
+					return context.WithValue(ctx, relayTLSKey{}, &rc.state)
+				}
+				return ctx
+			}}
 		go func() { _ = t.relaySrv.Serve(t.relay) }()
 	}
 	if t.Bootstrap != nil {
@@ -273,7 +279,9 @@ func (t *Transport) serveConn(c net.Conn) {
 			tc.Close()
 			return
 		}
-		if !t.relay.push(tc) {
+		// net/http would close a *tls.Conn with an ALPN protocol it doesn't
+		// know: hand it over wrapped, with its TLS state in the context.
+		if !t.relay.push(&relayConn{Conn: tc, state: cs}) {
 			tc.Close()
 		}
 	case ALPNMigrate:
@@ -508,3 +516,20 @@ func (q *connQueue) Close() error {
 }
 
 func (q *connQueue) Addr() net.Addr { return q.addr }
+
+// relayConn is an accepted relay connection with its TLS state.
+type relayConn struct {
+	net.Conn
+	state tls.ConnectionState
+}
+
+type relayTLSKey struct{}
+
+// RelayTLS is the TLS state of a request on a relay connection.
+func RelayTLS(r *http.Request) *tls.ConnectionState {
+	if r.TLS != nil {
+		return r.TLS
+	}
+	cs, _ := r.Context().Value(relayTLSKey{}).(*tls.ConnectionState)
+	return cs
+}

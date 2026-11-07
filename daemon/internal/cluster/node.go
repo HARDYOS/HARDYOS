@@ -134,6 +134,7 @@ type Core struct {
 	probeMu    sync.Mutex
 	probes     map[string]*http2.Transport
 	joinLimits joinLimiter
+	relay      relayState
 	codesMu    sync.Mutex
 }
 
