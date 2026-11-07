@@ -27,6 +27,9 @@ type clusterAPI struct {
 
 	sidMu sync.Mutex
 	sids  map[string]sidEntry // domain principal -> SID (entry side)
+
+	// limits caps relayed requests on the entry node (decision 371).
+	limits relayLimits
 }
 
 type sidEntry struct {
@@ -63,6 +66,9 @@ func (s *Server) AttachCluster(svc *member.Service) *ClusterAPI {
 	m.Handle("DELETE /api/v1/cluster/join-codes/{id}", s.admin(c.handleJoinCodeDelete))
 	m.Handle("DELETE /api/v1/cluster/nodes/{node}", s.admin(c.handleRemove))
 	m.Handle("POST /api/v1/cluster/witness/script", s.admin(c.handleWitnessScript))
+	m.Handle("GET /api/v1/cluster/admin-trust", s.admin(c.handleAdminTrust))
+	m.Handle("PUT /api/v1/cluster/admin-trust", s.admin(c.handleAdminTrustSet))
+
 	m.Handle("GET /api/v1/cluster/events", s.authed(c.handleEvents))
 	m.Handle("/api/v1/nodes/{node}/{rest...}", s.authed(c.handleNodeProxy))
 	return &ClusterAPI{c: c}

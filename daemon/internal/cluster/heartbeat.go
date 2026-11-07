@@ -2,7 +2,13 @@ package cluster
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"slices"
@@ -33,6 +39,9 @@ type HeartbeatRequest struct {
 	StorageOK bool              `json:"storageOK"`
 	LANOK     bool              `json:"lanOK"`
 	Running   []RunningWorkload `json:"running,omitempty"`
+	// Sent is the sender's own send time (Unix nanoseconds), echoed in the
+	// leader's signed statement so an old answer can't be replayed.
+	Sent int64 `json:"sent"`
 }
 
 // HeartbeatAnswer is the leader's answer.
@@ -41,6 +50,69 @@ type HeartbeatAnswer struct {
 	Leader NodeID `json:"leader"`
 	// View is the leader's record of the node.
 	View *Node `json:"view,omitempty"`
+	// Statement is a LeaderStatement (JSON) and Signature the leader's
+	// ES256 signature (ASN.1) over it (decision 367): only this proves the
+	// quorum, not the TLS connection alone.
+	Statement json.RawMessage `json:"statement"`
+	Signature []byte          `json:"signature"`
+}
+
+// LeaderStatement is what a leader signs in a heartbeat answer: it leads
+// in Term with Commit committed, and heard Node's heartbeat sent at Sent.
+type LeaderStatement struct {
+	Cluster ClusterID `json:"cluster"`
+	Leader  NodeID    `json:"leader"`
+	Node    NodeID    `json:"node"`
+	Term    uint64    `json:"term"`
+	Commit  uint64    `json:"commit"`
+	Sent    int64     `json:"sent"`
+}
+
+// statementDomain separates heartbeat signatures from every other use of
+// the cluster key.
+const statementDomain = "hardyos-heartbeat/1\n"
+
+func signStatement(id *Identity, st LeaderStatement) (json.RawMessage, []byte, error) {
+	raw, err := json.Marshal(st)
+	if err != nil {
+		return nil, nil, err
+	}
+	sum := sha256.Sum256(append([]byte(statementDomain), raw...))
+	sig, err := ecdsa.SignASN1(rand.Reader, id.Key, sum[:])
+	return raw, sig, err
+}
+
+// verifyStatement checks a heartbeat answer: signed by the leader that was
+// asked, a member that may lead by this node's state (never the witness),
+// for this node and this very heartbeat.
+func (n *Core) verifyStatement(leader NodeID, sent int64, ans *HeartbeatAnswer) error {
+	info := n.Info()
+	if info == nil {
+		return ErrNotMember
+	}
+	m, ok := n.Member(leader)
+	if !ok || !MayLead(m) {
+		return fmt.Errorf("%s may not answer heartbeats", leader)
+	}
+	k, err := ParsePublicKey(m.PublicKey)
+	if err != nil {
+		return err
+	}
+	if len(ans.Statement) == 0 || len(ans.Statement) > 4096 {
+		return errors.New("no leader statement")
+	}
+	sum := sha256.Sum256(append([]byte(statementDomain), ans.Statement...))
+	if !ecdsa.VerifyASN1(k, sum[:], ans.Signature) {
+		return errors.New("bad leader signature")
+	}
+	var st LeaderStatement
+	if err := json.Unmarshal(ans.Statement, &st); err != nil {
+		return err
+	}
+	if st.Cluster != info.Cluster || st.Leader != leader || st.Node != info.Node || st.Sent != sent {
+		return errors.New("the leader's statement is for another heartbeat")
+	}
+	return nil
 }
 
 type liveness struct {
@@ -150,7 +222,7 @@ func (n *Core) beat(ctx context.Context, t Timings) {
 	lh := n.localHealth(ctx)
 	q, _ := n.Quorate()
 	req := HeartbeatRequest{Node: self, BootID: n.cfg.BootID, Version: n.cfg.Version, Quorate: q,
-		StorageOK: lh.StorageOK, LANOK: lh.LANOK, Running: lh.Running}
+		StorageOK: lh.StorageOK, LANOK: lh.LANOK, Running: lh.Running, Sent: sent.UnixNano()}
 	if n.IsLeader() {
 		if n.verifyLeader() {
 			n.extendLease(sent)
@@ -167,6 +239,10 @@ func (n *Core) beat(ctx context.Context, t Timings) {
 	var ans HeartbeatAnswer
 	if err := n.peerc().Call(hctx, leader, http.MethodPost, "/heartbeat", req, &ans); err != nil {
 		n.log.Debug("cluster: heartbeat", "leader", leader, "err", err)
+		return
+	}
+	if err := n.verifyStatement(leader, req.Sent, &ans); err != nil {
+		n.log.Debug("cluster: heartbeat answer refused", "leader", leader, "err", err)
 		return
 	}
 	n.extendLease(sent)
@@ -198,14 +274,25 @@ func (n *Core) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	n.record(req, time.Now())
 	ans := HeartbeatAnswer{Leader: n.ID()}
+	st := LeaderStatement{Leader: n.ID(), Node: caller.ID, Sent: req.Sent}
+	if info := n.Info(); info != nil {
+		st.Cluster = info.Cluster
+	}
 	if r := n.r(); r != nil {
 		ans.Term, _ = strconv.ParseUint(r.Stats()["term"], 10, 64)
+		st.Term, st.Commit = ans.Term, r.CommitIndex()
+	}
+	var err error
+	if ans.Statement, ans.Signature, err = signStatement(n.cfg.Identity, st); err != nil {
+		peerError(w, http.StatusInternalServerError, "couldn't sign the answer")
+		return
 	}
 	if v, ok := n.cfg.Machine.Node(caller.ID); ok {
 		v.PublicKey = nil
 		ans.View = v
 	}
 	peerJSON(w, http.StatusOK, ans)
+
 }
 
 // Health implements Membership: the leader's view, from the leader.

@@ -13,8 +13,12 @@
 //
 // A refused entry changes nothing but the proposer's sequence (so it can't
 // be replayed once its preconditions hold) and the applied index, on every
-// node alike. An entry of a type no applier knows stops the FSM: the node
-// would diverge from the others (Halted).
+// node alike. An entry of a type no applier knows is refused like any other
+// when its level (Command.Level) is one this build supports or one the
+// cluster hasn't enabled: every node refuses it then. Only a type at an
+// enabled level above this build's FeatureLevel stops the FSM, since other
+// nodes may apply it (Halted; decision 366). An applier that panics refuses
+// the entry (the same panic happens on every node).
 //
 // Nothing here reads the clock, the network or the disk. Parts B and C add
 // their appliers in their own files of this package (register in an init
@@ -69,6 +73,9 @@ type FSM struct {
 	s        *cluster.Snapshot
 	appliers map[cluster.CommandType]cluster.Applier
 	halted   error
+	// restoreCheck vets snapshots against the current state (set by the
+	// core: it knows this node's id and key).
+	restoreCheck func(cur, next *cluster.Snapshot) error
 }
 
 // New returns an empty FSM with the built-in appliers (members, witness
@@ -195,15 +202,6 @@ func (f *FSM) Apply(index uint64, entry []byte) Result {
 		return res
 	}
 
-	// The type must be known before anything else is decided: an unknown
-	// type means this node can't follow the log any more.
-	a := f.appliers[c.Type]
-	if a == nil {
-		f.halted = fmt.Errorf("%w at entry %d: unknown command type %q (update this server)", ErrHalted, index, c.Type)
-		res.Err = f.halted
-		return res
-	}
-
 	// 3. Replay guard. A validly signed entry uses its sequence number up
 	// even when refused below, so it can't be replayed once its
 	// preconditions would hold.
@@ -212,6 +210,33 @@ func (f *FSM) Apply(index uint64, entry []byte) Result {
 		return res
 	}
 	consume := func() { f.s.Seq[c.Proposer] = c.Seq }
+
+	// The type and its level (decision 366). Every node decides the same:
+	// a type at a level this build supports is known to every build that
+	// supports the level, and a level the cluster hasn't enabled is refused
+	// by every node, knowing the type or not.
+	level := c.Level
+	if level == 0 {
+		level = 1
+	}
+	a := f.appliers[c.Type]
+	if a == nil {
+		if level <= max(1, f.s.FeatureLevel) && level > FeatureLevel {
+			// The cluster runs a level this build doesn't have: other nodes
+			// may apply this entry, so this one can't follow any more.
+			f.halted = fmt.Errorf("%w at entry %d: command type %q needs feature level %d (update this server)", ErrHalted, index, c.Type, level)
+			res.Err = f.halted
+			return res
+		}
+		consume()
+		res.Err = refused("unknown command type %q", c.Type)
+		return res
+	}
+	if want := cluster.LevelOf(c.Type); level != want || want > max(1, f.s.FeatureLevel) {
+		consume()
+		res.Err = refused("%s isn't enabled at feature level %d", c.Type, f.s.FeatureLevel)
+		return res
+	}
 
 	// 2. Signer role.
 	if !slices.Contains(a.Signers(c.Type), proposer.Role) {
@@ -222,7 +247,7 @@ func (f *FSM) Apply(index uint64, entry []byte) Result {
 
 	// 4. The applier works on a copy; a refusal leaves the state as it was.
 	next := Clone(f.s)
-	if err := a.Apply(next, *c); err != nil {
+	if err := safeApply(a, next, *c); err != nil {
 		consume()
 		res.Err = fmt.Errorf("%w: %s", ErrRefused, err.Error())
 		return res
@@ -230,6 +255,80 @@ func (f *FSM) Apply(index uint64, entry []byte) Result {
 	next.Seq[c.Proposer] = c.Seq
 	f.s = next
 	return res
+}
+
+// safeApply runs an applier, turning a panic into a refusal (it panics the
+// same way on every node, so the refusal is deterministic).
+func safeApply(a cluster.Applier, s *cluster.Snapshot, c cluster.Command) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("%s couldn't be applied (internal error: %v)", c.Type, p)
+		}
+	}()
+	return a.Apply(s, c)
+}
+
+// Admit implements cluster.StateMachine: what the leader checks before it
+// appends an entry, so a member can't fill the log with entries every node
+// would refuse or stop at (decision 366). The witness may only say hello.
+func (f *FSM) Admit(sc *cluster.SignedCommand) error {
+	if sc == nil {
+		return refused("no command")
+	}
+	c, err := DecodeCommand(sc.Command)
+	if err != nil {
+		return refused("%v", err)
+	}
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if f.halted != nil {
+		return f.halted
+	}
+	var proposer *cluster.Node
+	if c.Type == cluster.CmdClusterCreate {
+		if f.s.Cluster != "" {
+			return refused("the cluster exists already")
+		}
+		var b CreateBody
+		if err := json.Unmarshal(c.Body, &b); err != nil || b.Node.ID != c.Proposer {
+			return refused("cluster.create must be proposed by the node it creates the cluster with")
+		}
+		proposer = &b.Node
+	} else {
+		if f.s.Cluster == "" || c.Cluster != f.s.Cluster {
+			return refused("entry for another cluster")
+		}
+		proposer = f.s.Nodes[c.Proposer]
+		if proposer == nil || proposer.State == cluster.NodeRemoved {
+			return refused("%s isn't a member", c.Proposer)
+		}
+	}
+	if err := VerifyNodeKey(proposer); err != nil {
+		return refused("%v", err)
+	}
+	if err := Verify(sc, proposer.PublicKey); err != nil {
+		return refused("bad signature from %s", c.Proposer)
+	}
+	if proposer.Role == cluster.RoleWitness && c.Type != cluster.CmdWitnessHello {
+		return refused("the witness may only say hello")
+	}
+	a := f.appliers[c.Type]
+	if a == nil {
+		return refused("unknown command type %q", c.Type)
+	}
+	level := c.Level
+	if level == 0 {
+		level = 1
+	}
+	if want := cluster.LevelOf(c.Type); level != want || want > max(1, f.s.FeatureLevel) {
+		return refused("%s isn't enabled at feature level %d", c.Type, f.s.FeatureLevel)
+	}
+	if !slices.Contains(a.Signers(c.Type), proposer.Role) {
+		return refused("a %s node may not propose %s", proposer.Role, c.Type)
+	}
+	// A replay isn't refused here: a proposer resends an entry whose
+	// outcome it didn't learn, and the FSM refuses the second copy.
+	return nil
 }
 
 // DecodeCommand reads a command's canonical JSON strictly.
@@ -374,7 +473,10 @@ func (f *FSM) Encode() ([]byte, error) {
 	return Encode(f.s)
 }
 
-// Restore replaces the state with an encoded one (a Raft snapshot).
+// Restore replaces the state with an encoded one (a Raft snapshot), after
+// the restore check (decision 365): a snapshot can't empty the state, move
+// to another cluster, go back in the log, drop this node, or change an
+// existing member's key or role.
 func (f *FSM) Restore(data []byte) error {
 	s, err := Decode(data)
 	if err != nil {
@@ -382,9 +484,33 @@ func (f *FSM) Restore(data []byte) error {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if s.Cluster == "" {
+		return errors.New("cluster state: refusing an empty snapshot")
+	}
+	if f.restoreCheck != nil {
+		if err := f.restoreCheck(f.s, s); err != nil {
+			return fmt.Errorf("cluster state: refusing a snapshot: %w", err)
+		}
+	}
 	f.s = s
 	f.halted = nil
 	return nil
+}
+
+// Reset implements cluster.StateMachine: an empty state, before Raft
+// replays the log from its latest snapshot.
+func (f *FSM) Reset() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.s = Empty()
+	f.halted = nil
+}
+
+// SetRestoreCheck implements cluster.StateMachine.
+func (f *FSM) SetRestoreCheck(fn func(cur, next *cluster.Snapshot) error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.restoreCheck = fn
 }
 
 type snapshotAlias cluster.Snapshot

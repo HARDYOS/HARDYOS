@@ -123,13 +123,28 @@ to vote or delay changes, but can't forge or replay changes.
   server. The other server decides what you may do there:
   - **domain accounts** get what they would get signing in there (checked
     by the account's SID against the domain);
-  - an **administrator of any server is an administrator on every
-    server** (the audit log says `alice (via c1)`);
+  - an **administrator of another server** acts as an administrator here
+    for what the cluster desktop does: VMs, apps from the catalogs,
+    storage, shared folders, files, backups, monitoring and the cluster's
+    workloads (the audit log says `alice (via c1)`). Accounts, sign-in,
+    the terminal, network settings, updates, remote access, custom apps
+    and the cluster's membership (join codes, the witness script, leaving,
+    removing, dissolving) need signing in on that server itself;
+  - each server chooses which other servers' administrators it accepts:
+    **Cluster › Servers › Administrators of other servers** (all of them
+    until an administrator of that server turns one off);
   - **local non-admin accounts** belong to one server: sign in on that
     server to use it.
-- Live views (events, VM screens, terminals) are forwarded too and close
-  within 15 seconds of signing out. App windows for apps on another server
-  open through the entry server's window proxy.
+- Live views (events, VM screens) are forwarded too and close within 15
+  seconds of signing out, or of the account being turned off or losing its
+  administrator role. App windows for apps on another server open through
+  the entry server's window proxy, after that server confirmed you may use
+  the app; idle ones close after 30 minutes. Documents on another server
+  open in that server's editor at its LAN address (if the browser warns
+  about its certificate, accept it once for that address).
+- Each person has at most 16 requests and 8 live views to other servers
+  open at once (128 and 64 for everyone); uploads to another server wait in
+  hardyd's own folder on the entry server, up to 8 GiB at a time.
 
 ## Leaving and removing
 
@@ -302,6 +317,26 @@ until its probe is built, so LAN isolation never triggers.
   make that change, and that the number is new. A member can't forge
   another's changes, and an old change can't be replayed.
 - No secrets go into the log.
-- Membership is full trust, as in other clusters of this kind: a server
-  whose root is compromised can act as an administrator on the others. Both
-  ends audit every forwarded change with the person and the server.
+- The cluster log (Raft) only believes what the connection proves: every
+  message must come from the member whose key made the connection, and
+  only servers that may lead (active, rejoining or in maintenance) may send
+  a leader's or a candidate's messages. The witness, a joining server and a
+  dead or fenced one can't take over the log or make others follow them; a
+  snapshot can't swap a member's key, raise its role, roll a server back
+  or drop it. A server only counts itself in contact with the cluster when
+  the leader signed the answer to its heartbeat.
+- A change of a kind a server doesn't know never stops the cluster: every
+  server refuses it, unless the cluster enabled a feature level that server
+  lacks (then it stops and asks to be updated).
+- **How far members trust each other is still open** (the owner's
+  decision). Today a server whose root is compromised can act as an
+  administrator on the others within the limits above, can misbehave as a
+  leader of the log (Raft isn't Byzantine fault tolerant), and its relayed
+  requests are limited per server. Keeping a compromised member out
+  entirely would need every server to authenticate the person itself
+  (re-sign-in on the target); that waits for the decision. Both ends audit
+  every forwarded change with the person and the server.
+- Known limit: a server that was offline while another server joined (or
+  rejoined after a fence) catches up once the leader is a server it already
+  knows as active; until then it stays behind (the others are unaffected).
+

@@ -42,7 +42,8 @@ func TestScriptGolden(t *testing.T) {
 		t.Fatal("the script changed: check it and run go test ./internal/cluster/witness -update")
 	}
 	for _, must := range []string{"DynamicUser=yes", "ProtectSystem=strict", "NoNewPrivileges=yes", "MemoryMax=128M",
-		"RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX", "LoadCredential=join:", "--pinnedpubkey 'sha256//q6ur",
+		"RestrictAddressFamilies=AF_INET AF_INET6\n", "IPAddressDeny=any", "IPAddressAllow=$NBNET", "UMask=0077",
+		"ProtectProc=invisible", "ProcSubset=pid", "PrivateUsers=yes", "LoadCredential=join:", "--pinnedpubkey 'sha256//q6ur",
 		"sha256sum -c"} {
 		if !strings.Contains(string(b), must) {
 			t.Errorf("script lacks %q", must)
@@ -51,6 +52,12 @@ func TestScriptGolden(t *testing.T) {
 	if strings.Contains(string(b), "hardyos-witness run --code") {
 		t.Error("the code is on a command line")
 	}
+	// The service is restarted once the drop-in with the code is gone, so
+	// the running witness no longer has the credential (decision 374).
+	if i, j := strings.Index(string(b), `rm -f "$DROPIN/join.conf"`), strings.LastIndex(string(b), "systemctl restart hardyos-witness.service"); i < 0 || j < i {
+		t.Error("the witness isn't restarted after its join code is removed")
+	}
+
 }
 
 func TestScriptRejectsInjection(t *testing.T) {

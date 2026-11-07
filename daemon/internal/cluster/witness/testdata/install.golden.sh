@@ -40,6 +40,12 @@ command -v sha256sum >/dev/null || fail "sha256sum is required"
 # The witness listens on this VPS's NetBird address only.
 LISTEN=$(ip -4 -o addr show dev wt0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1)
 [ -n "$LISTEN" ] || fail "this VPS isn't on NetBird (no wt0 address): join it to the cluster's NetBird network first"
+# The NetBird network (wt0's prefix, host bits cleared): the only one the
+# witness may talk to.
+NBNET=$(ip -4 -o addr show dev wt0 2>/dev/null | awk '{split($4, a, "/"); split(a[1], o, "."); p = a[2] + 0;
+	ip = ((o[1] * 256 + o[2]) * 256 + o[3]) * 256 + o[4]; s = 2 ^ (32 - p); n = ip - (ip % s);
+	printf "%d.%d.%d.%d/%d\n", int(n / 16777216) % 256, int(n / 65536) % 256, int(n / 256) % 256, n % 256, p; exit}')
+[ -n "$NBNET" ] || fail "couldn't read the NetBird network of wt0"
 # shellcheck disable=SC2018,SC2019 # ASCII on purpose
 NAME=$(hostname -s | tr 'A-Z' 'a-z' | tr -c 'a-z0-9-\n' '-' | cut -c1-32)
 [ -n "$NAME" ] || NAME=witness
@@ -115,7 +121,15 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 CapabilityBoundingSet=
 AmbientCapabilities=
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictAddressFamilies=AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=$NBNET
+UMask=0077
+ProtectProc=invisible
+ProcSubset=pid
+PrivateUsers=yes
+PrivateIPC=yes
+RemoveIPC=yes
 MemoryMax=128M
 
 [Install]
@@ -137,6 +151,9 @@ while [ $i -lt 90 ]; do
 		rm -f "$DROPIN/join.conf" "$ETC/join.code"
 		rmdir "$DROPIN" 2>/dev/null || true
 		systemctl daemon-reload
+		# Restarted without the credential: the code is gone from the
+		# service too, not only from the disk.
+		systemctl restart hardyos-witness.service
 		echo "The HardyOS witness joined the cluster (through $GOT). It listens on $LISTEN:$PORT."
 		exit 0
 	fi
@@ -148,4 +165,6 @@ while [ $i -lt 90 ]; do
 done
 rm -f "$DROPIN/join.conf" "$ETC/join.code"
 systemctl daemon-reload
+systemctl stop hardyos-witness.service
 fail "the witness didn't join within 3 minutes: see journalctl -u hardyos-witness"
+

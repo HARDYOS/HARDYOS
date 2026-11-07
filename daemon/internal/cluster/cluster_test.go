@@ -501,7 +501,7 @@ func TestForgedAndReplayedProposalsRefused(t *testing.T) {
 	}
 	// The witness can only say hello: anything else it signs is refused.
 	if _, err := w.core.Propose(ctx(t), cluster.CmdMemberRemove, state.MemberRemoveBody{Node: "c1"}, admin); err == nil ||
-		!strings.Contains(err.Error(), "may not propose") {
+		!strings.Contains(err.Error(), "may only say hello") {
 		t.Fatalf("witness command: %v", err)
 	}
 	// The witness may not call member endpoints.

@@ -5867,6 +5867,37 @@ paths:
         "400": { $ref: "#/components/responses/Invalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /cluster/admin-trust:
+    get:
+      operationId: getClusterAdminTrust
+      summary: Which other members' administrators this server accepts as administrators (decision 368)
+      tags: [cluster]
+      responses:
+        "200":
+          description: Every other HardyOS member and whether its administrators are accepted here
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClusterAdminTrust" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    put:
+      operationId: setClusterAdminTrust
+      summary: Accept or refuse other members' administrators here (only this server's own administrators; members not named keep their setting)
+      tags: [cluster]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClusterAdminTrust" }
+      responses:
+        "200":
+          description: The setting now
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClusterAdminTrust" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /cluster/events:
     get:
       operationId: clusterEvents
@@ -10433,6 +10464,21 @@ components:
       properties:
         script: { type: string }
         expires: { type: string, format: date-time }
+    ClusterAdminTrust:
+      type: object
+      required: [members]
+      properties:
+        members:
+          type: array
+          items: { $ref: "#/components/schemas/ClusterAdminTrustMember" }
+    ClusterAdminTrustMember:
+      type: object
+      required: [id, name, accept]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        accept: { type: boolean, description: "Administrators of this member act as administrators here (within the cluster desktop's areas)" }
+
     # ---- end of cluster core schemas ----
     # ---- Phase 8 part B (cluster storage) schemas ----
     ClusterStorageNode:

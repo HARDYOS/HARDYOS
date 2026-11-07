@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
@@ -97,6 +98,11 @@ type Config struct {
 	// WitnessBinary opens the witness binary members hand to the install
 	// script (nil on the witness).
 	WitnessBinary func() (io.ReadSeekCloser, error)
+	// SpoolDir holds relayed request bodies too large for memory (a
+	// disk-backed folder of hardyd's; "" is the system's temporary folder)
+	// and SpoolQuota bounds them all together (DefaultSpoolQuota when 0).
+	SpoolDir   string
+	SpoolQuota int64
 	// OnJoin is told about join attempts (audit); OnEvent about every event.
 	OnJoin func(ctx context.Context, e JoinEvent)
 	Log    *slog.Logger
@@ -145,6 +151,19 @@ type Core struct {
 	ownMu   sync.Mutex
 	own     map[uint64]ownResult
 	codesMu sync.Mutex
+
+	// proposeLimit bounds proposals per member at the leader.
+	proposeLimit proposeLimiter
+
+	spoolOnce sync.Once
+	spool     *Spooler
+
+	pins atomic.Pointer[pinCache]
+
+	// raftSelf is this node's membership as Raft was started with: the
+	// snapshot check reads it without n.mu, which startLocked holds while
+	// Raft restores its latest snapshot.
+	raftSelf atomic.Pointer[Info]
 }
 
 // ErrRefused is an entry the cluster refused (its message says why).
@@ -185,6 +204,7 @@ func New(ctx context.Context, cfg Config) (*Core, error) {
 	}
 	n.pc = newPeerClient(n.tr)
 	n.routes()
+	cfg.Machine.SetRestoreCheck(n.checkSnapshot)
 	return n, nil
 }
 
@@ -255,7 +275,7 @@ func (n *Core) ByPin(pin string) (Node, bool) {
 	if pin == "" {
 		return Node{}, false
 	}
-	idx := n.cfg.Machine.PinIndex()
+	idx := n.pinIndex()
 	if len(idx) > 0 {
 		m, ok := idx[pin]
 		return m, ok
@@ -275,7 +295,7 @@ func (n *Core) Member(id NodeID) (Node, bool) {
 	if m, ok := n.cfg.Machine.Node(id); ok {
 		return *m, true
 	}
-	if len(n.cfg.Machine.PinIndex()) == 0 {
+	if len(n.pinIndex()) == 0 {
 		if i := n.Info(); i != nil {
 			for _, p := range i.Peers {
 				if p.ID == id {
@@ -287,8 +307,26 @@ func (n *Core) Member(id NodeID) (Node, bool) {
 	return Node{}, false
 }
 
+// pinIndex is the state's members by pin, rebuilt only when the applied
+// index moved: the Raft guard and the peer API look a caller up on every
+// message. Read only.
+func (n *Core) pinIndex() map[string]Node {
+	at := n.cfg.Machine.Index()
+	if c := n.pins.Load(); c != nil && c.index == at && at != 0 {
+		return c.m
+	}
+	m := n.cfg.Machine.PinIndex()
+	n.pins.Store(&pinCache{index: at, m: m})
+	return m
+}
+
+type pinCache struct {
+	index uint64
+	m     map[string]Node
+}
+
 func (n *Core) peers() []Node {
-	idx := n.cfg.Machine.PinIndex()
+	idx := n.pinIndex()
 	out := make([]Node, 0, len(idx))
 	for _, m := range idx {
 		out = append(out, m)
@@ -379,12 +417,12 @@ func (n *Core) startLocked(ctx context.Context, boot *raft.Configuration) error 
 		snaps = fs
 	}
 	// Raft replays the log (from its latest snapshot) into a fresh state.
-	if err := n.cfg.Machine.Restore([]byte(`{}`)); err != nil {
-		n.closeStores()
-		return err
-	}
+	n.cfg.Machine.Reset()
+	n.pins.Store(nil)
+
 	tr := n.trn()
-	layer := &streamLayer{t: tr, ln: tr.RaftListener()}
+	tr.RaftAdmit = n.raftAdmit
+	layer := &streamLayer{t: tr, ln: tr.RaftListener(), self: n.info.Node}
 	trans := raft.NewNetworkTransportWithConfig(&raft.NetworkTransportConfig{
 		Stream: layer, MaxPool: 3, Timeout: 10 * time.Second, Logger: hclogFor(n.log),
 	})
@@ -395,7 +433,10 @@ func (n *Core) startLocked(ctx context.Context, boot *raft.Configuration) error 
 			return fmt.Errorf("bootstrap: %w", err)
 		}
 	}
+	self := *n.info
+	n.raftSelf.Store(&self)
 	r, err := raft.NewRaft(n.raftConfig(), &fsmAdapter{n: n}, logs, stable, snaps, trans)
+
 	if err != nil {
 		trans.Close()
 		n.closeStores()
@@ -491,13 +532,17 @@ func (n *Core) SetMigrate(f func(conn *tls.Conn, from Node)) { n.trn().Migrate =
 // ---- raft glue ----------------------------------------------------------------
 
 type streamLayer struct {
-	t  *Transport
-	ln net.Listener
+	t    *Transport
+	ln   net.Listener
+	self NodeID
 }
 
 func (s *streamLayer) Accept() (net.Conn, error) { return s.ln.Accept() }
 func (s *streamLayer) Close() error              { return nil } // the transport owns the queue
-func (s *streamLayer) Addr() net.Addr            { return s.ln.Addr() }
+
+// Addr is this node's Raft address: its id, as in the configuration (the
+// guard checks a request's claimed address against the sender's id).
+func (s *streamLayer) Addr() net.Addr { return raftAddr(s.self) }
 
 func (s *streamLayer) Dial(address raft.ServerAddress, timeout time.Duration) (net.Conn, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -537,8 +582,10 @@ func (a *fsmAdapter) Restore(rc io.ReadCloser) error {
 		return err
 	}
 	if err := a.n.cfg.Machine.Restore(b); err != nil {
+		a.n.log.Error("cluster: refused a snapshot", "err", err)
 		return err
 	}
+	a.n.trn().RecheckInbound()
 	a.n.notifyApplied()
 	a.n.events.publish(Event{Index: a.n.cfg.Machine.Index()})
 	return nil
@@ -568,6 +615,11 @@ func (n *Core) applied(res ApplyResult) {
 	}
 	if res.Command == nil {
 		return
+	}
+	if res.Err == nil {
+		// Members removed, fenced or declared dead lose their inbound Raft
+		// connections at once (decision 365).
+		n.trn().RecheckInbound()
 	}
 	if res.Command.Proposer == n.ID() {
 		n.recordOwn(res.Command.Seq, res.Index, res.Err)
@@ -706,8 +758,12 @@ func (n *Core) Propose(ctx context.Context, t CommandType, body any, actor Actor
 	if actor.Via == "" {
 		actor.Via = info.Node
 	}
+	level := 0
+	if l := LevelOf(t); l > 1 {
+		level = l
+	}
 	sc, err := SignCommand(n.cfg.Identity, Command{Type: t, Cluster: info.Cluster, Proposer: info.Node, Seq: seq,
-		Actor: actor, Time: time.Now().UTC().Truncate(time.Millisecond), Body: raw})
+		Actor: actor, Time: time.Now().UTC().Truncate(time.Millisecond), Body: raw, Level: level})
 	if err != nil {
 		return 0, err
 	}
@@ -761,6 +817,13 @@ func (n *Core) submit(ctx context.Context, sc *SignedCommand) (uint64, error) {
 			return 0, ErrNotMember
 		}
 		if r.State() == raft.Leader {
+			if !ambiguous {
+				// An entry no node would apply never enters the log
+				// (decision 366). A resend was admitted the first time.
+				if err := n.cfg.Machine.Admit(sc); err != nil {
+					return 0, &ErrRefused{Reason: err.Error()}
+				}
+			}
 			f := r.Apply(data, time.Until(deadline))
 			err := f.Error()
 			switch {
@@ -786,7 +849,19 @@ func (n *Core) submit(ctx context.Context, sc *SignedCommand) (uint64, error) {
 			case errors.As(err, &pe) && pe.Status == http.StatusMisdirectedRequest:
 				// Not the leader any more: nothing was appended.
 			case errors.As(err, &pe) && pe.Status == http.StatusForbidden:
-				return 0, err
+				if ambiguous {
+					// A resend refused (the first copy may have removed
+					// this very member): the first copy's outcome, once it
+					// applies here, decides.
+					if r, ok := n.waitOwn(ctx, cmd.Seq, deadline); ok {
+						if r.err != nil {
+							return r.index, &ErrRefused{Reason: r.err.Error()}
+						}
+						return r.index, nil
+					}
+				}
+				// The leader refused to append it (decision 366).
+				return 0, &ErrRefused{Reason: pe.Message}
 			case ctx.Err() != nil:
 				return 0, ctx.Err()
 			default:
@@ -833,7 +908,24 @@ func (n *Core) recordOwn(seq, index uint64, err error) {
 	}
 }
 
+// waitOwn waits (until deadline) for this node to apply its own entry seq.
+func (n *Core) waitOwn(ctx context.Context, seq uint64, deadline time.Time) (ownResult, bool) {
+	for {
+		if r, ok := n.ownResult(seq); ok {
+			return r, true
+		}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			return ownResult{}, false
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
 func (n *Core) ownResult(seq uint64) (ownResult, bool) {
+
 	n.ownMu.Lock()
 	defer n.ownMu.Unlock()
 	r, ok := n.own[seq]
@@ -871,6 +963,17 @@ func (n *Core) handlePropose(w http.ResponseWriter, r *http.Request) {
 	}
 	if !n.IsLeader() {
 		peerError(w, http.StatusMisdirectedRequest, "not the leader")
+		return
+	}
+	if !n.proposeLimit.allow(caller.ID, caller.Role == RoleWitness, time.Now()) {
+		// A member flooding the log (decision 372).
+		peerErrorCode(w, http.StatusTooManyRequests, "too_many", "too many proposals from "+string(caller.ID))
+		return
+	}
+	if err := n.cfg.Machine.Admit(&sc); err != nil {
+		// Not appended: every node would refuse it (decision 366). Its
+		// sequence number isn't used, the proposer may use it again.
+		peerError(w, http.StatusForbidden, err.Error())
 		return
 	}
 	idx, err := n.submitLocal(r.Context(), &sc)

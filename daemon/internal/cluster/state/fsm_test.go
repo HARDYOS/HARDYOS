@@ -193,21 +193,102 @@ func TestRefusedEntryConsumesSequence(t *testing.T) {
 	_ = c1
 }
 
-func TestUnknownTypeHalts(t *testing.T) {
-	h, nas, _, _ := threeNodes(t)
-	r := h.apply(nas.sign(t, "future.thing", map[string]int{"x": 1}))
+// signLevel signs a command that says it needs feature level level.
+func (n *tnode) signLevel(t *testing.T, typ cluster.CommandType, body any, level int) []byte {
+	t.Helper()
+	n.seq++
+	b, _ := json.Marshal(body)
+	c := cluster.Command{Type: typ, Cluster: testCluster, Proposer: n.node.ID, Seq: n.seq, Level: level,
+		Actor: cluster.Actor{Kind: "system", Name: "test", Via: n.node.ID}, Time: time.Unix(1700000000, 0).UTC(), Body: b}
+	cb, _ := json.Marshal(c)
+	sum := sha256.Sum256(cb)
+	sig, err := ecdsa.SignASN1(rand.Reader, n.key, sum[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, _ := json.Marshal(cluster.SignedCommand{Command: cb, Signature: sig})
+	return e
+}
+
+// An unknown type doesn't stop the cluster (decision 366): at a level this
+// build supports or one the cluster hasn't enabled, every node refuses it.
+func TestUnknownTypeRefusedNotHalted(t *testing.T) {
+	h, nas, c1, _ := threeNodes(t)
+	h.mustRefuse(nas.sign(t, "future.thing", map[string]int{"x": 1}), "unknown command type")
+	h.mustRefuse(nas.signLevel(t, "future.thing", nil, 2), "unknown command type")
+	h.mustRefuse(c1.signLevel(t, "future.thing", nil, 9), "unknown command type")
+	if h.f.Halted() != nil {
+		t.Fatal("an unknown type halted the FSM")
+	}
+	// The cluster goes on.
+	h.mustApply(nas.sign(t, cluster.CmdMemberUpdate, MemberUpdateBody{Version: "2"}))
+	// A known type claiming another level is refused too (no node applies it).
+	h.mustRefuse(nas.signLevel(t, cluster.CmdMemberUpdate, MemberUpdateBody{Version: "3"}, 2), "isn't enabled")
+	// The leader doesn't even append these.
+	var sc cluster.SignedCommand
+	_ = json.Unmarshal(nas.sign(t, "future.thing", nil), &sc)
+	if err := h.f.Admit(&sc); err == nil || !strings.Contains(err.Error(), "unknown command type") {
+		t.Fatalf("admit unknown: %v", err)
+	}
+	_ = json.Unmarshal(nas.sign(t, cluster.CmdMemberUpdate, MemberUpdateBody{Version: "4"}), &sc)
+	if err := h.f.Admit(&sc); err != nil {
+		t.Fatalf("admit known: %v", err)
+	}
+}
+
+// Only a type at an enabled level above this build's stops the FSM: other
+// nodes may apply it.
+func TestUnknownTypeAtEnabledLevelHalts(t *testing.T) {
+	h, nas, c1, w := threeNodes(t)
+	f2 := []string{FeatureName(1), FeatureName(2)}
+	h.mustApply(nas.sign(t, cluster.CmdMemberUpdate, MemberUpdateBody{Features: f2}))
+	h.mustApply(c1.sign(t, cluster.CmdMemberUpdate, MemberUpdateBody{Features: f2}))
+	h.mustApply(w.sign(t, cluster.CmdWitnessHello, WitnessHelloBody{Addresses: w.node.Addresses, Version: "1.0", Features: f2}))
+	h.mustApply(nas.sign(t, cluster.CmdFeatureLevel, FeatureLevelBody{Level: 2}))
+	// An unsigned unknown type from a non-member doesn't halt.
+	x := newTNode(t, "x", cluster.RoleCompute, "10.0.0.1")
+	h.mustRefuse(x.signLevel(t, "future.thing", nil, 2), "isn't a member")
+	if h.f.Halted() != nil {
+		t.Fatal("a non-member halted the FSM")
+	}
+	r := h.apply(nas.signLevel(t, "future.thing", map[string]int{"x": 1}, 2))
 	if !errors.Is(r.Err, ErrHalted) || h.f.Halted() == nil {
 		t.Fatalf("got %v", r.Err)
 	}
 	if r := h.apply(nas.sign(t, cluster.CmdMemberUpdate, MemberUpdateBody{Version: "2"})); !errors.Is(r.Err, ErrHalted) {
 		t.Fatalf("after halt: %v", r.Err)
 	}
-	// An unsigned unknown type from a non-member doesn't halt.
-	h2, _, _, _ := threeNodes(t)
-	x := newTNode(t, "x", cluster.RoleCompute, "10.0.0.1")
-	h2.mustRefuse(x.sign(t, "future.thing", nil), "isn't a member")
-	if h2.f.Halted() != nil {
-		t.Fatal("a non-member halted the FSM")
+}
+
+type panicApplier struct{}
+
+func (panicApplier) Types() []cluster.CommandType               { return []cluster.CommandType{"test.panic"} }
+func (panicApplier) Signers(cluster.CommandType) []cluster.Role { return hardy }
+func (panicApplier) Apply(s *cluster.Snapshot, c cluster.Command) error {
+	s.Name = "changed"
+	var m map[string]int
+	m["boom"] = 1 // nil map: panics
+	return nil
+}
+
+// A panicking applier refuses its entry instead of crashing every node.
+func TestApplierPanicRefuses(t *testing.T) {
+	h, nas, _, _ := threeNodes(t)
+	h.f.Register(panicApplier{})
+	h.mustRefuse(nas.sign(t, "test.panic", nil), "internal error")
+	if h.f.Halted() != nil || h.f.Snapshot().Name != "home" {
+		t.Fatal("the panic changed the state")
+	}
+	h.mustApply(nas.sign(t, cluster.CmdMemberUpdate, MemberUpdateBody{Version: "2"}))
+}
+
+// The witness may only say hello, even through the leader.
+func TestAdmitWitnessOnlyHello(t *testing.T) {
+	h, _, _, w := threeNodes(t)
+	var sc cluster.SignedCommand
+	_ = json.Unmarshal(w.sign(t, cluster.CmdMemberUpdate, MemberUpdateBody{Version: "x"}), &sc)
+	if err := h.f.Admit(&sc); err == nil || !strings.Contains(err.Error(), "only say hello") {
+		t.Fatalf("admit: %v", err)
 	}
 }
 

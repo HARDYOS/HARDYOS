@@ -614,6 +614,11 @@ type Command struct {
 	Actor    Actor           `json:"actor"`
 	Time     time.Time       `json:"time"`
 	Body     json.RawMessage `json:"body"`
+	// Level is the feature level the type needs (LevelOf; omitted for
+	// level 1). A node that doesn't know the type refuses it when the level
+	// isn't enabled or is one it supports, and stops only when the cluster
+	// enabled a level above its own (decision 366).
+	Level int `json:"level,omitempty"`
 }
 
 // SignedCommand is what the log holds: the canonical JSON of a Command and
@@ -723,6 +728,12 @@ type Assertion struct {
 	Nonce     string    `json:"jti"`
 	// Request is the SHA-256 (hex) of method, path, query and body.
 	Request string `json:"req"`
+	// Host is the Host the browser sent to the entry node (the desktop's
+	// or an app window's address), so the target builds links and checks
+	// origins as the browser sees them (decision 373).
+	Host string `json:"host,omitempty"`
+	// Proto is "https" or "http": how the browser reached the entry node.
+	Proto string `json:"proto,omitempty"`
 }
 
 // JoinOffer is an open join code (shown once to the admin).

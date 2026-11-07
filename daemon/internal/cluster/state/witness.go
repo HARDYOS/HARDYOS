@@ -21,14 +21,19 @@ func applyWitnessHello(s *cluster.Snapshot, c cluster.Command) error {
 	if n.Role != cluster.RoleWitness {
 		return errors.New("only the witness says hello")
 	}
-	if err := validAddresses(&b.Addresses, cluster.RoleWitness); err != nil {
+	if err := validAddresses(s, n.ID, &b.Addresses, cluster.RoleWitness); err != nil {
 		return err
 	}
 	if err := validFeatures(b.Features); err != nil {
 		return err
 	}
-	if len(b.Version) > 64 {
-		return errors.New("invalid version")
+	if len(b.Version) > 64 || len(b.BootID) > 64 {
+		return errors.New("invalid version or boot id")
+	}
+	if n.State != cluster.NodeJoining && n.Addresses.NetBird == b.Addresses.NetBird && n.Version == b.Version &&
+		n.BootID == b.BootID && slices.Equal(n.Features, b.Features) {
+		// Nothing changed: not worth a log entry (decision 372).
+		return errors.New("the witness's hello changes nothing")
 	}
 	n.Addresses = b.Addresses
 	n.Version = b.Version
