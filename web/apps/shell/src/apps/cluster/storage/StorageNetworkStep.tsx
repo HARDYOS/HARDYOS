@@ -24,6 +24,10 @@ export function StorageNetworkStep({ onDone }: { onDone?: (plan: ClusterStorageP
   const [jumbo, setJumbo] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [problems, setProblems] = useState<string[]>([]);
+  // A change of this member's storage address: the server asks for its
+  // name (409 "confirm") and the request is sent again with it.
+  const [confirmMsg, setConfirmMsg] = useState("");
+  const [confirmName, setConfirmName] = useState("");
 
   useEffect(() => {
     const d = info.data;
@@ -43,13 +47,27 @@ export function StorageNetworkStep({ onDone }: { onDone?: (plan: ClusterStorageP
     : null;
 
   const apply = useMutation({
-    mutationFn: (p: ClusterStoragePlan) => unwrap(api.POST("/cluster/storage/network", { body: p })),
+    mutationFn: ({ p, confirm }: { p: ClusterStoragePlan; confirm?: string }) =>
+      unwrap(api.POST("/cluster/storage/network", { params: { query: confirm ? { confirm } : {} }, body: p })),
     onSuccess: (r) => {
       setProblems([]);
+      setConfirmMsg("");
       setJobId(r.job.id);
     },
-    onError: (e) => setProblems(e instanceof ApiFailure && e.details.length ? e.details : [errorMessage(e)]),
+    onError: (e) => {
+      if (e instanceof ApiFailure && e.status === 409 && e.code === "confirm") {
+        setProblems([]);
+        setConfirmMsg(e.message);
+        return;
+      }
+      setProblems(e instanceof ApiFailure && e.details.length ? e.details : [errorMessage(e)]);
+    },
   });
+  const changeAddress = (v: string) => {
+    setAddress(v);
+    setConfirmMsg("");
+    setConfirmName("");
+  };
 
   if (info.isLoading) return <Loading />;
   if (info.error) return <ErrorBox error={info.error} onRetry={() => void info.refetch()} />;
@@ -83,7 +101,7 @@ export function StorageNetworkStep({ onDone }: { onDone?: (plan: ClusterStorageP
       </fieldset>
       <div className="row" style={{ gap: 16, flexWrap: "wrap" }}>
         <Field label="This server's storage address" hint={`With the prefix, e.g. ${d.suggested || "10.77.0.21/24"}`}>
-          {(id) => <TextInput id={id} value={address} className="input mono" onChange={(e) => setAddress(e.target.value)} />}
+          {(id) => <TextInput id={id} value={address} className="input mono" onChange={(e) => changeAddress(e.target.value)} />}
         </Field>
         {cand?.kind === "vlan" && (
           <Field label="VLAN" hint="Your switch must carry this VLAN on the port.">
@@ -111,6 +129,16 @@ export function StorageNetworkStep({ onDone }: { onDone?: (plan: ClusterStorageP
           </ul>
         </Alert>
       )}
+      {confirmMsg && !jobId && (
+        <Alert tone="warn" title="This changes this server's storage address">
+          <div className="stack">
+            <span>{confirmMsg}</span>
+            <Field label="Type this server's name to confirm">
+              {(id) => <TextInput id={id} value={confirmName} className="input mono" onChange={(e) => setConfirmName(e.target.value)} />}
+            </Field>
+          </div>
+        </Alert>
+      )}
       {jobId ? (
         <JobProgress
           id={jobId}
@@ -122,9 +150,20 @@ export function StorageNetworkStep({ onDone }: { onDone?: (plan: ClusterStorageP
         />
       ) : (
         <div className="row">
-          <Button variant="primary" disabled={!plan || !address} busy={apply.isPending} onClick={() => plan && apply.mutate(plan)}>
-            {cand?.kind === "lan" ? "Use the LAN" : "Set up the storage network"}
-          </Button>
+          {confirmMsg ? (
+            <Button
+              variant="danger"
+              disabled={!plan || !address || !confirmName.trim()}
+              busy={apply.isPending}
+              onClick={() => plan && apply.mutate({ p: plan, confirm: confirmName.trim() })}
+            >
+              Change the storage address
+            </Button>
+          ) : (
+            <Button variant="primary" disabled={!plan || !address} busy={apply.isPending} onClick={() => plan && apply.mutate({ p: plan })}>
+              {cand?.kind === "lan" ? "Use the LAN" : "Set up the storage network"}
+            </Button>
+          )}
         </div>
       )}
     </div>
