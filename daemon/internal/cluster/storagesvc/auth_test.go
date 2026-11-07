@@ -369,6 +369,32 @@ func lanStore(t *testing.T) *Store {
 	return st
 }
 
+func TestCheckStoragePlan(t *testing.T) {
+	s := testSnapshot()
+	me := *s.Nodes["c1"]
+	plan := func(kind, a string) network.StoragePlan {
+		return network.StoragePlan{Kind: kind, Interface: "enp2s0", Address: a}
+	}
+	if c := CheckStoragePlan(s, me, plan(network.StorageDedicated, "10.77.0.21/24"), ""); len(c.Problems) != 0 || c.NeedsConfirm {
+		t.Fatalf("unchanged plan: %+v", c)
+	}
+	for _, bad := range []string{"10.88.0.21/24", "10.77.0.21/16", "10.77.0.22/24", "10.77.0.10/24"} {
+		if c := CheckStoragePlan(s, me, plan(network.StorageDedicated, bad), "c1"); len(c.Problems) == 0 {
+			t.Errorf("%s passed", bad)
+		}
+	}
+	c := CheckStoragePlan(s, me, plan(network.StorageDedicated, "10.77.0.31/24"), "")
+	if !c.NeedsConfirm || !strings.Contains(c.ConfirmMessage, "hardyctl cluster-storage repin c1") {
+		t.Fatalf("address change: %+v", c)
+	}
+	if c := CheckStoragePlan(s, me, plan(network.StorageDedicated, "10.77.0.31/24"), "c1"); c.NeedsConfirm {
+		t.Fatal("the typed name didn't confirm")
+	}
+	if c := CheckStoragePlan(s, me, plan(network.StorageShared, "10.77.0.21/24"), ""); len(c.Problems) == 0 {
+		t.Fatal("the LAN itself with VMs in the cluster (H2)")
+	}
+}
+
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "hardyd.db"))

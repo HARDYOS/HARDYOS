@@ -21,6 +21,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/san"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/state"
+	"github.com/hardyos/hardyos/daemon/internal/network"
 	"github.com/hardyos/hardyos/daemon/internal/nfs"
 )
 
@@ -146,6 +147,65 @@ func usableStorageAddrs(s *cluster.Snapshot, self cluster.NodeID, nodes []*clust
 		default:
 			out[n.ID] = true
 		}
+	}
+	return out
+}
+
+// PlanCheck is CheckStoragePlan's answer.
+type PlanCheck struct {
+	Problems []string
+	// NeedsConfirm: the plan changes this member's storage address; the
+	// typed name confirms it.
+	NeedsConfirm   bool
+	ConfirmMessage string
+}
+
+// CheckStoragePlan checks a member's storage network plan against the
+// cluster (M1, H2): the address inside the cluster's storage subnet, a
+// host address no other member (nor the storage node) uses; a changed
+// address only with the server's name typed (confirm), since the storage
+// server's root then turns this server's target off until its
+// administrator confirms the new address there too; and never the LAN
+// itself while the cluster has VMs or apps in NFS mode, whose own data is
+// exported without root squashing.
+func CheckStoragePlan(s *cluster.Snapshot, me cluster.Node, p network.StoragePlan, confirm string) PlanCheck {
+	var out PlanCheck
+	pre, err := netip.ParsePrefix(p.Address)
+	if err != nil {
+		return out // the plan's own validation reports it
+	}
+	a := pre.Addr()
+	if s.StorageSubnet.IsValid() {
+		sub := s.StorageSubnet.Masked()
+		if !sub.Contains(a) || pre.Masked() != sub {
+			out.Problems = append(out.Problems, "the cluster's storage network is "+sub.String()+"; use an address in it with the same size")
+		}
+	}
+	for _, n := range s.Nodes {
+		if n.ID == me.ID {
+			continue
+		}
+		taken := n.Addresses.Storage == a
+		for _, pt := range n.Addresses.Portals {
+			taken = taken || pt.Addr() == a
+		}
+		if taken {
+			out.Problems = append(out.Problems, a.String()+" is "+string(n.ID)+"'s storage address")
+		}
+	}
+	if p.Kind == network.StorageShared {
+		for _, pl := range s.Placements {
+			if pl.Workload.Kind == cluster.KindVM || pl.Storage.Mode != cluster.StorageBlock {
+				out.Problems = append(out.Problems, "the cluster has VMs or apps whose own data is shared over NFS without root squashing; that needs a dedicated storage port or a VLAN, not the LAN itself")
+				break
+			}
+		}
+	}
+	if cur := me.Addresses.Storage; cur.IsValid() && cur != a && confirm != string(me.ID) {
+		out.NeedsConfirm = true
+		out.ConfirmMessage = "This changes " + string(me.ID) + "'s storage address from " + cur.String() + " to " + a.String() +
+			". Type the server's name to confirm; the storage server keeps " + string(me.ID) + " cut off until its administrator also runs " +
+			"`hardyctl cluster-storage repin " + string(me.ID) + "` there."
 	}
 	return out
 }

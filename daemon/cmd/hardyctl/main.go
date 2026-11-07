@@ -48,6 +48,11 @@ Boot (run as root):
   boot-sync [--reinstall]    copy kernels to the boot disks and rewrite the boot menu
                              (runs automatically after kernel and initramfs updates)
 
+Cluster storage (run as root on the storage server):
+  cluster-storage repin <server>  accept a compute server's changed storage address or key
+  cluster-storage repin --subnet  accept a changed storage network
+  cluster-storage forget <server> clear what is kept of a removed server (its fence too)
+
 Apps:
   app-pack [-o file] <folder>  build a .hardyapp package from a folder (hardyapp.json,
                                compose.yaml, icon); see docs/apps.md
@@ -91,6 +96,8 @@ func main() {
 		err = bootList()
 	case "boot-sync":
 		err = bootSync(args)
+	case "cluster-storage":
+		err = clusterStorage(*socket, args, os.Stdin)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		flag.Usage()

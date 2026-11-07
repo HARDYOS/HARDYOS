@@ -461,6 +461,23 @@ func (h *clusterStorageAPI) networkApply(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
+	// In a cluster: the address must fit the cluster's storage network and
+	// be this server's alone (M1); a changed address needs the typed name
+	// (and the storage server's administrator confirms it there); the LAN
+	// itself can't carry a VM's or app's own data (H2).
+	if svc := h.cs.Service; svc.M != nil {
+		if me, err := svc.M.Self(); err == nil {
+			chk := storagesvc.CheckStoragePlan(svc.M.State().Snapshot(), me, p, r.URL.Query().Get("confirm"))
+			if len(chk.Problems) > 0 {
+				writeJSON(w, http.StatusBadRequest, ErrorResponse{Code: "invalid", Message: "Some settings need fixing.", Details: chk.Problems})
+				return
+			}
+			if chk.NeedsConfirm {
+				writeError(w, http.StatusConflict, "confirm", chk.ConfirmMessage)
+				return
+			}
+		}
+	}
 	h.s.submit(w, r, u, JobKindClusterStorageNet, "Set up the storage network", storageNetJob{Plan: p}, "cluster.storage.network", p.StorageInterface()+" "+p.Address, nil)
 }
 

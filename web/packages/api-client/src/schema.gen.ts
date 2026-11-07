@@ -5349,7 +5349,10 @@ export interface paths {
         /** Ways to carry the storage network on this server (dedicated ports fastest first, a VLAN, the LAN), the saved plan and a suggested address */
         get: operations["getClusterStorageNetwork"];
         put?: never;
-        /** Set up this server's storage network (a job; applied like any network change and rolled back unless confirmed in Network settings) */
+        /**
+         * Set up this server's storage network (a job; applied like any network change and rolled back unless confirmed in Network settings)
+         * @description In a cluster the address must be in the cluster's storage network and no other member's, and the LAN itself is refused while the cluster has VMs or apps in NFS mode. Changing a member's storage address answers 409 with code `confirm` unless `confirm` is the server's name; the storage server then keeps it cut off until its administrator runs `hardyctl cluster-storage repin <server>` there.
+         */
         post: operations["applyClusterStorageNetwork"];
         delete?: never;
         options?: never;
@@ -18386,7 +18389,10 @@ export interface operations {
     };
     applyClusterStorageNetwork: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description This server's name, to confirm a change of its storage address. */
+                confirm?: string;
+            };
             header?: never;
             path?: never;
             cookie?: never;

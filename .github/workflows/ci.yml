@@ -107,7 +107,7 @@ jobs:
         working-directory: daemon/internal/cluster/e2e
         run: '"$RUNNER_TEMP/e2e.test" -test.run TestClusterEndToEnd -test.v -test.count 1 -test.timeout 10m'
       - name: storage node - LIO targets with mutual CHAP, initiators with private iscsids, fence under I/O, cluster NFS exports
-        run: sudo HARDYOS_CLUSTER_INTEGRATION=1 "$RUNNER_TEMP/san.test" -test.run TestClusterStorageIntegration -test.v -test.timeout 10m
+        run: sudo HARDYOS_CLUSTER_INTEGRATION=1 "$RUNNER_TEMP/san.test" -test.run 'TestClusterStorageIntegration|TestFirewallSyntax' -test.v -test.timeout 10m
       - name: LIO and NFS state
         if: failure()
         run: |
