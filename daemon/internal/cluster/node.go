@@ -97,6 +97,11 @@ type Config struct {
 	// WitnessBinary opens the witness binary members hand to the install
 	// script (nil on the witness).
 	WitnessBinary func() (io.ReadSeekCloser, error)
+	// SpoolDir holds relayed request bodies too large for memory (a
+	// disk-backed folder of hardyd's; "" is the system's temporary folder)
+	// and SpoolQuota bounds them all together (DefaultSpoolQuota when 0).
+	SpoolDir   string
+	SpoolQuota int64
 	// OnJoin is told about join attempts (audit); OnEvent about every event.
 	OnJoin func(ctx context.Context, e JoinEvent)
 	Log    *slog.Logger
@@ -148,6 +153,9 @@ type Core struct {
 
 	// proposeLimit bounds proposals per member at the leader.
 	proposeLimit proposeLimiter
+
+	spoolOnce sync.Once
+	spool     *Spooler
 }
 
 // ErrRefused is an entry the cluster refused (its message says why).

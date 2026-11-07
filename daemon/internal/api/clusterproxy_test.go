@@ -25,6 +25,7 @@ type clusterNode struct {
 	env *testEnv
 	svc *member.Service
 	api *ClusterAPI
+	s   *Server
 }
 
 func newClusterNode(t *testing.T, net *clustertest.Net, host string, addrs cluster.Addresses) *clusterNode {
@@ -59,7 +60,8 @@ func newClusterNode(t *testing.T, net *clustertest.Net, host string, addrs clust
 		m.Wait()
 		db.Close()
 	})
-	return &clusterNode{env: &testEnv{srv: srv, db: db, broker: broker}, svc: svc, api: ca}
+	return &clusterNode{env: &testEnv{srv: srv, db: db, broker: broker}, svc: svc, api: ca, s: s}
+
 }
 
 func twoNodeCluster(t *testing.T) (*clusterNode, *clusterNode) {
@@ -98,32 +100,66 @@ func TestClusterProxyAssertionsAndAuthorization(t *testing.T) {
 		t.Fatalf("nodes %d %+v", code, nodes)
 	}
 
-	// nas's administrator reads c1's users through the proxy: served by c1.
-	var users []map[string]any
-	if code := cade.do("GET", "/api/v1/nodes/c1/users", nil, &users); code != 200 || len(users) != 1 || users[0]["username"] != "dora" {
-		t.Fatalf("proxied users = %d %v", code, users)
+	// nas's administrator reads c1's jobs through the proxy: served by c1.
+	var jobsList []map[string]any
+	if code := cade.do("GET", "/api/v1/nodes/c1/jobs", nil, &jobsList); code != 200 {
+		t.Fatalf("proxied jobs = %d %v", code, jobsList)
 	}
-	// The node scope works for this server too.
+	// c1's accounts aren't nas's administrator's business (decision 368).
+	var e0 ErrorResponse
+	if code := cade.do("GET", "/api/v1/nodes/c1/users", nil, &e0); code != 403 || !strings.Contains(e0.Message, "can't do this here") {
+		t.Fatalf("proxied users = %d %+v", code, e0)
+	}
+	if code := cade.do("POST", "/api/v1/nodes/c1/cluster/join-codes", map[string]string{"role": "compute"}, nil); code != 403 {
+		t.Fatalf("proxied join code = %d", code)
+	}
+	// The node scope works for this server too, without the limits.
+	var users []map[string]any
 	if code := cade.do("GET", "/api/v1/nodes/nas/users", nil, &users); code != 200 || users[0]["username"] != "cade" {
 		t.Fatalf("local scope = %d %v", code, users)
 	}
 	// A change on c1, audited there as cade (via nas).
-	if code := cade.do("POST", "/api/v1/nodes/c1/users", map[string]string{"username": "kid", "password": "kidpassword1"}, nil); code != 201 {
-		t.Fatalf("proxied create = %d", code)
+	if code := cade.do("POST", "/api/v1/nodes/c1/jobs/nope/cancel", nil, nil); code != 404 {
+		t.Fatalf("proxied cancel = %d", code)
 	}
 	l := &audit.Log{DB: c1.env.db}
 	entries, err := l.List(context.Background(), audit.Query{Limit: 50})
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := false
+	found, denied := false, false
 	for _, e := range entries {
-		if e.Actor == "cade (via nas)" && strings.HasPrefix(e.Action, "user.") {
+		if e.Actor == "cade (via nas)" && e.Action == "cluster.proxied" && e.Outcome == audit.Success {
 			found = true
 		}
+		if e.Actor == "cade (via nas)" && e.Action == "cluster.proxied" && e.Outcome == audit.Denied {
+			denied = true
+		}
 	}
-	if !found {
-		t.Fatalf("no audit entry by cade (via nas) on c1: %+v", entries)
+	if !found || !denied {
+		t.Fatalf("no audit entries by cade (via nas) on c1: %+v", entries)
+	}
+	// c1's own administrator stops accepting nas's administrators.
+	var trust ClusterAdminTrust
+	if code := other.do("GET", "/api/v1/cluster/admin-trust", nil, &trust); code != 200 || len(trust.Members) != 1 || !trust.Members[0].Accept {
+		t.Fatalf("trust = %d %+v", code, trust)
+	}
+	if code := cade.do("PUT", "/api/v1/nodes/c1/cluster/admin-trust", ClusterAdminTrust{}, nil); code != 403 {
+		t.Fatalf("nas's admin changed c1's trust: %d", code)
+	}
+	trust.Members[0].Accept = false
+	if code := other.do("PUT", "/api/v1/cluster/admin-trust", trust, &trust); code != 200 || trust.Members[0].Accept {
+		t.Fatalf("set trust = %d %+v", code, trust)
+	}
+	if code := cade.do("GET", "/api/v1/nodes/c1/jobs", nil, &e0); code != 403 || !strings.Contains(e0.Message, "doesn't accept administrators") {
+		t.Fatalf("refused admin = %d %+v", code, e0)
+	}
+	trust.Members[0].Accept = true
+	if code := other.do("PUT", "/api/v1/cluster/admin-trust", trust, &trust); code != 200 {
+		t.Fatalf("set trust = %d", code)
+	}
+	if code := cade.do("GET", "/api/v1/nodes/c1/jobs", nil, nil); code != 200 {
+		t.Fatalf("accepted again = %d", code)
 	}
 	// Signing in and the proxy itself are never forwarded; the witness and
 	// unknown nodes aren't targets.
@@ -167,7 +203,7 @@ func TestRelayRefusesReplayTamperAndStrangers(t *testing.T) {
 		}
 		defer sb.Close()
 		if tamper {
-			req.Body = io.NopCloser(strings.NewReader(`{"username":"kidy","password":"kidpassword1"}`))
+			req.Body = io.NopCloser(strings.NewReader(`{"reason":"y"}`))
 		}
 		resp, err := core.RoundTripRelay(req)
 		if err != nil {
@@ -177,8 +213,9 @@ func TestRelayRefusesReplayTamperAndStrangers(t *testing.T) {
 		return resp.StatusCode
 	}
 	admin := cluster.Principal{Kind: "local", Name: "cade", Admin: true}
-	body := `{"username":"kidx","password":"kidpassword1"}`
-	f := &cluster.Forward{Node: "c1", Principal: admin, Method: "POST", Path: "/api/v1/users", Header: http.Header{"Content-Type": {"application/json"}},
+	body := `{"reason":"x"}`
+	path := "/api/v1/jobs/nope/cancel"
+	f := &cluster.Forward{Node: "c1", Principal: admin, Method: "POST", Path: path, Header: http.Header{"Content-Type": {"application/json"}},
 		Body: strings.NewReader(body)}
 	// The body is bound to the assertion: a different body is refused.
 	if code := send(&cluster.Forward{Node: f.Node, Principal: admin, Method: "POST", Path: f.Path, Header: f.Header, Body: strings.NewReader(body)}, true); code != 403 {
@@ -191,12 +228,12 @@ func TestRelayRefusesReplayTamperAndStrangers(t *testing.T) {
 	}
 	jws := req.Header.Get(cluster.AssertionHeader)
 	resp, err := core.RoundTripRelay(req)
-	if err != nil || resp.StatusCode != 201 {
+	if err != nil || resp.StatusCode != 404 {
 		t.Fatalf("first = %v %v", resp.StatusCode, err)
 	}
 	resp.Body.Close()
 	sb.Close()
-	req2, sb2, _ := core.RelayRequest(ctx, &cluster.Forward{Node: "c1", Principal: admin, Method: "POST", Path: "/api/v1/users",
+	req2, sb2, _ := core.RelayRequest(ctx, &cluster.Forward{Node: "c1", Principal: admin, Method: "POST", Path: path,
 		Header: f.Header, Body: strings.NewReader(body)})
 	req2.Header.Set(cluster.AssertionHeader, jws)
 	req2.Body = io.NopCloser(bytes.NewReader([]byte(body)))
@@ -207,7 +244,8 @@ func TestRelayRefusesReplayTamperAndStrangers(t *testing.T) {
 	}
 	resp2.Body.Close()
 	// A request without an assertion over the relay is refused.
-	req3, sb3, _ := core.RelayRequest(ctx, &cluster.Forward{Node: "c1", Principal: admin, Method: "GET", Path: "/api/v1/users"})
+	req3, sb3, _ := core.RelayRequest(ctx, &cluster.Forward{Node: "c1", Principal: admin, Method: "GET", Path: "/api/v1/jobs"})
+
 	req3.Header.Del(cluster.AssertionHeader)
 	resp3, err := core.RoundTripRelay(req3)
 	sb3.Close()

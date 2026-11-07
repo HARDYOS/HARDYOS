@@ -94,6 +94,16 @@ func (s *Server) handleVMConsoleWS(w http.ResponseWriter, r *http.Request, u *au
 		cur, err := s.sessionUser(r, session, info.UserID)
 		return err == nil && cur.IsAdmin()
 	}
+	if rr := relayedFrom(r); rr != nil {
+		// Relayed from another member (no session here): the entry node
+		// closes the relay when the desktop session ends; this node checks
+		// the member and the person again (decision 373).
+		still = func() bool {
+			cur, ok := rr.still(ctx)
+			return ok && cur.IsAdmin()
+		}
+	}
+
 	reason := relayVNC(ctx, conn, vnc, still)
 	s.record(r, u, "vms.console.close", id, audit.Success, fmt.Sprintf("%s after %s", reason, time.Since(started).Round(time.Second)))
 }

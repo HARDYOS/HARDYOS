@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -142,7 +143,12 @@ func (s *Service) dir() string {
 	return cluster.StateDir
 }
 
+// spoolDir holds relayed request bodies too large for memory: on hardyd's
+// own disk (the cluster folder), not in a tmpfs (decision 371).
+func (s *Service) spoolDir() string { return filepath.Join(s.dir(), "spool") }
+
 func (s *Service) newCoreLocked(ctx context.Context) error {
+
 	st := s.store()
 	id, err := st.Identity(ctx)
 	if err != nil {
@@ -167,6 +173,7 @@ func (s *Service) newCoreLocked(ctx context.Context) error {
 		},
 		Raft: s.Raft, Paths: s.Paths, Timings: s.Timings, Health: s.Health,
 		WitnessBinary: s.openWitnessBinary,
+		SpoolDir:      s.spoolDir(),
 		OnJoin:        s.auditJoin,
 		Log:           s.log(),
 	})

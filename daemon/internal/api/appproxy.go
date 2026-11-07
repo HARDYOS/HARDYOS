@@ -401,11 +401,14 @@ func (p *appProxy) reconcile(ctx context.Context) {
 	}
 	now := time.Now()
 	p.mu.Lock()
-	for id := range p.listeners {
+	for id, l := range p.listeners {
 		if isRemoteWindow(id) {
-			want[id] = true // remote windows live until the proxy stops
+			// Remote windows live while used (decision 371): an idle one
+			// is closed with its sessions and opened again on demand.
+			want[id] = l.remote == nil || !l.remote.idle(now)
 		}
 	}
+
 	for id, l := range p.listeners {
 		if !want[id] {
 			_ = l.srv.Close()

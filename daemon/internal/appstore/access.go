@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/hardyos/hardyos/daemon/internal/ports"
 )
 
 // Principal kinds for app access.
@@ -256,8 +258,11 @@ func (s *Store) ProxyPorts(ctx context.Context) (map[string]int, error) {
 	return out, rows.Err()
 }
 
-// AllocateProxyPort gives an app the lowest free port from base up (skipping
-// avoid, ports that turned out to be taken) and records it.
+// AllocateProxyPort gives an app the lowest free port of the window proxy
+// range (base up to base + ports.AppProxyCount - 1, skipping avoid, ports
+// that turned out to be taken, and every fixed HardyOS port) and records
+// it. The range is bounded so a window never takes the replication or the
+// cluster port (decision 371).
 func (s *Store) AllocateProxyPort(ctx context.Context, appID string, base int, avoid map[int]bool) (int, error) {
 	db, err := s.db()
 	if err != nil {
@@ -273,8 +278,12 @@ func (s *Store) AllocateProxyPort(ctx context.Context, appID string, base int, a
 			taken[p] = true
 		}
 	}
-	for port := base; port < base+1000 && port <= 65535; port++ {
-		if taken[port] || avoid[port] {
+	fixed := map[int]bool{}
+	for _, p := range ports.Fixed {
+		fixed[p] = true
+	}
+	for port := base; port < base+ports.AppProxyCount && port <= 65535; port++ {
+		if taken[port] || avoid[port] || fixed[port] {
 			continue
 		}
 		if _, err := db.ExecContext(ctx, `INSERT INTO app_proxy_ports (app_id, port) VALUES (?, ?)
@@ -283,5 +292,5 @@ func (s *Store) AllocateProxyPort(ctx context.Context, appID string, base int, a
 		}
 		return port, nil
 	}
-	return 0, fmt.Errorf("no free port for %s's window from %d", appID, base)
+	return 0, fmt.Errorf("no free port for %s's window in %d-%d", appID, base, base+ports.AppProxyCount-1)
 }

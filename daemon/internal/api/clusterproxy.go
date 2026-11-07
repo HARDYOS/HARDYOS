@@ -10,12 +10,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -42,6 +44,37 @@ type clusterUserKey struct{}
 func clusterUserFrom(ctx context.Context) *auth.User {
 	u, _ := ctx.Value(clusterUserKey{}).(*auth.User)
 	return u
+}
+
+type relayedKey struct{}
+
+// relayedRequest is a verified relayed request's context: its assertion
+// and how to check again that the person may still act (long requests:
+// VM consoles).
+type relayedRequest struct {
+	rel   *cluster.Relayed
+	still func(ctx context.Context) (*auth.User, bool)
+	// selfHost is this server's LAN address (its own origins, such as the
+	// office editor, are reached there).
+	selfHost string
+}
+
+// relayedFrom is the relayed request r is, or nil.
+func relayedFrom(r *http.Request) *relayedRequest {
+	rr, _ := r.Context().Value(relayedKey{}).(*relayedRequest)
+	return rr
+}
+
+// requestScheme is how the browser reached this server for r: for a
+// relayed request, how it reached the entry node (signed).
+func requestScheme(r *http.Request) string {
+	if rr := relayedFrom(r); rr != nil && rr.rel.Assertion.Proto != "" {
+		return rr.rel.Assertion.Proto
+	}
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
 }
 
 // SourceCluster marks an administrator of another member acting here.
@@ -126,21 +159,36 @@ func (c *clusterAPI) handleNodeProxy(w http.ResponseWriter, r *http.Request, u *
 		writeError(w, http.StatusNotFound, "not_found", "no server called "+string(node)+" in the cluster")
 		return
 	}
-	if app, ok := strings.CutPrefix(path, "/api/v1/apps/"); ok && r.Method == http.MethodPost && strings.HasSuffix(app, "/open") {
-		// An app window: through this node's window proxy, relayed.
-		c.openRemoteWindow(w, r, u, node, strings.TrimSuffix(app, "/open"))
-		return
-	}
+	// Who the person is for other members, decided before anything is
+	// read, spooled or opened (decision 371): local accounts that aren't
+	// administrators exist only on their own server.
 	p, err := c.principal(r.Context(), u)
 	if err != nil {
 		writeError(w, http.StatusForbidden, "forbidden", err.Error())
 		return
 	}
+	if p.Kind == "local" && !p.Admin {
+		writeError(w, http.StatusForbidden, "forbidden", "local accounts are per server: sign in on "+m.Name)
+		return
+	}
+	upgrade := cluster.IsUpgrade(r)
+	release, ok := c.limits.take(u.Username, upgrade)
+	if !ok {
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusTooManyRequests, "too_many", "too many requests to other servers at once; try again shortly")
+		return
+	}
+	defer release()
+	if app, ok := strings.CutPrefix(path, "/api/v1/apps/"); ok && r.Method == http.MethodPost && strings.HasSuffix(app, "/open") {
+		// An app window: through this node's window proxy, relayed.
+		c.openRemoteWindow(w, r, u, p, node, strings.TrimSuffix(app, "/open"))
+		return
+	}
 	token, _ := c.s.sessionToken(r)
 	f := &cluster.Forward{Node: node, Principal: p, SessionHash: sessionHash(token), Method: r.Method, Path: path,
-		RawQuery: r.URL.RawQuery, Header: r.Header.Clone(), Body: r.Body}
-	if cluster.IsUpgrade(r) {
-		c.relayUpgrade(w, r, f, token)
+		RawQuery: r.URL.RawQuery, Header: r.Header.Clone(), Body: r.Body, Host: r.Host, Proto: requestScheme(r)}
+	if upgrade {
+		c.relayUpgrade(w, r, u, p, f, token)
 		return
 	}
 	stripHopHeaders(f.Header)
@@ -167,15 +215,46 @@ func stripHopHeaders(h http.Header) {
 	}
 }
 
-// copyResponse hands a member's answer to the browser: never its cookies.
-func copyResponse(w http.ResponseWriter, resp *http.Response) {
-	for k, v := range resp.Header {
-		if strings.EqualFold(k, "Set-Cookie") {
-			continue
+// relayedHeaders are the only response headers that cross from another
+// member to the browser (decision 369): what the API's answers and
+// downloads need. Never cookies, never the member's security headers
+// (this node's stay), never anything that would change how the browser
+// treats the desktop's origin.
+var relayedHeaders = []string{"Content-Type", "Content-Length", "Content-Disposition", "Content-Range", "Content-Encoding",
+	"Accept-Ranges", "Cache-Control", "Expires", "Etag", "Last-Modified", "Retry-After", "Vary", "Allow"}
+
+// relayedUpgradeHeaders are the only headers of a member's 101 answer that
+// reach the browser.
+var relayedUpgradeHeaders = []string{"Upgrade", "Connection", "Sec-Websocket-Accept", "Sec-Websocket-Protocol", "Sec-Websocket-Extensions"}
+
+// sandboxCSP is put on every relayed answer that isn't JSON: a page or an
+// SVG a member sends runs in an opaque origin without scripts, never as
+// the desktop.
+const sandboxCSP = "default-src 'none'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'unsafe-inline'; sandbox"
+
+// relayResponseHeaders copies the allowed headers of a member's answer and
+// (re)applies this node's security headers.
+func relayResponseHeaders(dst, src http.Header) {
+	for _, k := range relayedHeaders {
+		if v := src.Values(k); len(v) > 0 {
+			dst[http.CanonicalHeaderKey(k)] = append([]string(nil), v...)
 		}
-		w.Header()[k] = v
 	}
-	stripHopHeaders(w.Header())
+	dst.Set("X-Content-Type-Options", "nosniff")
+	dst.Set("X-Frame-Options", "SAMEORIGIN")
+	dst.Set("Referrer-Policy", "same-origin")
+	mt, _, _ := mime.ParseMediaType(src.Get("Content-Type"))
+	if mt != "application/json" && mt != "application/problem+json" {
+		dst.Set("Content-Security-Policy", sandboxCSP)
+	} else if dst.Get("Content-Security-Policy") == "" {
+		dst.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'self'")
+	}
+}
+
+// copyResponse hands a member's answer to the browser: only the allowed
+// headers, this node's security headers.
+func copyResponse(w http.ResponseWriter, resp *http.Response) {
+	relayResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	fl := http.NewResponseController(w)
 	buf := make([]byte, 32<<10)
@@ -207,9 +286,10 @@ func sameOrigin(r *http.Request) bool {
 // sessionCheck is how often a relayed WebSocket rechecks the session.
 var sessionCheck = 15 * time.Second
 
-// relayUpgrade forwards a WebSocket (events, VM console, terminal) and
-// closes it within sessionCheck of the session ending.
-func (c *clusterAPI) relayUpgrade(w http.ResponseWriter, r *http.Request, f *cluster.Forward, token string) {
+// relayUpgrade forwards a WebSocket (events, VM console) and closes it
+// within sessionCheck of the session ending or the person changing (signed
+// out, demoted, turned off; decision 372).
+func (c *clusterAPI) relayUpgrade(w http.ResponseWriter, r *http.Request, u *auth.User, p cluster.Principal, f *cluster.Forward, token string) {
 	if !sameOrigin(r) {
 		writeError(w, http.StatusForbidden, "forbidden", "cross-origin WebSocket refused")
 		return
@@ -246,9 +326,14 @@ func (c *clusterAPI) relayUpgrade(w http.ResponseWriter, r *http.Request, f *clu
 		return
 	}
 	defer conn.Close()
-	resp.Header.Del("Set-Cookie")
+	h := http.Header{}
+	for _, k := range relayedUpgradeHeaders {
+		if v := resp.Header.Values(k); len(v) > 0 {
+			h[http.CanonicalHeaderKey(k)] = v
+		}
+	}
 	fmt.Fprintf(brw, "HTTP/1.1 101 Switching Protocols\r\n")
-	_ = resp.Header.Write(brw)
+	_ = h.Write(brw)
 	fmt.Fprintf(brw, "\r\n")
 	if brw.Flush() != nil {
 		return
@@ -263,11 +348,27 @@ func (c *clusterAPI) relayUpgrade(w http.ResponseWriter, r *http.Request, f *clu
 		case <-done:
 			return
 		case <-t.C:
-			if info, err := c.s.peekSession(context.Background(), token); err != nil || info == nil {
+			if !c.samePerson(r, token, u, p) {
 				return
 			}
 		}
 	}
+}
+
+// samePerson reports whether a session still belongs to the person a relay
+// was opened for, with the same standing for other members: not signed
+// out, turned off, renamed, demoted or promoted.
+func (c *clusterAPI) samePerson(r *http.Request, token string, u *auth.User, p cluster.Principal) bool {
+	info, err := c.s.peekSession(context.WithoutCancel(r.Context()), token)
+	if err != nil || info == nil || info.UserID != u.ID {
+		return false
+	}
+	cur, err := c.s.sessionUser(r, token, info.UserID)
+	if err != nil {
+		return false
+	}
+	p2, err := c.principal(r.Context(), cur)
+	return err == nil && p2 == p
 }
 
 // ---- the merged event stream ----------------------------------------------------
@@ -307,8 +408,11 @@ func (c *clusterAPI) handleEvents(w http.ResponseWriter, r *http.Request, u *aut
 			}
 		}
 	}()
-	if p, err := c.principal(ctx, u); err == nil && core.Info() != nil {
-		token, _ := c.s.sessionToken(r)
+	token, _ := c.s.sessionToken(r)
+	p, perr := c.principal(ctx, u)
+	// Local accounts that aren't administrators exist only here: no member
+	// would accept them (decision 372).
+	if perr == nil && core.Info() != nil && (p.Kind == "domain" || p.Admin) {
 		var wg sync.WaitGroup
 		for _, m := range core.Machine().Snapshot().Nodes {
 			if m.ID == self || m.Role == cluster.RoleWitness {
@@ -341,7 +445,14 @@ func (c *clusterAPI) handleEvents(w http.ResponseWriter, r *http.Request, u *aut
 				conn.Close(websocket.StatusPolicyViolation, "signed out")
 				return
 			}
+			if perr == nil && !c.samePerson(r, token, u, p) {
+				// Demoted, turned off or another person: the relayed
+				// streams were opened for who they were.
+				conn.Close(websocket.StatusPolicyViolation, "the account changed")
+				return
+			}
 		}
+
 	}
 }
 
@@ -364,7 +475,7 @@ func (t relayRT) RoundTrip(r *http.Request) (*http.Response, error) {
 		cookies = r.Header.Values("Cookie")
 	}
 	f := &cluster.Forward{Node: t.node, Principal: t.p, SessionHash: t.sess, Method: r.Method, Path: r.URL.Path,
-		RawQuery: r.URL.RawQuery, Header: r.Header.Clone(), Body: r.Body}
+		RawQuery: r.URL.RawQuery, Header: r.Header.Clone(), Body: r.Body, Host: r.Host, Proto: requestScheme(r)}
 	req, sb, err := t.core.RelayRequest(r.Context(), f)
 	if err != nil {
 		return nil, err
@@ -444,12 +555,38 @@ func (c *clusterAPI) relayHandler() http.Handler {
 			return
 		}
 		r.Header.Del("Origin")
+		selfHost := ""
+		if self, err := c.core().Self(); err == nil && self.Addresses.LAN.IsValid() {
+			selfHost = self.Addresses.LAN.String()
+		}
+		r = r.WithContext(context.WithValue(r.Context(), relayedKey{}, &relayedRequest{rel: rel, selfHost: selfHost, still: func(ctx context.Context) (*auth.User, bool) {
+			// The member must still be one that may forward, and the
+			// person still usable here (decision 373).
+			from, ok := c.core().TLSPeer(cluster.RelayTLS(r))
+			if !ok || from.ID != rel.From.ID || from.Role == cluster.RoleWitness || from.State == cluster.NodeDead || from.State == cluster.NodeFenced {
+				return nil, false
+			}
+			cur, err := c.userFor(ctx, rel)
+			return cur, err == nil
+		}}))
 		if rest, ok := strings.CutPrefix(r.URL.Path, cluster.PeerPathPrefix+"window/"); ok {
 			c.serveWindow(w, r, u, rel, rest)
 			return
 		}
+		if app, ok := strings.CutPrefix(r.URL.Path, cluster.PeerPathPrefix+"windowcheck/"); ok && r.Method == http.MethodGet {
+			c.checkWindow(w, r, u, app)
+			return
+		}
 		if !proxyable(r.URL.Path) {
 			writeError(w, http.StatusNotFound, "not_found", "no such API endpoint")
+			return
+		}
+		if u.Source == SourceCluster && !clusterAdminMay(r.Method, r.URL.Path) {
+			// An administrator of another member manages this one's
+			// workloads and data, not its accounts, sign-in, network,
+			// updates or membership (decision 368).
+			c.recordOutcome(r, u, "cluster.proxied", r.Method+" "+r.URL.Path, audit.Denied, "not open to administrators of other servers")
+			writeError(w, http.StatusForbidden, "forbidden", "administrators of other servers can't do this here: sign in on "+string(c.core().ID()))
 			return
 		}
 		r.Header.Del("Cookie")
@@ -462,7 +599,11 @@ func (c *clusterAPI) relayHandler() http.Handler {
 }
 
 func (c *clusterAPI) record(r *http.Request, u *auth.User, action, target, detail string) {
-	e := audit.Entry{Action: action, Target: target, Outcome: audit.Success, Detail: detail, IP: r.RemoteAddr, Actor: u.Username}
+	c.recordOutcome(r, u, action, target, audit.Success, detail)
+}
+
+func (c *clusterAPI) recordOutcome(r *http.Request, u *auth.User, action, target string, outcome audit.Outcome, detail string) {
+	e := audit.Entry{Action: action, Target: target, Outcome: outcome, Detail: detail, IP: r.RemoteAddr, Actor: u.Username}
 	if u.ID > 0 {
 		id := u.ID
 		e.ActorID = &id
@@ -509,6 +650,9 @@ func (c *clusterAPI) userFor(ctx context.Context, rel *cluster.Relayed) (*auth.U
 	case "local":
 		if !sub.Admin {
 			return nil, errors.New("local accounts are per server: sign in on " + string(c.core().ID()))
+		}
+		if !c.acceptsAdminsFrom(ctx, rel.From.ID) {
+			return nil, errors.New("this server doesn't accept administrators of " + string(rel.From.ID) + ": sign in on " + string(c.core().ID()))
 		}
 		// An administrator of any member is an administrator here
 		// (decision 324); recorded with the server they came through.
@@ -590,6 +734,49 @@ type remoteWindow struct {
 	c    *clusterAPI
 	node cluster.NodeID
 	app  string
+	// used is when the window last relayed a request (Unix seconds): idle
+	// remote listeners are closed (decision 371).
+	used atomic.Int64
+}
+
+// Remote windows: at most maxRemoteWindows listeners at once, each closed
+// after remoteWindowIdle without a request.
+const (
+	maxRemoteWindows = 16
+	remoteWindowIdle = 30 * time.Minute
+)
+
+func (rw *remoteWindow) idle(now time.Time) bool {
+	return now.Sub(time.Unix(rw.used.Load(), 0)) > remoteWindowIdle
+}
+
+// checkWindow is the owner's answer to "may this person open this app's
+// window" before the entry node opens a listener for it.
+func (c *clusterAPI) checkWindow(w http.ResponseWriter, r *http.Request, u *auth.User, appID string) {
+	if apps.ValidID(appID) != nil {
+		writeError(w, http.StatusNotFound, "not_found", "no such app")
+		return
+	}
+	o, err := c.s.appsStatus(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "unavailable", "the apps aren't available")
+		return
+	}
+	for _, a := range o.Apps {
+		if a.ID != appID {
+			continue
+		}
+		if a.Web == nil {
+			break
+		}
+		if may, err := c.s.mayUse(r.Context(), "", u, appID); err != nil || !may {
+			writeError(w, http.StatusForbidden, "forbidden", "you haven't been given "+a.Name)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	writeError(w, http.StatusNotFound, "not_found", appID+" has no window here")
 }
 
 type windowUserKey struct{}
@@ -606,6 +793,7 @@ func (rw *remoteWindow) RoundTrip(r *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	rw.used.Store(time.Now().Unix())
 	desk, _ := r.Context().Value(windowDeskKey{}).(string)
 	r2 := r.Clone(r.Context())
 	r2.URL.Path = cluster.PeerPathPrefix + "window/" + rw.app + r.URL.Path
@@ -617,7 +805,7 @@ type windowDeskKey struct{}
 // openRemoteWindow answers POST /nodes/{node}/apps/{id}/open for an app on
 // another member: a window proxy on this (the entry) node that relays to
 // the owner, with this node's own sign-in token.
-func (c *clusterAPI) openRemoteWindow(w http.ResponseWriter, r *http.Request, u *auth.User, node cluster.NodeID, app string) {
+func (c *clusterAPI) openRemoteWindow(w http.ResponseWriter, r *http.Request, u *auth.User, pr cluster.Principal, node cluster.NodeID, app string) {
 	if apps.ValidID(app) != nil {
 		writeError(w, http.StatusNotFound, "not_found", "no such app")
 		return
@@ -627,7 +815,32 @@ func (c *clusterAPI) openRemoteWindow(w http.ResponseWriter, r *http.Request, u 
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "the window proxy isn't running")
 		return
 	}
-	port, err := p.ensureRemote(r.Context(), &remoteWindow{c: c, node: node, app: app})
+	// The owner says whether the app has a window and the person may use
+	// it before a listener is opened here (decision 371).
+	token, _ := c.s.sessionToken(r)
+	creq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, "http://"+string(node)+cluster.PeerPathPrefix+"windowcheck/"+app, nil)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid", "no such app")
+		return
+	}
+	creq.Host = r.Host
+	cresp, err := relayRT{core: c.core(), node: node, p: pr, sess: sessionHash(token)}.RoundTrip(creq)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "unreachable", fmt.Sprintf("%s isn't answering: %v", node, err))
+		return
+	}
+	cresp.Body.Close()
+	switch {
+	case cresp.StatusCode == http.StatusForbidden:
+		writeError(w, http.StatusForbidden, "forbidden", "you haven't been given that app on "+string(node))
+		return
+	case cresp.StatusCode != http.StatusNoContent:
+		writeError(w, http.StatusNotFound, "not_found", app+" has no window on "+string(node))
+		return
+	}
+	rw := &remoteWindow{c: c, node: node, app: app}
+	rw.used.Store(time.Now().Unix())
+	port, err := p.ensureRemote(r.Context(), rw)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "couldn't open the window: "+err.Error())
 		return
@@ -649,9 +862,22 @@ func (p *appProxy) ensureRemote(ctx context.Context, rw *remoteWindow) (int, err
 		return 0, errors.New("the window proxy isn't running")
 	}
 	if l := p.listeners[key]; l != nil {
+		if l.remote != nil {
+			l.remote.used.Store(time.Now().Unix())
+		}
 		return l.port, nil
 	}
+	remotes := 0
+	for id := range p.listeners {
+		if isRemoteWindow(id) {
+			remotes++
+		}
+	}
+	if remotes >= maxRemoteWindows {
+		return 0, fmt.Errorf("%d windows of apps on other servers are open already; close some first", remotes)
+	}
 	st := p.s.appStore()
+
 	ports, err := st.ProxyPorts(ctx)
 	if err != nil {
 		return 0, err

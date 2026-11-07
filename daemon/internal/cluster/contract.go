@@ -732,6 +732,8 @@ type Assertion struct {
 	// or an app window's address), so the target builds links and checks
 	// origins as the browser sees them (decision 373).
 	Host string `json:"host,omitempty"`
+	// Proto is "https" or "http": how the browser reached the entry node.
+	Proto string `json:"proto,omitempty"`
 }
 
 // JoinOffer is an open join code (shown once to the admin).
