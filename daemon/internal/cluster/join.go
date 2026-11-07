@@ -539,6 +539,15 @@ func (n *Core) FinishJoin(ctx context.Context, hello any) error {
 			}
 			var re *ErrRefused
 			if errors.As(err, &re) {
+				// An earlier attempt may have been committed after all (its
+				// answer was lost): once this node has applied the refused
+				// entry, it is no longer joining.
+				if werr := n.WaitApplied(ctx, idx); werr != nil {
+					return werr
+				}
+				if self, ok := n.cfg.Machine.Node(info.Node); ok && self.State != NodeJoining {
+					continue
+				}
 				return err
 			}
 		}

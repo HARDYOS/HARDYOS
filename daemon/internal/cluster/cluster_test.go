@@ -80,7 +80,7 @@ func (h *harness) build(n *tnode) {
 		Net:  h.net.Host(n.addrs.LAN, n.addrs.Storage, n.addrs.NetBird),
 		Port: 44500, Dir: n.dir, Version: "1.0.0", Features: state.Features(), BootID: "boot-" + string(n.id),
 		Addresses: func() cluster.Addresses { return n.addrs },
-		Raft: cluster.RaftTimings{Heartbeat: 150 * time.Millisecond, Election: 150 * time.Millisecond, LeaderLease: 75 * time.Millisecond,
+		Raft: cluster.RaftTimings{Heartbeat: 300 * time.Millisecond, Election: 300 * time.Millisecond, LeaderLease: 150 * time.Millisecond,
 			Commit: 5 * time.Millisecond, SnapshotThreshold: 64, TrailingLogs: 128, SnapshotInterval: time.Second},
 		Paths:   cluster.PathTimings{Interval: 30 * time.Millisecond, Timeout: 60 * time.Millisecond, DownAfter: 3, UpAfter: 10},
 		Timings: &timings,
@@ -488,9 +488,14 @@ func TestForgedAndReplayedProposalsRefused(t *testing.T) {
 	if l.id == "c1" {
 		l = nas
 	}
-	if err := c1.core.Peers().Call(ctx(t), h.leader(nas, c1, h.nodes["c2"]).id, http.MethodPost, "/propose", sc2, &ans); err != nil {
-		t.Fatalf("replay: %v", err)
-	}
+	// (Retried while leadership moves: the replay check doesn't depend on it.)
+	h.eventually("replay answered", 10*time.Second, func() error {
+		l := h.leader(nas, c1, h.nodes["c2"])
+		if l == nil {
+			return errors.New("no leader")
+		}
+		return c1.core.Peers().Call(ctx(t), l.id, http.MethodPost, "/propose", sc2, &ans)
+	})
 	if !strings.Contains(ans.Refused, "replayed") {
 		t.Fatalf("replay answer %+v", ans)
 	}

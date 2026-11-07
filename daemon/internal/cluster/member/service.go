@@ -64,6 +64,9 @@ type Service struct {
 	// sets the relay handler; parts B and C register appliers and peer
 	// endpoints).
 	Configure []func(c *cluster.Core)
+	// Health is this server's own report in heartbeats (parts B and C:
+	// storage paths, LAN, running workloads); nil reports all well.
+	Health func(ctx context.Context) cluster.LocalHealth
 	// Raft, Paths and Timings tune the core (tests).
 	Raft    cluster.RaftTimings
 	Paths   cluster.PathTimings
@@ -161,7 +164,7 @@ func (s *Service) newCoreLocked(ctx context.Context) error {
 			}
 			return Discover(sn)
 		},
-		Raft: s.Raft, Paths: s.Paths, Timings: s.Timings,
+		Raft: s.Raft, Paths: s.Paths, Timings: s.Timings, Health: s.Health,
 		WitnessBinary: s.openWitnessBinary,
 		OnJoin:        s.auditJoin,
 		Log:           s.log(),

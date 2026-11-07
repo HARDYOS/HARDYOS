@@ -80,7 +80,7 @@ func TestWitnessJoinsAndSaysHello(t *testing.T) {
 	timings := cluster.Timings{Heartbeat: 50 * time.Millisecond, Suspect: 500 * time.Millisecond, QuorumLease: 800 * time.Millisecond,
 		SelfStop: 100 * time.Millisecond, Watchdog: 200 * time.Millisecond, Dead: 2 * time.Second, StorageIsolated: time.Second,
 		LANIsolated: 2 * time.Second, FenceAck: time.Second}
-	raftT := cluster.RaftTimings{Heartbeat: 150 * time.Millisecond, Election: 150 * time.Millisecond, LeaderLease: 75 * time.Millisecond, Commit: 5 * time.Millisecond}
+	raftT := cluster.RaftTimings{Heartbeat: 300 * time.Millisecond, Election: 300 * time.Millisecond, LeaderLease: 150 * time.Millisecond, Commit: 5 * time.Millisecond}
 	paths := cluster.PathTimings{Interval: 30 * time.Millisecond, Timeout: 60 * time.Millisecond}
 	nasAddrs := cluster.Addresses{LAN: netip.MustParseAddr("192.168.1.105"), NetBird: netip.MustParseAddr("100.64.0.105")}
 	id, _ := cluster.NewIdentity("nas")

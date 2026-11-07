@@ -45,7 +45,7 @@ func newClusterNode(t *testing.T, net *clustertest.Net, host string, addrs clust
 		LANIsolated: 2 * time.Second, FenceAck: time.Second}
 	svc := &member.Service{DB: db, Version: "1.8.0", Dir: t.TempDir(), Net: net.Host(addrs.LAN, addrs.NetBird),
 		Addrs: func(netip.Prefix) cluster.Addresses { return addrs }, Hostname: func() string { return host }, Timings: &timings,
-		Raft:  cluster.RaftTimings{Heartbeat: 150 * time.Millisecond, Election: 150 * time.Millisecond, LeaderLease: 75 * time.Millisecond, Commit: 5 * time.Millisecond},
+		Raft:  cluster.RaftTimings{Heartbeat: 300 * time.Millisecond, Election: 300 * time.Millisecond, LeaderLease: 150 * time.Millisecond, Commit: 5 * time.Millisecond},
 		Paths: cluster.PathTimings{Interval: 30 * time.Millisecond}}
 	ca := s.AttachCluster(svc)
 	if err := svc.Init(ctx); err != nil {

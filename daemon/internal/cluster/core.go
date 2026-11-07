@@ -27,3 +27,11 @@ type StateMachine interface {
 	// PinIndex maps every member's pin to its record.
 	PinIndex() map[string]Node
 }
+
+// Part A implements the contract's interfaces with these.
+var (
+	_ Membership = (*Core)(nil)
+	_ PeerClient = (*peerClient)(nil)
+	_ PeerMux    = (*peerMux)(nil)
+	_ PeerBook   = (*Core)(nil)
+)

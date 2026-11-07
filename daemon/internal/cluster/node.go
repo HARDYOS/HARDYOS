@@ -135,7 +135,10 @@ type Core struct {
 	probes     map[string]*http2.Transport
 	joinLimits joinLimiter
 	relay      relayState
-	codesMu    sync.Mutex
+
+	ownMu   sync.Mutex
+	own     map[uint64]ownResult
+	codesMu sync.Mutex
 }
 
 // ErrRefused is an entry the cluster refused (its message says why).
@@ -540,6 +543,9 @@ func (n *Core) applied(res ApplyResult) {
 	if res.Command == nil {
 		return
 	}
+	if res.Command.Proposer == n.ID() {
+		n.recordOwn(res.Command.Seq, res.Index, res.Err)
+	}
 	if res.Err == nil {
 		switch res.Command.Type {
 		case CmdClusterCreate, CmdMemberAdd, CmdMemberReady, CmdMemberUpdate, CmdMemberRemove, CmdWitnessHello:
@@ -688,16 +694,40 @@ type proposeAnswer struct {
 }
 
 // submit hands a signed command to the leader (this node or another) and
-// waits until it is committed. A command is resent only when it surely
-// wasn't appended (no leader, not the leader, unreachable before sending).
+// waits until it is committed. When the outcome is unknown (leadership
+// lost while committing, the connection broke after sending) the same
+// signed command is sent again: the sequence check lets at most one copy
+// apply, and the outcome is the first copy's, as this node applied it.
 func (n *Core) submit(ctx context.Context, sc *SignedCommand) (uint64, error) {
 	data, err := json.Marshal(sc)
 	if err != nil {
 		return 0, err
 	}
+	var cmd Command
+	_ = json.Unmarshal(sc.Command, &cmd)
 	deadline := time.Now().Add(15 * time.Second)
 	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
 		deadline = dl
+	}
+	ambiguous := false
+	var last error = ErrNoQuorum
+	done := func(idx uint64, refused string) (uint64, error) {
+		if ambiguous {
+			// A resend: what happened to the first copy decides.
+			if err := n.WaitApplied(ctx, idx); err != nil {
+				return idx, err
+			}
+			if r, ok := n.ownResult(cmd.Seq); ok {
+				if r.err != nil {
+					return r.index, &ErrRefused{Reason: r.err.Error()}
+				}
+				return r.index, nil
+			}
+		}
+		if refused != "" {
+			return idx, &ErrRefused{Reason: refused}
+		}
+		return idx, nil
 	}
 	for {
 		r := n.r()
@@ -706,42 +736,41 @@ func (n *Core) submit(ctx context.Context, sc *SignedCommand) (uint64, error) {
 		}
 		if r.State() == raft.Leader {
 			f := r.Apply(data, time.Until(deadline))
-			if err := f.Error(); err != nil {
-				if errors.Is(err, raft.ErrNotLeader) {
-					goto wait
+			err := f.Error()
+			switch {
+			case err == nil:
+				res, _ := f.Response().(ApplyResult)
+				if res.Err != nil {
+					return done(f.Index(), res.Err.Error())
 				}
-				return 0, fmt.Errorf("%w (%v)", ErrNoQuorum, err)
+				return done(f.Index(), "")
+			case errors.Is(err, raft.ErrNotLeader):
+			default:
+				ambiguous, last = true, err
 			}
-			res, _ := f.Response().(ApplyResult)
-			if res.Err != nil {
-				return f.Index(), &ErrRefused{Reason: res.Err.Error()}
-			}
-			return f.Index(), nil
-		}
-		if leader, ok := n.Leader(); ok {
+		} else if leader, ok := n.Leader(); ok {
 			var ans proposeAnswer
 			cctx, cancel := context.WithDeadline(ctx, deadline)
 			err := n.pc.Call(cctx, leader, http.MethodPost, "/propose", sc, &ans)
 			cancel()
 			var pe *PeerError
 			switch {
-			case err == nil && ans.Refused != "":
-				return ans.Index, &ErrRefused{Reason: ans.Refused}
 			case err == nil:
-				return ans.Index, nil
+				return done(ans.Index, ans.Refused)
 			case errors.As(err, &pe) && pe.Status == http.StatusMisdirectedRequest:
-				// Not the leader any more: retry.
-			case errors.As(err, &pe):
-				return 0, fmt.Errorf("%w (%s)", ErrNoQuorum, pe.Message)
-			case errors.Is(err, ErrUnreachable) && ctx.Err() == nil:
-				// Possibly sent: report rather than resend.
-				return 0, fmt.Errorf("%w (%v)", ErrNoQuorum, err)
-			default:
+				// Not the leader any more: nothing was appended.
+			case errors.As(err, &pe) && pe.Status == http.StatusForbidden:
 				return 0, err
+			case ctx.Err() != nil:
+				return 0, ctx.Err()
+			default:
+				ambiguous, last = true, err
 			}
 		}
-	wait:
 		if time.Now().After(deadline) {
+			if ambiguous {
+				return 0, fmt.Errorf("%w (%v)", ErrNoQuorum, last)
+			}
 			return 0, ErrNoQuorum
 		}
 		select {
@@ -750,6 +779,39 @@ func (n *Core) submit(ctx context.Context, sc *SignedCommand) (uint64, error) {
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+}
+
+type ownResult struct {
+	index uint64
+	err   error
+}
+
+// recordOwn remembers what happened to this node's own entries (the first
+// application of each sequence number; a resent copy is a replay).
+func (n *Core) recordOwn(seq, index uint64, err error) {
+	n.ownMu.Lock()
+	defer n.ownMu.Unlock()
+	if n.own == nil {
+		n.own = map[uint64]ownResult{}
+	}
+	if _, ok := n.own[seq]; ok {
+		return
+	}
+	n.own[seq] = ownResult{index: index, err: err}
+	if len(n.own) > 256 {
+		for s := range n.own {
+			if s+128 < seq {
+				delete(n.own, s)
+			}
+		}
+	}
+}
+
+func (n *Core) ownResult(seq uint64) (ownResult, bool) {
+	n.ownMu.Lock()
+	defer n.ownMu.Unlock()
+	r, ok := n.own[seq]
+	return r, ok
 }
 
 // ---- the peer API: core endpoints ---------------------------------------------

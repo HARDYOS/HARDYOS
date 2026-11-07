@@ -494,7 +494,11 @@ func (n *Core) probe(ctx context.Context, peer Node, p Path) (time.Duration, err
 // (after a link cut the next probe dials again).
 func (n *Core) pathSwitched(id NodeID, from, to Path) {
 	n.log.Info("cluster: control path changed", "node", id, "from", from, "to", to)
-	n.tr.DropConns(id)
+	if from != PathNone {
+		// Connections on the path left behind are redialled on the new one
+		// (the first choice keeps what is already connected).
+		n.tr.DropConns(id)
+	}
 	n.events.publish(Event{Index: n.cfg.Machine.Index(), Node: id})
 }
 
