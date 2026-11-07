@@ -213,8 +213,9 @@ func TestClusterStorageIntegration(t *testing.T) {
 	// c1 logs in and sees its LUN by WWN; then it is fenced while logged in.
 	dev := ByIDPath(vol.WWN)
 	fencedFlag := filepath.Join(dir, "fenced")
+	readFlag := filepath.Join(dir, "read")
 	script := login + "; for i in $(seq 1 40); do [ -e " + dev + " ] && break; sleep 0.25; done; [ -e " + dev + " ]; " +
-		"dd if=" + dev + " of=/dev/null bs=4k count=1 iflag=direct; echo FENCE-NOW; " +
+		"dd if=" + dev + " of=/dev/null bs=4k count=1 iflag=direct; echo FENCE-NOW; touch " + readFlag + "; " +
 		"for i in $(seq 1 60); do [ -e " + fencedFlag + " ] && break; sleep 0.25; done; " +
 		"if dd if=" + dev + " of=/dev/null bs=4k count=1 iflag=direct 2>/dev/null; then echo READ-AFTER-FENCE; fi; " +
 		"iscsiadm -m node -T " + t1 + " --logout || true"
@@ -232,6 +233,15 @@ func TestClusterStorageIntegration(t *testing.T) {
 	if Sessions(r.FS, cl)["c1"] == 0 {
 		<-done
 		t.Fatalf("c1 never logged in: %v\n%s", lerr, out)
+	}
+	// c1 read its disk before anything is cut.
+	for _, err := os.Stat(readFlag); err != nil && time.Now().Before(deadline.Add(30*time.Second)); _, err = os.Stat(readFlag) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if _, err := os.Stat(readFlag); err != nil {
+		_ = os.WriteFile(fencedFlag, nil, 0o644)
+		<-done
+		t.Fatalf("c1 couldn't read its disk: %v\n%s", lerr, out)
 	}
 	// The storage firewall (a fence is complete only once the node's
 	// address is blocked). The initiators above reach the portal over the
