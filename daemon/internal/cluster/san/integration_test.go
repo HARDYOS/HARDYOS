@@ -193,7 +193,11 @@ func TestClusterStorageIntegration(t *testing.T) {
 			"iscsid -f -n -d 1 >>" + logf + " 2>&1 & pid=$!; trap 'kill $pid 2>/dev/null; wait $pid 2>/dev/null || true' EXIT; " +
 			"for i in $(seq 1 20); do rc=0; iscsiadm -m session >/dev/null 2>&1 || rc=$?; if [ $rc -eq 0 ] || [ $rc -eq 21 ]; then break; fi; sleep 0.25; done; " +
 			script
-		out, err := sh("unshare", "-m", "sh", "-c", full)
+		// Its own PID namespace too: stopping iscsid makes it signal more
+		// than itself (its process group, or every process it can), which
+		// from the initial PID namespace as root reached the CI runner and
+		// shut it down. Inside the namespace it reaches only this run.
+		out, err := sh("unshare", "-m", "-p", "--fork", "--mount-proc", "sh", "-c", full)
 		if err != nil {
 			if l, rerr := os.ReadFile(logf); rerr == nil {
 				out += "\n--- iscsid log ---\n" + string(l)
