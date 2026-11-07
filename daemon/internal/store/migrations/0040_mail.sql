@@ -25,19 +25,9 @@ CREATE TABLE mail_domains (
 -- made automatically. account_state follows the domain: a turned-off or
 -- deleted account can't sign in to mail; deleting the mailbox itself
 -- (and its messages) is a separate, confirmed step. aliases is a JSON list.
--- storage_key names the mailbox on disk for good (vmail/<key>, Radicale);
--- account_guid and account_sid tie it to the domain account itself, so an
--- account deleted and made again under the same name doesn't get the old
--- one's mail. A mailbox whose account is gone for good has account
--- "@<id>". deleting: taken off the server, its files being deleted (the
--- row goes last).
 CREATE TABLE mail_mailboxes (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     account       TEXT NOT NULL UNIQUE,
-    storage_key   TEXT NOT NULL UNIQUE,
-    account_guid  TEXT NOT NULL DEFAULT '',
-    account_sid   TEXT NOT NULL DEFAULT '',
-    deleting      INTEGER NOT NULL DEFAULT 0,
     address       TEXT NOT NULL UNIQUE,
     display_name  TEXT NOT NULL DEFAULT '',
     aliases       TEXT NOT NULL DEFAULT '[]',
