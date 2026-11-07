@@ -474,13 +474,19 @@ func TestClusterEndToEnd(t *testing.T) {
 	}
 
 	// ---- a member that isn't moving a workload can't drive its steps -------------------
+	// (The leader may drive any step: the bystander is a compute server
+	// that isn't the leader.)
+	bystander := c3
+	if l, ok := nas.live.Leader(); ok && l == c3.id {
+		bystander = c2
+	}
 	var refused moves.StepResult
-	if err := c3.live.Call(tctx(t, 10*time.Second), "c1", http.MethodPost, cluster.PeerPathPrefix+moves.PathStop,
+	if err := bystander.live.Call(tctx(t, 10*time.Second), "c1", http.MethodPost, cluster.PeerPathPrefix+moves.PathStop,
 		moves.StepRequest{Workload: web, Generation: h.snap().Placements[web].Generation}, &refused); err != nil {
 		t.Fatalf("calling c1's stop step: %v", err)
 	}
 	if refused.OK || !strings.Contains(refused.Message, "isn't the one moving") {
-		t.Fatalf("c3 stopped c1's VM without moving it: %+v", refused)
+		t.Fatalf("%s stopped c1's VM without moving it: %+v", bystander.id, refused)
 	}
 	if err := h.running(web, "c1"); err != nil {
 		t.Fatal(err)
