@@ -115,6 +115,22 @@ func RegisterSAN(s *Server, r *san.Root) {
 		res, err := r.NFSApply(ctx, a)
 		return res, sanErr(err)
 	}))
+	s.Handle(san.OpMigrationAllow, typed(func(ctx context.Context, a san.MigrationArgs) (any, error) {
+		return map[string]bool{"allowed": !a.Revoke}, sanErr(r.AllowMigration(ctx, a))
+	}))
+	// An administrator's confirmations as root on the storage node
+	// (hardyctl cluster-storage): never callable by hardyd.
+	s.Handle(san.OpPinReset, typed(func(ctx context.Context, a san.PinResetArgs) (any, error) {
+		return map[string]bool{"reset": true}, sanErr(r.PinReset(ctx, a))
+	}))
+	s.Handle(san.OpForget, typed(func(ctx context.Context, a san.ForgetArgs) (any, error) {
+		return map[string]bool{"forgotten": true}, sanErr(r.Forget(ctx, a))
+	}))
+	if s.RootOnly == nil {
+		s.RootOnly = map[string]bool{}
+	}
+	s.RootOnly[san.OpPinReset] = true
+	s.RootOnly[san.OpForget] = true
 	if s.QuietOps == nil {
 		s.QuietOps = map[string]bool{}
 	}

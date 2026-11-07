@@ -155,10 +155,22 @@ func (s *Service) Attach(ctx context.Context, ws cluster.WorkloadStorage, g clus
 			}
 		}
 	}
+	// Who wrote a block volume before (its file system is checked before
+	// it is mounted when it wasn't only this node; H5). Unknown when the
+	// storage node can't say: root checks it then.
+	var writers VolumeWriters
+	if ws.Mode == cluster.StorageBlock && s.Peers != nil {
+		if sn, ok := StorageNode(snap); ok {
+			if err := s.Peers.Call(ctx, sn.ID, "POST", "storage/writers", writersReq{Workload: g.Workload}, &writers); err != nil {
+				s.log().Info("storage: the storage server didn't say who wrote the volume; it is checked", "workload", g.Workload.ID, "err", err)
+				writers = nil
+			}
+		}
+	}
 	var rec sanclient.Record
 	err = s.Priv.Call(ctx, sanclient.OpAttach, sanclient.AttachArgs{
 		Workload: g.Workload, Generation: g.Generation, Storage: ws, Server: path.server, Interface: path.iface,
-		Multipath: path.multipath, GrowFS: ws.Mode == cluster.StorageBlock,
+		Multipath: path.multipath, GrowFS: ws.Mode == cluster.StorageBlock, Writers: writers,
 	}, &rec)
 	if err != nil {
 		return nil, err

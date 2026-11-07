@@ -91,7 +91,7 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zfsutils-linux acl nfs-kernel-server open-iscsi e2fsprogs \
             "linux-modules-extra-$(uname -r)" || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zfsutils-linux acl nfs-kernel-server open-iscsi e2fsprogs
           sudo modprobe zfs
-          # The test runs its own iscsid per namespace; the runner's stays off.
+          # The test runs its own iscsid for each initiator; the runner's stays off.
           sudo systemctl disable --now iscsid.socket iscsid.service open-iscsi.service 2>/dev/null || true
           sudo systemctl disable --now nfs-server.service || true
           sudo mkdir -p /etc/systemd/system-generators
@@ -106,7 +106,7 @@ jobs:
       - name: parts A, B and C together - join, storage grants, VM and app placed, offline move, node death, fence, recovery
         working-directory: daemon/internal/cluster/e2e
         run: '"$RUNNER_TEMP/e2e.test" -test.run TestClusterEndToEnd -test.v -test.count 1 -test.timeout 10m'
-      - name: storage node - LIO targets with mutual CHAP, initiators in network namespaces, fence under I/O, cluster NFS exports
+      - name: storage node - LIO targets with mutual CHAP, initiators with private iscsids, fence under I/O, cluster NFS exports
         run: sudo HARDYOS_CLUSTER_INTEGRATION=1 "$RUNNER_TEMP/san.test" -test.run TestClusterStorageIntegration -test.v -test.timeout 10m
       - name: LIO and NFS state
         if: failure()

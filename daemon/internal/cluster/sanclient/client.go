@@ -67,9 +67,10 @@ type Client struct {
 	// ThawAfter is the automatic thaw of a forwarded freeze (default 60 s).
 	ThawAfter time.Duration
 
-	mu     sync.Mutex
-	thaws  map[string]*time.Timer
-	recsMu sync.Mutex
+	mu      sync.Mutex
+	thaws   map[string]*time.Timer
+	freezes map[string]*freezeLog
+	recsMu  sync.Mutex
 }
 
 func (c *Client) log() *slog.Logger {

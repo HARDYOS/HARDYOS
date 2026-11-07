@@ -21,7 +21,7 @@ type ShareRequest struct {
 // SetShareCluster commits storage.share (signed by the storage node, which
 // reads the folder's dataset itself).
 func (s *Service) SetShareCluster(ctx context.Context, r ShareRequest) error {
-	return s.onStorage(ctx, "storage/share", r, nil, func(snap *cluster.Snapshot, me cluster.Node) error {
+	return s.onStorage(ctx, "storage/share", r, nil, r.Actor, func(snap *cluster.Snapshot, me cluster.Node) error {
 		sh := cluster.ClusterShare{ID: r.ID, Pool: r.Pool, Dataset: r.Pool + "/shares/" + r.ID,
 			MountPath: cluster.RemoteMountRoot + "/" + r.Pool + "/shares/" + r.ID}
 		if r.In {

@@ -40,6 +40,17 @@ type Service struct {
 	Log   *slog.Logger
 	// Network reads this server's network status (interfaces, addresses).
 	Network func(ctx context.Context) (*network.Status, error)
+	// Signer is the running cluster core (its key signs this node's
+	// assertions and rejoin statements); nil uses M's when M has one.
+	Signer func() Signer
+
+	authState
+
+	rejoinMu sync.Mutex
+	// rejoins are fenced nodes' signed rejoin statements (storage node).
+	rejoins map[cluster.NodeID]san.RejoinStatement
+	// rejoinSent is the epoch this node last sent its statement for.
+	rejoinSent uint64
 
 	holdMu sync.Mutex
 	holds  map[cluster.WorkloadRef]bool
@@ -151,8 +162,9 @@ func StorageNode(snap *cluster.Snapshot) (*cluster.Node, bool) {
 }
 
 // onStorage runs local when this node is the storage node, else remote
-// (the same request on the storage node's peer API).
-func (s *Service) onStorage(ctx context.Context, path string, in, out any, local func(snap *cluster.Snapshot, self cluster.Node) error) error {
+// (the same request on the storage node's peer API, signed for actor when
+// it is a person).
+func (s *Service) onStorage(ctx context.Context, path string, in, out any, actor cluster.Actor, local func(snap *cluster.Snapshot, self cluster.Node) error) error {
 	me, snap, err := s.self()
 	if err != nil {
 		return err
@@ -164,10 +176,7 @@ func (s *Service) onStorage(ctx context.Context, path string, in, out any, local
 	if !ok {
 		return ErrNoStorageNode
 	}
-	if s.Peers == nil {
-		return cluster.ErrStorageUnavailable
-	}
-	return s.Peers.Call(ctx, sn.ID, "POST", path, in, out)
+	return s.callStorage(ctx, sn.ID, path, in, out, actor)
 }
 
 var (
@@ -185,7 +194,7 @@ type provisionVMReq struct {
 // ProvisionVM implements cluster.StorageService.
 func (s *Service) ProvisionVM(ctx context.Context, r cluster.VMStorageRequest, actor cluster.Actor) (*cluster.WorkloadStorage, error) {
 	var out cluster.WorkloadStorage
-	err := s.onStorage(ctx, "storage/provision/vm", provisionVMReq{r, actor}, &out, func(snap *cluster.Snapshot, _ cluster.Node) error {
+	err := s.onStorage(ctx, "storage/provision/vm", provisionVMReq{r, actor}, &out, actor, func(snap *cluster.Snapshot, _ cluster.Node) error {
 		ws, err := s.provisionVM(ctx, snap.Cluster, r)
 		s.audit(ctx, actor, "cluster.storage.provision", "vm "+r.VM, err)
 		if err == nil {
@@ -235,7 +244,7 @@ type provisionAppReq struct {
 // ProvisionApp implements cluster.StorageService.
 func (s *Service) ProvisionApp(ctx context.Context, r cluster.AppStorageRequest, actor cluster.Actor) (*cluster.WorkloadStorage, error) {
 	var out cluster.WorkloadStorage
-	err := s.onStorage(ctx, "storage/provision/app", provisionAppReq{r, actor}, &out, func(snap *cluster.Snapshot, _ cluster.Node) error {
+	err := s.onStorage(ctx, "storage/provision/app", provisionAppReq{r, actor}, &out, actor, func(snap *cluster.Snapshot, _ cluster.Node) error {
 		if u, ok := snap.AppUIDs[r.App]; !ok || u != r.UID {
 			return fmt.Errorf("app %s's user id %d isn't the one the cluster gave it", r.App, r.UID)
 		}
@@ -308,7 +317,7 @@ func placementOf(snap *cluster.Snapshot, w cluster.WorkloadRef) (*cluster.Placem
 
 // ResizeDisk implements cluster.StorageService.
 func (s *Service) ResizeDisk(ctx context.Context, w cluster.WorkloadRef, disk string, sizeGB int, actor cluster.Actor) error {
-	return s.onStorage(ctx, "storage/resize", resizeReq{w, disk, sizeGB, actor}, nil, func(snap *cluster.Snapshot, _ cluster.Node) error {
+	return s.onStorage(ctx, "storage/resize", resizeReq{w, disk, sizeGB, actor}, nil, actor, func(snap *cluster.Snapshot, _ cluster.Node) error {
 		p, err := placementOf(snap, w)
 		if err != nil {
 			return err
@@ -330,7 +339,7 @@ type destroyReq struct {
 // Destroy implements cluster.StorageService: the workload must be gone
 // from the cluster state (or have no grant holder) first.
 func (s *Service) Destroy(ctx context.Context, w cluster.WorkloadRef, confirm string, actor cluster.Actor) error {
-	return s.onStorage(ctx, "storage/destroy", destroyReq{Workload: w, Confirm: confirm, Actor: actor}, nil, func(snap *cluster.Snapshot, _ cluster.Node) error {
+	return s.onStorage(ctx, "storage/destroy", destroyReq{Workload: w, Confirm: confirm, Actor: actor}, nil, actor, func(snap *cluster.Snapshot, _ cluster.Node) error {
 		if confirm != w.ID {
 			return errors.New("type the name to destroy its storage")
 		}
@@ -368,7 +377,7 @@ func (s *Service) snapArgs(snap *cluster.Snapshot, w cluster.WorkloadRef, name, 
 // Snapshots implements cluster.StorageService.
 func (s *Service) Snapshots(ctx context.Context, w cluster.WorkloadRef) ([]cluster.SnapshotInfo, error) {
 	out := []cluster.SnapshotInfo{}
-	err := s.onStorage(ctx, "storage/snapshots", snapReq{Workload: w}, &out, func(snap *cluster.Snapshot, _ cluster.Node) error {
+	err := s.onStorage(ctx, "storage/snapshots", snapReq{Workload: w}, &out, cluster.Actor{}, func(snap *cluster.Snapshot, _ cluster.Node) error {
 		a, err := s.snapArgs(snap, w, "", "")
 		if err != nil {
 			return err
@@ -390,7 +399,7 @@ func (s *Service) Snapshots(ctx context.Context, w cluster.WorkloadRef) ([]clust
 // runs on its owner first.
 func (s *Service) Snapshot(ctx context.Context, w cluster.WorkloadRef, name string, actor cluster.Actor) (*cluster.SnapshotInfo, error) {
 	var out cluster.SnapshotInfo
-	err := s.onStorage(ctx, "storage/snapshot", snapReq{Workload: w, Name: name, Actor: actor}, &out, func(snap *cluster.Snapshot, _ cluster.Node) error {
+	err := s.onStorage(ctx, "storage/snapshot", snapReq{Workload: w, Name: name, Actor: actor}, &out, actor, func(snap *cluster.Snapshot, _ cluster.Node) error {
 		a, err := s.snapArgs(snap, w, name, "")
 		if err != nil {
 			return err
@@ -428,7 +437,7 @@ func stopped(p *cluster.Placement) bool {
 // Rollback implements cluster.StorageService (the workload must be
 // stopped).
 func (s *Service) Rollback(ctx context.Context, w cluster.WorkloadRef, snapshot, confirm string, actor cluster.Actor) error {
-	return s.onStorage(ctx, "storage/rollback", snapReq{Workload: w, Name: snapshot, Confirm: confirm, Actor: actor}, nil, func(snap *cluster.Snapshot, _ cluster.Node) error {
+	return s.onStorage(ctx, "storage/rollback", snapReq{Workload: w, Name: snapshot, Confirm: confirm, Actor: actor}, nil, actor, func(snap *cluster.Snapshot, _ cluster.Node) error {
 		p, err := placementOf(snap, w)
 		if err != nil {
 			return err
@@ -461,7 +470,7 @@ func (s *Service) Rollback(ctx context.Context, w cluster.WorkloadRef, snapshot,
 
 // DeleteSnapshot implements cluster.StorageService.
 func (s *Service) DeleteSnapshot(ctx context.Context, w cluster.WorkloadRef, snapshot, confirm string, actor cluster.Actor) error {
-	return s.onStorage(ctx, "storage/snapshot/delete", snapReq{Workload: w, Name: snapshot, Confirm: confirm, Actor: actor}, nil, func(snap *cluster.Snapshot, _ cluster.Node) error {
+	return s.onStorage(ctx, "storage/snapshot/delete", snapReq{Workload: w, Name: snapshot, Confirm: confirm, Actor: actor}, nil, actor, func(snap *cluster.Snapshot, _ cluster.Node) error {
 		a, err := s.snapArgs(snap, w, snapshot, confirm)
 		if err != nil {
 			return err
@@ -475,7 +484,7 @@ func (s *Service) DeleteSnapshot(ctx context.Context, w cluster.WorkloadRef, sna
 // Health implements cluster.StorageService.
 func (s *Service) Health(ctx context.Context) (*cluster.StorageHealth, error) {
 	var out cluster.StorageHealth
-	err := s.onStorage(ctx, "storage/health", struct{}{}, &out, func(snap *cluster.Snapshot, me cluster.Node) error {
+	err := s.onStorage(ctx, "storage/health", struct{}{}, &out, cluster.Actor{}, func(snap *cluster.Snapshot, me cluster.Node) error {
 		var st san.Status
 		out = cluster.StorageHealth{Node: me.ID, Reachable: true, Sessions: map[cluster.NodeID]int{}}
 		if err := s.Priv.Call(ctx, san.OpStatus, nil, &st); err != nil {
@@ -515,9 +524,56 @@ func (s *Service) FenceNode(ctx context.Context, node cluster.NodeID, epoch uint
 	return s.Priv.Call(ctx, san.OpFence, san.FenceArgs{Node: node, Epoch: epoch, Confirm: string(node)}, &res)
 }
 
-// UnfenceNode implements cluster.StorageFencer on the storage node.
+// UnfenceNode implements cluster.StorageFencer on the storage node: root
+// lifts the fence with the node's own signed rejoin statement for that
+// epoch (sent by the node over the peer API; H3).
 func (s *Service) UnfenceNode(ctx context.Context, node cluster.NodeID, epoch uint64) error {
-	return s.Priv.Call(ctx, san.OpUnfence, san.UnfenceArgs{Node: node, Epoch: epoch}, nil)
+	a := san.UnfenceArgs{Node: node, Epoch: epoch}
+	s.rejoinMu.Lock()
+	if st, ok := s.rejoins[node]; ok && st.Epoch == epoch {
+		a.Statement = &st
+	}
+	s.rejoinMu.Unlock()
+	err := s.Priv.Call(ctx, san.OpUnfence, a, nil)
+	if err == nil {
+		s.rejoinMu.Lock()
+		delete(s.rejoins, node)
+		s.rejoinMu.Unlock()
+	}
+	return err
+}
+
+// ---- live migrations (M6) -------------------------------------------------------
+
+// AllowMigration is the hook a live migration's destination calls (part
+// C's mover, before it admits the migration): this compute node's
+// firewall lets the source's storage address reach the migration port
+// (0: the whole range) for the given time (0: 120 s, at most 10 min).
+// Connections set up meanwhile carry on after it ends.
+func (s *Service) AllowMigration(ctx context.Context, source cluster.NodeID, port int, ttl time.Duration) error {
+	return s.migrationRule(ctx, source, port, ttl, false)
+}
+
+// RevokeMigration ends a source's migration allowances (the migration is
+// over or was refused).
+func (s *Service) RevokeMigration(ctx context.Context, source cluster.NodeID) error {
+	return s.migrationRule(ctx, source, 0, 0, true)
+}
+
+func (s *Service) migrationRule(ctx context.Context, source cluster.NodeID, port int, ttl time.Duration, revoke bool) error {
+	_, snap, err := s.self()
+	if err != nil {
+		return err
+	}
+	n := snap.Nodes[source]
+	if n == nil || n.Role != cluster.RoleCompute || !n.Addresses.Storage.IsValid() {
+		return fmt.Errorf("%s isn't a compute server with a storage address", source)
+	}
+	secs := int(ttl / time.Second)
+	if ttl > 0 && secs == 0 {
+		secs = 1
+	}
+	return s.Priv.Call(ctx, san.OpMigrationAllow, san.MigrationArgs{Source: n.Addresses.Storage, Port: port, Seconds: secs, Revoke: revoke}, nil)
 }
 
 // ---- local storage network -----------------------------------------------------

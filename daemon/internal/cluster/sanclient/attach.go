@@ -9,8 +9,10 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -286,9 +288,124 @@ type AttachArgs struct {
 	Server     netip.Addr              `json:"server"`
 	Interface  string                  `json:"interface"`
 	Multipath  bool                    `json:"multipath,omitempty"`
-	// GrowFS grows a block volume's file system to the LUN's size.
+	// GrowFS grows a block volume's file system to the LUN's size when the
+	// LUN is larger than the file system (it grew).
 	GrowFS bool `json:"growFS,omitempty"`
+	// Writers is the storage node's word on who last wrote each volume
+	// (by WWN); a block file system someone else wrote is checked before
+	// it is mounted (H5). Missing means unknown: checked.
+	Writers map[string]WriterInfo `json:"writers,omitempty"`
 }
+
+// WriterInfo is what the storage node knows about a volume's writers.
+type WriterInfo struct {
+	Known bool `json:"known"`
+	// OthersWrote: another node (or the storage node) held it in its last
+	// two holder sets.
+	OthersWrote bool `json:"othersWrote"`
+	// Seq changes whenever the volume's holders change.
+	Seq uint64 `json:"seq"`
+}
+
+// BlockCheckFile records, per WWN, the holder sequence at which this node
+// last checked a block volume's file system (root's own, persistent).
+const BlockCheckFile = rootfile.RootStateDir + "/cluster/blockcheck.json"
+
+// needsCheck decides whether a block file system must be checked first:
+// unless the storage node says only this node wrote it, or this node has
+// already checked it since its holders last changed.
+func (c *Client) needsCheck(wwn string, wi WriterInfo, have bool) bool {
+	if !have || !wi.Known {
+		return true
+	}
+	if !wi.OthersWrote {
+		return false
+	}
+	return wi.Seq == 0 || c.checkedSeq(wwn) != wi.Seq
+}
+
+func (c *Client) checkedSeq(wwn string) uint64 {
+	b, err := rootfile.ReadFile(c.sys(BlockCheckFile))
+	if err != nil {
+		return 0
+	}
+	var m map[string]uint64
+	if json.Unmarshal(b, &m) != nil {
+		return 0
+	}
+	return m[wwn]
+}
+
+func (c *Client) recordChecked(wwn string, seq uint64) {
+	if seq == 0 {
+		return
+	}
+	m := map[string]uint64{}
+	if b, err := rootfile.ReadFile(c.sys(BlockCheckFile)); err == nil {
+		_ = json.Unmarshal(b, &m)
+	}
+	m[wwn] = seq
+	b, _ := json.Marshal(m)
+	if err := rootfile.WriteInRootDir(c.sys(BlockCheckFile), b, 0o600, 0o700); err != nil {
+		c.log().Warn("sanclient: recording a block volume's check", "err", err)
+	}
+}
+
+// blockSizes reads the device's and the file system's sizes in bytes.
+func (c *Client) blockSizes(ctx context.Context, fsType, dev, mp string) (uint64, uint64, error) {
+	out, err := c.run(ctx, "blockdev", "--getsize64", dev)
+	if err != nil {
+		return 0, 0, err
+	}
+	devSize, err := strconv.ParseUint(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("blockdev: %q", out)
+	}
+	var fsSize uint64
+	switch fsType {
+	case san.BlockExt4:
+		out, err = c.run(ctx, "dumpe2fs", "-h", dev)
+		if err != nil {
+			return 0, 0, err
+		}
+		var count, bs uint64
+		for _, l := range strings.Split(string(out), "\n") {
+			k, v, ok := strings.Cut(l, ":")
+			if !ok {
+				continue
+			}
+			switch strings.TrimSpace(k) {
+			case "Block count":
+				count, _ = strconv.ParseUint(strings.TrimSpace(v), 10, 64)
+			case "Block size":
+				bs, _ = strconv.ParseUint(strings.TrimSpace(v), 10, 64)
+			}
+		}
+		fsSize = count * bs
+	case san.BlockXFS:
+		out, err = c.run(ctx, "xfs_info", mp)
+		if err != nil {
+			return 0, 0, err
+		}
+		m := xfsDataRE.FindStringSubmatch(string(out))
+		if m == nil {
+			return 0, 0, errors.New("xfs_info: no data section")
+		}
+		bs, _ := strconv.ParseUint(m[1], 10, 64)
+		blocks, _ := strconv.ParseUint(m[2], 10, 64)
+		fsSize = bs * blocks
+	}
+	if fsSize == 0 {
+		return 0, 0, errors.New("can't read the file system's size")
+	}
+	return devSize, fsSize, nil
+}
+
+var xfsDataRE = regexp.MustCompile(`(?m)^data\s+=\s+bsize=(\d+)\s+blocks=(\d+)`)
+
+// growSlack is how much bigger the LUN must be than the file system for a
+// grow (volumes grow in whole gigabytes).
+const growSlack = 64 << 20
 
 // Attach makes a workload's storage usable here and records it.
 func (c *Client) Attach(ctx context.Context, a AttachArgs) (*Record, error) {
@@ -339,6 +456,18 @@ func (c *Client) Attach(ctx context.Context, a AttachArgs) (*Record, error) {
 			return nil, bad("block file system %q isn't ext4 or xfs", a.Storage.BlockFS)
 		}
 		if !c.mounted(mp) {
+			wwn := a.Storage.Volumes[0].WWN
+			wi, have := a.Writers[wwn]
+			if c.needsCheck(wwn, wi, have) {
+				// Someone else wrote it last (another node, or the storage
+				// node moving the app's data): the file system's own
+				// checker reads it first, and a finding keeps it unmounted
+				// (H5).
+				if err := san.CheckBlockFS(ctx, c.Runner, a.Storage.BlockFS, dev); err != nil {
+					return nil, fmt.Errorf("%s's block volume: %w", w.ID, err)
+				}
+				c.recordChecked(wwn, wi.Seq)
+			}
 			if err := os.MkdirAll(c.sys(mp), 0o755); err != nil {
 				return nil, err
 			}
@@ -347,13 +476,17 @@ func (c *Client) Attach(ctx context.Context, a AttachArgs) (*Record, error) {
 			}
 		}
 		if a.GrowFS {
-			if a.Storage.BlockFS == san.BlockExt4 {
-				_, err = c.run(ctx, "resize2fs", dev)
-			} else {
-				_, err = c.run(ctx, "xfs_growfs", mp)
-			}
-			if err != nil {
-				c.log().Warn("sanclient: growing the block volume's file system", "app", w.ID, "err", err)
+			if devSize, fsSize, serr := c.blockSizes(ctx, a.Storage.BlockFS, dev, mp); serr != nil {
+				c.log().Warn("sanclient: reading the block volume's sizes", "app", w.ID, "err", serr)
+			} else if devSize > fsSize+growSlack {
+				if a.Storage.BlockFS == san.BlockExt4 {
+					_, err = c.run(ctx, "resize2fs", dev)
+				} else {
+					_, err = c.run(ctx, "xfs_growfs", mp)
+				}
+				if err != nil {
+					c.log().Warn("sanclient: growing the block volume's file system", "app", w.ID, "err", err)
+				}
 			}
 		}
 		rec.Mounts = append(rec.Mounts, mp)
@@ -584,6 +717,9 @@ func (c *Client) Freeze(ctx context.Context, a FreezeArgs) (bool, error) {
 	if _, ok := recs.Workloads[recordKey(cluster.WorkloadRef{Kind: cluster.KindVM, ID: a.VM})]; !ok {
 		return false, bad("%s isn't a cluster VM attached here", a.VM)
 	}
+	if err := c.freezeAllowed(a.VM, time.Now()); err != nil {
+		return false, err
+	}
 	fctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	if _, err := c.run(fctx, "virsh", "-c", "qemu:///system", "domfsfreeze", a.VM); err != nil {
@@ -619,11 +755,68 @@ func (c *Client) Thaw(ctx context.Context, a FreezeArgs) error {
 	return nil
 }
 
+// Freeze limits (M4): a guest is frozen at most MaxFrozenPerHour in any
+// hour (each freeze counts until it is thawed, at most ThawAfter), and
+// stays thawed at least MinThawedGap between two freezes, whoever asks.
+const (
+	MinThawedGap     = 30 * time.Second
+	MaxFrozenPerHour = 5 * time.Minute
+)
+
+// freezeLog is one VM's recent freezes.
+type freezeLog struct {
+	frozenAt time.Time
+	thawedAt time.Time
+	spans    []freezeSpan
+}
+
+type freezeSpan struct{ from, to time.Time }
+
+// freezeAllowed records a freeze about to start, or refuses it.
+func (c *Client) freezeAllowed(vm string, now time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.freezes == nil {
+		c.freezes = map[string]*freezeLog{}
+	}
+	l := c.freezes[vm]
+	if l == nil {
+		l = &freezeLog{}
+		c.freezes[vm] = l
+	}
+	if !l.frozenAt.IsZero() {
+		return bad("%s is frozen already", vm)
+	}
+	if !l.thawedAt.IsZero() && now.Sub(l.thawedAt) < MinThawedGap {
+		return bad("%s was thawed less than %s ago", vm, MinThawedGap)
+	}
+	var spent time.Duration
+	keep := l.spans[:0]
+	for _, s := range l.spans {
+		if now.Sub(s.to) > time.Hour {
+			continue
+		}
+		keep = append(keep, s)
+		spent += s.to.Sub(s.from)
+	}
+	l.spans = keep
+	if spent >= MaxFrozenPerHour {
+		return bad("%s has been frozen for %s in the last hour", vm, spent.Round(time.Second))
+	}
+	l.frozenAt = now
+	return nil
+}
+
 func (c *Client) thaw(vm string) {
 	c.mu.Lock()
 	if t := c.thaws[vm]; t != nil {
 		t.Stop()
 		delete(c.thaws, vm)
+	}
+	if l := c.freezes[vm]; l != nil && !l.frozenAt.IsZero() {
+		now := time.Now()
+		l.spans = append(l.spans, freezeSpan{from: l.frozenAt, to: now})
+		l.frozenAt, l.thawedAt = time.Time{}, now
 	}
 	c.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
 )
@@ -32,7 +33,34 @@ type FirewallSpec struct {
 	Members []netip.Addr `json:"members"`
 	// Fenced nodes' addresses are dropped outright.
 	Fenced []netip.Addr `json:"fenced"`
+	// Index is the Raft index the spec was built from (root refuses an
+	// older one, or one too far ahead; H3).
+	Index uint64 `json:"index,omitempty"`
 }
+
+// FirewallExtra is what root adds to a spec from its own state.
+type FirewallExtra struct {
+	// MACs are the link-layer addresses root pinned for members' storage
+	// addresses: a packet from such an address with another source MAC
+	// is dropped (H2; a member on the same segment can still spoof both,
+	// see docs/plans/cluster.md 8.1).
+	MACs map[netip.Addr]string
+	// Migrations are the live-migration sources allowed now (compute
+	// nodes, M6), each until its expiry.
+	Migrations []MigrationAllow
+	// Shared: the storage network is the LAN itself; the NFSv3 side ports
+	// stay open for the LAN's own NFS clients then.
+	Shared bool
+}
+
+// MigrationAllow lets one source address reach one migration port.
+type MigrationAllow struct {
+	Source  netip.Addr `json:"source"`
+	Port    int        `json:"port"`
+	Expires time.Time  `json:"expires"`
+}
+
+var macRE = regexp.MustCompile(`^([0-9a-f]{2}:){5}[0-9a-f]{2}$`)
 
 var ifRE = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_.-]{0,14}$`)
 
@@ -84,6 +112,11 @@ func setLine(name string, l []netip.Addr) string {
 // RenderFirewall renders the table. Loading it replaces the previous one
 // atomically (one nft transaction).
 func RenderFirewall(s FirewallSpec) (string, error) {
+	return RenderFirewallWith(s, FirewallExtra{}, time.Now())
+}
+
+// RenderFirewallWith renders the table with root's own additions.
+func RenderFirewallWith(s FirewallSpec, x FirewallExtra, now time.Time) (string, error) {
 	if err := s.Validate(); err != nil {
 		return "", err
 	}
@@ -92,17 +125,68 @@ func RenderFirewall(s FirewallSpec) (string, error) {
 	fmt.Fprintf(&b, "table inet %s\ndelete table inet %s\ntable inet %s {\n", FirewallTable, FirewallTable, FirewallTable)
 	b.WriteString(setLine("members", s.Members))
 	b.WriteString(setLine("fenced", s.Fenced))
+	// Members' pinned link-layer addresses.
+	var pinned []netip.Addr
+	for a, mac := range x.MACs {
+		if !macRE.MatchString(mac) || !a.Is4() || !s.Subnet.Contains(a) {
+			return "", fmt.Errorf("MAC pin %s %q isn't valid", a, mac)
+		}
+		pinned = append(pinned, a)
+	}
+	slices.SortFunc(pinned, func(a, b netip.Addr) int { return a.Compare(b) })
+	pairs := make([]string, 0, len(pinned))
+	for _, a := range pinned {
+		pairs = append(pairs, a.String()+" . "+x.MACs[a])
+	}
+	b.WriteString(setLine("mac_pinned", pinned))
+	b.WriteString("\tset member_macs {\n\t\ttype ipv4_addr . ether_addr\n")
+	if len(pairs) > 0 {
+		fmt.Fprintf(&b, "\t\telements = { %s }\n", strings.Join(pairs, ", "))
+	}
+	b.WriteString("\t}\n")
+	if s.Role == cluster.RoleCompute {
+		var els []string
+		for _, m := range x.Migrations {
+			left := int(m.Expires.Sub(now) / time.Second)
+			if left < 1 {
+				continue
+			}
+			if !m.Source.Is4() || !slices.Contains(s.Members, m.Source) || m.Port < MigrateFirst || m.Port > MigrateLast {
+				return "", fmt.Errorf("migration allowance %s:%d isn't valid", m.Source, m.Port)
+			}
+			els = append(els, fmt.Sprintf("%s . %d timeout %ds", m.Source, m.Port, left))
+		}
+		slices.Sort(els)
+		els = slices.Compact(els)
+		b.WriteString("\tset migrations {\n\t\ttype ipv4_addr . inet_service\n\t\tflags timeout\n")
+		if len(els) > 0 {
+			fmt.Fprintf(&b, "\t\telements = { %s }\n", strings.Join(els, ", "))
+		}
+		b.WriteString("\t}\n")
+	}
 	b.WriteString("\tchain input {\n\t\ttype filter hook input priority filter - 5; policy accept;\n")
 	sif := fmt.Sprintf("%q", s.Interface)
 	fmt.Fprintf(&b, "\t\tiifname != %s ip saddr %s drop\n", sif, s.Subnet)
 	fmt.Fprintf(&b, "\t\tiifname %s ip saddr @fenced drop\n", sif)
+	fmt.Fprintf(&b, "\t\tiifname %s ip saddr @mac_pinned ip saddr . ether saddr != @member_macs drop\n", sif)
 	switch s.Role {
 	case cluster.RoleStorage:
 		fmt.Fprintf(&b, "\t\ttcp dport %d iifname != %s drop\n", ISCSIPort, sif)
+		if !x.Shared {
+			// Cluster mounts are NFSv4.2 over TCP 2049 only: rpcbind,
+			// mountd and NFS over UDP stay closed on the storage network
+			// (L6).
+			fmt.Fprintf(&b, "\t\tiifname %s tcp dport { 111, 20048 } drop\n", sif)
+			fmt.Fprintf(&b, "\t\tiifname %s udp dport { 111, %d, 20048 } drop\n", sif, NFSPort)
+		}
 		fmt.Fprintf(&b, "\t\tiifname %s tcp dport { %d, %d } ip saddr @members accept\n", sif, NFSPort, ISCSIPort)
 		fmt.Fprintf(&b, "\t\tiifname %s tcp dport { %d, %d } drop\n", sif, NFSPort, ISCSIPort)
 	case cluster.RoleCompute:
-		fmt.Fprintf(&b, "\t\tiifname %s tcp dport %d-%d ip saddr @members accept\n", sif, MigrateFirst, MigrateLast)
+		// A migration's memory stream comes only from the source the
+		// destination allowed for it (M6); a connection already set up
+		// carries on when its allowance ends or the table is reloaded.
+		fmt.Fprintf(&b, "\t\tiifname %s tcp dport %d-%d ct state established,related ip saddr @members accept\n", sif, MigrateFirst, MigrateLast)
+		fmt.Fprintf(&b, "\t\tiifname %s ip saddr . tcp dport @migrations accept\n", sif)
 		fmt.Fprintf(&b, "\t\ttcp dport %d-%d drop\n", MigrateFirst, MigrateLast)
 	}
 	b.WriteString("\t}\n}\n")

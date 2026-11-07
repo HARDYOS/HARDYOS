@@ -43,7 +43,7 @@ type ModeResult struct {
 // the app's next start attaches the new layout.
 func (s *Service) SwitchAppMode(ctx context.Context, r ModeRequest) (*ModeResult, error) {
 	var out ModeResult
-	err := s.onStorage(ctx, "storage/mode", r, &out, func(snap *cluster.Snapshot, me cluster.Node) error {
+	err := s.onStorage(ctx, "storage/mode", r, &out, r.Actor, func(snap *cluster.Snapshot, me cluster.Node) error {
 		res, err := s.switchMode(ctx, snap, me, r)
 		s.audit(ctx, r.Actor, "cluster.storage.mode", "app "+r.App+" -> "+string(r.To), err)
 		if err == nil {
@@ -115,7 +115,7 @@ func (s *Service) switchMode(ctx context.Context, snap *cluster.Snapshot, me clu
 		vol = &v
 	}
 	var mr san.MigrateResult
-	if err := s.Priv.Call(ctx, san.OpAppMigrate, san.MigrateArgs{App: r.App, Pool: p.Storage.Pool, To: r.To, Confirm: r.App, RemoveOld: r.RemoveOld}, &mr); err != nil {
+	if err := s.Priv.Call(ctx, san.OpAppMigrate, san.MigrateArgs{App: r.App, Pool: p.Storage.Pool, To: r.To, FS: fs, Confirm: r.App, RemoveOld: r.RemoveOld}, &mr); err != nil {
 		return nil, err
 	}
 	ns := cluster.WorkloadStorage{Pool: p.Storage.Pool, Mode: r.To, Shares: p.Storage.Shares}

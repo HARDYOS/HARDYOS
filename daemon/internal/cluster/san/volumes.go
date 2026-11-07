@@ -25,6 +25,11 @@ const (
 
 var snapRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$`)
 
+// MaxSnapshots is the most snapshots a cluster workload's dataset may
+// have (M4: a node asking for snapshots of its own workloads can't pile
+// them up on the storage node).
+const MaxSnapshots = 512
+
 // WorkloadArgs names a workload's storage on a pool.
 type WorkloadArgs struct {
 	Kind cluster.WorkloadKind `json:"kind"`
@@ -90,6 +95,9 @@ func (r *Root) DatasetCreate(ctx context.Context, a DatasetCreateArgs) (*Dataset
 			return nil, fmt.Errorf("creating %s: %w", parent, err)
 		}
 	}
+	if err := r.ensureParentQuota(ctx, a.Pool, parent); err != nil {
+		return nil, err
+	}
 	ds := a.Dataset()
 	if _, err := r.zfs(ctx, "list", "-H", "-o", "name", ds); err == nil {
 		return nil, &ValidationError{fmt.Errorf("%s already exists", ds)}
@@ -121,6 +129,40 @@ func (r *Root) DatasetCreate(ctx context.Context, a DatasetCreateArgs) (*Dataset
 	}
 	r.log().Info("san: dataset created", "dataset", ds)
 	return info, nil
+}
+
+// ParentQuotaPercent is the share of a pool that <pool>/vms and
+// <pool>/apps may each use at most (L5): cluster zvols are sparse, so a
+// compute node writing its volumes full can't fill the storage node's
+// pool and stop everything else on it (shares, the system, backups).
+const ParentQuotaPercent = 90
+
+// ensureParentQuota caps <pool>/vms or <pool>/apps when it has no quota
+// yet (an administrator's own quota is kept).
+func (r *Root) ensureParentQuota(ctx context.Context, pool, parent string) error {
+	p, err := r.props(ctx, parent, "quota")
+	if err != nil {
+		return err
+	}
+	if q := p["quota"]; q != "" && q != "0" && q != "-" && q != "none" {
+		return nil
+	}
+	pp, err := r.props(ctx, pool, "used", "available")
+	if err != nil {
+		return err
+	}
+	used, _ := strconv.ParseUint(pp["used"], 10, 64)
+	avail, _ := strconv.ParseUint(pp["available"], 10, 64)
+	total := used + avail
+	if total == 0 {
+		r.log().Warn("san: can't read the pool's size; the cluster datasets stay uncapped", "pool", pool)
+		return nil
+	}
+	q := total / 100 * ParentQuotaPercent
+	if _, err := r.zfs(ctx, "set", "quota="+strconv.FormatUint(q, 10), parent); err != nil {
+		return fmt.Errorf("capping %s: %w", parent, err)
+	}
+	return nil
 }
 
 func (r *Root) datasetInfo(ctx context.Context, ds string) (*DatasetInfo, error) {
@@ -307,22 +349,40 @@ func (r *Root) VolumeCreate(ctx context.Context, c cluster.ClusterID, a VolumeAr
 		return nil, err
 	}
 	if a.Kind == cluster.KindApp {
-		label := "hc-" + a.ID
-		if len(label) > 12 && a.FS == BlockXFS {
-			label = label[:12] // xfs labels are at most 12 characters
-		}
-		var err error
-		if a.FS == BlockExt4 {
-			_, err = sysexec.Output(ctx, r.Runner, "mkfs.ext4", "-q", "-F", "-E", "nodiscard", "-L", label, dev)
-		} else {
-			_, err = sysexec.Output(ctx, r.Runner, "mkfs.xfs", "-q", "-f", "-K", "-L", label, dev)
-		}
-		if err != nil {
+		if err := r.mkfs(ctx, a.FS, a.ID, dev, false); err != nil {
 			_, _ = r.zfs(ctx, "destroy", ds)
 			return nil, fmt.Errorf("formatting the block volume: %w", err)
 		}
+		r.markStorageWriter(BackstoreName(a.ref(), "block"))
 	}
 	return r.volumeInfo(ctx, c, ds)
+}
+
+// mkfs formats an app's block volume; discard gives a used volume's
+// blocks back to the pool (a new sparse one has none).
+func (r *Root) mkfs(ctx context.Context, fsType, app, dev string, discard bool) error {
+	label := "hc-" + app
+	if len(label) > 12 && fsType == BlockXFS {
+		label = label[:12] // xfs labels are at most 12 characters
+	}
+	var err error
+	switch fsType {
+	case BlockExt4:
+		args := []string{"-q", "-F", "-L", label}
+		if !discard {
+			args = append(args, "-E", "nodiscard")
+		}
+		_, err = sysexec.Output(ctx, r.Runner, "mkfs.ext4", append(args, dev)...)
+	case BlockXFS:
+		args := []string{"-q", "-f", "-L", label}
+		if !discard {
+			args = append(args, "-K")
+		}
+		_, err = sysexec.Output(ctx, r.Runner, "mkfs.xfs", append(args, dev)...)
+	default:
+		err = &ValidationError{fmt.Errorf("file system %q isn't ext4 or xfs", fsType)}
+	}
+	return err
 }
 
 func (r *Root) volumeInfo(ctx context.Context, c cluster.ClusterID, ds string) (*VolumeInfo, error) {
@@ -462,6 +522,13 @@ func (r *Root) SnapshotCreate(ctx context.Context, a SnapshotArgs) (*SnapshotInf
 	if err := r.checkOwned(ctx, a.WorkloadArgs, a.Dataset()); err != nil {
 		return nil, err
 	}
+	have, err := r.SnapshotList(ctx, a)
+	if err != nil {
+		return nil, err
+	}
+	if len(have) >= MaxSnapshots {
+		return nil, &ValidationError{fmt.Errorf("%s %s already has %d snapshots; delete some first", a.Kind, a.ID, len(have))}
+	}
 	if _, err := r.zfs(ctx, "snapshot", "-r", a.Dataset()+"@"+a.Name); err != nil {
 		return nil, err
 	}
@@ -564,13 +631,54 @@ func (r *Root) SnapshotDestroy(ctx context.Context, a SnapshotArgs) error {
 // dataset and its block volume, on the storage node, with the app stopped
 // everywhere. Confirm must be the app's id.
 type MigrateArgs struct {
-	App     string              `json:"app"`
-	Pool    string              `json:"pool"`
-	To      cluster.StorageMode `json:"to"`
-	Confirm string              `json:"confirm"`
+	App  string              `json:"app"`
+	Pool string              `json:"pool"`
+	To   cluster.StorageMode `json:"to"`
+	// FS is the block volume's file system (ext4 or xfs): the volume is
+	// checked and mounted as exactly that, never auto-detected (H4).
+	FS      string `json:"fs"`
+	Confirm string `json:"confirm"`
 	// RemoveOld clears the copy it moved away from once the copy succeeded
 	// (the NFS dataset's files after a snapshot, or the block volume).
 	RemoveOld bool `json:"removeOld,omitempty"`
+}
+
+// CheckBlockFS runs the file system's own read-only checker on a block
+// volume (e2fsck -fn, xfs_repair -n) and refuses it on any finding: the
+// kernel never parses a node-written file system that its checker
+// doesn't accept (H4, H5). A file system with an unreplayed journal is
+// refused too (mount it on its owner once to replay it).
+func CheckBlockFS(ctx context.Context, run sysexec.Runner, fsType, dev string) error {
+	var res sysexec.Result
+	var err error
+	switch fsType {
+	case BlockExt4:
+		res, err = run.Run(ctx, nil, "e2fsck", "-f", "-n", dev)
+	case BlockXFS:
+		res, err = run.Run(ctx, nil, "xfs_repair", "-n", dev)
+	default:
+		return &ValidationError{fmt.Errorf("file system %q isn't ext4 or xfs", fsType)}
+	}
+	if err != nil {
+		return fmt.Errorf("checking %s: %w", dev, err)
+	}
+	if res.ExitCode != 0 {
+		msg := strings.TrimSpace(string(res.Stderr) + "\n" + string(res.Stdout))
+		if len(msg) > 400 {
+			msg = msg[len(msg)-400:]
+		}
+		return &ValidationError{fmt.Errorf("the %s file system on %s didn't pass its check (exit %d), so it isn't mounted: %s", fsType, dev, res.ExitCode, msg)}
+	}
+	return nil
+}
+
+// noReplay is the mount option that keeps a read-only mount from
+// replaying the journal.
+func noReplay(fsType string) string {
+	if fsType == BlockXFS {
+		return "norecovery"
+	}
+	return "noload"
 }
 
 // MigrateResult reports a data move.
@@ -593,6 +701,9 @@ func (r *Root) Migrate(ctx context.Context, a MigrateArgs) (*MigrateResult, erro
 	}
 	if a.To != cluster.StorageBlock && a.To != cluster.StorageNFS {
 		return nil, &ValidationError{errors.New("the data can move to block or nfs")}
+	}
+	if a.FS != BlockExt4 && a.FS != BlockXFS {
+		return nil, &ValidationError{errors.New("the block volume's file system must be named (ext4 or xfs)")}
 	}
 	if err := r.checkOwned(ctx, w, w.Dataset()); err != nil {
 		return nil, err
@@ -620,11 +731,27 @@ func (r *Root) Migrate(ctx context.Context, a MigrateArgs) (*MigrateResult, erro
 		return nil, err
 	}
 	dev := "/dev/zvol/" + blk
-	if _, err := sysexec.Output(ctx, r.Runner, "mount", "-o", "nosuid,nodev", dev, mnt); err != nil {
+	// The volume was last written by a compute node: its file system is
+	// checked read-only by the userspace checker first and mounted only
+	// as the named type, read-only when it is the source (H4).
+	if err := CheckBlockFS(ctx, r.Runner, a.FS, dev); err != nil {
+		return nil, err
+	}
+	opts := "nosuid,nodev,noexec"
+	if a.To == cluster.StorageNFS {
+		opts += ",ro," + noReplay(a.FS)
+	}
+	if _, err := sysexec.Output(ctx, r.Runner, "mount", "-t", a.FS, "-o", opts, dev, mnt); err != nil {
 		return nil, fmt.Errorf("mounting the block volume: %w", err)
 	}
+	if a.To == cluster.StorageBlock {
+		defer r.markStorageWriter(BackstoreName(w.ref(), "block"))
+	}
+	mounted := true
 	defer func() {
-		_, _ = sysexec.Output(context.WithoutCancel(ctx), r.Runner, "umount", mnt)
+		if mounted {
+			_, _ = sysexec.Output(context.WithoutCancel(ctx), r.Runner, "umount", mnt)
+		}
 		_ = os.Remove(mnt)
 	}()
 	src, dst := info.Mountpoint, mnt
@@ -639,15 +766,24 @@ func (r *Root) Migrate(ctx context.Context, a MigrateArgs) (*MigrateResult, erro
 	}
 	res := &MigrateResult{To: a.To, Snapshot: snap}
 	if a.RemoveOld {
-		if _, err := sysexec.Output(ctx, r.Runner, "find", src, "-mindepth", "1", "-maxdepth", "1",
+		if a.To == cluster.StorageNFS {
+			// The block volume was mounted read-only: it is cleared by
+			// formatting it afresh (which discards its blocks, giving them
+			// back to the pool), never by writing through the node-written
+			// file system. The snapshot keeps the old contents.
+			if _, err := sysexec.Output(ctx, r.Runner, "umount", mnt); err != nil {
+				return res, fmt.Errorf("the data was copied, but the block volume couldn't be unmounted to clear it: %w", err)
+			}
+			mounted = false
+			if err := r.mkfs(ctx, a.FS, a.App, dev, true); err != nil {
+				return res, fmt.Errorf("the data was copied, but clearing the block volume failed: %w", err)
+			}
+			r.markStorageWriter(BackstoreName(w.ref(), "block"))
+		} else if _, err := sysexec.Output(ctx, r.Runner, "find", src, "-mindepth", "1", "-maxdepth", "1",
 			"!", "-name", "lost+found", "!", "-name", ".zfs", "-exec", "rm", "-rf", "--one-file-system", "{}", "+"); err != nil {
 			return res, fmt.Errorf("the data was copied, but clearing the old copy failed: %w", err)
 		}
 		res.Removed = true
-		if a.To == cluster.StorageNFS {
-			// Give the freed blocks back to the pool (the zvol is sparse).
-			_, _ = sysexec.Output(ctx, r.Runner, "fstrim", mnt)
-		}
 	}
 	r.log().Info("san: app data moved", "app", a.App, "to", a.To, "snapshot", snap)
 	return res, nil

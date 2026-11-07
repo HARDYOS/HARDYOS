@@ -2,9 +2,13 @@ package san
 
 import (
 	"net/netip"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
 )
@@ -259,6 +263,40 @@ func TestReconcileRecreatesOnSerialChangeAndLeavesForeignObjects(t *testing.T) {
 	}
 }
 
+// TestFirewallSyntax checks rendered tables with the real nft (-c, in a
+// network namespace of its own) where it can: root with nft and unshare.
+func TestFirewallSyntax(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root for nft -c")
+	}
+	for _, tool := range []string{"nft", "unshare"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s isn't installed", tool)
+		}
+	}
+	a, b := netip.MustParseAddr("10.77.0.21"), netip.MustParseAddr("10.77.0.22")
+	x := FirewallExtra{MACs: map[netip.Addr]string{a: "52:54:00:aa:bb:01"},
+		Migrations: []MigrationAllow{{Source: b, Port: 49152, Expires: time.Now().Add(time.Minute)}}}
+	for _, role := range []cluster.Role{cluster.RoleStorage, cluster.RoleCompute} {
+		for _, shared := range []bool{false, true} {
+			x.Shared = shared
+			out, err := RenderFirewallWith(FirewallSpec{Role: role, Interface: "enp2s0", Subnet: netip.MustParsePrefix("10.77.0.0/24"),
+				Members: []netip.Addr{a, b}, Fenced: []netip.Addr{netip.MustParseAddr("10.77.0.23")}}, x, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := filepath.Join(t.TempDir(), "fw.nft")
+			_ = os.WriteFile(p, []byte(out), 0o600)
+			if res, err := exec.Command("unshare", "-n", "nft", "-c", "-f", p).CombinedOutput(); err != nil {
+				if strings.Contains(string(res), "Operation not permitted") {
+					t.Skipf("nft can't run here: %s", res)
+				}
+				t.Fatalf("%s table (shared %v) refused by nft: %v\n%s\n%s", role, shared, err, res, out)
+			}
+		}
+	}
+}
+
 func TestFirewallRender(t *testing.T) {
 	spec := FirewallSpec{Role: cluster.RoleStorage, Interface: "enp2s0", Subnet: netip.MustParsePrefix("10.77.0.0/24"),
 		Members: []netip.Addr{netip.MustParseAddr("10.77.0.22"), netip.MustParseAddr("10.77.0.21")},
@@ -284,9 +322,17 @@ func TestFirewallRender(t *testing.T) {
 	if strings.Index(out, "@fenced drop") > strings.Index(out, "@members accept") {
 		t.Error("fenced addresses must be dropped before members are accepted")
 	}
+	for _, want := range []string{`iifname "enp2s0" tcp dport { 111, 20048 } drop`, `iifname "enp2s0" udp dport { 111, 2049, 20048 } drop`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("storage table lacks %q (L6)", want)
+		}
+	}
 	spec.Role = cluster.RoleCompute
 	out, _ = RenderFirewall(spec)
-	if !strings.Contains(out, "tcp dport 49152-49215 ip saddr @members accept") || strings.Contains(out, "3260") {
+	// Migrations come only from the allowed source and port (M6), never
+	// from every member.
+	if strings.Contains(out, "tcp dport 49152-49215 ip saddr @members accept") || !strings.Contains(out, "ip saddr . tcp dport @migrations accept") ||
+		strings.Contains(out, "3260") {
 		t.Errorf("compute table:\n%s", out)
 	}
 	for _, bad := range []FirewallSpec{

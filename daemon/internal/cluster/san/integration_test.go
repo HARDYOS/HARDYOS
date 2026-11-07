@@ -17,11 +17,11 @@ import (
 
 // TestClusterStorageIntegration runs the storage node's root side against
 // the real kernel: LIO through configfs on a file-backed ZFS pool's zvols,
-// iSCSI logins with mutual CHAP from two compute "nodes" in their own
-// network namespaces (each with a private iscsid and /etc/iscsi, so this
+// iSCSI logins with mutual CHAP from two compute "nodes" (each with a
+// private iscsid and /etc/iscsi in its own mount namespace, so this
 // machine's iSCSI configuration is never touched), a fence dropping the
-// session, and the cluster NFS exports mounted from the namespaces (owner
-// only, root_squash on shares).
+// session, and the cluster NFS exports mounted from two network
+// namespaces (owner only, root_squash on shares).
 //
 // It needs root, ZFS, open-iscsi, the NFS server and the LIO target
 // modules (target_core_mod, target_core_iblock, iscsi_target_mod; on
@@ -116,6 +116,9 @@ func TestClusterStorageIntegration(t *testing.T) {
 		_ = Reconcile(r.FS, Plan{Desired: Desired{Cluster: cl}})
 		_ = os.Remove(nfs.ClusterExportsFile)
 		_ = os.Remove(nfs.ClusterConfFile)
+		_ = os.Remove(FirewallFile)
+		_ = os.Remove(FSBlacklistFile)
+		_, _ = exec.Command("nft", "delete", "table", "inet", FirewallTable).CombinedOutput()
 		_, _ = exec.Command("exportfs", "-ra").CombinedOutput()
 	})
 	web := WorkloadArgs{Kind: cluster.KindVM, ID: "web", Pool: pool}
@@ -131,9 +134,22 @@ func TestClusterStorageIntegration(t *testing.T) {
 	addrs := map[cluster.NodeID]netip.Addr{"c1": netip.MustParseAddr("10.177.0.21"), "c2": netip.MustParseAddr("10.177.0.22")}
 	d := Desired{Cluster: cl, Index: 1, Portals: []netip.AddrPort{netip.MustParseAddrPort("10.177.0.10:3260")}, Backstores: []Backstore{b},
 		Targets: []Target{{Node: "c1", Enabled: true, LUNs: []string{b.Name}}, {Node: "c2", Enabled: true}}}
-	st, err := r.Apply(ctx, ApplyArgs{Desired: d, Addresses: addrs})
+	ids := map[cluster.NodeID]*cluster.Identity{}
+	keys := map[cluster.NodeID][]byte{}
+	for _, n := range []cluster.NodeID{"c1", "c2"} {
+		id, err := cluster.NewIdentity(string(n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[n], keys[n] = id, id.PublicKey
+	}
+	subnet := netip.MustParsePrefix("10.177.0.0/24")
+	st, err := r.Apply(ctx, ApplyArgs{Desired: d, Addresses: addrs, Keys: keys, Subnet: subnet})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if fi, err := os.Stat(ConfigFSRoot); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("LIO's configfs folder isn't root's alone: %v %v", fi.Mode(), err)
 	}
 	if len(st.Current["c1"].LUNs) != 1 || len(st.Drift) != 0 {
 		t.Fatalf("LIO after apply: %+v drift %+v", st.Current, st.Drift)
@@ -217,11 +233,18 @@ func TestClusterStorageIntegration(t *testing.T) {
 		<-done
 		t.Fatalf("c1 never logged in: %v\n%s", lerr, out)
 	}
+	// The storage firewall (a fence is complete only once the node's
+	// address is blocked). The initiators above reach the portal over the
+	// loopback, which the firewall then cuts too.
+	if err := r.FirewallApply(ctx, FirewallSpec{Role: cluster.RoleStorage, Interface: br, Subnet: subnet,
+		Members: []netip.Addr{addrs["c1"], addrs["c2"]}, Index: 1}); err != nil {
+		t.Fatal(err)
+	}
 	res, err := r.Fence(ctx, FenceArgs{Node: "c1", Epoch: 1, Confirm: "c1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.TargetDisabled || res.SessionsDropped != 1 {
+	if !res.TargetDisabled || res.SessionsDropped != 1 || !res.AddressBlocked {
 		t.Fatalf("fence %+v", res)
 	}
 	_ = os.WriteFile(fencedFlag, nil, 0o644)
@@ -232,7 +255,20 @@ func TestClusterStorageIntegration(t *testing.T) {
 	if n := Sessions(r.FS, cl)["c1"]; n != 0 {
 		t.Fatalf("sessions after fence: %d", n)
 	}
-	if err := r.Unfence(ctx, UnfenceArgs{Node: "c1", Epoch: 1}); err != nil {
+	if err := r.Unfence(ctx, UnfenceArgs{Node: "c1", Epoch: 1}); err == nil {
+		t.Fatal("unfenced without the node's signed rejoin")
+	}
+	stmt, err := SignRejoin(ids["c1"].Key, RejoinStatement{Cluster: cl, Node: "c1", Epoch: 1, BootID: "b2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Unfence(ctx, UnfenceArgs{Node: "c1", Epoch: 1, Statement: &stmt}); err != nil {
+		t.Fatal(err)
+	}
+	// web is granted to c1 again (its state is exported only to the node
+	// that holds its disks).
+	d.Index = 2
+	if _, err := r.Apply(ctx, ApplyArgs{Desired: d, Addresses: addrs, Keys: keys, Subnet: subnet}); err != nil {
 		t.Fatal(err)
 	}
 
