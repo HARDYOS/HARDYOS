@@ -484,6 +484,7 @@ auth_policy_request_attributes {
   login = %%{requested_username}
   remote = %%{remote_ip}
   local_port = %%{local_port}
+  real_local_port = %%{real_local_port}
   protocol = %%{protocol}
   fail_type = %%{fail_type}
 }

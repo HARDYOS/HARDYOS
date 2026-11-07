@@ -90,3 +90,7 @@ func Reserved(p int) bool {
 // accepts webmail tokens from it alone and never a password from it
 // (decision 305). Outside Docker's default pools (172.17-31.0.0/16).
 var WebmailSubnet = netip.MustParsePrefix("172.16.253.0/28")
+
+// WebmailAddr is the webmail container's own address in WebmailSubnet
+// (its compose file pins it; decision 317).
+var WebmailAddr = netip.MustParseAddr("172.16.253.2")

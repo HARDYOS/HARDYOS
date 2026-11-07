@@ -23,7 +23,7 @@ func TestThrottleNeverLocksOutTheLAN(t *testing.T) {
 	th := NewThrottle()
 	attacker := internet("198.51.100.66")
 	lan := internet("192.168.1.20")
-	if attacker.Internet == false || lan.Internet {
+	if !attacker.Internet || lan.Internet {
 		t.Fatal("classification")
 	}
 	for i := 0; i < 10; i++ {
@@ -32,17 +32,9 @@ func TestThrottleNeverLocksOutTheLAN(t *testing.T) {
 	if v := th.Check("admin@example.net", attacker); !v.Refuse {
 		t.Fatal("the attacker isn't blocked")
 	}
-	if v := th.Check("admin@example.net", lan); v.Refuse || v.Delay > 0 {
+	// The LAN is at most slowed down by the mailbox's soft delay.
+	if v := th.Check("admin@example.net", lan); v.Refuse || v.Delay > MaxSoftDelay {
 		t.Fatalf("the LAN is held back by an internet attack: %+v", v)
-	}
-	// Mistakes on the LAN are refused only while their short wait lasts:
-	// at most 30 s per address, a minute per mailbox; never an hour.
-	for i := 0; i < 50; i++ {
-		th.Result("admin@example.net", lan, false)
-	}
-	v := th.Check("admin@example.net", lan)
-	if !v.Refuse || v.RetryAfter > time.Minute+time.Second {
-		t.Fatalf("LAN after many mistakes: %+v", v)
 	}
 	for _, a := range []string{"10.0.0.1", "172.17.0.2", "100.90.1.2", "fd00::1", "127.0.0.1"} {
 		if !Inside(netip.MustParseAddr(a)) {
@@ -54,33 +46,66 @@ func TestThrottleNeverLocksOutTheLAN(t *testing.T) {
 	}
 }
 
-// A wait is a refusal (Dovecot would only pause the guess), and failures
-// from inside get a per-mailbox bucket of their own: many LAN addresses
-// guessing one mailbox are slowed down, the internet's bucket untouched.
-func TestThrottleWaitRefusesAndLANMailboxBucket(t *testing.T) {
+// Decision 317: inside, a device that guesses is refused for itself only;
+// others (and the webmail app) only see the mailbox's soft delay.
+func TestThrottleInsideIsPerSource(t *testing.T) {
 	th := NewThrottle()
-	user := "bob@example.net"
-	// Internet: the per-mailbox wait (5 free failures, from many addresses)
-	// refuses the next attempt from yet another address.
-	for i := 0; i < 6; i++ {
-		th.Result(user, internet("203.0.113."+string(rune('1'+i))), false)
+	user := "mom@example.net"
+	guesser := internet("192.168.1.66")
+	for i := 0; i < 30; i++ {
+		th.Result(user, guesser, false)
 	}
-	if v := th.Check(user, internet("203.0.113.99")); !v.Refuse {
-		t.Fatalf("a waiting mailbox let a sign-in through: %+v", v)
+	if v := th.Check(user, guesser); !v.Refuse {
+		t.Fatal("the guessing device isn't held back")
 	}
-	// Inside: other LAN addresses one failure each.
-	th2 := NewThrottle()
-	for i := 0; i < 12; i++ {
-		th2.Result(user, From(netip.AddrFrom4([4]byte{10, 0, 1, byte(i)}), false), false)
+	moms := internet("192.168.1.20")
+	v := th.Check(user, moms)
+	if v.Refuse || v.Delay <= 0 || v.Delay > MaxSoftDelay {
+		t.Fatalf("mom's own device: %+v (want a short delay, never a refusal)", v)
 	}
-	if v := th2.Check(user, internet("10.0.2.1")); !v.Refuse {
-		t.Fatal("rotating LAN addresses guess a mailbox freely")
+	webmail := From(th.WebmailAddr, false)
+	if v := th.Check(user, webmail); v.Refuse || v.Delay != 0 {
+		t.Fatalf("webmail held back: %+v", v)
 	}
-	if v := th2.Check(user, internet("198.51.100.1")); v.Refuse {
-		t.Fatal("LAN failures spilled into the internet's bucket")
+	// A webmail address claimed through the VPS gets no exemption.
+	if fw := From(th.WebmailAddr, true); th.webmail(fw) {
+		t.Fatal("forwarded webmail address exempt")
 	}
-	if v := th2.Check("carol@example.net", internet("10.0.2.1")); v.Refuse {
-		t.Fatal("another mailbox is held back")
+}
+
+// Decision 317: from the internet, a mailbox is refused per network; a
+// network it signed in from successfully is exempt, so one stranger can't
+// keep mom's phone out.
+func TestThrottleOutsideIsPerNetwork(t *testing.T) {
+	th := NewThrottle()
+	user := "mom@example.net"
+	phone := internet("203.0.113.40")
+	th.Result(user, phone, true) // her phone signed in before
+	// A stranger elsewhere guesses slowly (one address, under the address
+	// block), for a long time.
+	stranger := internet("198.51.100.7")
+	for i := 0; i < 9; i++ {
+		th.Result(user, stranger, false)
+	}
+	if v := th.Check(user, stranger); !v.Refuse {
+		t.Fatal("the stranger's network isn't refused for the mailbox")
+	}
+	if v := th.Check(user, phone); v.Refuse || v.Delay != 0 {
+		t.Fatalf("mom's phone network: %+v", v)
+	}
+	// Another of mom's networks she never used yet: delay only.
+	if v := th.Check(user, internet("192.0.2.9")); v.Refuse {
+		t.Fatalf("an unrelated network is refused: %+v", v)
+	}
+	// Networks are /24 and /48.
+	if th.netKey(user, internet("198.51.100.200")) != th.netKey(user, stranger) {
+		t.Fatal("/24 not grouped")
+	}
+	// Trust ends after 30 days.
+	now := time.Now()
+	th.now = func() time.Time { return now.Add(TrustFor + time.Hour) }
+	if th.isTrusted(user, phone) {
+		t.Fatal("trust doesn't expire")
 	}
 }
 
@@ -106,11 +131,11 @@ func TestThrottleIPv6By64AndNames(t *testing.T) {
 }
 
 // A forwarded port or the gateway makes a sign-in the internet's even when
-// it claims a LAN address.
+// it claims a LAN address; the real local port counts, not the claimed one.
 func TestForwardedSignInsAreInternet(t *testing.T) {
 	for _, req := range []policyRequest{
-		{Remote: "192.168.1.5", LocalPort: []byte("10993")},
-		{Remote: "192.168.1.5", LocalPort: []byte(`"10465"`)},
+		{Remote: "192.168.1.5", LocalPort: []byte("993"), RealLocalPort: []byte("10993")},
+		{Remote: "192.168.1.5", RealLocalPort: []byte(`"10465"`)},
 		{Remote: "10.0.0.5", Protocol: ProxySASLService},
 		{Remote: "203.0.113.5", LocalPort: []byte("993")},
 	} {
@@ -118,7 +143,7 @@ func TestForwardedSignInsAreInternet(t *testing.T) {
 			t.Errorf("%+v isn't the internet's", req)
 		}
 	}
-	if (policyRequest{Remote: "192.168.1.5", LocalPort: []byte("993"), Protocol: "imap"}).source().Internet {
+	if (policyRequest{Remote: "192.168.1.5", LocalPort: []byte("993"), RealLocalPort: []byte("993"), Protocol: "imap"}).source().Internet {
 		t.Error("a LAN sign-in on 993 is the internet's")
 	}
 	if !From(netip.MustParseAddr("192.168.1.5"), true).Internet {
@@ -130,7 +155,7 @@ func TestThrottleDAVIsSoft(t *testing.T) {
 	th := NewThrottle()
 	user := "alice@example.net"
 	for i := 0; i < 30; i++ {
-		th.ResultDAV(user, internet("203.0.113."+string(rune('1'+i%9))), false)
+		th.ResultDAV(user, internet(fmt.Sprintf("203.0.%d.1", i)), false)
 	}
 	// From a fresh internet address: slowed down, never refused because of
 	// the mailbox.
@@ -144,10 +169,6 @@ func TestThrottleDAVIsSoft(t *testing.T) {
 	}
 	if !th.CheckDAV(user, internet("198.51.100.201")).Refuse {
 		t.Fatal("the guessing address isn't blocked")
-	}
-	// Calendar failures don't touch mail apps' buckets.
-	if th.Check(user, internet("198.51.100.200")).Refuse {
-		t.Fatal("calendar guesses lock mail apps")
 	}
 }
 
@@ -195,48 +216,6 @@ func TestAuthServer(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, string(b)
 	}
-	grant := func(user, pw string) url.Values {
-		return url.Values{"grant_type": {"password"}, "username": {user}, "password": {pw}, "client_id": {"dovecot"}, "client_secret": {secret}}
-	}
-	lan := map[string]string{"X-Dovecot-Auth-Remote": "192.168.1.9:51000"}
-	if code, body := post("/token", grant("Alice@example.net", "pw1"), lan); code != 200 || !strings.Contains(body, `"username":"alice@example.net"`) || !strings.Contains(body, `"active":"true"`) {
-		t.Fatalf("grant %d %s", code, body)
-	}
-	if code, _ := post("/token", grant("alice@example.net", "nope"), lan); code != 400 {
-		t.Fatalf("wrong password: %d", code)
-	}
-	noClient := grant("alice@example.net", "pw1")
-	noClient.Set("client_secret", "guess")
-	if code, _ := post("/token", noClient, lan); code != 401 {
-		t.Fatalf("without the client secret: %d", code)
-	}
-	// Decision 302: from the webmail network, passwords never work (only
-	// webmail tokens), and webmail tokens work from there only.
-	webmail := map[string]string{"X-Dovecot-Auth-Remote": ports.WebmailSubnet.Addr().Next().Next().String() + ":40000"}
-	if code, _ := post("/token", grant("alice@example.net", "pw1"), webmail); code != 400 {
-		t.Fatalf("a password from the webmail container: %d", code)
-	}
-	tokChecker := checker{"alice@example.net": WebmailTokenPrefix + "abc"}
-	as.Checker = tokChecker
-	if code, _ := post("/token", grant("alice@example.net", WebmailTokenPrefix+"abc"), webmail); code != 200 {
-		t.Fatalf("a webmail token from the webmail container: %d", code)
-	}
-	if code, _ := post("/token", grant("alice@example.net", WebmailTokenPrefix+"abc"), lan); code != 400 {
-		t.Fatalf("a webmail token from elsewhere: %d", code)
-	}
-	as.Checker = checker{"alice@example.net": "pw1", NotifyLogin: "npw"}
-	// The notification sign-in only from this server itself.
-	if code, _ := post("/token", grant(NotifyLogin, "npw"), lan); code != 400 {
-		t.Fatalf("notification sign-in from the LAN: %d", code)
-	}
-	if code, _ := post("/token", grant(NotifyLogin, "npw"), map[string]string{"X-Dovecot-Auth-Remote": "127.0.0.1:5000"}); code != 200 {
-		t.Fatalf("notification sign-in from here: %d", code)
-	}
-	// Names that can't be a mailbox are refused before any check.
-	if code, _ := post("/token", grant("administrator", "pw1"), lan); code != 400 {
-		t.Fatalf("non-address login: %d", code)
-	}
-
 	policy := func(cmd, body string, auth bool) string {
 		req, _ := http.NewRequest("POST", "http://hardyd.invalid/policy?command="+cmd, strings.NewReader(body))
 		if auth {
@@ -250,23 +229,100 @@ func TestAuthServer(t *testing.T) {
 		resp.Body.Close()
 		return string(b)
 	}
+	// Dovecot asks the policy first (with the real local port), then for
+	// the grant (with only the claimed address).
+	allow := func(login, remote, realPort string) {
+		t.Helper()
+		got := policy("allow", fmt.Sprintf(`{"login":%q,"remote":%q,"local_port":"993","real_local_port":%q}`, login, remote, realPort), true)
+		if strings.Contains(got, `"status":-1`) {
+			t.Fatalf("policy refused %s from %s: %s", login, remote, got)
+		}
+	}
+	grant := func(user, pw string) url.Values {
+		return url.Values{"grant_type": {"password"}, "username": {user}, "password": {pw}, "client_id": {"dovecot"}, "client_secret": {secret}}
+	}
+	hdr := func(remote string) map[string]string {
+		return map[string]string{"X-Dovecot-Auth-Remote": remote + ":40000"}
+	}
+	lanIP, webIP := "192.168.1.9", ports.WebmailAddr.String()
+
+	allow("alice@example.net", lanIP, "993")
+	if code, body := post("/token", grant("Alice@example.net", "pw1"), hdr(lanIP)); code != 200 || !strings.Contains(body, `"username":"alice@example.net"`) || !strings.Contains(body, `"active":"true"`) {
+		t.Fatalf("grant %d %s", code, body)
+	}
+	if code, _ := post("/token", grant("alice@example.net", "nope"), hdr(lanIP)); code != 400 {
+		t.Fatalf("wrong password: %d", code)
+	}
+	noClient := grant("alice@example.net", "pw1")
+	noClient.Set("client_secret", "guess")
+	if code, _ := post("/token", noClient, hdr(lanIP)); code != 401 {
+		t.Fatalf("without the client secret: %d", code)
+	}
+	// Decisions 305, 317: from the webmail app, passwords never work (only
+	// webmail tokens), and webmail tokens work from its address only, never
+	// through the VPS.
+	allow("alice@example.net", webIP, "993")
+	if code, _ := post("/token", grant("alice@example.net", "pw1"), hdr(webIP)); code != 400 {
+		t.Fatalf("a password from the webmail container: %d", code)
+	}
+	as.Checker = checker{"alice@example.net": WebmailTokenPrefix + "abc"}
+	if code, _ := post("/token", grant("alice@example.net", WebmailTokenPrefix+"abc"), hdr(webIP)); code != 200 {
+		t.Fatalf("a webmail token from the webmail container: %d", code)
+	}
+	if code, _ := post("/token", grant("alice@example.net", WebmailTokenPrefix+"abc"), hdr("172.16.253.3")); code != 400 {
+		t.Fatalf("a webmail token from another address in the webmail network: %d", code)
+	}
+	if code, _ := post("/token", grant("alice@example.net", WebmailTokenPrefix+"abc"), hdr(lanIP)); code != 400 {
+		t.Fatalf("a webmail token from elsewhere: %d", code)
+	}
+	// A compromised VPS claims the webmail address through 10993: refused,
+	// and it stays refused even if a real webmail attempt comes in between.
+	allow("alice@example.net", webIP, "10993")
+	allow("alice@example.net", webIP, "993")
+	if code, _ := post("/token", grant("alice@example.net", WebmailTokenPrefix+"abc"), hdr(webIP)); code != 400 {
+		t.Fatalf("a forwarded webmail token: %d", code)
+	}
+	// Without a policy check first, it fails closed.
+	if code, _ := post("/token", grant("alice@example.net", WebmailTokenPrefix+"abc"), hdr("172.16.253.2")); code != 400 {
+		t.Fatalf("a token without a policy check: %d", code)
+	}
+	as.Checker = checker{"alice@example.net": "pw1", NotifyLogin: "npw"}
+	// The notification sign-in only from this server itself, never forwarded.
+	allow(NotifyLogin, lanIP, "587")
+	if code, _ := post("/token", grant(NotifyLogin, "npw"), hdr(lanIP)); code != 400 {
+		t.Fatalf("notification sign-in from the LAN: %d", code)
+	}
+	allow(NotifyLogin, "127.0.0.1", "587")
+	if code, _ := post("/token", grant(NotifyLogin, "npw"), hdr("127.0.0.1")); code != 200 {
+		t.Fatalf("notification sign-in from here: %d", code)
+	}
+	policy("allow", `{"login":"hardyos-notify","remote":"127.0.0.2","protocol":"`+ProxySASLService+`"}`, true)
+	if code, _ := post("/token", grant(NotifyLogin, "npw"), hdr("127.0.0.2")); code != 400 {
+		t.Fatalf("forwarded notification sign-in claiming loopback: %d", code)
+	}
+	// Names that can't be a mailbox are refused before any check.
+	if code, _ := post("/token", grant("administrator", "pw1"), hdr(lanIP)); code != 400 {
+		t.Fatalf("non-address login: %d", code)
+	}
+
 	if got := policy("allow", `{"login":"a@example.net","remote":"198.51.100.66"}`, false); !strings.Contains(got, "unauthorized") {
 		t.Fatalf("policy without the secret: %s", got)
 	}
-	// Forwarded IMAP claiming a LAN address counts as the internet's.
+	// Forwarded IMAP (real port 10993) claiming a LAN address counts as the
+	// internet's.
 	for i := 0; i < 10; i++ {
-		policy("report", `{"login":"a@example.net","remote":"192.168.7.7","local_port":"10993","success":false,"fail_type":"credentials"}`, true)
+		policy("report", `{"login":"a@example.net","remote":"192.168.7.7","local_port":"993","real_local_port":"10993","success":false,"fail_type":"credentials"}`, true)
 	}
-	if got := policy("allow", `{"login":"a@example.net","remote":"192.168.7.7","local_port":"10993"}`, true); !strings.Contains(got, `"status":-1`) {
+	if got := policy("allow", `{"login":"a@example.net","remote":"192.168.7.7","local_port":"993","real_local_port":"10993"}`, true); !strings.Contains(got, `"status":-1`) {
 		t.Fatalf("blocked forwarded address allowed: %s", got)
 	}
-	// The real LAN address isn't.
-	if got := policy("allow", `{"login":"a@example.net","remote":"192.168.7.7","local_port":"993"}`, true); !strings.Contains(got, `"status":0`) {
+	// The real LAN address isn't refused (at most delayed).
+	if got := policy("allow", `{"login":"a@example.net","remote":"192.168.7.7","local_port":"993","real_local_port":"993"}`, true); strings.Contains(got, `"status":-1`) {
 		t.Fatalf("LAN blocked by forwarded failures: %s", got)
 	}
 	// Mail off: everything refused.
 	as.Secret = func() string { return "" }
-	if code, _ := post("/token", grant("alice@example.net", "pw1"), lan); code != 401 {
+	if code, _ := post("/token", grant("alice@example.net", "pw1"), hdr(lanIP)); code != 401 {
 		t.Fatalf("grant while off: %d", code)
 	}
 }

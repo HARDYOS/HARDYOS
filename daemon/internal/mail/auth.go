@@ -57,13 +57,16 @@ type Source struct {
 	// Internet: from outside, either by its address or because it came in
 	// through the VPS or the app gateway, whatever address it claims.
 	Internet bool
+	// Forced: it came through the VPS or the gateway (Internet whatever
+	// its address).
+	Forced bool
 }
 
 // From classifies a client address; forced marks a connection that came
 // through the VPS (a forwarded port) or NetBird's reverse proxy.
 func From(a netip.Addr, forced bool) Source {
 	a = a.Unmap()
-	return Source{Addr: a, Internet: forced || (a.IsValid() && !Inside(a))}
+	return Source{Addr: a, Internet: forced || (a.IsValid() && !Inside(a)), Forced: forced}
 }
 
 // ipKey is the address a limit counts by: an IPv4 address, or an IPv6
@@ -107,31 +110,64 @@ func SignInName(login string) bool {
 	return err == nil
 }
 
-// Throttle limits failed mail sign-ins (decisions 241, 306). From the
-// internet: 10 failures in 15 minutes block an address (an IPv6 /64) for an
-// hour, and each mailbox is slowed down (doubling waits) on its own. From
-// inside: never blocked, only slowed down, per address and per mailbox, in
-// buckets of their own, so nobody outside can lock a family member (or
-// the administrator on the LAN) out of their mail. A sign-in that has to
-// wait is refused until the wait is over (Dovecot would otherwise just
-// pause it and let the guess through).
+// Throttle limits failed mail sign-ins (decisions 241, 306, 317). What
+// refuses a sign-in is always tied to where it comes from, so nobody can
+// lock someone else out:
+//
+//   - From the internet: an address (an IPv6 /64) that fails 10 times in 15
+//     minutes is blocked for an hour, and each mailbox has a bucket per
+//     network (IPv4 /24, IPv6 /48) that is refused while its wait lasts. A
+//     network the mailbox signed in from successfully in the last 30 days
+//     is exempt from the mailbox's limits (a person's own phone keeps
+//     working while strangers guess).
+//   - From inside (LAN, NetBird, containers): never blocked, only refused
+//     during a short wait, per address and per (mailbox, address).
+//   - Per mailbox, from anywhere except the webmail app and exempt
+//     networks: a soft delay that only slows sign-ins down (Dovecot pauses
+//     them), never refuses.
 type Throttle struct {
-	block    *auth.LoginLimiter // internet, per address
-	userSlow *auth.DelayLimiter // internet, per mailbox
-	lanSlow  *auth.DelayLimiter // inside, per address
-	lanUser  *auth.DelayLimiter // inside, per mailbox
-	davUser  *auth.DelayLimiter // calendars from the internet, per mailbox (soft)
+	block   *auth.LoginLimiter // internet, per address
+	netUser *auth.DelayLimiter // internet, per (mailbox, network): refuse while waiting
+	lanSlow *auth.DelayLimiter // inside, per address: refuse while waiting
+	lanUser *auth.DelayLimiter // inside, per (mailbox, address): refuse while waiting
+	soft    *auth.DelayLimiter // per mailbox: delay only
+	davSoft *auth.DelayLimiter // calendars, per mailbox: delay only
+
+	// WebmailAddr is the webmail app's address, exempt from the per-mailbox
+	// delay (its sign-ins are tokens HardyOS made).
+	WebmailAddr netip.Addr
+
+	mu      sync.Mutex
+	trusted map[string]time.Time // mailbox+network -> last successful sign-in
+	now     func() time.Time
 }
+
+// TrustFor is how long a successful sign-in from a network keeps the
+// mailbox's own limits off for it.
+const TrustFor = 30 * 24 * time.Hour
+
+// MaxSoftDelay bounds the per-mailbox delay.
+const MaxSoftDelay = 10 * time.Second
 
 // NewThrottle returns HardyOS's defaults.
 func NewThrottle() *Throttle {
 	return &Throttle{
-		block:    &auth.LoginLimiter{MaxFailures: 10, Window: 15 * time.Minute, Lockout: time.Hour},
-		userSlow: &auth.DelayLimiter{Free: 5, MaxDelay: 5 * time.Minute, Window: time.Hour},
-		lanSlow:  &auth.DelayLimiter{Free: 5, MaxDelay: 30 * time.Second, Window: 15 * time.Minute},
-		lanUser:  &auth.DelayLimiter{Free: 10, MaxDelay: time.Minute, Window: 15 * time.Minute},
-		davUser:  &auth.DelayLimiter{Free: 10, MaxDelay: 30 * time.Second, Window: time.Hour},
+		block:       &auth.LoginLimiter{MaxFailures: 10, Window: 15 * time.Minute, Lockout: time.Hour},
+		netUser:     &auth.DelayLimiter{Free: 5, MaxDelay: 5 * time.Minute, Window: time.Hour},
+		lanSlow:     &auth.DelayLimiter{Free: 5, MaxDelay: 30 * time.Second, Window: 15 * time.Minute},
+		lanUser:     &auth.DelayLimiter{Free: 5, MaxDelay: 30 * time.Second, Window: 15 * time.Minute},
+		soft:        &auth.DelayLimiter{Free: 10, MaxDelay: MaxSoftDelay, Window: time.Hour},
+		davSoft:     &auth.DelayLimiter{Free: 10, MaxDelay: 5 * time.Second, Window: time.Hour},
+		WebmailAddr: ports.WebmailAddr,
+		trusted:     map[string]time.Time{},
 	}
+}
+
+func (t *Throttle) clock() time.Time {
+	if t.now != nil {
+		return t.now()
+	}
+	return time.Now()
 }
 
 // Verdict is the answer to a sign-in attempt: Refuse it, or let it go on
@@ -145,48 +181,76 @@ type Verdict struct {
 
 func key(prefix, s string) string { return prefix + strings.ToLower(s) }
 
-// Check says whether a mail app's sign-in (IMAP, SMTP) as login from src may
-// go ahead now: refused while any of its limits says wait.
-func (t *Throttle) Check(login string, src Source) Verdict {
-	user := SignInName(login)
-	if !src.Internet {
-		ip := ipKey(src.Addr)
-		if ok, wait := t.lanSlow.Allowed(key("lan-ip:", ip)); !ok {
-			return Verdict{Refuse: true, RetryAfter: wait}
-		}
-		if user {
-			if ok, wait := t.lanUser.Allowed(key("lan-user:", login)); !ok {
-				return Verdict{Refuse: true, RetryAfter: wait}
-			}
-		}
-		return Verdict{}
-	}
-	if ok, wait := t.block.Allowed(key("ip:", ipKey(src.Addr))); !ok {
-		return Verdict{Refuse: true, RetryAfter: wait}
-	}
-	if user {
-		if ok, wait := t.userSlow.Allowed(key("user:", login)); !ok {
-			return Verdict{Refuse: true, RetryAfter: wait}
-		}
-	}
-	return Verdict{}
+func (t *Throttle) netKey(login string, src Source) string {
+	return strings.ToLower(login) + "|" + AlertKey(src.Addr)
 }
 
-// CheckDAV is Check for calendars and contacts (decision 307): only an
-// address's block refuses; a mailbox's failures from the internet only slow
-// it down (a short pause, then the attempt goes on), so nobody outside can
-// shut a person out of their calendar.
-func (t *Throttle) CheckDAV(login string, src Source) Verdict {
-	if !src.Internet {
-		return t.Check(login, src)
+func (t *Throttle) isTrusted(login string, src Source) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	at, ok := t.trusted[t.netKey(login, src)]
+	return ok && t.clock().Sub(at) < TrustFor
+}
+
+func (t *Throttle) trust(login string, src Source) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := t.clock()
+	if len(t.trusted) >= 20000 {
+		for k, at := range t.trusted {
+			if now.Sub(at) >= TrustFor || len(t.trusted) >= 20000 {
+				delete(t.trusted, k)
+			}
+		}
 	}
-	if ok, wait := t.block.Allowed(key("ip:", ipKey(src.Addr))); !ok {
+	t.trusted[t.netKey(login, src)] = now
+}
+
+func (t *Throttle) webmail(src Source) bool {
+	return !src.Internet && t.WebmailAddr.IsValid() && src.Addr == t.WebmailAddr
+}
+
+// Check says whether a mail app's sign-in (IMAP, SMTP) as login from src may
+// go ahead now, and how long Dovecot should pause it.
+func (t *Throttle) Check(login string, src Source) Verdict {
+	return t.check(login, src, t.soft, MaxSoftDelay)
+}
+
+// CheckDAV is Check for calendars and contacts (decision 307): the same
+// address and per-source limits, with a delay of at most 5 s per mailbox.
+func (t *Throttle) CheckDAV(login string, src Source) Verdict {
+	return t.check(login, src, t.davSoft, 5*time.Second)
+}
+
+func (t *Throttle) check(login string, src Source, soft *auth.DelayLimiter, maxDelay time.Duration) Verdict {
+	user := SignInName(login)
+	ip := ipKey(src.Addr)
+	if src.Internet {
+		if ok, wait := t.block.Allowed(key("ip:", ip)); !ok {
+			return Verdict{Refuse: true, RetryAfter: wait}
+		}
+	} else if ok, wait := t.lanSlow.Allowed(key("lan-ip:", ip)); !ok {
 		return Verdict{Refuse: true, RetryAfter: wait}
 	}
-	if SignInName(login) {
-		if ok, wait := t.davUser.Allowed(key("dav-user:", login)); !ok {
-			return Verdict{Delay: min(wait, 5*time.Second)}
+	if !user {
+		return Verdict{}
+	}
+	trusted := src.Internet && t.isTrusted(login, src)
+	switch {
+	case src.Internet && !trusted:
+		if ok, wait := t.netUser.Allowed(key("net-user:", t.netKey(login, src))); !ok {
+			return Verdict{Refuse: true, RetryAfter: wait}
 		}
+	case !src.Internet:
+		if ok, wait := t.lanUser.Allowed(key("lan-user:", login+"|"+ip)); !ok {
+			return Verdict{Refuse: true, RetryAfter: wait}
+		}
+	}
+	if trusted || t.webmail(src) {
+		return Verdict{}
+	}
+	if ok, wait := soft.Allowed(key("soft:", login)); !ok {
+		return Verdict{Delay: min(wait, maxDelay)}
 	}
 	return Verdict{}
 }
@@ -194,44 +258,56 @@ func (t *Throttle) CheckDAV(login string, src Source) Verdict {
 // Result records the outcome of a sign-in. It returns true when this
 // failure just blocked an internet address.
 func (t *Throttle) Result(login string, src Source, ok bool) (blocked bool) {
-	return t.result(login, src, ok, t.userSlow, "user:")
+	return t.result(login, src, ok, t.soft)
 }
 
 // ResultDAV is Result for calendars and contacts.
 func (t *Throttle) ResultDAV(login string, src Source, ok bool) (blocked bool) {
-	if !src.Internet {
-		return t.Result(login, src, ok)
-	}
-	return t.result(login, src, ok, t.davUser, "dav-user:")
+	return t.result(login, src, ok, t.davSoft)
 }
 
-func (t *Throttle) result(login string, src Source, ok bool, users *auth.DelayLimiter, userPrefix string) bool {
+func (t *Throttle) result(login string, src Source, ok bool, soft *auth.DelayLimiter) bool {
 	user := SignInName(login)
 	ip := ipKey(src.Addr)
-	if !src.Internet {
-		if ok {
-			t.lanSlow.Succeed(key("lan-ip:", ip))
-			t.lanUser.Succeed(key("lan-user:", login))
-			return false
-		}
-		t.lanSlow.Fail(key("lan-ip:", ip))
-		if user {
-			t.lanUser.Fail(key("lan-user:", login))
-		}
-		return false
-	}
 	if ok {
-		t.block.Succeed(key("ip:", ip))
-		users.Succeed(key(userPrefix, login))
+		if src.Internet {
+			t.block.Succeed(key("ip:", ip))
+			if user {
+				t.netUser.Succeed(key("net-user:", t.netKey(login, src)))
+				t.trust(login, src)
+			}
+		} else {
+			t.lanSlow.Succeed(key("lan-ip:", ip))
+			t.lanUser.Succeed(key("lan-user:", login+"|"+ip))
+		}
+		if user {
+			soft.Succeed(key("soft:", login))
+		}
 		return false
 	}
-	before, _ := t.block.Allowed(key("ip:", ip))
-	t.block.Fail(key("ip:", ip))
-	if user {
-		users.Fail(key(userPrefix, login))
+	blocked := false
+	if src.Internet {
+		before, _ := t.block.Allowed(key("ip:", ip))
+		t.block.Fail(key("ip:", ip))
+		after, _ := t.block.Allowed(key("ip:", ip))
+		blocked = before && !after
+	} else {
+		t.lanSlow.Fail(key("lan-ip:", ip))
 	}
-	after, _ := t.block.Allowed(key("ip:", ip))
-	return before && !after
+	if !user {
+		return blocked
+	}
+	trusted := src.Internet && t.isTrusted(login, src)
+	switch {
+	case src.Internet && !trusted:
+		t.netUser.Fail(key("net-user:", t.netKey(login, src)))
+	case !src.Internet:
+		t.lanUser.Fail(key("lan-user:", login+"|"+ip))
+	}
+	if !trusted && !t.webmail(src) {
+		soft.Fail(key("soft:", login))
+	}
+	return blocked
 }
 
 // Refused records an attempt the policy refused: from the internet it
@@ -268,13 +344,13 @@ type AuthServer struct {
 	Limits  *Throttle
 	OnEvent func(AuthEvent)
 	Log     *slog.Logger
-	// WebmailNet is the webmail app's network (default
-	// ports.WebmailSubnet): only webmail tokens are accepted from it, and
-	// only from it.
-	WebmailNet netip.Prefix
+	// WebmailAddr is the webmail app's address (default ports.WebmailAddr):
+	// only webmail tokens are accepted from it, and only from it.
+	WebmailAddr netip.Addr
 
-	mu     sync.Mutex
-	tokens map[string]grant
+	mu       sync.Mutex
+	tokens   map[string]grant
+	attempts map[string]attempt
 }
 
 type grant struct {
@@ -293,11 +369,11 @@ func (s *AuthServer) log() *slog.Logger {
 	return slog.Default()
 }
 
-func (s *AuthServer) webmailNet() netip.Prefix {
-	if s.WebmailNet.IsValid() {
-		return s.WebmailNet
+func (s *AuthServer) webmailAddr() netip.Addr {
+	if s.WebmailAddr.IsValid() {
+		return s.WebmailAddr
 	}
-	return ports.WebmailSubnet
+	return ports.WebmailAddr
 }
 
 func (s *AuthServer) secretOK(got string) bool {
@@ -364,19 +440,82 @@ func parseRemote(s string) netip.Addr {
 	return a.Unmap()
 }
 
-// secretAllowed is decision 305: the webmail app's network signs in with
-// webmail tokens only, and webmail tokens work from there only. Mail sent
-// signed in as HardyOS's notifications comes from this server itself.
-func (s *AuthServer) secretAllowed(login, secret string, remote netip.Addr) bool {
-	webmail := remote.IsValid() && s.webmailNet().Contains(remote)
+// secretAllowed is decisions 305 and 317: the webmail app signs in with
+// webmail tokens only, and webmail tokens work from its address only; mail
+// sent signed in as HardyOS's notifications comes from this server itself.
+// A sign-in that came through the VPS (forced) is neither, whatever
+// address its PROXY header claims.
+func (s *AuthServer) secretAllowed(login, secret string, remote netip.Addr, forced bool) bool {
+	fromWebmail := remote.IsValid() && remote == s.webmailAddr()
 	token := strings.HasPrefix(secret, WebmailTokenPrefix)
-	if webmail != token {
+	switch {
+	case fromWebmail && !token: // never a password from the webmail app
+		return false
+	case token && (!fromWebmail || forced): // tokens only from it, never forwarded
 		return false
 	}
-	if login == NotifyLogin && !(remote.IsValid() && remote.IsLoopback()) {
+	if login == NotifyLogin && (forced || !remote.IsValid() || !remote.IsLoopback()) {
 		return false
 	}
 	return true
+}
+
+// forcedFor is how long a forwarded sign-in attempt marks its (login,
+// claimed address) as the internet's for /token.
+const forcedFor = time.Minute
+
+// attemptKey names a sign-in attempt for matching the policy's view of it
+// (which knows the real local port) with Dovecot's grant request (which
+// doesn't).
+func attemptKey(login string, remote netip.Addr) string {
+	return strings.ToLower(login) + "|" + remote.String()
+}
+
+// noteAttempt remembers the policy's verdict on where an attempt came in.
+// Forced is sticky: once seen for (login, address), it stays forced for a
+// minute, so a forwarded attempt can't be made to look local by racing a
+// local one.
+func (s *AuthServer) noteAttempt(login string, remote netip.Addr, forced bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.attempts == nil {
+		s.attempts = map[string]attempt{}
+	}
+	now := time.Now()
+	if len(s.attempts) > 10000 {
+		for k, a := range s.attempts {
+			if now.Sub(a.at) > forcedFor {
+				delete(s.attempts, k)
+			}
+		}
+	}
+	k := attemptKey(login, remote)
+	prev, had := s.attempts[k]
+	a := attempt{at: now, forced: forced}
+	if had && prev.forced && now.Sub(prev.forcedAt) < forcedFor {
+		a.forced, a.forcedAt = true, prev.forcedAt
+	} else if forced {
+		a.forcedAt = now
+	}
+	s.attempts[k] = a
+}
+
+// wasForced reports whether the attempt /token is about came through the
+// VPS. Without a recent policy check for it, it's treated as forced (the
+// policy always runs first; anything else fails closed).
+func (s *AuthServer) wasForced(login string, remote netip.Addr) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.attempts[attemptKey(login, remote)]
+	if !ok || time.Since(a.at) > forcedFor {
+		return true
+	}
+	return a.forced
+}
+
+type attempt struct {
+	at, forcedAt time.Time
+	forced       bool
 }
 
 func (s *AuthServer) token(w http.ResponseWriter, r *http.Request) {
@@ -403,7 +542,7 @@ func (s *AuthServer) token(w http.ResponseWriter, r *http.Request) {
 	}
 	// Dovecot names the client in a header (send_auth_headers).
 	remote := parseRemote(r.Header.Get("X-Dovecot-Auth-Remote"))
-	if !s.secretAllowed(login, pw, remote) {
+	if !s.secretAllowed(login, pw, remote, s.wasForced(login, remote)) {
 		s.log().Info("mail sign-in refused: not allowed from there", "login", login, "remote", remote)
 		bad()
 		return
@@ -468,6 +607,9 @@ type policyRequest struct {
 	Login     string          `json:"login"`
 	Remote    string          `json:"remote"`
 	LocalPort json.RawMessage `json:"local_port"`
+	// RealLocalPort is the port the connection really came in on (local_port
+	// is what a PROXY header claims).
+	RealLocalPort json.RawMessage `json:"real_local_port"`
 	Protocol  string          `json:"protocol"`
 	FailType  string          `json:"fail_type"`
 	Success   *bool           `json:"success"`
@@ -477,8 +619,9 @@ type policyRequest struct {
 // or Postfix's forwarded submission (its own SASL service name), it is the
 // internet's, whatever address the PROXY header gave.
 func (req policyRequest) source() Source {
-	port, _ := strconv.Atoi(strings.Trim(string(req.LocalPort), `" `))
-	forced := ProxiedPort(port) || strings.EqualFold(req.Protocol, ProxySASLService)
+	port, _ := strconv.Atoi(strings.Trim(string(req.RealLocalPort), `" `))
+	claimed, _ := strconv.Atoi(strings.Trim(string(req.LocalPort), `" `))
+	forced := ProxiedPort(port) || ProxiedPort(claimed) || strings.EqualFold(req.Protocol, ProxySASLService)
 	return From(parseRemote(req.Remote), forced)
 }
 
@@ -501,11 +644,18 @@ func (s *AuthServer) policy(w http.ResponseWriter, r *http.Request) {
 	login := strings.ToLower(strings.TrimSpace(req.Login))
 	switch r.URL.Query().Get("command") {
 	case "allow":
-		if v := s.Limits.Check(login, src); v.Refuse {
+		s.noteAttempt(login, src.Addr, src.Forced)
+		v := s.Limits.Check(login, src)
+		if v.Refuse {
 			writeAuthJSON(w, http.StatusOK, map[string]any{"status": -1, "msg": "Too many failed sign-ins; try again later."})
 			return
 		}
-		writeAuthJSON(w, http.StatusOK, map[string]any{"status": 0, "msg": ""})
+		// A positive status makes Dovecot pause the sign-in that long.
+		delay := 0
+		if v.Delay > 0 {
+			delay = int((v.Delay + time.Second - 1) / time.Second)
+		}
+		writeAuthJSON(w, http.StatusOK, map[string]any{"status": delay, "msg": ""})
 	case "report":
 		ok := req.Success != nil && *req.Success
 		// A sign-in the policy refused counts against its address only (an
