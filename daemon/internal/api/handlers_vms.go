@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/auth"
+	"github.com/hardyos/hardyos/daemon/internal/cluster"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/vms"
 )
@@ -205,7 +206,12 @@ func (s *Server) handleVMUpdate(w http.ResponseWriter, r *http.Request, u *auth.
 		writeError(w, http.StatusBadRequest, "confirm_required", "type the VM's name ("+v.Name+") to confirm deleting "+strings.Join(req.RemoveDisks, ", "))
 		return
 	}
-	p := vmUpdateParams{UpdateArgs: vms.UpdateArgs{Spec: req.Spec, RemoveDisks: req.RemoveDisks, Confirm: req.Confirm, AllowOvercommit: req.AllowOvercommit}}
+	clusterActor, ok := s.clusterSettings(w, u, cluster.WorkloadRef{Kind: cluster.KindVM, ID: v.ID})
+	if !ok {
+		return
+	}
+	p := vmUpdateParams{UpdateArgs: vms.UpdateArgs{Spec: req.Spec, RemoveDisks: req.RemoveDisks, Confirm: req.Confirm, AllowOvercommit: req.AllowOvercommit},
+		Cluster: clusterActor}
 	if req.Password != "" {
 		p.PasswordRef = jobSecrets.put(req.Password)
 	}

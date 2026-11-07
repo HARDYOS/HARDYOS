@@ -161,6 +161,9 @@ func (s *Server) handleAppReconfigure(w http.ResponseWriter, r *http.Request, u 
 	if !ok {
 		return
 	}
+	if s.refuseClusterApp(w, a.ID) {
+		return
+	}
 	cur, err := s.appConfig(r.Context(), a.ID)
 	if err != nil {
 		s.writePrivError(w, err)
@@ -309,6 +312,9 @@ func (s *Server) handleAppRollback(w http.ResponseWriter, r *http.Request, u *au
 	}
 	a, ok := s.installedApp(w, r)
 	if !ok {
+		return
+	}
+	if s.refuseClusterApp(w, a.ID) {
 		return
 	}
 	if !confirmsApp(req.Confirm, a.ID, a.Name) {

@@ -179,6 +179,9 @@ func New(cfg Config) *Server {
 	if cfg.Root == nil {
 		cfg.Root = os.DirFS("/")
 	}
+	if cfg.ClusterHA != nil {
+		clusterSpecs.Store(cfg.ClusterHA)
+	}
 	s := &Server{cfg: cfg, mux: http.NewServeMux(), started: time.Now(), log: cfg.Logger,
 		ips: &clientip.Resolver{Trusted: cfg.TrustedProxies}, pubLimiter: auth.NewDelayLimiter()}
 	s.proxy = &appProxy{s: s}
