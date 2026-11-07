@@ -17,11 +17,11 @@ import (
 
 // TestClusterStorageIntegration runs the storage node's root side against
 // the real kernel: LIO through configfs on a file-backed ZFS pool's zvols,
-// iSCSI logins with mutual CHAP from two compute "nodes" in their own
-// network namespaces (each with a private iscsid and /etc/iscsi, so this
+// iSCSI logins with mutual CHAP from two compute "nodes" (each with a
+// private iscsid and /etc/iscsi in its own mount namespace, so this
 // machine's iSCSI configuration is never touched), a fence dropping the
-// session, and the cluster NFS exports mounted from the namespaces (owner
-// only, root_squash on shares).
+// session, and the cluster NFS exports mounted from two network
+// namespaces (owner only, root_squash on shares).
 //
 // It needs root, ZFS, open-iscsi, the NFS server and the LIO target
 // modules (target_core_mod, target_core_iblock, iscsi_target_mod; on
@@ -116,6 +116,9 @@ func TestClusterStorageIntegration(t *testing.T) {
 		_ = Reconcile(r.FS, Plan{Desired: Desired{Cluster: cl}})
 		_ = os.Remove(nfs.ClusterExportsFile)
 		_ = os.Remove(nfs.ClusterConfFile)
+		_ = os.Remove(FirewallFile)
+		_ = os.Remove(FSBlacklistFile)
+		_, _ = exec.Command("nft", "delete", "table", "inet", FirewallTable).CombinedOutput()
 		_, _ = exec.Command("exportfs", "-ra").CombinedOutput()
 	})
 	web := WorkloadArgs{Kind: cluster.KindVM, ID: "web", Pool: pool}
@@ -131,16 +134,42 @@ func TestClusterStorageIntegration(t *testing.T) {
 	addrs := map[cluster.NodeID]netip.Addr{"c1": netip.MustParseAddr("10.177.0.21"), "c2": netip.MustParseAddr("10.177.0.22")}
 	d := Desired{Cluster: cl, Index: 1, Portals: []netip.AddrPort{netip.MustParseAddrPort("10.177.0.10:3260")}, Backstores: []Backstore{b},
 		Targets: []Target{{Node: "c1", Enabled: true, LUNs: []string{b.Name}}, {Node: "c2", Enabled: true}}}
-	st, err := r.Apply(ctx, ApplyArgs{Desired: d, Addresses: addrs})
+	ids := map[cluster.NodeID]*cluster.Identity{}
+	keys := map[cluster.NodeID][]byte{}
+	for _, n := range []cluster.NodeID{"c1", "c2"} {
+		id, err := cluster.NewIdentity(string(n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[n], keys[n] = id, id.PublicKey
+	}
+	subnet := netip.MustParsePrefix("10.177.0.0/24")
+	st, err := r.Apply(ctx, ApplyArgs{Desired: d, Addresses: addrs, Keys: keys, Subnet: subnet})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if fi, err := os.Stat(ConfigFSRoot); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("LIO's configfs folder isn't root's alone: %v %v", fi.Mode(), err)
 	}
 	if len(st.Current["c1"].LUNs) != 1 || len(st.Drift) != 0 {
 		t.Fatalf("LIO after apply: %+v drift %+v", st.Current, st.Drift)
 	}
 	sec1, _ := r.CHAP(ctx, CHAPArgs{Node: "c1"})
 
-	// An initiator in a namespace with its own iscsid and /etc/iscsi.
+	// An initiator with its own iscsid and /etc/iscsi. The kernel's iSCSI
+	// initiator (scsi_transport_iscsi's netlink) only serves the initial
+	// network namespace, so an iscsid inside a namespace dies as soon as it
+	// asks the kernel for a session (the target sees the TCP connection
+	// close before the first login PDU). The initiators therefore run in
+	// the initial network namespace, each in a private mount namespace
+	// with its own node records and a private iscsid that is stopped after
+	// every run (iscsid's control socket is per network namespace, so two
+	// at once would share one daemon). The target's ACLs are by initiator
+	// name, which is what these runs check; NFS, which is namespace-aware,
+	// still runs from the namespaces below.
+	if out, err := sh("pgrep", "-x", "iscsid"); err == nil {
+		t.Skipf("an iscsid is already running on this machine (%s); this test runs its own", strings.TrimSpace(out))
+	}
 	initiator := func(ns, initName, target string, s Secrets, script string) (string, error) {
 		etc := filepath.Join(dir, ns, "etc")
 		lib := filepath.Join(dir, ns, "lib")
@@ -155,9 +184,19 @@ func TestClusterStorageIntegration(t *testing.T) {
 			"node.session.timeo.replacement_timeout = 5", "node.conn[0].address = 10.177.0.10", "node.conn[0].port = 3260",
 			"node.conn[0].startup = manual", "# END RECORD", ""}, "\n")
 		_ = os.WriteFile(filepath.Join(etc, "nodes", target, "10.177.0.10,3260,1", "default"), []byte(rec), 0o600)
-		full := "set -e; mount --bind " + etc + " /etc/iscsi; mkdir -p /var/lib/iscsi /run/lock/iscsi; mount --bind " + lib + " /var/lib/iscsi; " +
-			"mount -t tmpfs tmpfs /run/lock/iscsi; (iscsid -f -n >/dev/null 2>&1 &); sleep 1; " + script
-		return sh("ip", "netns", "exec", ns, "sh", "-c", full)
+		logf := filepath.Join(dir, ns, "iscsid.log")
+		full := "set -e; mount --make-rprivate /; mkdir -p /etc/iscsi /var/lib/iscsi /run/lock/iscsi; mount --bind " + etc + " /etc/iscsi; " +
+			"mount --bind " + lib + " /var/lib/iscsi; mount -t tmpfs tmpfs /run/lock/iscsi; " +
+			"iscsid -f -n -d 1 >>" + logf + " 2>&1 & pid=$!; trap 'kill $pid 2>/dev/null; wait $pid 2>/dev/null || true' EXIT; " +
+			"for i in $(seq 1 20); do rc=0; iscsiadm -m session >/dev/null 2>&1 || rc=$?; if [ $rc -eq 0 ] || [ $rc -eq 21 ]; then break; fi; sleep 0.25; done; " +
+			script
+		out, err := sh("unshare", "-m", "sh", "-c", full)
+		if err != nil {
+			if l, rerr := os.ReadFile(logf); rerr == nil {
+				out += "\n--- iscsid log ---\n" + string(l)
+			}
+		}
+		return out, err
 	}
 	t1 := TargetIQN(cl, "c1")
 	login := "iscsiadm -m node -T " + t1 + " -p 10.177.0.10:3260 --login"
@@ -174,8 +213,9 @@ func TestClusterStorageIntegration(t *testing.T) {
 	// c1 logs in and sees its LUN by WWN; then it is fenced while logged in.
 	dev := ByIDPath(vol.WWN)
 	fencedFlag := filepath.Join(dir, "fenced")
+	readFlag := filepath.Join(dir, "read")
 	script := login + "; for i in $(seq 1 40); do [ -e " + dev + " ] && break; sleep 0.25; done; [ -e " + dev + " ]; " +
-		"dd if=" + dev + " of=/dev/null bs=4k count=1 iflag=direct; echo FENCE-NOW; " +
+		"dd if=" + dev + " of=/dev/null bs=4k count=1 iflag=direct; echo FENCE-NOW; touch " + readFlag + "; " +
 		"for i in $(seq 1 60); do [ -e " + fencedFlag + " ] && break; sleep 0.25; done; " +
 		"if dd if=" + dev + " of=/dev/null bs=4k count=1 iflag=direct 2>/dev/null; then echo READ-AFTER-FENCE; fi; " +
 		"iscsiadm -m node -T " + t1 + " --logout || true"
@@ -194,11 +234,27 @@ func TestClusterStorageIntegration(t *testing.T) {
 		<-done
 		t.Fatalf("c1 never logged in: %v\n%s", lerr, out)
 	}
+	// c1 read its disk before anything is cut.
+	for _, err := os.Stat(readFlag); err != nil && time.Now().Before(deadline.Add(30*time.Second)); _, err = os.Stat(readFlag) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if _, err := os.Stat(readFlag); err != nil {
+		_ = os.WriteFile(fencedFlag, nil, 0o644)
+		<-done
+		t.Fatalf("c1 couldn't read its disk: %v\n%s", lerr, out)
+	}
+	// The storage firewall (a fence is complete only once the node's
+	// address is blocked). The initiators above reach the portal over the
+	// loopback, which the firewall then cuts too.
+	if err := r.FirewallApply(ctx, FirewallSpec{Role: cluster.RoleStorage, Interface: br, Subnet: subnet,
+		Members: []netip.Addr{addrs["c1"], addrs["c2"]}, Index: 1}); err != nil {
+		t.Fatal(err)
+	}
 	res, err := r.Fence(ctx, FenceArgs{Node: "c1", Epoch: 1, Confirm: "c1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.TargetDisabled || res.SessionsDropped != 1 {
+	if !res.TargetDisabled || res.SessionsDropped != 1 || !res.AddressBlocked {
 		t.Fatalf("fence %+v", res)
 	}
 	_ = os.WriteFile(fencedFlag, nil, 0o644)
@@ -209,7 +265,20 @@ func TestClusterStorageIntegration(t *testing.T) {
 	if n := Sessions(r.FS, cl)["c1"]; n != 0 {
 		t.Fatalf("sessions after fence: %d", n)
 	}
-	if err := r.Unfence(ctx, UnfenceArgs{Node: "c1", Epoch: 1}); err != nil {
+	if err := r.Unfence(ctx, UnfenceArgs{Node: "c1", Epoch: 1}); err == nil {
+		t.Fatal("unfenced without the node's signed rejoin")
+	}
+	stmt, err := SignRejoin(ids["c1"].Key, RejoinStatement{Cluster: cl, Node: "c1", Epoch: 1, BootID: "b2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Unfence(ctx, UnfenceArgs{Node: "c1", Epoch: 1, Statement: &stmt}); err != nil {
+		t.Fatal(err)
+	}
+	// web is granted to c1 again (its state is exported only to the node
+	// that holds its disks).
+	d.Index = 2
+	if _, err := r.Apply(ctx, ApplyArgs{Desired: d, Addresses: addrs, Keys: keys, Subnet: subnet}); err != nil {
 		t.Fatal(err)
 	}
 

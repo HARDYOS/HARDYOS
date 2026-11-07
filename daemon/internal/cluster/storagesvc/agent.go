@@ -10,6 +10,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/san"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/state"
+	"github.com/hardyos/hardyos/daemon/internal/network"
 )
 
 // systemActor is HardyOS itself acting (the storage agent).
@@ -163,16 +164,24 @@ func (a *Agent) reconcileStorage(ctx context.Context, me cluster.Node, snap *clu
 	// 3. LIO, exports, firewall.
 	applied := true
 	var sst san.Status
-	if err := s.Priv.Call(ctx, san.OpApply, san.ApplyArgs{Desired: p.SAN, Addresses: p.Addresses}, &sst); err != nil {
+	if err := s.Priv.Call(ctx, san.OpApply, san.ApplyArgs{Desired: p.SAN, Addresses: p.Addresses, Keys: p.Keys, Subnet: p.Subnet}, &sst); err != nil {
 		errs = append(errs, fmt.Errorf("iSCSI targets: %w", err))
 		applied = false
 	}
-	if err := s.Priv.Call(ctx, san.OpNFSClusterSet, san.NFSApplyArgs{Exports: p.Exports}, nil); err != nil {
+	if s.sharedLAN(ctx) {
+		// A VM's or app's own data is exported without root squashing, so
+		// only on a dedicated storage network or VLAN (H2); root refuses
+		// it on the LAN as well.
+		if n := p.DropOwnerExports(); n > 0 {
+			errs = append(errs, fmt.Errorf("%d VM or app data exports are off: the storage network is the LAN itself; use a dedicated port or a VLAN", n))
+		}
+	}
+	if err := s.Priv.Call(ctx, san.OpNFSClusterSet, san.NFSApplyArgs{Exports: p.Exports, Index: snap.Index}, nil); err != nil {
 		errs = append(errs, fmt.Errorf("cluster exports: %w", err))
 		applied = false
 	}
 	if iface, _, err := s.StorageInterface(ctx, snap.StorageSubnet); err == nil && snap.StorageSubnet.IsValid() {
-		spec := san.FirewallSpec{Role: cluster.RoleStorage, Interface: iface, Subnet: snap.StorageSubnet.Masked(), Members: p.Members, Fenced: p.Fenced}
+		spec := san.FirewallSpec{Role: cluster.RoleStorage, Interface: iface, Subnet: snap.StorageSubnet.Masked(), Members: p.Members, Fenced: p.Fenced, Index: snap.Index}
 		if err := s.Priv.Call(ctx, san.OpFirewallApply, spec, nil); err != nil {
 			errs = append(errs, fmt.Errorf("storage firewall: %w", err))
 		} else {
@@ -195,15 +204,57 @@ func (a *Agent) reconcileStorage(ctx context.Context, me cluster.Node, snap *clu
 	return errors.Join(errs...)
 }
 
+// sendRejoin hands the storage node this node's signed rejoin statement
+// once node.rejoin is applied for it (H3): root lifts the fence only with
+// it. Sent on every pass while the node is rejoining.
+func (s *Service) sendRejoin(ctx context.Context, me cluster.Node, snap *cluster.Snapshot) error {
+	f := snap.Fences[me.ID]
+	if me.State != cluster.NodeRejoining || f == nil || !f.Confirmed {
+		return nil
+	}
+	sn, ok := StorageNode(snap)
+	if !ok || s.Peers == nil {
+		return nil
+	}
+	c := s.core()
+	if c == nil || c.Identity() == nil {
+		return errors.New("the cluster key isn't available")
+	}
+	stmt, err := san.SignRejoin(c.Identity().Key, san.RejoinStatement{Cluster: snap.Cluster, Node: me.ID, Epoch: f.Epoch, BootID: me.BootID})
+	if err != nil {
+		return err
+	}
+	if err := s.Peers.Call(ctx, sn.ID, "POST", "storage/rejoin", stmt, nil); err != nil {
+		return err
+	}
+	s.rejoinMu.Lock()
+	s.rejoinSent = f.Epoch
+	s.rejoinMu.Unlock()
+	return nil
+}
+
+// sharedLAN reports whether this storage node's storage network is the
+// LAN itself (its saved plan says so).
+func (s *Service) sharedLAN(ctx context.Context) bool {
+	if s.Store == nil {
+		return false
+	}
+	p, err := s.Store.StorageNet(ctx)
+	return err == nil && p != nil && p.Kind == network.StorageShared
+}
+
 func (a *Agent) reconcileCompute(ctx context.Context, me cluster.Node, snap *cluster.Snapshot, st *AgentStatus) error {
 	s := a.S
 	var errs []error
+	if err := s.sendRejoin(ctx, me, snap); err != nil {
+		errs = append(errs, fmt.Errorf("asking the storage server to let this server back in: %w", err))
+	}
 	if err := s.SyncShares(ctx); err != nil {
 		errs = append(errs, fmt.Errorf("cluster shares: %w", err))
 	}
 	if iface, _, err := s.StorageInterface(ctx, snap.StorageSubnet); err == nil && snap.StorageSubnet.IsValid() {
 		p := BuildDesired(snap, me.ID)
-		spec := san.FirewallSpec{Role: cluster.RoleCompute, Interface: iface, Subnet: snap.StorageSubnet.Masked(), Members: p.Members, Fenced: p.Fenced}
+		spec := san.FirewallSpec{Role: cluster.RoleCompute, Interface: iface, Subnet: snap.StorageSubnet.Masked(), Members: p.Members, Fenced: p.Fenced, Index: snap.Index}
 		if err := s.Priv.Call(ctx, san.OpFirewallApply, spec, nil); err != nil {
 			errs = append(errs, fmt.Errorf("live migration firewall: %w", err))
 		} else {

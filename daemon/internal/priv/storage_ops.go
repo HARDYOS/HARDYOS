@@ -219,7 +219,12 @@ func RegisterStorage(s *Server, env StorageEnv) {
 		return st.status(ctx, a.Pool)
 	}))
 	s.Handle(OpPoolImportable, func(ctx context.Context, _ json.RawMessage) (any, error) {
-		res, err := env.Runner.Run(ctx, nil, "zpool", "import", "-d", "/dev/disk/by-id")
+		// Only local disks are scanned: never a cluster LUN (M5).
+		scan, ok := hw.ImportScanArgs(env.Root)
+		if !ok {
+			return zfs.ParseImportable(nil), nil
+		}
+		res, err := env.Runner.Run(ctx, nil, "zpool", append([]string{"import"}, scan...)...)
 		if err != nil {
 			return nil, err
 		}
@@ -526,7 +531,11 @@ func (st *storageOps) importPool(ctx context.Context, a PoolImportArgs) (any, er
 	// -N: mount nothing yet. A pool from another machine chooses its own
 	// mount points, and one set to /etc or /usr would cover the system's
 	// own folders; they're checked first (safeMount).
-	args := []string{"import", "-N", "-d", "/dev/disk/by-id"}
+	scan, ok := hw.ImportScanArgs(st.env.Root)
+	if !ok {
+		return nil, Errorf(CodeBadArgs, "there are no local disks to import a pool from")
+	}
+	args := append([]string{"import", "-N"}, scan...)
 	if a.Force {
 		args = append(args, "-f")
 	}

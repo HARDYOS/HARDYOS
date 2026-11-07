@@ -20,15 +20,16 @@ func addrs(s ...string) []netip.Addr {
 }
 
 func TestRenderCluster(t *testing.T) {
-	out, err := RenderCluster([]ClusterExport{
+	exports := []ClusterExport{
 		{Kind: KindShare, Dataset: "tank/shares/media", Path: "/mnt/tank/shares/media", GUID: "9", Clients: addrs("10.77.0.22", "10.77.0.21")},
 		{Kind: KindVMState, Dataset: "tank/vms/web", Path: "/mnt/tank/vms/web", GUID: "8", Clients: addrs("10.77.0.21")},
 		{Kind: KindAppData, Dataset: "tank/apps/notes", Path: "/mnt/tank/apps/notes", GUID: "7", Clients: addrs("10.77.0.22")},
-	})
+	}
+	out, err := RenderCluster(exports)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateCluster(out); err != nil {
+	if err := ValidateCluster(out, exports); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -56,16 +57,33 @@ func TestRenderCluster(t *testing.T) {
 			t.Errorf("accepted %+v", bad)
 		}
 	}
-	// Validation refuses hand-made dangerous lines.
+	// Validation refuses hand-made dangerous lines. no_root_squash is
+	// decided by the export's kind, not its path (L4): a share mounted
+	// somewhere without "/shares/" in its path still gets root_squash.
+	kinds := []ClusterExport{{Kind: KindShare, Path: "/mnt/tank/shares/m"}, {Kind: KindVMState, Path: "/mnt/tank/vms/web"},
+		{Kind: KindShare, Path: "/srv/media"}, {Kind: KindAppData, Path: "/mnt/tank/apps/x"}}
 	for _, bad := range []string{
 		"/mnt/tank/shares/m 10.77.0.21(rw,sync,no_subtree_check,no_root_squash,sec=sys,fsid=" + FSID("1") + ")\n",
+		"/srv/media 10.77.0.21(rw,sync,no_subtree_check,no_root_squash,sec=sys,fsid=" + FSID("1") + ")\n",
+		"/mnt/tank/apps/x 10.77.0.21(rw,sync,no_subtree_check,root_squash,sec=sys,fsid=" + FSID("1") + ")\n",
 		"/mnt/tank/vms/web 10.77.0.0/24(rw,sync,no_subtree_check,no_root_squash,sec=sys,fsid=" + FSID("1") + ")\n",
 		"/mnt/tank/vms/web *(rw,no_root_squash)\n",
 		"/mnt/tank/vms/web 10.77.0.21(rw,sync,no_subtree_check,no_root_squash,sec=sys,insecure,fsid=" + FSID("1") + ")\n",
+		"/mnt/other 10.77.0.21(rw,sync,no_subtree_check,root_squash,sec=sys,fsid=" + FSID("1") + ")\n",
+		"/mnt/tank/vms/web 10.77.0.21(rw,sync,no_subtree_check,no_root_squash,sec=sys,fsid=" + FSID("1") + ") 10.77.0.22(rw,sync,no_subtree_check,no_root_squash,sec=sys,fsid=" + FSID("1") + ") 10.77.0.23(rw,sync,no_subtree_check,no_root_squash,sec=sys,fsid=" + FSID("1") + ")\n",
 	} {
-		if ValidateCluster(bad) == nil {
+		if ValidateCluster(bad, kinds) == nil {
 			t.Errorf("validated %q", bad)
 		}
+	}
+	if err := ValidateCluster("/srv/media 10.77.0.21(rw,sync,no_subtree_check,root_squash,sec=sys,fsid="+FSID("1")+")\n", kinds); err != nil {
+		t.Errorf("a share outside /shares/: %v", err)
+	}
+}
+
+func TestClusterConfTurnsNFSv3Off(t *testing.T) {
+	if !strings.Contains(ClusterConf(false), "vers3=n\n") || strings.Contains(ClusterConf(true), "vers3") {
+		t.Fatalf("%q / %q", ClusterConf(false), ClusterConf(true))
 	}
 }
 

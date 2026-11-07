@@ -116,6 +116,31 @@ func (o OSFS) Exists(p string) bool {
 	return err == nil
 }
 
+// Lockdown implements Lockable: LIO's attributes (the ACLs' CHAP secrets
+// among them) are world-readable files, so the target folder is made
+// root's alone (0700) and checked on every reconcile (M3).
+func (o OSFS) Lockdown() error {
+	fi, err := os.Stat(o.Root)
+	if err != nil {
+		return err
+	}
+	if fi.Mode().Perm() != 0o700 {
+		if err := os.Chmod(o.Root, 0o700); err != nil {
+			return err
+		}
+		if fi, err = os.Stat(o.Root); err != nil {
+			return err
+		}
+	}
+	if fi.Mode().Perm() != 0o700 {
+		return fmt.Errorf("%s is %v, not 0700", o.Root, fi.Mode().Perm())
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Uid != 0 {
+		return fmt.Errorf("%s isn't owned by root", o.Root)
+	}
+	return nil
+}
+
 // ---- the fake ---------------------------------------------------------------
 
 // FakeFS is an in-memory configfs for tests. It creates the attributes and
@@ -131,6 +156,20 @@ type FakeFS struct {
 	// Sessions: target IQN -> logged-in sessions; disabling a TPG drops
 	// them (tests check fencing).
 	Sessions map[string]int
+	// Locked is set by Lockdown; LockErr makes it fail (tests).
+	Locked  bool
+	LockErr error
+}
+
+// Lockdown implements Lockable.
+func (f *FakeFS) Lockdown() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.LockErr != nil {
+		return f.LockErr
+	}
+	f.Locked = true
+	return nil
 }
 
 type fakeNode struct {

@@ -55,6 +55,15 @@ contents:
     dst: /lib/systemd/system/hardyos-issue.service
   - src: ./systemd/hardyos-dc.service
     dst: /lib/systemd/system/hardyos-dc.service
+  # Cluster storage: the saved storage firewall loads at boot before the
+  # NFS server (security review L1), and iSCSI disks (cluster LUNs) are
+  # never probed or offered by the host (M5).
+  - src: ./systemd/hardyos-cluster-firewall.service
+    dst: /lib/systemd/system/hardyos-cluster-firewall.service
+  - src: ./systemd/nfs-server.service.d/hardyos-cluster.conf
+    dst: /lib/systemd/system/nfs-server.service.d/hardyos-cluster.conf
+  - src: ./udev/59-hardyos-cluster-luns.rules
+    dst: /lib/udev/rules.d/59-hardyos-cluster-luns.rules
   # libvirt's qemu hook: incoming live migrations are checked by hardyd-priv (Phase 8 part C).
   - src: ./libvirt/hooks/qemu
     dst: /etc/libvirt/hooks/qemu

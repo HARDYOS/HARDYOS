@@ -186,6 +186,112 @@ func TestMountPathsAndMultipath(t *testing.T) {
 	}
 }
 
+// blockApp attaches app db in block mode (ext4) with the given writers.
+func blockApp(t *testing.T, c *Client, writers map[string]WriterInfo) (*Record, error) {
+	t.Helper()
+	wwn := san.WWN(san.Serial(cid, "77"))
+	dev := filepath.Join(c.Sys, "dev/disk/by-id/wwn-0x"+wwn)
+	_ = os.MkdirAll(filepath.Dir(dev), 0o755)
+	_ = os.WriteFile(dev, nil, 0o644)
+	ws := cluster.WorkloadStorage{Pool: "tank", Mode: cluster.StorageBlock, BlockFS: san.BlockExt4,
+		Volumes: []cluster.Volume{{Dataset: "tank/apps/db/block", Disk: "block", SizeGB: 64, WWN: wwn}}}
+	return c.Attach(context.Background(), AttachArgs{Workload: cluster.WorkloadRef{Kind: cluster.KindApp, ID: "db"}, Generation: 2, Storage: ws,
+		Server: netip.MustParseAddr("10.77.0.10"), Interface: "enp2s0", GrowFS: true, Writers: writers})
+}
+
+func TestBlockVolumeIsCheckedWhenSomeoneElseWroteIt(t *testing.T) {
+	wwn := san.WWN(san.Serial(cid, "77"))
+	dev := "/dev/disk/by-id/wwn-0x" + wwn
+	c, fx := newClient(t)
+	fx.OnPrefix("mount ", sysexec.Result{})
+	fx.OnPrefix("blockdev ", sysexec.Result{Stdout: []byte("68719476736\n")})
+	fx.OnPrefix("dumpe2fs ", sysexec.Result{Stdout: []byte("Block count:              16777216\nBlock size:               4096\n")})
+	// Unknown writers: checked; a finding keeps it unmounted (H5).
+	fx.OnResult("e2fsck -f -n "+dev, sysexec.Result{ExitCode: 4, Stdout: []byte("corrupt")})
+	if _, err := blockApp(t, c, nil); err == nil || !strings.Contains(err.Error(), "didn't pass its check") {
+		t.Fatalf("a failing check: %v", err)
+	}
+	if contains(fx.Lines(), "mount -t ext4 -o nosuid,nodev,noatime "+dev+" /mnt/hc/tank/apps/db") {
+		t.Fatal("mounted a file system that failed its check")
+	}
+	// Someone else wrote it (seq 5): checked once, then not again at seq 5.
+	fx.On("e2fsck -f -n "+dev, "clean")
+	if _, err := blockApp(t, c, map[string]WriterInfo{wwn: {Known: true, OthersWrote: true, Seq: 5}}); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(fx.Lines(), "e2fsck -f -n "+dev); n != 2 {
+		t.Fatalf("checks: %d", n)
+	}
+	if _, err := blockApp(t, c, map[string]WriterInfo{wwn: {Known: true, OthersWrote: true, Seq: 5}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := blockApp(t, c, map[string]WriterInfo{wwn: {Known: true, OthersWrote: false, Seq: 6}}); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(fx.Lines(), "e2fsck -f -n "+dev); n != 2 {
+		t.Fatalf("checked again although nobody else wrote it since: %d", n)
+	}
+	if _, err := blockApp(t, c, map[string]WriterInfo{wwn: {Known: true, OthersWrote: true, Seq: 7}}); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(fx.Lines(), "e2fsck -f -n "+dev); n != 3 {
+		t.Fatalf("a new writer wasn't checked: %d", n)
+	}
+	// The LUN (64 GiB) equals the file system: no grow.
+	if count(fx.Lines(), "resize2fs "+dev) != 0 {
+		t.Fatal("grew a file system whose LUN didn't grow")
+	}
+	c2, fx2 := newClient(t)
+	fx2.OnPrefix("mount ", sysexec.Result{})
+	fx2.OnPrefix("blockdev ", sysexec.Result{Stdout: []byte("137438953472\n")})
+	fx2.OnPrefix("dumpe2fs ", sysexec.Result{Stdout: []byte("Block count:              16777216\nBlock size:               4096\n")})
+	fx2.OnPrefix("resize2fs ", sysexec.Result{})
+	if _, err := blockApp(t, c2, map[string]WriterInfo{wwn: {Known: true, OthersWrote: false, Seq: 7}}); err != nil {
+		t.Fatal(err)
+	}
+	if count(fx2.Lines(), "resize2fs "+dev) != 1 || count(fx2.Lines(), "e2fsck -f -n "+dev) != 0 {
+		t.Fatal("didn't grow after the LUN grew")
+	}
+}
+
+func count(l []string, s string) int {
+	n := 0
+	for _, x := range l {
+		if x == s {
+			n++
+		}
+	}
+	return n
+}
+
+func contains(l []string, s string) bool { return count(l, s) > 0 }
+
+func TestFreezeLimits(t *testing.T) {
+	c, _ := newClient(t)
+	now := time.Now()
+	if err := c.freezeAllowed("web", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.freezeAllowed("web", now); err == nil {
+		t.Fatal("frozen twice")
+	}
+	c.thaw("web")
+	if err := c.freezeAllowed("web", time.Now().Add(5*time.Second)); err == nil {
+		t.Fatal("frozen again right after a thaw")
+	}
+	// The hour's budget.
+	c.mu.Lock()
+	c.freezes["web"].spans = []freezeSpan{{from: now.Add(-50 * time.Minute), to: now.Add(-45 * time.Minute)}}
+	c.freezes["web"].thawedAt = now.Add(-45 * time.Minute)
+	c.mu.Unlock()
+	if err := c.freezeAllowed("web", now); err == nil || !strings.Contains(err.Error(), "in the last hour") {
+		t.Fatalf("over the hour's budget: %v", err)
+	}
+	if err := c.freezeAllowed("web", now.Add(20*time.Minute)); err != nil {
+		t.Fatalf("after the window: %v", err)
+	}
+}
+
 func TestFreezeOnlyAttachedVMs(t *testing.T) {
 	c, fx := newClient(t)
 	fx.OnPrefix("virsh ", sysexec.Result{})

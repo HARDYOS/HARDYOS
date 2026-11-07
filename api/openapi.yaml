@@ -5997,7 +5997,18 @@ paths:
     post:
       operationId: applyClusterStorageNetwork
       summary: Set up this server's storage network (a job; applied like any network change and rolled back unless confirmed in Network settings)
+      description: >-
+        In a cluster the address must be in the cluster's storage network and no other member's, and the LAN itself is
+        refused while the cluster has VMs or apps in NFS mode. Changing a member's storage address answers 409 with code
+        `confirm` unless `confirm` is the server's name; the storage server then keeps it cut off until its administrator
+        runs `hardyctl cluster-storage repin <server>` there.
       tags: [cluster-storage]
+      parameters:
+        - name: confirm
+          in: query
+          required: false
+          description: This server's name, to confirm a change of its storage address.
+          schema: { type: string }
       requestBody:
         required: true
         content:

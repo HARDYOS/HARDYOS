@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -66,5 +67,22 @@ func TestClusterStorageOpsAreNamedAndValidated(t *testing.T) {
 		if strings.HasPrefix(l, "zfs destroy") || strings.HasPrefix(l, "mount") || strings.HasPrefix(l, "iscsiadm") {
 			t.Errorf("a refused op ran %s", l)
 		}
+	}
+	// Pin resets and forgetting a node are an administrator's, as root.
+	if !s.RootOnly[san.OpPinReset] || !s.RootOnly[san.OpForget] || s.RootOnly[san.OpApply] {
+		t.Fatalf("root-only ops: %v", s.RootOnly)
+	}
+}
+
+func TestRootOnlyOpsRefuseOtherUsers(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("runs as a user other than root")
+	}
+	s := &Server{AllowedUIDs: []uint32{uint32(os.Getuid())}, RootOnly: map[string]bool{"x.reset": true}}
+	s.Handle("x.reset", func(context.Context, json.RawMessage) (any, error) { return "done", nil })
+	err := NewClient(startServer(t, s)).Call(context.Background(), "x.reset", nil, nil)
+	var pe *Error
+	if !errors.As(err, &pe) || pe.Code != CodeForbidden {
+		t.Fatalf("a root-only op ran for uid %d: %v", os.Getuid(), err)
 	}
 }
