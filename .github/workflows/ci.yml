@@ -114,7 +114,8 @@ jobs:
           sudo dmesg -W --time-format iso | sed -u 's/^/[kernel] /' &
           sudo journalctl -f -n 0 -o short-iso | sed -u 's/^/[journal] /' &
           trap 'sudo pkill -f "dmesg -W" || true; sudo pkill -f "journalctl -f" || true' EXIT
-          sudo HARDYOS_CLUSTER_INTEGRATION=1 "$RUNNER_TEMP/san.test" -test.run 'TestClusterStorageIntegration|TestFirewallSyntax' -test.v -test.timeout 10m
+          # Its own session: nothing the iSCSI tools signal reaches the runner.
+          sudo HARDYOS_CLUSTER_INTEGRATION=1 setsid -w "$RUNNER_TEMP/san.test" -test.run 'TestClusterStorageIntegration|TestFirewallSyntax' -test.v -test.timeout 10m
       - name: LIO and NFS state
         if: failure()
         run: |
