@@ -384,9 +384,36 @@ type Export struct {
 	FSID string `json:"fsid"`
 }
 
+// StorageMode is how an app's data reaches its node (decision 341).
+type StorageMode string
+
+const (
+	// StorageNFS: the app's dataset <pool>/apps/<id>, mounted over NFS.
+	StorageNFS StorageMode = "nfs"
+	// StorageBlock: a zvol <pool>/apps/<id>/block with ext4 or xfs, a LUN
+	// in the owner's target (exclusive like a VM disk), mounted by the
+	// owner at the same folder.
+	StorageBlock StorageMode = "block"
+)
+
+// ClusterShare is a shared folder exported to every active compute node
+// (root_squash). Compute nodes mount it at MountPath.
+type ClusterShare struct {
+	ID        string `json:"id"`
+	Pool      string `json:"pool"`
+	Dataset   string `json:"dataset"`   // <pool>/shares/<id>
+	Path      string `json:"path"`      // its mountpoint on the storage node
+	MountPath string `json:"mountPath"` // RemoteMountRoot/<pool>/shares/<id>
+	FSID      string `json:"fsid"`      // the dataset's GUID
+}
+
 // WorkloadStorage is everything a workload has on the storage node.
 type WorkloadStorage struct {
-	Pool    string   `json:"pool"`
+	Pool string `json:"pool"`
+	// Mode is an app's data mode ("" means StorageNFS; VMs leave it empty).
+	Mode StorageMode `json:"mode,omitempty"`
+	// BlockFS is the file system on an app's block volume: ext4 or xfs.
+	BlockFS string   `json:"blockFS,omitempty"`
 	Volumes []Volume `json:"volumes,omitempty"`
 	Exports []Export `json:"exports,omitempty"`
 	// Shares are shared folder ids an app uses (exported to every compute
@@ -476,6 +503,9 @@ type Snapshot struct {
 	Seq map[NodeID]uint64 `json:"seq"`
 	// AppUIDs: app id -> its user id (30000-30999), unique cluster-wide.
 	AppUIDs map[string]int `json:"appUids,omitempty"`
+	// ClusterShares are the shared folders on the storage node with "Use in
+	// the cluster" on, by share id (storage.share; part B).
+	ClusterShares map[string]*ClusterShare `json:"clusterShares,omitempty"`
 	// Index is the Raft index this snapshot reflects.
 	Index uint64 `json:"index"`
 }
@@ -514,6 +544,10 @@ const (
 	CmdStorageUnfence CommandType = "storage.unfenced"
 	CmdShareCluster   CommandType = "storage.share" // a shared folder in or out of the cluster
 	CmdAppUID         CommandType = "storage.appuid"
+	// CmdStorageLayout changes a stopped workload's storage (an app's NFS
+	// or block mode) after the storage node moved its data (part B,
+	// decision 342).
+	CmdStorageLayout CommandType = "storage.layout"
 
 	// Part C: placement, HA, fencing.
 	CmdWorkloadAdd    CommandType = "workload.add"
