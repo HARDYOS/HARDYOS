@@ -1,0 +1,250 @@
+// Package storagesvc is hardyd's side of cluster storage
+// (docs/plans/cluster.md sections 5 and 6.1): the storage node's agent
+// that turns the applied cluster state into LIO, exports and firewall
+// (through hardyd-priv's san.* operations) and acknowledges grants and
+// fences in the log; the StorageService any member calls (it runs on the
+// storage node over the peer API); the compute node's StorageAttacher;
+// CHAP distribution; and the VM freeze and app dump the storage node
+// forwards to a workload's owner around its snapshots.
+//
+// The one rule that keeps disks safe lives in BuildDesired: what is mapped
+// and exported comes from the applied, signed cluster state only, never
+// from a request. Root checks it again (san.Desired.Validate, the datasets'
+// own properties, its recorded fences).
+package storagesvc
+
+import (
+	"net/netip"
+	"slices"
+	"sort"
+
+	"github.com/hardyos/hardyos/daemon/internal/cluster"
+	"github.com/hardyos/hardyos/daemon/internal/cluster/san"
+	"github.com/hardyos/hardyos/daemon/internal/cluster/state"
+	"github.com/hardyos/hardyos/daemon/internal/nfs"
+)
+
+// Plan is what the storage node should look like for one applied state.
+type Plan struct {
+	SAN       san.Desired
+	Addresses map[cluster.NodeID]netip.Addr
+	// Exports name datasets and clients; root fills in paths and GUIDs.
+	Exports []nfs.ClusterExport
+	// Members and Fenced are storage addresses for the firewall.
+	Members []netip.Addr
+	Fenced  []netip.Addr
+	// Acks are the grants this plan applies that aren't acknowledged yet.
+	Acks []state.GrantAck
+	// Fences to put in place (a dead or isolated node's unconfirmed
+	// fence), and fences to lift (a rejoining node, confirmed fence).
+	Fences   []cluster.Fence
+	Unfences []cluster.Fence
+}
+
+// Hold takes a workload's storage out of the plan: nothing of it is mapped
+// or exported while the storage node works on it offline (a rollback, a
+// move between NFS and block mode). Its grant isn't acknowledged either.
+func (p *Plan) Hold(w cluster.WorkloadRef) {
+	var drop []string
+	keep := p.SAN.Backstores[:0]
+	for _, b := range p.SAN.Backstores {
+		if b.Workload == w {
+			drop = append(drop, b.Name)
+			continue
+		}
+		keep = append(keep, b)
+	}
+	p.SAN.Backstores = keep
+	for i := range p.SAN.Targets {
+		p.SAN.Targets[i].LUNs = slices.DeleteFunc(p.SAN.Targets[i].LUNs, func(l string) bool { return slices.Contains(drop, l) })
+	}
+	ds := w.ID
+	p.Exports = slices.DeleteFunc(p.Exports, func(e nfs.ClusterExport) bool {
+		parts := splitDataset(e.Dataset)
+		return len(parts) == 3 && parts[2] == ds && ((w.Kind == cluster.KindVM && parts[1] == "vms") || (w.Kind == cluster.KindApp && parts[1] == "apps"))
+	})
+	p.Acks = slices.DeleteFunc(p.Acks, func(a state.GrantAck) bool { return a.Workload == w })
+}
+
+func splitDataset(ds string) []string {
+	var out []string
+	start := 0
+	for i := 0; i < len(ds); i++ {
+		if ds[i] == '/' {
+			out = append(out, ds[start:i])
+			start = i + 1
+		}
+	}
+	return append(out, ds[start:])
+}
+
+// fencedNode reports whether a node must have no access now.
+func fencedNode(s *cluster.Snapshot, n *cluster.Node) bool {
+	if _, ok := s.Fences[n.ID]; ok {
+		return true
+	}
+	switch n.State {
+	case cluster.NodeDead, cluster.NodeFenced, cluster.NodeRejoining, cluster.NodeRemoved:
+		return true
+	}
+	return false
+}
+
+// sharesClient: nodes that mount cluster shares.
+func sharesClient(n *cluster.Node) bool {
+	return n.State == cluster.NodeActive || n.State == cluster.NodeMaintenance
+}
+
+// BuildDesired derives the storage node's configuration from the applied
+// state. self is the storage node. Only compute nodes get targets; a node
+// that is dead, fenced, rejoining or removed gets nothing (its target is
+// disabled); a grant maps its workload's volumes into each named node's
+// target (two only with GrantMigration) and exports its state or data to
+// those nodes only; cluster shares go to every active compute node.
+func BuildDesired(s *cluster.Snapshot, self cluster.NodeID) Plan {
+	p := Plan{Addresses: map[cluster.NodeID]netip.Addr{}}
+	d := san.Desired{Cluster: s.Cluster, Index: s.Index}
+	if me := s.Nodes[self]; me != nil {
+		if len(me.Addresses.Portals) > 0 {
+			d.Portals = slices.Clone(me.Addresses.Portals)
+		} else if me.Addresses.Storage.IsValid() {
+			d.Portals = []netip.AddrPort{netip.AddrPortFrom(me.Addresses.Storage, san.ISCSIPort)}
+		}
+	}
+	nodes := make([]*cluster.Node, 0, len(s.Nodes))
+	for _, n := range s.Nodes {
+		nodes = append(nodes, n)
+	}
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
+	targets := map[cluster.NodeID]*san.Target{}
+	for _, n := range nodes {
+		if n.Role != cluster.RoleCompute || n.State == cluster.NodeRemoved {
+			continue
+		}
+		if san.ValidNode(n.ID) != nil {
+			continue
+		}
+		a := n.Addresses.Storage
+		if a.IsValid() {
+			p.Addresses[n.ID] = a
+		}
+		t := &san.Target{Node: n.ID, Enabled: !fencedNode(s, n), LUNs: []string{}}
+		if f := s.Fences[n.ID]; f != nil {
+			t.FenceEpoch = f.Epoch
+		}
+		targets[n.ID] = t
+		if !a.IsValid() {
+			continue
+		}
+		if fencedNode(s, n) {
+			p.Fenced = append(p.Fenced, a)
+		} else {
+			p.Members = append(p.Members, a)
+		}
+	}
+	// Fences and unfences.
+	fids := make([]cluster.NodeID, 0, len(s.Fences))
+	for id := range s.Fences {
+		fids = append(fids, id)
+	}
+	slices.Sort(fids)
+	for _, id := range fids {
+		f := s.Fences[id]
+		n := s.Nodes[id]
+		if n == nil || n.Role != cluster.RoleCompute {
+			continue
+		}
+		switch {
+		case !f.Confirmed:
+			p.Fences = append(p.Fences, *f)
+		case n.State == cluster.NodeRejoining:
+			p.Unfences = append(p.Unfences, *f)
+		}
+	}
+	// Grants.
+	refs := make([]cluster.WorkloadRef, 0, len(s.Grants))
+	for w := range s.Grants {
+		refs = append(refs, w)
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		if refs[i].Kind != refs[j].Kind {
+			return refs[i].Kind < refs[j].Kind
+		}
+		return refs[i].ID < refs[j].ID
+	})
+	for _, w := range refs {
+		g := s.Grants[w]
+		pl := s.Placements[w]
+		if pl == nil || state.ValidWorkloadStorage(w, pl.Storage) != nil {
+			continue
+		}
+		holders := []cluster.NodeID{}
+		for _, n := range g.Nodes {
+			if t := targets[n]; t != nil && t.Enabled && !slices.Contains(holders, n) {
+				holders = append(holders, n)
+			}
+		}
+		limit := 1
+		if g.Mode == cluster.GrantMigration {
+			limit = 2
+		}
+		if len(holders) > limit {
+			holders = holders[:limit]
+		}
+		for _, v := range pl.Storage.Volumes {
+			b := san.Backstore{
+				Name: san.BackstoreName(w, v.Disk), Workload: w, Dataset: v.Dataset, Disk: v.Disk,
+				Generation: g.Generation, Migration: g.Mode == cluster.GrantMigration && len(holders) == 2,
+			}
+			d.Backstores = append(d.Backstores, b)
+			for _, n := range holders {
+				targets[n].LUNs = append(targets[n].LUNs, b.Name)
+			}
+		}
+		var clients []netip.Addr
+		for _, n := range holders {
+			if a, ok := p.Addresses[n]; ok {
+				clients = append(clients, a)
+			}
+		}
+		for _, e := range pl.Storage.Exports {
+			if e.Kind != cluster.ExportVMState && e.Kind != cluster.ExportAppData {
+				continue
+			}
+			if len(clients) == 0 {
+				continue
+			}
+			p.Exports = append(p.Exports, nfs.ClusterExport{Kind: string(e.Kind), Dataset: e.Dataset, Path: e.Path, GUID: e.FSID, Clients: slices.Clone(clients)})
+		}
+		if !g.Applied && len(holders) > 0 {
+			p.Acks = append(p.Acks, state.GrantAck{Workload: w, Generation: g.Generation})
+		}
+	}
+	// Shares.
+	var shareClients []netip.Addr
+	for _, n := range nodes {
+		if n.Role == cluster.RoleCompute && sharesClient(n) && !fencedNode(s, n) && n.Addresses.Storage.IsValid() {
+			shareClients = append(shareClients, n.Addresses.Storage)
+		}
+	}
+	sids := make([]string, 0, len(s.ClusterShares))
+	for id := range s.ClusterShares {
+		sids = append(sids, id)
+	}
+	slices.Sort(sids)
+	for _, id := range sids {
+		sh := s.ClusterShares[id]
+		if len(shareClients) == 0 || state.ValidClusterShare(*sh) != nil {
+			continue
+		}
+		p.Exports = append(p.Exports, nfs.ClusterExport{Kind: nfs.KindShare, Dataset: sh.Dataset, Path: sh.Path, GUID: sh.FSID, Clients: slices.Clone(shareClients)})
+	}
+	for _, n := range nodes {
+		if t := targets[n.ID]; t != nil {
+			d.Targets = append(d.Targets, *t)
+		}
+	}
+	d.Normalize()
+	p.SAN = d
+	return p
+}

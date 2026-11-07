@@ -237,6 +237,7 @@ func main() {
 		priv.RegisterCloudBackup(s, cb)
 		go vmm.OnStart(ctx)
 		go vmm.Watch(ctx)
+		_ = wireClusterB(ctx, s, log, am.PreBackup) // cluster storage: storage node (LIO, exports, firewall) and compute client
 		// Replication between servers: snapshots, zfs send and receive
 		// (into <pool>/replicas/<source>/ only), restores. VMs are frozen
 		// by their guest agent for the snapshot when they can be.

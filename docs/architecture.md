@@ -2207,6 +2207,121 @@ request.
 Part A adds only `cluster.status` (read-only: boot id, watchdog devices,
 the state directory's owner). Raft's files are hardyd's.
 
+### Storage node and storage clients (part B)
+
+The storage role and the compute nodes' storage clients
+(`docs/plans/cluster.md` sections 5 and 6.1; decisions 323, 340-349). One
+HardyOS server holds the pool; compute servers use its zvols over iSCSI (VM
+disks, and apps in block mode) and its datasets over NFSv4.2 (VM state, apps
+in NFS mode, cluster shared folders). Snapshots, backups and replication stay
+on the storage server.
+
+**Who decides what.** Only the applied, signed cluster state says which node
+may reach which workload's storage (`Grant`s, fences, cluster shares).
+hardyd's storage agent on the storage node (`internal/cluster/storagesvc`)
+builds a desired configuration from it (`BuildDesired`: nothing from requests)
+and hands it to hardyd-priv; root validates it again and checks every dataset
+itself (`internal/cluster/san`). Then the agent acknowledges in the log
+(`storage.applied`, `storage.fenced`, `storage.unfenced`), and a compute node
+attaches only a grant that names it at its generation and is acknowledged
+(`storagesvc.CheckGrant`; decision 326).
+
+**Storage node, root side** (`internal/cluster/san`, `priv/san_ops.go`):
+
+- **LIO through configfs** (`/sys/kernel/config/target`), reconciled from
+  root's own state file `/var/lib/hardyos/root/cluster/san.json` at boot and on
+  every change; `targetcli` is only for diagnostics, there is no
+  `saveconfig.json`. HardyOS's backstores live in their own HBA
+  (`core/iblock_77`) and its targets start with its IQN prefix, so objects made
+  by hand are never touched.
+- **One target per compute node** (`iqn.2026-11.net.hardynetworks:hardyos.<cluster8>.<node>`),
+  TPG 1 on the storage portal(s) only, `authentication=1`,
+  `generate_node_acls=0`, exactly one ACL (the node's initiator) with mutual
+  CHAP. SendTargets discovery is closed (random credentials nobody has):
+  compute nodes are told their target.
+- **LUNs**: backstore `hcv_<vm>_<disk>` / `hca_<app>_block` on
+  `/dev/zvol/...`; unit serial from SHA-256 of the cluster id and the zvol's
+  GUID, so the WWN (`wwn-0x6001405…`) never changes; `emulate_tpu=1`, write
+  cache per the zvol's `sync`. Cluster zvols carry `org.hardyos:role=cluster`
+  and the owner's id, and `volmode=dev` (the storage node never scans guest
+  partitions). A LUN is in one target, two only for a live-migration grant
+  (`Desired.Validate`).
+- **Fences** (`san.fence {node, epoch, confirm}`): recorded first, then the
+  target is disabled (sessions dropped), everything unmapped, the node's
+  address removed from every export, its NFSv4 clients expired and its address
+  dropped by the firewall. Until `san.unfence` with the same epoch, no
+  `san.apply`, export or firewall change can give the node anything back, and
+  it can't get its CHAP secrets. A desired state from an older Raft index than
+  the applied one is refused.
+- **NFS** (`internal/nfs/cluster.go`): `/etc/exports.d/hardyos-cluster.exports`,
+  VM state and app data to the owner's storage address only
+  (`no_root_squash`), cluster shares to every active compute node
+  (`root_squash`), `fsid` derived from the dataset's GUID; paths and GUIDs are
+  read by root from ZFS, never taken from hardyd. NFSv4 lease and grace times
+  15 s (`/etc/nfs.conf.d/hardyos-cluster.conf`). The LAN shares' manager keeps
+  nfsd running while cluster exports exist.
+- **Firewall** (`/etc/hardyos/cluster-storage.nft`, table
+  `hardyos_cluster_storage`): storage-subnet sources arriving on any other
+  interface are dropped, iSCSI only on the storage interface, fenced
+  addresses dropped before members are accepted, 2049/3260 on the storage
+  interface only from members. On compute nodes the live-migration range
+  49152-49215 is open only to members' storage addresses.
+- **Volumes and datasets** (`san.volume.*`, `san.dataset.*`,
+  `san.snapshot.*`, `san.app.migrate`): only under `<pool>/vms/<id>` and
+  `<pool>/apps/<id>`, destroy and rollback with typed confirmation and refused
+  while anything of the workload is mapped or exported.
+
+**Compute node, root side** (`internal/cluster/sanclient`,
+`priv/sanclient_ops.go`): open-iscsi with `node.startup = manual` (a fenced
+node never logs in at boot), node records written by root as 0600 files with
+the CHAP secrets (never `iscsiadm -o update`), replacement timeout 15 s,
+NOP-Outs every 5 s; devices found by WWN; optional multipath with an allow
+list (`find_multipaths strict`, `no_path_retry 3`); NFS mounts
+`vers=4.2,hard,…,nosuid,nodev` (VM state `noexec`) at
+`/mnt/hc/<pool>/{vms,apps,shares}/<id>`; block-mode app volumes mounted at the
+same place. Before any login or mount, `ip route get` must show the storage
+interface without a gateway, never NetBird. Attachments are recorded in
+`/run/hardyos/cluster/attached.json`, which the engines' cluster backends read
+(`VMBackend`, `AppBackend`, `ShareResolver`; part C wires them in).
+
+**hardyd** (`internal/cluster/storagesvc`, `api/handlers_cluster_storage.go`):
+`StorageService` runs on the storage node (forwarded over the peer API from
+any member), audited there as `person (via node)`; the storage agent; the
+compute attacher (fetches its own CHAP secrets from the storage node, which
+hands a node only its own, seals them with purpose `cluster`); freeze and dump
+forwarding (the storage node asks a running VM's owner to freeze its guest,
+with an automatic thaw after 60 s, and a running app's owner to run its backup
+dump, before snapshotting); rollbacks and data-mode switches done offline on
+the storage node (the owner detaches, the agent holds the workload out of LIO
+and the exports). The Cluster app's Storage page
+(`web/apps/shell/src/apps/cluster/storage`) shows the storage server, per-node
+status, targets and exports with drift, cluster shares, snapshots and data
+modes, and the storage network step of the create and join wizards.
+
+**App data mode** (decision 341): NFS folder or block volume (a zvol LUN with
+ext4 or xfs, exclusive to the app's node). Apps that keep a database default to
+block: the manifest's `storage.database` or `storage.mode`, or a known
+database image in the compose file (`apps.DefaultStorageMode`). The admin can
+switch a stopped app (a job, typed confirmation, a snapshot of the source
+first; `storage.layout` commits the new layout and bumps the generation).
+
+**Storage network** (`internal/network/storagenet.go`, decision 343): a
+dedicated port (fastest first), a VLAN on the LAN port, or the LAN itself
+(warned against); static private IPv4 address without gateway, in the
+cluster's subnet; jumbo frames offered on physical ports of 1 Gb/s and up.
+Applied as a normal network change (kept only when confirmed, else rolled
+back).
+
+Tests: configfs rendering against `san.FakeFS` (which refuses what configfs
+refuses: creating attributes, removing busy objects, changing an exported
+LUN's serial), root's fences against later requests, exports, nft rules, node
+records and command lines, attachments, appliers, the desired-state builder
+and the agent's order; `TestClusterStorageIntegration`
+(`HARDYOS_CLUSTER_INTEGRATION=1`, CI's **Cluster (namespaces)** job) runs real
+LIO on a file-backed pool with initiators in network namespaces (their own
+iscsid and `/etc/iscsi`), a fence under I/O, and NFS mounts from the
+namespaces; it skips with the reason when the kernel lacks the target modules.
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly
