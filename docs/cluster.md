@@ -175,7 +175,12 @@ private, without a gateway, in the cluster's storage subnet (suggested
 `10.77.0.0/24`, `.10` for the NAS). Jumbo frames (MTU 9000) are offered on
 ports of 1 Gb/s and up; the switch must allow them. Like every network
 change it is kept only once you confirm it. Compute servers refuse to use
-cluster storage over any other path, never over NetBird.
+cluster storage over any other path, never over NetBird. The LAN itself
+can carry only shared folders and apps in block mode: VMs and apps whose
+data is a folder need a dedicated port or a VLAN. Changing a server's
+storage address later asks for its name, and the storage server keeps it
+cut off until its administrator runs `hardyctl cluster-storage repin
+<server>` there.
 
 **App data: folder or volume.** An app's data is an NFS folder (default:
 plain files) or a **block volume** (a ZFS volume with ext4 or xfs that only
@@ -189,10 +194,12 @@ confirmation; a snapshot is taken first).
 (see High availability), the NAS disables that server's iSCSI target
 (dropping its sessions), removes it from every export, expires its NFS
 clients and blocks its address, and only then confirms in the log. It
-keeps refusing the server until it rejoins. Each compute server has its own
-iSCSI target and login secrets (mutual CHAP) that the NAS's root keeps and
-hands to that server alone; **New CHAP secrets** next to the server's
-target in Cluster › Storage replaces them.
+keeps refusing the server until it rejoins (with a request signed by the
+server's own key) and gives it new secrets then. Each compute server has
+its own iSCSI target and login secrets (mutual CHAP) that the NAS's root
+keeps and hands to that server alone; **New CHAP secrets** next to the
+server's target in Cluster › Storage replaces them (only while nothing is
+mapped to it: move or stop its workloads first; its sessions are dropped).
 
 ## Moving VMs and apps
 
@@ -305,3 +312,27 @@ until its probe is built, so LAN isolation never triggers.
 - Membership is full trust, as in other clusters of this kind: a server
   whose root is compromised can act as an administrator on the others. Both
   ends audit every forwarded change with the person and the server.
+- The storage server's root doesn't take its own hardyd's word for who may
+  reach what: it remembers each compute server's storage address, key and
+  network card (MAC) from the first time it sees them, and keeps a fenced
+  server cut off until that server itself asks to come back, signed with
+  its own key. When a server's storage address or key really changes (a new
+  network card, a reinstall), its storage stays off until an administrator
+  confirms it **as root on the storage server**:
+  `hardyctl cluster-storage repin <server>` (or `repin --subnet` for a new
+  storage network). After removing a server for good,
+  `hardyctl cluster-storage forget <server>` clears what the storage
+  server kept of it, its fence included (the address can't be reused
+  before that).
+- Destroying, rolling back, deleting snapshots of, resizing or moving the
+  data of cluster storage, and putting shared folders in or out of the
+  cluster, need an administrator's request; a server on its own may only
+  snapshot its own workloads (at most once a minute).
+- VMs' and apps' own data is exported to their server without root
+  squashing, so it is never exported when the storage network is the LAN
+  itself: use a dedicated port or a VLAN. The storage network carries no
+  encryption: a server on that network could still pretend to be another
+  (decision 379); encrypting it is a later step.
+- Compute servers never treat cluster disks as their own (they aren't
+  offered for pools, imported or probed), and a block volume another server
+  wrote is checked before it is mounted.

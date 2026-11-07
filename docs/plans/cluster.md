@@ -684,6 +684,66 @@ storage grant for that generation is applied.
     `vms.migrate.accept` / `.send` / `.check`, `vms.cpu.baseline`.
   No operation takes a command line, a path outside the named trees, or XML.
 
+### 8.1 Storage: what holds today, and member isolation (pending)
+
+The security review of part B (decisions 375-384) was fixed so that it
+holds whichever way the owner decides the open question below: what
+matters regardless is fixed, and for member-against-member isolation the
+cheap containment is in place.
+
+**In place.** The storage node's root no longer takes hardyd's word for
+who may reach what: it pins each compute node's storage address, cluster
+key and MAC and the storage subnet (first use; changes only through
+`hardyctl cluster-storage` as root), keeps fences by node and key with an
+epoch high-water mark, lifts one only with the fenced node's own signed
+rejoin statement, refuses old or implausibly new Raft indexes, and keeps
+export clients to pinned nodes that hold the workload's volumes. Peer
+requests carry the person only in an assertion the calling node signs;
+destructive storage operations need an administrator's. Owner-only
+exports never go over the LAN itself, the storage firewall checks source
+MACs and closes NFSv3's side protocols, node-written file systems are
+checked before any kernel mounts them, and cluster LUNs are invisible to
+the compute host's own disk tools.
+
+**Open question (owner): do members fully trust each other?** Proxmox-style
+clusters do (section 8: a member's root is a cluster compromise). If
+instead a compromised compute node must not be able to reach other
+workloads' storage, these remain, in order of value:
+
+1. **Root-side log verification on the storage node.** Root keeps the
+   members' keys (seeded from the pins) and verifies every applied entry
+   that affects storage itself: hardyd hands root the signed entries
+   (`cluster.SignedCommand`) since root's last index, root replays the
+   storage-relevant appliers (`state.Storage`, placements, fences,
+   membership) on its own copy and builds the desired LIO state, exports
+   and firewall from that copy instead of hardyd's `Desired`. Needs part A
+   to expose raw entries (or the snapshot plus entries) to hardyd, and a
+   log compaction story (root keeps its own snapshot). It would also let
+   root clear a removed node's fence on a signed `member.remove` instead of
+   `hardyctl cluster-storage forget`, and verify `node.rejoin` itself.
+2. **Step-up re-authentication for destructive storage operations.** A
+   compromised member can still sign an administrator's assertion (its key
+   signs every assertion it relays). The storage node would require a
+   fresh proof from the person (a WebAuthn assertion or TOTP checked on
+   the storage node, or the person's password verified by the storage
+   node's own account store for domain accounts) for destroy, rollback,
+   snapshot delete, mode and share changes.
+3. **Authenticated, encrypted storage transport.** A member on the storage
+   segment can spoof another's IP and MAC (the MAC pin stops only casual
+   spoofing) and then mount `no_root_squash` exports or read iSCSI traffic.
+   NFS RPC-with-TLS (`xprtsec=mtls`, kernel 6.12 with `tlshd` from
+   ktls-utils) binds an export to a client certificate; it needs per-node
+   X.509 keys on disk for root and tlshd (distinct from the sealed cluster
+   key), a CA or pinned trust list in `/etc/tlshd.conf`, and testing in CI
+   (the namespace job can't run tlshd per namespace easily). iSCSI has no
+   TLS in LIO: IPsec (strongSwan, per-node certificates) between the
+   storage node and each compute node, or NVMe/TCP with TLS later.
+   Prototyped neither yet: the key handling is the larger part.
+4. **Owner-side data moves.** Switching an app between NFS and block mode
+   copies on the storage node today (checked and read-only, decision 380).
+   Copying on the owner instead needs a placement holding both layouts for
+   the move (a state change in part C's placement rules).
+
 ## 9. Upgrades in a cluster
 
 - **Version window.** Members may differ by one release while upgrading. Each

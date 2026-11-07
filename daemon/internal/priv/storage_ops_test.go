@@ -259,7 +259,7 @@ func TestImportPoolKeepsMountsInsideThePool(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"zpool import -N "+localScan+" evil",
+		"zpool import -N " + localScan + " evil",
 		"zfs set mountpoint=/mnt/evil evil",
 		"zfs inherit mountpoint evil/shares",
 		"zfs inherit mountpoint evil/usr",
