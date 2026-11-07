@@ -215,7 +215,7 @@ func TestDovecotConfig(t *testing.T) {
 		"  oauth2 {\n    http_client_proxy_socket_path = /run/hardyos-mail-auth.sock\n",
 		"  local_port = %{local_port}\n",
 		"port = 10993\n    ssl = yes\n    haproxy = yes\n", "inet_listener imap {\n    port = 0\n",
-		"quota_full_tempfail = yes\n", "lmtp_rcpt_check_quota = yes\n", "quota_status_success = DUNNO\n",
+		"quota_full_tempfail = yes\n", "auth_cache_size = 0\n", "lmtp_rcpt_check_quota = yes\n", "quota_status_success = DUNNO\n",
 		"    auto = subscribe\n    autoexpunge = 30 days\n",
 		"  unix_listener auth-userdb {\n    mode = 0600\n    user = hardyos-vmail\n",
 		"  unix_listener lmtp {\n    mode = 0600\n",

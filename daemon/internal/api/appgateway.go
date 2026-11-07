@@ -570,6 +570,11 @@ func (rt *remoteRuntime) proxyFor(route *gwRoute, desktopHost string) *gwRoute {
 			pr.Out.Header.Set("X-Forwarded-Proto", "https")
 			pr.Out.Header.Set("X-Forwarded-Host", pr.In.Host)
 			gatewayRequestCookies(pr.Out.Header)
+			if route.appID == WebmailAppID {
+				// Only HardyOS's window proxy signs people in to webmail
+				// (decision 302): never credentials from the internet.
+				pr.Out.Header.Del("Authorization")
+			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			gatewayFixResponse(resp, target, host, frame)
@@ -699,6 +704,9 @@ func (rt *remoteRuntime) serveApp(w http.ResponseWriter, r *http.Request, route 
 				"Your HardyOS sign-in ended or an administrator changed who may use it. Open it again.")
 			return
 		}
+	}
+	if filterAppRequest(w, r, route.appID) {
+		return
 	}
 	var rw http.ResponseWriter = w
 	if ss != nil {

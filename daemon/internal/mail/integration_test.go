@@ -39,21 +39,33 @@ import (
 
 const (
 	itVPS      = "10.99.0.1"
+	itWebmail  = "172.16.253.2" // in ports.WebmailSubnet
+	itLAN      = "192.168.77.5"
 	itDomain   = "example.test"
 	itHost     = "mail.example.test"
 	itMailRoot = "/srv/hardyos-mail-it"
+	itKeyAlice = "a11ce0000000000000000001"
+	itKeyBob   = "b0b000000000000000000002"
+	itKeyCarol = "ca7010000000000000000003"
 )
 
 var itPasswords = map[string]string{
 	"alice@example.test": "alice-password-1",
 	"bob@example.test":   "bob-password-1",
+	"carol@example.test": "carol-password-1",
 	NotifyLogin:          "notify-password-1",
 }
+
+// itToken is a webmail token the fake checker accepts for alice.
+const itToken = WebmailTokenPrefix + "it-token"
 
 type fakeChecker struct{}
 
 func (fakeChecker) CheckLogin(_ context.Context, login, secret string) error {
 	if pw, ok := itPasswords[login]; ok && pw == secret {
+		return nil
+	}
+	if login == "alice@example.test" && secret == itToken {
 		return nil
 	}
 	return ErrBadLogin
@@ -85,7 +97,13 @@ func startDaemons(t *testing.T) func(ctx context.Context, cfg RootConfig, res *A
 			itRun(t, "chown", d.owner+":", d.dir)
 		}
 		itDaemon(t, "runuser", "-u", "redis", "--", "redis-server", RedisConf, "--daemonize", "yes", "--supervised", "no")
-		itDaemon(t, "rspamd", "-u", "_rspamd", "-g", "_rspamd")
+		// As systemd runs it: _rspamd from the start.
+		rsp := exec.Command("runuser", "-u", "_rspamd", "--", "rspamd", "-c", "/etc/rspamd/rspamd.conf", "-f")
+		rsp.Stdout, rsp.Stderr = os.Stderr, os.Stderr
+		if err := rsp.Start(); err != nil {
+			return err
+		}
+		t.Cleanup(func() { _ = rsp.Process.Kill() })
 		itDaemon(t, "dovecot")
 		itDaemon(t, "postfix", "start")
 		rad := exec.Command("runuser", "-u", "radicale", "--", "radicale", "--config", RadicaleConf)
@@ -96,7 +114,7 @@ func startDaemons(t *testing.T) func(ctx context.Context, cfg RootConfig, res *A
 		t.Cleanup(func() { _ = rad.Process.Kill() })
 		// Rspamd takes a moment to load its maps.
 		for i := 0; i < 60; i++ {
-			if c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", PortRspamdMilter), time.Second); err == nil {
+			if c, err := net.DialTimeout("unix", RspamdMilterSocket, time.Second); err == nil {
 				c.Close()
 				break
 			}
@@ -118,21 +136,29 @@ func TestMailServerIntegration(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root and the mail packages (see the comment at the top)")
 	}
-	// The VPS's NetBird address, on this host for the test.
-	if out, err := exec.Command("ip", "addr", "add", itVPS+"/32", "dev", "lo").CombinedOutput(); err != nil && !strings.Contains(string(out), "File exists") && !strings.Contains(string(out), "already assigned") {
-		t.Fatalf("adding the VPS address: %v %s", err, out)
+	// The VPS's NetBird address, a webmail container's and a LAN client's,
+	// on this host for the test.
+	for _, a := range []string{itVPS, itWebmail, itLAN} {
+		if out, err := exec.Command("ip", "addr", "add", a+"/32", "dev", "lo").CombinedOutput(); err != nil && !strings.Contains(string(out), "File exists") && !strings.Contains(string(out), "already assigned") {
+			t.Fatalf("adding %s: %v %s", a, err, out)
+		}
+		defer exec.Command("ip", "addr", "del", a+"/32", "dev", "lo").Run()
 	}
-	defer exec.Command("ip", "addr", "del", itVPS+"/32", "dev", "lo").Run()
 	stopDaemons()
 	defer stopDaemons()
 
 	secret := "it-secret-0123456789abcdefghijklmnopqrstuvwxyz"
 	limits := NewThrottle()
 	authSrv := &AuthServer{Secret: func() string { return secret }, Checker: fakeChecker{}, Limits: limits}
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", DefaultAuthPort))
+	// hardyd's sign-in socket as hardyd-mail-auth.socket makes it: group
+	// dovecot, 0660.
+	_ = os.Remove(AuthSocket)
+	ln, err := net.Listen("unix", AuthSocket)
 	if err != nil {
 		t.Fatal(err)
 	}
+	itRun(t, "chgrp", "dovecot", AuthSocket)
+	itRun(t, "chmod", "0660", AuthSocket)
 	hs := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if os.Getenv("MAIL_IT_DEBUG") != "" {
 			body, _ := io.ReadAll(r.Body)
@@ -158,11 +184,12 @@ func TestMailServerIntegration(t *testing.T) {
 	// The real Root writes through rootfile, which wants root-owned
 	// folders all the way: true in the container.
 	cfg := RootConfig{
-		Pool: "tank", Hostname: itHost, VPSPeer: itVPS,
+		Pool: "tank", Hostname: itHost, VPSPeer: itVPS, NetBirdNet: "10.99.0.0/16", NetBirdIface: "lo",
 		Domains: []RootDomain{{Name: itDomain, Selector: "hardyos1"}},
 		Mailboxes: []RootMailbox{
-			{Address: "alice@example.test", Aliases: []string{"mom@example.test"}, QuotaMB: 100},
-			{Address: "bob@example.test", QuotaMB: 100},
+			{Key: itKeyAlice, Address: "alice@example.test", Aliases: []string{"mom@example.test"}, QuotaMB: 100},
+			{Key: itKeyBob, Address: "bob@example.test", QuotaMB: 100},
+			{Key: itKeyCarol, Address: "carol@example.test", QuotaMB: 1},
 		},
 		GroupAliases:   []RootGroupAlias{{Address: "family@example.test", Targets: []string{"alice@example.test", "bob@example.test"}}},
 		Postmaster:     "alice@example.test",
@@ -171,7 +198,7 @@ func TestMailServerIntegration(t *testing.T) {
 	}
 	ctx := context.Background()
 	res, err := r.Apply(ctx, ApplyArgs{Config: cfg, Secrets: RootSecrets{AuthSecret: secret,
-		DAV: map[string]string{"alice@example.test": "dav-secret-alice-0123456789abcdefgh"}}})
+		DAV: map[string]string{itKeyAlice: "dav-secret-alice-0123456789abcdefgh"}}})
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
@@ -272,9 +299,9 @@ func TestMailServerIntegration(t *testing.T) {
 		c.Close()
 		deadline := time.Now().Add(60 * time.Second)
 		for {
-			inbox, _ := filepath.Glob(filepath.Join(itMailRoot, "vmail", itDomain, "alice", "Maildir", "new", "*"))
-			junk, _ := filepath.Glob(filepath.Join(itMailRoot, "vmail", itDomain, "bob", "Maildir", ".Junk", "new", "*"))
-			bobIn, _ := filepath.Glob(filepath.Join(itMailRoot, "vmail", itDomain, "bob", "Maildir", "new", "*"))
+			inbox, _ := filepath.Glob(filepath.Join(itMailRoot, "vmail", itKeyAlice, "Maildir", "new", "*"))
+			junk, _ := filepath.Glob(filepath.Join(itMailRoot, "vmail", itKeyBob, "Maildir", ".Junk", "new", "*"))
+			bobIn, _ := filepath.Glob(filepath.Join(itMailRoot, "vmail", itKeyBob, "Maildir", "new", "*"))
 			if len(inbox) >= 1 && len(junk) >= 1 && len(bobIn) >= 1 {
 				signed := false
 				for _, f := range bobIn {
@@ -297,7 +324,7 @@ func TestMailServerIntegration(t *testing.T) {
 	})
 	t.Run("calendar through Radicale", func(t *testing.T) {
 		req, _ := http.NewRequest("PROPFIND", fmt.Sprintf("http://127.0.0.1:%d/family/", PortRadicale), nil)
-		req.SetBasicAuth("alice@example.test", "dav-secret-alice-0123456789abcdefgh")
+		req.SetBasicAuth(itKeyAlice, "dav-secret-alice-0123456789abcdefgh")
 		req.Header.Set("Depth", "1")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -307,7 +334,7 @@ func TestMailServerIntegration(t *testing.T) {
 		if resp.StatusCode != 207 {
 			t.Fatalf("PROPFIND /family/: %d", resp.StatusCode)
 		}
-		req.SetBasicAuth("alice@example.test", "wrong")
+		req.SetBasicAuth(itKeyAlice, "wrong")
 		resp, err = http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -317,6 +344,7 @@ func TestMailServerIntegration(t *testing.T) {
 			t.Fatalf("wrong calendar password: %d", resp.StatusCode)
 		}
 	})
+	securityReview(t)
 	_ = netip.Addr{}
 }
 
@@ -325,7 +353,7 @@ func smtpFrom(t *testing.T, src string, port int, implicitTLS bool) *smtp.Client
 	d := net.Dialer{Timeout: 10 * time.Second, LocalAddr: &net.TCPAddr{IP: net.ParseIP(src)}}
 	conn, err := d.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if src == itVPS {
-		conn, err = d.Dial("tcp", fmt.Sprintf("%s:%d", itVPS, port))
+		conn, err = d.Dial("tcp", net.JoinHostPort(itVPS, fmt.Sprint(port)))
 	}
 	if err != nil {
 		t.Fatal(err)
@@ -390,11 +418,9 @@ func proxyV2(client string, dstPort int) []byte {
 func imapLogin(t *testing.T, src string, port int, proxied, user, pass string) bool {
 	t.Helper()
 	d := net.Dialer{Timeout: 10 * time.Second, LocalAddr: &net.TCPAddr{IP: net.ParseIP(src)}}
-	dst := "127.0.0.1"
-	if src == itVPS {
-		dst = itVPS
-	}
-	conn, err := d.Dial("tcp", fmt.Sprintf("%s:%d", dst, port))
+	// To the client's own address (all of them are on lo here).
+	dst := src
+	conn, err := d.Dial("tcp", net.JoinHostPort(dst, fmt.Sprint(port)))
 	if err != nil {
 		return false
 	}

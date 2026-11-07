@@ -452,6 +452,7 @@ quota_exceeded_message = The mailbox is full.
 quota_status_success = DUNNO
 quota_status_nouser = DUNNO
 quota_status_overquota = 452 4.2.2 The mailbox is full
+quota_status_toolarge = 552 5.2.3 The message is bigger than this mailbox may hold
 
 # TLS for everyone: no plain-text sign-in, ever.
 ssl = required
@@ -469,9 +470,10 @@ haproxy_trusted_networks = %s
 # (auth policy: rate limits, turned-off mailboxes).
 auth_mechanisms = plain login
 auth_username_format = %%{user | lower}
-auth_cache_size = 10M
-auth_cache_ttl = 5 mins
-auth_cache_negative_ttl = 0
+# No sign-in cache: hardyd decides every time, with the client's address
+# (a cached success would let a webmail token work from anywhere, and a
+# turned-off mailbox keep working until the cache expires).
+auth_cache_size = 0
 auth_failure_delay = 2 secs
 
 auth_policy_server_url = %s/policy

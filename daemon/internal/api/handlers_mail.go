@@ -45,7 +45,7 @@ const (
 
 // WebmailAppID is the catalog app the Mail app is (Roundcube): its window
 // proxy signs the person in to their mailbox.
-const WebmailAppID = "roundcube"
+const WebmailAppID = apps.WebmailAppID
 
 // RegisterMailJobs adds the mail server's job kinds.
 func RegisterMailJobs(m *jobs.Manager, svc *manage.Service, pc *priv.Client) {

@@ -371,6 +371,9 @@ func GrantsOf(m apps.Manifest) []EntryGrant {
 	if m.Permissions.GPU {
 		out = append(out, EntryGrant{Grant: apps.GrantGPU, Label: "Use the server's graphics card (GPU), for example to convert videos"})
 	}
+	if m.Permissions.ROCm {
+		out = append(out, EntryGrant{Grant: apps.GrantROCm, Label: "Use AMD's compute interface (/dev/kfd), for machine learning on an AMD graphics card (ROCm)"})
+	}
 	for _, c := range m.Permissions.Capabilities {
 		if basicCapabilities[c] {
 			continue // in Docker's default set: nothing to grant

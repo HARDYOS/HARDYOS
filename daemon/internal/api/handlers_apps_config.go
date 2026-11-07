@@ -247,6 +247,7 @@ func (s *Server) handleSetAppAccess(w http.ResponseWriter, r *http.Request, u *a
 		s.writeAppError(w, p)
 		return
 	}
+	defer s.photosNudge() // Photos follows who may use Immich
 	if err := s.appStore().SetAccess(r.Context(), a.ID, list); err != nil {
 		s.writeAppError(w, err)
 		return

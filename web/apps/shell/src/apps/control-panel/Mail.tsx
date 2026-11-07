@@ -196,7 +196,12 @@ function SetupTab({ o }: { o: MailOverview }) {
             <Field label="Messages per person per hour" hint="Stops a stolen password from sending a flood">
               {(id) => <TextInput id={id} className="input mono" inputMode="numeric" value={s.sendPerHour ?? 200} onChange={(e) => edit({ sendPerHour: Number(e.target.value) || 0 })} />}
             </Field>
-            <Field label="Notifications from" hint="HardyOS's alerts can be sent through this server from this address (Control Panel › Notifications: “HardyOS Mail”)">
+            <Field label="Mail storage limit" hint="GB on the pool; 0 works one out from the mailboxes' sizes (never more than 80% of the pool)">
+              {(id) => (
+                <TextInput id={id} className="input mono" inputMode="numeric" value={Math.round((s.storageLimitMb ?? 0) / 1024)} onChange={(e) => edit({ storageLimitMb: (Number(e.target.value) || 0) * 1024 })} />
+              )}
+            </Field>
+            <Field label="Notifications from" hint="An address of its own, not anyone's mailbox, alias or group. HardyOS's alerts can be sent through this server from it (Control Panel › Notifications: “HardyOS Mail”)">
               {(id) => <TextInput id={id} className="input mono" value={s.notifyFrom ?? ""} placeholder="hardyos@example.net" onChange={(e) => edit({ notifyFrom: e.target.value.trim().toLowerCase() })} />}
             </Field>
           </div>
@@ -354,6 +359,7 @@ function MailboxesTab({ o }: { o: MailOverview }) {
                   <td>
                     {m.displayName || m.account}{" "}
                     {m.accountState !== "active" && <Badge tone={m.accountState === "deleted" ? "bad" : "warn"}>{m.accountState === "deleted" ? "account deleted" : "account off"}</Badge>}
+                    {m.deleting && <Badge tone="bad">being deleted</Badge>}
                   </td>
                   <td className="mono small">
                     {bytes((m.usedKb ?? 0) * 1024)}

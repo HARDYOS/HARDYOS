@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/shares"
 )
@@ -16,7 +17,15 @@ const (
 	OpSharesDelete  = "shares.delete"
 	OpSharesStarter = "shares.starter"
 	OpSharesFolders = "shares.folders"
+	// OpSharesLinks lists a share's symbolic links that lead out of it
+	// (Photos excludes them from Immich's libraries, decision 286).
+	OpSharesLinks = "shares.links"
 )
+
+// ShareLinksArgs names the share to scan.
+type ShareLinksArgs struct {
+	ID string `json:"id"`
+}
 
 // ShareDeleteArgs deletes a shared folder; Confirm is its name.
 type ShareDeleteArgs struct {
@@ -68,6 +77,13 @@ func RegisterShares(s *Server, m *shares.Manager, hooks ...ShareHook) {
 		l, err := m.CreateStarter(ctx, a)
 		runChanged(ctx, hooks)
 		return SharesResult{Shares: l}, sharesErr(err)
+	}))
+	s.Handle(OpSharesLinks, typed(func(ctx context.Context, a ShareLinksArgs) (any, error) {
+		// At most 10 minutes; a longer walk reports Truncated.
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+		defer cancel()
+		res, err := m.ScanLinks(ctx, a.ID)
+		return res, sharesErr(err)
 	}))
 	s.Handle(OpSharesFolders, typed(func(ctx context.Context, a ShareFoldersArgs) (any, error) {
 		l, err := m.Folders(ctx, a.ID, a.Path)

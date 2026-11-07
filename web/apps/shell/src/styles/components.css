@@ -1568,6 +1568,20 @@
   border: 0;
   background: #fff;
 }
+/* Photos: Immich in a window, with a sign-in hint above it. */
+.photos-app {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.photos-app__hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--hos-surface-border);
+}
 /* A click on a background window focuses it first (iframes swallow events). */
 .window:not(.is-focused) .app-frame__view {
   pointer-events: none;

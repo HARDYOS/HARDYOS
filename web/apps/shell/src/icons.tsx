@@ -132,6 +132,13 @@ export const MailIcon = svg(
     <path d="M3 7l9 6 9-6" />
   </>,
 );
+export const PhotoIcon = svg(
+  <>
+    <rect x="3" y="4" width="18" height="16" rx="3" />
+    <circle cx="15.5" cy="9" r="1.8" />
+    <path d="M3.5 17l5.5-6 4.5 5 2.5-2.5 4.5 4.5" />
+  </>,
+);
 export const CalendarIcon = svg(
   <>
     <rect x="3" y="5" width="18" height="16" rx="2" />

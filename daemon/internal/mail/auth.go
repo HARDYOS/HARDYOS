@@ -234,6 +234,20 @@ func (t *Throttle) result(login string, src Source, ok bool, users *auth.DelayLi
 	return before && !after
 }
 
+// Refused records an attempt the policy refused: from the internet it
+// counts against the address (never the mailbox); from inside it's ignored.
+// It returns true when this blocked the address.
+func (t *Throttle) Refused(src Source) (blocked bool) {
+	if !src.Internet {
+		return false
+	}
+	ip := key("ip:", ipKey(src.Addr))
+	before, _ := t.block.Allowed(ip)
+	t.block.Fail(ip)
+	after, _ := t.block.Allowed(ip)
+	return before && !after
+}
+
 // AuthEvent is told about blocked addresses (alerts) and every result
 // (counters).
 type AuthEvent struct {
@@ -494,8 +508,13 @@ func (s *AuthServer) policy(w http.ResponseWriter, r *http.Request) {
 		writeAuthJSON(w, http.StatusOK, map[string]any{"status": 0, "msg": ""})
 	case "report":
 		ok := req.Success != nil && *req.Success
-		// A failure caused by the policy itself isn't counted again.
+		// A sign-in the policy refused counts against its address only (an
+		// address that keeps trying while refused is blocked; the mailbox
+		// isn't held back any longer for it).
 		if !ok && req.FailType == "policy" {
+			if blocked := s.Limits.Refused(src); blocked && s.OnEvent != nil {
+				s.OnEvent(AuthEvent{Login: login, Remote: src.Addr.String(), Protocol: req.Protocol, Blocked: true})
+			}
 			writeAuthJSON(w, http.StatusOK, map[string]any{"status": 0})
 			return
 		}

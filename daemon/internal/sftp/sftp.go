@@ -169,7 +169,7 @@ func sshdSettings(root string) []string {
 	return []string{
 		"AllowGroups " + Group,
 		"ChrootDirectory " + root + "/%U",
-		"ForceCommand internal-sftp -d /",
+		"ForceCommand internal-sftp -d / -P symlink,hardlink",
 		"DisableForwarding yes",
 		"AllowTcpForwarding no",
 		"AllowAgentForwarding no",
@@ -204,7 +204,7 @@ func RenderSSHD(root string, on bool) string {
 	b.WriteString("# Written by HardyOS (Control Panel > File Services > SFTP): changes here are replaced.\n")
 	b.WriteString("# Domain accounts may only use SFTP, each inside its own view of the shared\n")
 	b.WriteString("# folders. Local accounts (root and other Linux accounts) are not affected.\n")
-	settings := []string{"DenyGroups *", "DisableForwarding yes", "PermitTTY no", "ForceCommand internal-sftp -d /", "ChrootDirectory /nonexistent"}
+	settings := []string{"DenyGroups *", "DisableForwarding yes", "PermitTTY no", "ForceCommand internal-sftp -d / -P symlink,hardlink", "ChrootDirectory /nonexistent"}
 	if on {
 		settings = sshdSettings(root)
 	} else {

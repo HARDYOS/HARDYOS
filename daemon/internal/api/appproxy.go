@@ -549,6 +549,9 @@ func (p *appProxy) handler(l *proxyListener) http.Handler {
 				"Your HardyOS sign-in ended or an administrator changed who may use it. Open it again from the desktop.")
 			return
 		}
+		if filterAppRequest(w, r, l.appID) {
+			return
+		}
 		if l.webmail.Load() {
 			if c, ok := p.webmailCreds(r, ss, key); ok {
 				r = r.WithContext(context.WithValue(r.Context(), webmailKey{}, c))

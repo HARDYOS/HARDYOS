@@ -27,6 +27,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/monitor"
 	"github.com/hardyos/hardyos/daemon/internal/notify"
 	"github.com/hardyos/hardyos/daemon/internal/oidc"
+	"github.com/hardyos/hardyos/daemon/internal/photos"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/publish"
 	"github.com/hardyos/hardyos/daemon/internal/replication"
@@ -144,6 +145,10 @@ type Server struct {
 	// waits hands a job's in-memory outcome (a new client secret) back to
 	// the request that started it.
 	waits jobWaits
+	// photos keeps Photos (Immich set up by HardyOS) state; nil without
+	// a database or the sign-in provider.
+	photos    *photos.Store
+	photosRun photosState
 }
 
 // New builds the API server and registers its routes.
@@ -186,6 +191,7 @@ func New(cfg Config) *Server {
 				if cfg.Jobs != nil {
 					s.registerOIDCJobs(cfg.Jobs)
 				}
+				s.newPhotos()
 			}
 		}
 	}
@@ -255,6 +261,7 @@ func (s *Server) routes() {
 			s.domainRoutes()
 			s.appRoutes()
 			s.remoteRoutes()
+			s.photosRoutes()
 			s.shareRoutes()
 			s.fileServiceRoutes()
 			s.snapshotRoutes()
