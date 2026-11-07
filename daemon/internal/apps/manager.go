@@ -81,6 +81,13 @@ type Manager struct {
 	// CatalogDir overrides DefaultCatalogDir under Root (tests): packages
 	// whose bytes match a file there are catalog apps.
 	CatalogDir string
+	// Backend finds apps on cluster storage attached to this server (part
+	// B's sanclient); nil: only apps on the engine's pool (cluster.go).
+	Backend StorageBackend
+	// ClusterShares resolves shared folders for apps on cluster storage
+	// (the storage node's shares mounted under /mnt/hc; part B's
+	// sanclient.ShareResolver); nil: cluster apps get Shares.
+	ClusterShares ShareResolver
 
 	mu sync.Mutex // installs and removals, one at a time
 
@@ -496,6 +503,9 @@ type installedApp struct {
 	manifest Manifest
 	state    appState
 	icon     []byte
+	// remote: on cluster storage (an NFS mount); started only by the
+	// cluster (ClusterStart).
+	remote bool
 }
 
 func (ia *installedApp) meta(name string) string { return filepath.Join(ia.dir, metaDir, name) }
@@ -680,6 +690,11 @@ func (m *Manager) load(ctx context.Context, c *EngineConfig, id string) (*instal
 	if err != nil {
 		return nil, err
 	}
+	return m.loadDir(ds, dir)
+}
+
+// loadDir reads an app's files from its folder.
+func (m *Manager) loadDir(ds, dir string) (*installedApp, error) {
 	ia := &installedApp{dataset: ds, dir: dir}
 	sb, err := readStateFile(ia.meta(stateFile))
 	if errors.Is(err, fs.ErrNotExist) {
@@ -1275,9 +1290,17 @@ func (m *Manager) app(ctx context.Context, id string) (*installedApp, *EngineCon
 		return nil, nil, err
 	}
 	if c == nil {
+		if ia, cc, ok := m.remoteApp(ctx, id); ok {
+			return ia, cc, nil
+		}
 		return nil, nil, ErrNoEngine
 	}
 	ia, err := m.load(ctx, c, id)
+	if errors.Is(err, ErrNotInstalled) {
+		if ia, cc, ok := m.remoteApp(ctx, id); ok {
+			return ia, cc, nil
+		}
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1285,6 +1308,23 @@ func (m *Manager) app(ctx context.Context, id string) (*installedApp, *EngineCon
 		return nil, nil, ErrNotInstalled
 	}
 	return ia, c, nil
+}
+
+// remoteApp is a cluster app attached here, for the read-only and
+// container operations that work the same on cluster storage.
+func (m *Manager) remoteApp(ctx context.Context, id string) (*installedApp, *EngineConfig, bool) {
+	if m.Backend == nil {
+		return nil, nil, false
+	}
+	ia, _, err := m.remote(ctx, id)
+	if err != nil {
+		return nil, nil, false
+	}
+	c, err := m.clusterEngine(ctx)
+	if err != nil {
+		return nil, nil, false
+	}
+	return ia, c, true
 }
 
 func (m *Manager) composeArgs(ia *installedApp, args ...string) []string {
@@ -1443,6 +1483,9 @@ func (m *Manager) Up(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	if ia.remote {
+		return ErrClusterPlaced
+	}
 	return m.up(ctx, ia, c)
 }
 
@@ -1472,6 +1515,9 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	if ia.remote {
+		return ErrClusterPlaced
+	}
 	_, err = m.runCompose(ctx, m.composeArgs(ia, "stop")...)
 	return err
 }
@@ -1481,6 +1527,9 @@ func (m *Manager) Restart(ctx context.Context, id string) error {
 	ia, _, err := m.app(ctx, id)
 	if err != nil {
 		return err
+	}
+	if ia.remote {
+		return ErrClusterPlaced
 	}
 	if err := checkBlocked(ia); err != nil {
 		return err
@@ -1650,4 +1699,13 @@ func contains(xs []string, x string) bool {
 		}
 	}
 	return false
+}
+
+// sharesFor is the share resolver for an app: cluster apps resolve the
+// storage node's shares mounted here, local apps this server's.
+func (m *Manager) sharesFor(ia *installedApp) ShareResolver {
+	if ia != nil && ia.remote && m.ClusterShares != nil {
+		return m.ClusterShares
+	}
+	return m.Shares
 }

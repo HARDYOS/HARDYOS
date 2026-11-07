@@ -5463,6 +5463,143 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/cluster/ha": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** High availability in the cluster - placements, nodes' HA readiness, the coordinator, this node's fence agent and watchdog, pre-pulled images */
+        get: operations["getClusterHA"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/ha/watchdog/{node}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Allow (or stop allowing) HA workloads on a compute server without a hardware watchdog; confirm is the server's name (a job) */
+        put: operations["setClusterWatchdogOverride"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/ha/timings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Change the failover timings, within the bounds HardyOS enforces (dead >= quorum lease + watchdog + 10 s, self-stop < watchdog; a job) */
+        put: operations["setClusterTimings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/workloads/{kind}/{id}/ha": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Set a cluster workload's HA policy (a job; refused for VMs with passthrough devices and on servers without a watchdog) */
+        put: operations["setClusterHAPolicy"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/workloads/{kind}/{id}/request": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start or stop a cluster workload wherever it is placed (a job) */
+        post: operations["requestClusterWorkload"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/moves": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Moves started on this server, newest first */
+        get: operations["listClusterMoves"];
+        put?: never;
+        /** Move a workload to another compute server, offline or (VMs) live; confirm (the workload's name) for passthrough devices or a server that is down (a job) */
+        post: operations["moveClusterWorkload"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/moves/candidates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Where a workload could move, and whether it can move live (the Move dialog) */
+        get: operations["getClusterMoveCandidates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/moves/drain": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Move everything off a compute server (live where possible, HA first); stopOthers also stops what can't move (confirm = the server's name; a job) */
+        post: operations["drainClusterNode"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -8427,6 +8564,8 @@ export interface components {
             labels?: {
                 [key: string]: string;
             };
+            /** @description A named libvirt CPU model (the cluster's baseline) instead of the host's CPU; empty: host-passthrough */
+            cpuModel?: string;
         };
         VM: components["schemas"]["VMSpec"] & {
             dataset: string;
@@ -8442,6 +8581,13 @@ export interface components {
             diskUsage: {
                 [key: string]: number;
             };
+            /**
+             * @description cluster: on the storage server (moves and HA from Cluster)
+             * @enum {string}
+             */
+            backend?: "local" | "cluster";
+            /** @description The cluster placement generation its storage was attached under */
+            generation?: number;
         };
         VMKeptDisk: {
             dataset: string;
@@ -9732,6 +9878,166 @@ export interface components {
             sizeGB?: number;
             removeOld?: boolean;
             confirm: string;
+        };
+        ClusterHAPolicy: {
+            enabled: boolean;
+            /** @description 1-100, higher recovers first (default 50) */
+            priority?: number;
+            /** @description Restarts in place per hour before relocating (default 3) */
+            maxRestarts?: number;
+            /** @description Relocations per hour before giving up (default 2) */
+            maxRelocations?: number;
+            preferred?: string[] | null;
+            restricted?: boolean;
+            antiAffinity?: string;
+            failBack?: boolean;
+        };
+        ClusterPlacement: {
+            workload: components["schemas"]["ClusterWorkloadRef"];
+            name: string;
+            owner?: string;
+            target?: string;
+            generation: number;
+            /** @enum {string} */
+            requested: "running" | "stopped";
+            /** @enum {string} */
+            state: "stopped" | "starting" | "running" | "stopping" | "migrating" | "moving" | "recovering" | "pending" | "error";
+            ha: components["schemas"]["ClusterHAPolicy"];
+            pinned?: boolean;
+            storage?: {
+                [key: string]: unknown;
+            };
+            problem?: string;
+            /** Format: date-time */
+            changed: string;
+        };
+        ClusterGrant: {
+            workload: components["schemas"]["ClusterWorkloadRef"];
+            nodes: string[];
+            /** @enum {string} */
+            mode: "exclusive" | "migration";
+            generation: number;
+            applied: boolean;
+        };
+        ClusterNodeHA: {
+            id: string;
+            name: string;
+            state: string;
+            /** @description hardware, softdog or empty (none) */
+            watchdog: string;
+            eligible: boolean;
+            reason?: string;
+            override: boolean;
+        };
+        ClusterTimings: {
+            heartbeatMs: number;
+            suspectMs: number;
+            quorumLeaseMs: number;
+            selfStopMs: number;
+            watchdogMs: number;
+            deadMs: number;
+            storageIsolatedMs: number;
+            lanIsolatedMs: number;
+            fenceAckMs: number;
+        };
+        ClusterHAEvent: {
+            /** Format: date-time */
+            at: string;
+            kind: string;
+            target: string;
+            message: string;
+            problem?: string;
+        };
+        ClusterCoordinator: {
+            active: boolean;
+            /** Format: date-time */
+            leaderSince?: string;
+            storageLost: boolean;
+            suspect: string[];
+            lastHeard: {
+                [key: string]: string;
+            };
+            recent: components["schemas"]["ClusterHAEvent"][];
+        };
+        ClusterFenceAgent: {
+            /** @enum {string} */
+            state: "disarmed" | "armed" | "selffencing";
+            kind: string;
+            problem?: string;
+            haHere: components["schemas"]["ClusterWorkloadRef"][];
+            /** Format: date-time */
+            lastFence?: string;
+            fenceReason?: string;
+            cleanStopped: boolean;
+        };
+        ClusterWatchdog: {
+            armed: boolean;
+            kind: string;
+            timeoutSec?: number;
+            pettingForMs: number;
+            /** Format: date-time */
+            lastPet?: string;
+            problem?: string;
+        };
+        ClusterPrepull: {
+            app: string;
+            images: string[];
+            missing: string[];
+            failed?: {
+                [key: string]: string;
+            };
+            /** Format: date-time */
+            checked: string;
+        };
+        ClusterHAStatus: {
+            member: boolean;
+            self?: string;
+            quorate: boolean;
+            /** @description Durations in nanoseconds (cluster.Timings) */
+            timings: {
+                [key: string]: number;
+            };
+            nodes: components["schemas"]["ClusterNodeHA"][];
+            placements: components["schemas"]["ClusterPlacement"][];
+            coordinator?: components["schemas"]["ClusterCoordinator"];
+            fence?: components["schemas"]["ClusterFenceAgent"];
+            prepull: components["schemas"]["ClusterPrepull"][];
+            watchdog?: components["schemas"]["ClusterWatchdog"];
+            leader?: string;
+            cpuBaseline?: string;
+            grants: {
+                [key: string]: components["schemas"]["ClusterGrant"];
+            };
+        };
+        ClusterMoveCandidate: {
+            id: string;
+            name: string;
+            fits: boolean;
+            reason?: string;
+        };
+        ClusterMoveCandidates: {
+            placement: components["schemas"]["ClusterPlacement"];
+            candidates: components["schemas"]["ClusterMoveCandidate"][];
+            live: boolean;
+            liveReason?: string;
+            pinned: boolean;
+            ownerDown: boolean;
+        };
+        ClusterMoveRecord: {
+            jobId: string;
+            kind: string;
+            workload: string;
+            from: string;
+            to: string;
+            mode: string;
+            /** Format: date-time */
+            started: string;
+            /** Format: date-time */
+            finished: string;
+            downtimeMs: number;
+            ok: boolean;
+            problem?: string;
+            actor: string;
         };
     };
     responses: {
@@ -18266,6 +18572,236 @@ export interface operations {
             400: components["responses"]["Invalid"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    getClusterHA: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Status (member false outside a cluster) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClusterHAStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    setClusterWatchdogOverride: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    allow: boolean;
+                    /** @description The server's name, typed */
+                    confirm: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    setClusterTimings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClusterTimings"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    setClusterHAPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: "vm" | "app";
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    policy: components["schemas"]["ClusterHAPolicy"];
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    requestClusterWorkload: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: "vm" | "app";
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @enum {string} */
+                    requested: "running" | "stopped";
+                    /** @description The generation the person saw (0: any) */
+                    generation?: number;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listClusterMoves: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Moves */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClusterMoveRecord"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    moveClusterWorkload: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @enum {string} */
+                    kind: "vm" | "app";
+                    id: string;
+                    /** @description Empty: HardyOS chooses */
+                    to?: string;
+                    /** @enum {string} */
+                    mode: "offline" | "live";
+                    generation?: number;
+                    confirm?: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    getClusterMoveCandidates: {
+        parameters: {
+            query: {
+                kind: "vm" | "app";
+                id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Candidates */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClusterMoveCandidates"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    drainClusterNode: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    node: string;
+                    stopOthers?: boolean;
+                    confirm?: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
 }

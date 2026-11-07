@@ -58,6 +58,9 @@ func (m *Manager) TakeSnapshot(ctx context.Context, a SnapshotArgs) (*Snapshot, 
 	if err != nil {
 		return nil, err
 	}
+	if err := localOnly(st); err != nil {
+		return nil, err
+	}
 	name := "vm-" + m.now().Format("20060102-150405")
 	existing, _ := m.snapshots(ctx, st)
 	for i := 1; ; i++ {
@@ -120,6 +123,9 @@ func (m *Manager) thaw(id string) {
 func (m *Manager) Snapshots(ctx context.Context, id string) ([]Snapshot, error) {
 	st, err := m.find(ctx, id)
 	if err != nil {
+		return nil, err
+	}
+	if err := localOnly(st); err != nil {
 		return nil, err
 	}
 	return m.snapshots(ctx, st)
@@ -188,6 +194,9 @@ func (m *Manager) Rollback(ctx context.Context, a RollbackArgs) (*VM, error) {
 	defer unlock()
 	st, err := m.find(ctx, a.ID)
 	if err != nil {
+		return nil, err
+	}
+	if err := localOnly(st); err != nil {
 		return nil, err
 	}
 	if !Confirms(a.Confirm, &st.spec) {
@@ -285,6 +294,9 @@ func (m *Manager) DeleteSnapshot(ctx context.Context, a DeleteSnapshotArgs) erro
 	defer unlock()
 	st, err := m.find(ctx, a.ID)
 	if err != nil {
+		return err
+	}
+	if err := localOnly(st); err != nil {
 		return err
 	}
 	if !Confirms(a.Confirm, &st.spec) {
@@ -438,6 +450,9 @@ type ImportArgs struct {
 func (m *Manager) StartImport(ctx context.Context, a ImportArgs) (*Task, error) {
 	st, err := m.find(ctx, a.ID)
 	if err != nil {
+		return nil, err
+	}
+	if err := localOnly(st); err != nil {
 		return nil, err
 	}
 	var disk *Disk

@@ -6,6 +6,7 @@ import { dateTime } from "../../format";
 import { Alert, Button, Card, Field, PageHeader, Select, TextInput } from "../../ui";
 import { JobProgress } from "../shared";
 import type { ClusterStatus } from "../../cluster/scope";
+import { StorageNetworkStep } from "./storage";
 
 type Offer = components["schemas"]["ClusterJoinOffer"];
 
@@ -22,7 +23,17 @@ export function CreateOrJoin() {
           Join a cluster
         </Button>
       </div>
-      {mode === "create" ? <CreateForm /> : <JoinWizard />}
+      {mode === "create" ? (
+        <>
+          <CreateForm />
+          <Card title="Storage network">
+            <p className="muted small">iSCSI and NFS between the servers go over their own network: a dedicated port, a VLAN, or (not recommended) the LAN.</p>
+            <StorageNetworkStep />
+          </Card>
+        </>
+      ) : (
+        <JoinWizard />
+      )}
     </div>
   );
 }
@@ -83,7 +94,7 @@ function JoinWizard() {
     onSuccess: (r) => setJob(r.job.id),
   });
   return (
-    <Card title={`Join a cluster — step ${step} of 3`}>
+    <Card title={`Join a cluster — step ${step} of 4`}>
       <div className="stack">
         {step === 1 && (
           <>
@@ -121,6 +132,18 @@ function JoinWizard() {
         )}
         {step === 3 && (
           <>
+            <p className="muted small">
+              This server's address on the storage network (iSCSI and NFS from the storage server). It can also be set later in Cluster › Storage.
+            </p>
+            <StorageNetworkStep onDone={() => setStep(4)} />
+            <div className="row">
+              <Button onClick={() => setStep(2)}>Back</Button>
+              <Button onClick={() => setStep(4)}>Next</Button>
+            </div>
+          </>
+        )}
+        {step === 4 && (
+          <>
             <p>
               Join through <strong>{address}</strong> as a <strong>{role}</strong> server. The two servers prove the code to each other; this server keeps
               its own pools and apps.
@@ -130,7 +153,7 @@ function JoinWizard() {
               <JobProgress id={job} onDone={() => qc.invalidateQueries({ queryKey: ["cluster"] })} />
             ) : (
               <div className="row">
-                <Button onClick={() => setStep(2)}>Back</Button>
+                <Button onClick={() => setStep(3)}>Back</Button>
                 <Button variant="primary" busy={m.isPending} onClick={() => m.mutate()}>
                   Join
                 </Button>

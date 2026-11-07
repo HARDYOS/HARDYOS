@@ -75,6 +75,7 @@ type Service struct {
 	mu     sync.Mutex
 	st     *DBStore
 	core   *cluster.Core
+	live   *Live
 	ctx    context.Context
 	bootID string
 }

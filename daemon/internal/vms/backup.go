@@ -73,6 +73,9 @@ func (m *Manager) BackupSnapshot(ctx context.Context, id, snap string) (*BackupS
 	if err != nil {
 		return nil, err
 	}
+	if err := localOnly(st); err != nil {
+		return nil, err
+	}
 	running := m.state(ctx, id) == "running"
 	frozen := false
 	if running && st.spec.GuestAgent {
@@ -171,6 +174,9 @@ func (m *Manager) RestoreFromBackup(ctx context.Context, id, confirm string, f R
 	check := func() (*stored, error) {
 		st, err := m.find(ctx, id)
 		if err != nil {
+			return nil, err
+		}
+		if err := localOnly(st); err != nil {
 			return nil, err
 		}
 		if !Confirms(confirm, &st.spec) {

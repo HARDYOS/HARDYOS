@@ -87,6 +87,9 @@ type Storage struct{}
 
 var _ cluster.Applier = Storage{}
 
+// Every FSM (members and the witness) applies the storage commands.
+func init() { register(Storage{}) }
+
 // Types implements cluster.Applier.
 func (Storage) Types() []cluster.CommandType {
 	return []cluster.CommandType{cluster.CmdStorageApplied, cluster.CmdStorageFenced, cluster.CmdStorageUnfence,
@@ -112,37 +115,37 @@ func (st Storage) Apply(s *cluster.Snapshot, c cluster.Command) error {
 	switch c.Type {
 	case cluster.CmdStorageApplied:
 		var b StorageAppliedBody
-		if err := decode(c.Body, &b); err != nil {
+		if err := decodeStorage(c.Body, &b); err != nil {
 			return err
 		}
 		return applyApplied(s, b)
 	case cluster.CmdStorageFenced:
 		var b StorageFencedBody
-		if err := decode(c.Body, &b); err != nil {
+		if err := decodeStorage(c.Body, &b); err != nil {
 			return err
 		}
 		return applyFenced(s, b, c)
 	case cluster.CmdStorageUnfence:
 		var b StorageUnfencedBody
-		if err := decode(c.Body, &b); err != nil {
+		if err := decodeStorage(c.Body, &b); err != nil {
 			return err
 		}
 		return applyUnfenced(s, b)
 	case cluster.CmdShareCluster:
 		var b ShareClusterBody
-		if err := decode(c.Body, &b); err != nil {
+		if err := decodeStorage(c.Body, &b); err != nil {
 			return err
 		}
 		return applyShare(s, b)
 	case cluster.CmdAppUID:
 		var b AppUIDBody
-		if err := decode(c.Body, &b); err != nil {
+		if err := decodeStorage(c.Body, &b); err != nil {
 			return err
 		}
 		return applyAppUID(s, b)
 	case cluster.CmdStorageLayout:
 		var b StorageLayoutBody
-		if err := decode(c.Body, &b); err != nil {
+		if err := decodeStorage(c.Body, &b); err != nil {
 			return err
 		}
 		return applyLayout(s, b)
@@ -150,7 +153,7 @@ func (st Storage) Apply(s *cluster.Snapshot, c cluster.Command) error {
 	return fmt.Errorf("storage applier: unexpected command %q", c.Type)
 }
 
-func decode(raw json.RawMessage, v any) error {
+func decodeStorage(raw json.RawMessage, v any) error {
 	if err := json.Unmarshal(raw, v); err != nil {
 		return fmt.Errorf("bad command body: %w", err)
 	}

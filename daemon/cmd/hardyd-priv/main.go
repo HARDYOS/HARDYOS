@@ -204,7 +204,6 @@ func main() {
 		if err != nil {
 			log.Error("file access isn't available", "err", err)
 		}
-		go am.OnStart(ctx)
 		// The mail server: configuration rendered by root from what hardyd
 		// sends (validated again here); back after a restart once its pool
 		// is mounted.
@@ -222,6 +221,15 @@ func main() {
 		devs.Assignments = vmm.Assignments
 		go reconcileDevices(ctx, devs, log)
 		priv.RegisterVMs(s, vmm)
+		wireClusterC(s, vmm, am, log)
+		// Cluster storage: storage node (LIO, exports, firewall) and compute
+		// client; the VM and app engines find cluster workloads' storage
+		// through part B's backends (part C's runtime ops start them).
+		clusterStorage := wireClusterB(ctx, s, log, am.PreBackup)
+		vmm.Backend = clusterStorage.VMs
+		am.Backend = clusterStorage.Apps
+		am.ClusterShares = clusterStorage.Shares
+		go am.OnStart(ctx) // after its cluster backend is set
 		// Versioned cloud backups (restic) of shared folders, apps, VMs and
 		// the settings; the destination an installer's "Restore from
 		// backup" left is taken over now (after the settings restore above).
@@ -237,7 +245,6 @@ func main() {
 		priv.RegisterCloudBackup(s, cb)
 		go vmm.OnStart(ctx)
 		go vmm.Watch(ctx)
-		_ = wireClusterB(ctx, s, log, am.PreBackup) // cluster storage: storage node (LIO, exports, firewall) and compute client
 		// Replication between servers: snapshots, zfs send and receive
 		// (into <pool>/replicas/<source>/ only), restores. VMs are frozen
 		// by their guest agent for the snapshot when they can be.

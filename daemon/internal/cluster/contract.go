@@ -466,6 +466,18 @@ type Fence struct {
 	ConfirmedAt time.Time `json:"confirmedAt,omitempty"`
 }
 
+// WatchdogOverride is an administrator's typed confirmation that a node
+// without a hardware watchdog may host HA workloads (softdog doesn't
+// survive a kernel hang). Part C amendment.
+type WatchdogOverride struct {
+	Node NodeID `json:"node"`
+	// Kind is the watchdog the node had when it was allowed ("softdog" or
+	// ""); the override lapses when the node reports another kind.
+	Kind  string    `json:"kind"`
+	Actor Actor     `json:"actor"`
+	At    time.Time `json:"at"`
+}
+
 // StorageHealth is the storage node's report.
 type StorageHealth struct {
 	Node      NodeID `json:"node"`
@@ -519,6 +531,9 @@ type Snapshot struct {
 	// ClusterShares are the shared folders on the storage node with "Use in
 	// the cluster" on, by share id (storage.share; part B).
 	ClusterShares map[string]*ClusterShare `json:"clusterShares,omitempty"`
+	// HAOverrides: nodes an administrator allowed to host HA workloads
+	// without a hardware watchdog (CmdHAWatchdog; part C amendment).
+	HAOverrides map[NodeID]*WatchdogOverride `json:"haOverrides,omitempty"`
 	// Index is the Raft index this snapshot reflects.
 	Index uint64 `json:"index"`
 }
@@ -575,6 +590,10 @@ const (
 	CmdNodeIsolated   CommandType = "node.isolated"
 	CmdNodeRejoin     CommandType = "node.rejoin"
 	CmdCPUBaseline    CommandType = "cluster.cpubaseline"
+	// CmdHAWatchdog records an administrator's per-node override that lets
+	// HA workloads run on a node without a hardware watchdog (softdog or
+	// none; decision 352). Part C amendment.
+	CmdHAWatchdog CommandType = "ha.watchdog"
 )
 
 // Actor is who caused a command: a person through a node, or HardyOS

@@ -432,7 +432,10 @@ func CheckTimings(t cluster.Timings) error {
 	if t.Heartbeat >= t.Suspect || t.Heartbeat*3 > t.QuorumLease {
 		return errors.New("the heartbeat must be well inside the suspect time and the quorum lease")
 	}
-	return nil
+	// Part C's bounds (decision 353): every node refuses what the API
+	// refuses, so an unsafe value can't reach the state through another
+	// member.
+	return ValidateTimings(t)
 }
 
 func applyTimings(s *cluster.Snapshot, c cluster.Command) error {

@@ -14,3 +14,6 @@ sg3-utils
 rsync
 e2fsprogs
 xfsprogs
+# Phase 8 part C: the live-migration channel is narrowed with libvirt's
+# polkit access driver (decision 351; vms.migrate.setup refuses without it).
+polkitd

@@ -2322,6 +2322,53 @@ LIO on a file-backed pool with initiators in network namespaces (their own
 iscsid and `/etc/iscsi`), a fence under I/O, and NFS mounts from the
 namespaces; it skips with the reason when the kernel lacks the target modules.
 
+### Placement, moves, HA and fencing (part C)
+
+The plan is `docs/plans/cluster.md` sections 6.3-7.6; decisions 350-359.
+
+- **State** (`internal/cluster/state/placement.go`, `fence.go`): pure appliers
+  for `workload.*`, `placement.*`, `move.*`, `ha.policy`, `ha.watchdog`,
+  `cluster.cpubaseline`, `node.dead/isolated/rejoin`. Every owner or grant
+  change raises the generation; owner changes need a stopped report, a
+  confirmed fence, or a live migration's collapse (decision 350).
+  `state.MayRun` is the single check before a node runs anything;
+  `state.ValidateTimings` bounds the timings (decision 353).
+- **Placement** (`internal/cluster/placement`): filters active, quorate,
+  storage-reachable compute nodes with the bridges/VLANs, memory (never
+  overcommitted), CPU model and HA watchdog a workload needs; scores preferred
+  nodes, anti-affinity, least committed memory; returns reasons.
+- **Node** (hardyd, `internal/cluster/runtime`, `fence`): the reconciler
+  stops stale workloads and starts placed ones through hardyd-priv's
+  `vms.cluster.*` / `apps.cluster.*` ops, which refuse any generation other
+  than the attachment's; the fence agent arms the watchdog for HA workloads
+  and self-fences on lease loss or `node.dead/isolated`; root's feeder pets
+  `/dev/watchdog0` only within hardyd's deadline (decision 356); the
+  pre-puller keeps HA apps' images (decision 355).
+- **Leader** (`internal/cluster/ha`): detection, isolation, recovery only
+  after the storage fence, pending/relocation, LAN evacuation, fail back
+  (decision 359). `ha.Service` wires everything and backs
+  `/api/v1/cluster/ha`, `/cluster/workloads/{kind}/{id}/{ha,request}`,
+  `/cluster/moves[/candidates|/drain]`.
+- **Moves** (`internal/cluster/moves`): offline (stop on A, report, hand over,
+  storage regrants, B attaches and starts) and live (two-node grant, both
+  attach, destination admits, source sends over a relayed one-shot socket,
+  grant collapses; failure keeps the VM on A). Passthrough VMs: offline only,
+  to a node whose own `devices.check` passes, confirmed (decision 354).
+  Peer API steps under `/cluster/v1/moves/*`.
+- **Live migration channel** (decision 351): `hardyos-migrate` user, polkit
+  access driver with per-migration rules, `packaging/libvirt/hooks/qemu` →
+  `hardyd-priv libvirt-hook` → `vms.migrate.check`. Cluster VMs render with
+  `cache=none`, `error_policy=stop`, their LUN by WWN and the cluster CPU
+  baseline (`Spec.CPUModel`, chosen by `vms.ChooseBaseline`).
+- **Publishing** (`internal/publish/cluster.go`): cluster apps' NetBird
+  services are named after the cluster and follow the owner (decision 358).
+- **Tests**: `clustertest` is an in-process cluster (real appliers, fake
+  membership, storage node, runtimes, watchdogs, fake clock) that flags any
+  moment two nodes could write one disk; the scenarios of section 7.4, moves
+  with a real HTTP relay, a random-command property test of the appliers, the
+  watchdog feeder against a fake device, and the XML check. Nothing touches a
+  real watchdog, libvirt, disk or network.
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly
