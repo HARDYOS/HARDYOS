@@ -30,6 +30,7 @@ recommends:
   - rspamd
   - redis-server
   - radicale
+  - gunicorn
 contents:
   - src: ../dist/bin/hardyd
     dst: /usr/bin/hardyd

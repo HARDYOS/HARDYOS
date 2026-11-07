@@ -60,7 +60,7 @@ type Passwords interface {
 }
 
 // sameAccount reports whether the directory's account is the one the
-// mailbox belongs to (decision 319): a mailbox tied to an objectGUID opens
+// mailbox belongs to (decision 361): a mailbox tied to an objectGUID opens
 // only for that account, whatever its name is now.
 func sameAccount(m *Mailbox, guid string) bool {
 	return m.AccountGUID == "" || guid == "" || strings.EqualFold(m.AccountGUID, guid)
@@ -556,7 +556,7 @@ func (s *Service) SyncAccounts(ctx context.Context) (*AccountSync, error) {
 		}
 		m := byAccount[acct]
 		// Renamed in the domain: the mailbox follows the account (by its
-		// objectGUID), keeping its address and mail (decision 319).
+		// objectGUID), keeping its address and mail (decision 361).
 		if g := byGUID[strings.ToLower(u.GUID)]; u.GUID != "" && g != nil && g.Account != acct {
 			if m != nil && m != g {
 				// Something else holds the new name: it isn't this account's.

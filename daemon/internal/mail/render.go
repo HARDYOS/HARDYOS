@@ -194,7 +194,7 @@ mailbox_size_limit = 0
 authorized_submit_users = root
 maximal_queue_lifetime = 5d
 bounce_queue_lifetime = 5d
-# No bounces to the internet (decisions 311, 319): a message without a
+# No bounces to the internet (decisions 311, 362): a message without a
 # return address (a bounce or delivery notice) going outside is only ever
 # about mail that came in from outside, often with a forged sender, so it
 # never goes out through Amazon SES. It fails here instead, and Postfix

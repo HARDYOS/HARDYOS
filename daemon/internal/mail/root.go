@@ -428,7 +428,7 @@ func StorageLimitMB(c RootConfig, poolMB int64) int64 {
 	return limit
 }
 
-// storageLimit sets the dataset's refquota (decision 319: what the mail
+// storageLimit sets the dataset's refquota (decision 360: what the mail
 // itself uses; snapshots don't count against it). Warnings only: mail runs
 // without. A limit below what the mail already uses isn't set.
 func (r *Root) storageLimit(ctx context.Context, cfg RootConfig, res *ApplyResult) {

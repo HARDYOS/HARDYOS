@@ -1749,14 +1749,14 @@ Details: [monitoring.md](monitoring.md).
 
 ## Mail server
 
-User guide: [mail.md](mail.md); decisions 239-249, security review 303-316 (the port registry, 303, is HardyOS-wide).
+User guide: [mail.md](mail.md); decisions 239-249, security reviews 303-319 and 360-364 (the port registry, 303, is HardyOS-wide).
 
 ```
  internet ─25─► VPS Postfix (relay, verify, queue 14 d) ─NetBird─► Postfix :2525 ─► Rspamd milter ─► Dovecot LMTP ─► <pool>/mail/vmail
  apps ─993/465/587─► VPS HAProxy ─PROXY v2─► Dovecot :10993 / Postfix :10465 :10587       (nftables: VPS peer only)
  LAN apps ─993/465/587──────────────────────► Dovecot / Postfix                          Postfix ─587 STARTTLS─► Amazon SES
  Dovecot passdb oauth2 + auth policy ─/run/hardyos-mail-auth.sock─► hardyd (domain passwords: Kerberos with the local DC; webmail tokens; limits)
- phones ─https://mail.<base>─► NetBird proxy ─► app gateway ─► hardyd /dav-mail/ (checks the password) ─► Radicale 127.0.0.1:5232
+ phones ─https://mail.<base>─► NetBird proxy ─► app gateway ─► hardyd /dav-mail/ (checks the password) ─► Radicale (gunicorn, Unix socket)
  desktop ─► window proxy (Basic: address + session token) ─► Roundcube (catalog app, 127.0.0.1) ─► Dovecot / Postfix on the host
 ```
 
@@ -1810,8 +1810,10 @@ User guide: [mail.md](mail.md); decisions 239-249, security review 303-316 (the 
   session's key, good only while that session is (`sessionAlive`).
 - **Calendars and contacts.** `/dav-mail/` (hardyd's mux, and
   `mail.<base>` through the gateway) checks Basic credentials like a mail
-  sign-in (throttled by the client's address) and proxies to Radicale on
-  127.0.0.1 with the mailbox's derived password and `X-Script-Name`.
+  sign-in (throttled like one) and proxies to Radicale, served by gunicorn
+  on `/run/hardyos-mail/radicale/radicale.sock` (setgid radicale:hardyd;
+  `mail.RadicaleDialer` checks the socket's owner first, decision 319),
+  as the mailbox's key with its derived password and `X-Script-Name`.
 - **Publishing.** While the mail server is on and its name is
   `<label>.<base>`, Remote Access publishes it (key `mail`, public, nothing
   in front); the gateway serves only autoconfig, autodiscover and

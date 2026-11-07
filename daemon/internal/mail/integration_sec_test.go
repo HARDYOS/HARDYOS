@@ -143,7 +143,7 @@ func securityReview(t *testing.T) {
 			return w.Close()
 		}
 		for name, h := range map[string]string{
-			"two From headers": "From: alice@example.test\r\nFrom: bob@example.test\r\n",
+			"two From headers":                    "From: alice@example.test\r\nFrom: bob@example.test\r\n",
 			"another address in the display name": "From: \"bob@example.test\" <alice@example.test>\r\n",
 			"an encoded display name":             "From: =?utf-8?b?Ym9iQGV4YW1wbGUudGVzdA==?= <alice@example.test>\r\n",
 			"group syntax":                        "From: Friends: alice@example.test, bob@example.test;\r\n",

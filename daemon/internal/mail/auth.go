@@ -610,9 +610,9 @@ type policyRequest struct {
 	// RealLocalPort is the port the connection really came in on (local_port
 	// is what a PROXY header claims).
 	RealLocalPort json.RawMessage `json:"real_local_port"`
-	Protocol  string          `json:"protocol"`
-	FailType  string          `json:"fail_type"`
-	Success   *bool           `json:"success"`
+	Protocol      string          `json:"protocol"`
+	FailType      string          `json:"fail_type"`
+	Success       *bool           `json:"success"`
 }
 
 // source classifies a policy request: through a port the VPS forwards to,
