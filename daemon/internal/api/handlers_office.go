@@ -83,6 +83,9 @@ type officeTicket struct {
 	sessHash string
 	frame    string // the desktop's origin, for frame-ancestors
 	expires  time.Time
+	// relayed: opened through another member's desktop (the browser has
+	// no session here); the single-use ticket alone opens the editor.
+	relayed bool
 }
 
 type officeRuntime struct {
@@ -926,6 +929,19 @@ func (s *Server) handleOfficeOpen(w http.ResponseWriter, r *http.Request, u *aut
 		return
 	}
 	token, _ := s.sessionToken(r)
+	sessHash := hashSecret(token)
+	rr := relayedFrom(r)
+	if rr != nil {
+		// Through another member's desktop (decision 373): the editor is
+		// this server's, at this server's own LAN address; the ticket is
+		// bound to the entry node's session as the assertion names it.
+		if rr.selfHost == "" {
+			writeError(w, http.StatusServiceUnavailable, "office_unavailable", "this server has no LAN address for the editor")
+			return
+		}
+		origin = requestScheme(r) + "://" + net.JoinHostPort(rr.selfHost, strconv.Itoa(rt.port()))
+		sessHash = rr.rel.Assertion.Session
+	}
 	name := u.DisplayName
 	if name == "" {
 		name = displayName(u.Username)
@@ -938,7 +954,8 @@ func (s *Server) handleOfficeOpen(w http.ResponseWriter, r *http.Request, u *aut
 		s.writeOfficeError(w, err)
 		return
 	}
-	t := rt.addTicket(&officeTicket{ed: ed, title: path.Base(p), sessHash: hashSecret(token), frame: desktopOrigin(r), expires: time.Now().Add(officeTicketLifetime)})
+	t := rt.addTicket(&officeTicket{ed: ed, title: path.Base(p), sessHash: sessHash, frame: desktopOrigin(r), expires: time.Now().Add(officeTicketLifetime),
+		relayed: rr != nil})
 	writeJSON(w, http.StatusOK, OfficeOpened{URL: origin + "/s/-/office/editor?t=" + t, Mode: string(ed.Mode), Title: path.Base(p), ViewReason: ed.ViewReason})
 }
 
@@ -967,11 +984,7 @@ func hashSecret(s string) string {
 }
 
 func desktopOrigin(r *http.Request) string {
-	scheme := "https"
-	if r.TLS == nil {
-		scheme = "http"
-	}
-	return scheme + "://" + r.Host
+	return requestScheme(r) + "://" + r.Host
 }
 
 // originFor is the office origin as the browser behind r reaches it.
@@ -1030,15 +1043,18 @@ func (rt *officeRuntime) serveDesktopEditor(w http.ResponseWriter, r *http.Reque
 		office.ServeMessage(w, http.StatusGone, "Open the document again", "This editor link was already used or has expired.", "")
 		return
 	}
-	tok, ok := rt.s.sessionToken(r)
-	if !ok || hashSecret(tok) != t.sessHash {
-		office.ServeMessage(w, http.StatusForbidden, "Open the document again", "Open documents from the HardyOS desktop you're signed in to.", "")
-		return
+	if !t.relayed {
+		tok, ok := rt.s.sessionToken(r)
+		if !ok || hashSecret(tok) != t.sessHash {
+			office.ServeMessage(w, http.StatusForbidden, "Open the document again", "Open documents from the HardyOS desktop you're signed in to.", "")
+			return
+		}
+		if _, err := rt.s.peekSession(r.Context(), tok); err != nil {
+			office.ServeMessage(w, http.StatusForbidden, "Sign in again", "Your desktop session has ended.", "")
+			return
+		}
 	}
-	if _, err := rt.s.peekSession(r.Context(), tok); err != nil {
-		office.ServeMessage(w, http.StatusForbidden, "Sign in again", "Your desktop session has ended.", "")
-		return
-	}
+
 	rt.gate.Set(w, r)
 	office.ServeEditor(w, t.ed, t.title, t.ed.ViewReason, t.frame)
 }

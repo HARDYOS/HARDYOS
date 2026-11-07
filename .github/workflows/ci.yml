@@ -52,7 +52,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq zfsutils-linux acl gdisk dosfstools squashfs-tools grub-efi-amd64-bin grub-pc-bin grub2-common
           sudo modprobe zfs
-          zfs version
+          sudo zfs version
       - name: build test binaries
         working-directory: daemon
         run: |
@@ -75,6 +75,53 @@ jobs:
         run: sudo HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/cloudbackup.test" -test.run 'TestZFSIntegrationCloudBackup|TestSandbox' -test.v -test.timeout 10m
       - name: replication between two pools over mutual TLS (full, incremental, resume, refusals, restore)
         run: sudo HARDYOS_ZFS_INTEGRATION=1 "$RUNNER_TEMP/replication.test" -test.run TestZFSReplicationIntegration -test.v -test.timeout 15m
+
+  cluster:
+    name: Cluster (namespaces)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache: false
+      - name: install ZFS, LIO, open-iscsi and the NFS server
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zfsutils-linux acl nfs-kernel-server open-iscsi e2fsprogs \
+            "linux-modules-extra-$(uname -r)" || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zfsutils-linux acl nfs-kernel-server open-iscsi e2fsprogs
+          sudo modprobe zfs
+          # The test runs its own iscsid for each initiator; the runner's stays off.
+          sudo systemctl disable --now iscsid.socket iscsid.service open-iscsi.service 2>/dev/null || true
+          sudo systemctl disable --now nfs-server.service || true
+          sudo mkdir -p /etc/systemd/system-generators
+          sudo ln -sf /dev/null /etc/systemd/system-generators/nfs-server-generator
+          sudo systemctl daemon-reload
+          sudo modprobe -a target_core_mod target_core_iblock iscsi_target_mod iscsi_tcp || echo "LIO modules unavailable: the LIO test will skip"
+      - name: build test binaries
+        working-directory: daemon
+        run: |
+          go test -c -o "$RUNNER_TEMP/san.test" ./internal/cluster/san
+          go test -race -c -o "$RUNNER_TEMP/e2e.test" ./internal/cluster/e2e
+      - name: parts A, B and C together - join, storage grants, VM and app placed, offline move, node death, fence, recovery
+        working-directory: daemon/internal/cluster/e2e
+        run: '"$RUNNER_TEMP/e2e.test" -test.run TestClusterEndToEnd -test.v -test.count 1 -test.timeout 10m'
+      - name: storage node - LIO targets with mutual CHAP, initiators with private iscsids, fence under I/O, cluster NFS exports
+        # The kernel's log and the journal stream into this step while the
+        # test runs: a kernel problem with LIO or the initiator on the
+        # runner shows up here even if the runner itself goes down.
+        run: |
+          sudo dmesg -W --time-format iso | sed -u 's/^/[kernel] /' &
+          sudo journalctl -f -n 0 -o short-iso | sed -u 's/^/[journal] /' &
+          trap 'sudo pkill -f "dmesg -W" || true; sudo pkill -f "journalctl -f" || true' EXIT
+          # Its own session: nothing the iSCSI tools signal reaches the runner.
+          sudo HARDYOS_CLUSTER_INTEGRATION=1 setsid -w "$RUNNER_TEMP/san.test" -test.run 'TestClusterStorageIntegration|TestFirewallSyntax' -test.v -test.timeout 10m
+      - name: LIO and NFS state
+        if: failure()
+        run: |
+          sudo targetcli ls 2>/dev/null || sudo find /sys/kernel/config/target -maxdepth 4 | head -100 || true
+          sudo cat /etc/exports.d/hardyos-cluster.exports || true
+          sudo dmesg | tail -60 || true
 
   nfs:
     name: NFS (loopback)

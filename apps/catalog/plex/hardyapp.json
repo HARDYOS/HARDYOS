@@ -35,5 +35,6 @@
       "suggest": "media"
     }
   ],
-  "permissions": { "gpu": true }
+  "permissions": { "gpu": true },
+  "storage": { "database": "sqlite" }
 }

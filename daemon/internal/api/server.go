@@ -19,6 +19,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/backups"
 	"github.com/hardyos/hardyos/daemon/internal/clientip"
 	"github.com/hardyos/hardyos/daemon/internal/cloudbackups"
+	"github.com/hardyos/hardyos/daemon/internal/cluster/ha"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/files"
 	"github.com/hardyos/hardyos/daemon/internal/installer"
@@ -120,6 +121,9 @@ type Config struct {
 	// Mail is the family mail server (Control Panel › Mail); nil leaves it
 	// out.
 	Mail *manage.Service
+	// ClusterHA is Phase 8 part C (placement, moves, HA); nil or outside a
+	// cluster its endpoints say so.
+	ClusterHA *ha.Service
 
 	// OfficeInternal replaces looking the Document Server up among the
 	// apps (tests, the office integration job): its http://127.0.0.1:port.
@@ -174,6 +178,9 @@ func New(cfg Config) *Server {
 	}
 	if cfg.Root == nil {
 		cfg.Root = os.DirFS("/")
+	}
+	if cfg.ClusterHA != nil {
+		clusterSpecs.Store(cfg.ClusterHA)
 	}
 	s := &Server{cfg: cfg, mux: http.NewServeMux(), started: time.Now(), log: cfg.Logger,
 		ips: &clientip.Resolver{Trusted: cfg.TrustedProxies}, pubLimiter: auth.NewDelayLimiter()}
@@ -281,6 +288,7 @@ func (s *Server) routes() {
 			s.vmRoutes()
 			s.deviceRoutes()
 			s.replicationRoutes()
+			s.clusterHARoutes()
 		}
 		if s.cfg.Backups != nil {
 			s.backupRoutes()

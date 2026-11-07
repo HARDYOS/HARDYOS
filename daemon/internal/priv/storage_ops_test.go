@@ -50,6 +50,10 @@ const okStatus = "  pool: tank\n state: ONLINE\nconfig:\n\n\tNAME STATE READ WRI
 
 func id(n string) string { return "/dev/disk/by-id/ata-DISK_" + n }
 
+// localScan is zpool import's -d list for storageEnv's disks.
+const localScan = "-d /dev/disk/by-id/ata-DISK_nvme0n1 -d /dev/disk/by-id/ata-DISK_sda -d /dev/disk/by-id/ata-DISK_sdb " +
+	"-d /dev/disk/by-id/ata-DISK_sdc -d /dev/disk/by-id/ata-DISK_sdd -d /dev/disk/by-id/ata-DISK_sde"
+
 func TestCreatePoolWipesAndCreates(t *testing.T) {
 	st, f := storageEnv(t)
 	f.OnPrefix("zpool labelclear", sysexec.Result{ExitCode: 1}) // no label: ignored
@@ -244,7 +248,7 @@ func TestTypedRejectsUnknownFields(t *testing.T) {
 // mounting, put back under /mnt/<pool>, and only then mounted.
 func TestImportPoolKeepsMountsInsideThePool(t *testing.T) {
 	st, f := storageEnv(t)
-	f.On("zpool import -N -d /dev/disk/by-id evil", "")
+	f.On("zpool import -N "+localScan+" evil", "")
 	f.On(strings.Join(append([]string{"zpool"}, zfs.PoolListArgs...), " "), "evil\t100\t1\t99\t0\t1\tONLINE\t123\n")
 	f.On("zfs list -Hp -r -t filesystem -o name,mountpoint evil",
 		"evil\t/etc\nevil/shares\t/etc/shares\nevil/ok\t/mnt/evil/ok\nevil/usr\t/usr\nevil/raw\tlegacy\n")
@@ -255,7 +259,7 @@ func TestImportPoolKeepsMountsInsideThePool(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"zpool import -N -d /dev/disk/by-id evil",
+		"zpool import -N " + localScan + " evil",
 		"zfs set mountpoint=/mnt/evil evil",
 		"zfs inherit mountpoint evil/shares",
 		"zfs inherit mountpoint evil/usr",
@@ -272,7 +276,7 @@ func TestImportPoolKeepsMountsInsideThePool(t *testing.T) {
 	}
 	// A garbled listing mounts nothing.
 	st2, f2 := storageEnv(t)
-	f2.On("zpool import -N -d /dev/disk/by-id evil", "")
+	f2.On("zpool import -N "+localScan+" evil", "")
 	f2.On(strings.Join(append([]string{"zpool"}, zfs.PoolListArgs...), " "), "evil\t100\t1\t99\t0\t1\tONLINE\t123\n")
 	f2.On("zfs list -Hp -r -t filesystem -o name,mountpoint evil", "evil\t/mnt/evil\nother/x\t/etc\n")
 	if _, err := st2.importPool(context.Background(), PoolImportArgs{Pool: "evil"}); err == nil {

@@ -67,6 +67,40 @@ func fakeRoot() fstest.MapFS {
 	}
 }
 
+// Cluster LUNs on a compute node are never offered as free disks, and
+// zpool import never scans them (M5).
+func TestClusterLUNsAreNotLocalDisks(t *testing.T) {
+	out := `{"blockdevices":[
+	 {"name":"sda","path":"/dev/sda","size":1000,"type":"disk","rota":false,"model":"X","serial":"1","wwn":null,"tran":"sata","fstype":null,"label":null,"mountpoints":[null],"hotplug":false,"phy-sec":512},
+	 {"name":"sdb","path":"/dev/sdb","size":1000,"type":"disk","rota":false,"model":"hcv_web_disk0","serial":"s","wwn":"0x6001405efda8e8ca455410a838c6a63b","tran":"iscsi","fstype":"zfs_member","label":"guestpool","mountpoints":[null],"hotplug":false,"phy-sec":512},
+	 {"name":"sdc","path":"/dev/sdc","size":1000,"type":"disk","rota":false,"model":"Y","serial":"2","wwn":"0x60014051111111111111111111111111","tran":null,"fstype":null,"label":null,"mountpoints":[null],"hotplug":false,"phy-sec":512}
+	]}`
+	disks, err := parseDisks([]byte(out), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(disks) != 1 || disks[0].Name != "sda" {
+		t.Fatalf("disks %+v", disks)
+	}
+	root := fstest.MapFS{
+		"dev/disk/by-id/ata-X_1":                                link("../../sda"),
+		"dev/disk/by-id/ata-X_1-part1":                          link("../../sda1"),
+		"dev/disk/by-id/wwn-0x6001405efda8e8ca455410a838c6a63b": link("../../sdb"),
+		"dev/disk/by-id/scsi-36001405efda8e8ca455410a838c6a63b": link("../../sdb"),
+		"dev/disk/by-id/scsi-SLIO-ORG_hcv_web_disk0_x-part1":    link("../../sdb1"),
+		"sys/class/block/sda":                                   link("../../devices/pci0000:00/0000:00:17.0/ata1/host0/target0:0:0/0:0:0:0/block/sda"),
+		"sys/class/block/sda1":                                  link("../../devices/pci0000:00/0000:00:17.0/ata1/host0/target0:0:0/0:0:0:0/block/sda/sda1"),
+		"sys/class/block/sdb1":                                  link("../../devices/platform/host3/session1/target3:0:0/3:0:0:0/block/sdb/sdb1"),
+	}
+	got := ImportDevices(root)
+	if len(got) != 2 || got[0] != "/dev/disk/by-id/ata-X_1" || got[1] != "/dev/disk/by-id/ata-X_1-part1" {
+		t.Fatalf("import scan %v", got)
+	}
+	if args, ok := ImportScanArgs(fstest.MapFS{}); ok || len(args) != 0 {
+		t.Fatalf("nothing to scan must not scan everything: %v", args)
+	}
+}
+
 func TestListDisks(t *testing.T) {
 	f := (&sysexec.Fake{}).On("lsblk -J -b -o "+lsblkColumns, lsblkFixture)
 	disks, err := ListDisks(context.Background(), f, fakeRoot())

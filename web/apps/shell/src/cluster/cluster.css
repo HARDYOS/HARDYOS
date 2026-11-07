@@ -1,0 +1,88 @@
+/* The cluster desktop: the menu bar's server switcher and the Cluster app. */
+.menubar__switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: 1px solid var(--hos-border, rgba(255, 255, 255, 0.12));
+  border-radius: 999px;
+  padding: 2px 10px;
+  color: var(--hos-text-2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.menubar__switcher:hover {
+  background: var(--hos-surface-2);
+}
+
+.cluster-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 12px;
+}
+.cluster-node {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cluster-node__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.cluster-node__name {
+  font-weight: 600;
+}
+.cluster-node__meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 10px;
+  font-size: 12px;
+}
+.cluster-node__meta dt {
+  color: var(--hos-text-3, var(--hos-text-2));
+}
+.cluster-node__meta dd {
+  margin: 0;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+}
+.cluster-path {
+  display: inline-flex;
+  gap: 4px;
+}
+.cluster-path span {
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 0 6px;
+  border: 1px solid var(--hos-border, rgba(255, 255, 255, 0.12));
+  opacity: 0.55;
+}
+.cluster-path span.is-current {
+  opacity: 1;
+  border-color: #22d3ee;
+  color: #22d3ee;
+}
+.cluster-path span.is-down {
+  text-decoration: line-through;
+}
+.cluster-code {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 20px;
+  letter-spacing: 0.04em;
+  user-select: all;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--hos-surface-2);
+  text-align: center;
+}
+.cluster-script {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11px;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--hos-surface-2);
+}

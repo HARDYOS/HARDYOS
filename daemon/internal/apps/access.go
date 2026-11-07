@@ -319,10 +319,11 @@ func (m *Manager) currentShareBinds(ctx context.Context, ia *installedApp) ([]sh
 		if ch.Path != "" {
 			return nil, fmt.Errorf("%s has a subfolder of shared folder %s for %s; apps get whole shared folders now: choose the shared folder again in the app's settings", ia.manifest.Name, ch.Share, name)
 		}
-		if m.Shares == nil {
+		shares := m.sharesFor(ia)
+		if shares == nil {
 			return nil, fmt.Errorf("%s uses shared folders, which aren't available; refusing to start", ia.manifest.Name)
 		}
-		host, err := m.Shares.Resolve(ctx, ch.Share, "")
+		host, err := shares.Resolve(ctx, ch.Share, "")
 		if err != nil {
 			return nil, fmt.Errorf("shared folder %s for %s: %w", ch.Share, name, err)
 		}

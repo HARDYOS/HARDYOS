@@ -1,0 +1,16 @@
+#!/bin/sh
+# libvirt's qemu hook, installed by HardyOS (Phase 8 cluster, decisions 351
+# and 385). libvirt runs it as root: qemu <domain> <operation>
+# <sub-operation> <extra>, with the domain XML on stdin.
+#
+# An incoming live migration ("migrate") and every start of QEMU
+# ("prepare", "start", "restore") go to hardyd-priv: a cluster VM, or one
+# with an open migration admission, starts only when its XML matches
+# HardyOS's own rendering of the VM's stored settings. This server's own
+# VMs pass (also while hardyd-priv is down, unless their XML names cluster
+# storage). Every other operation passes untouched.
+case "$2" in
+migrate | prepare | start | restore) ;;
+*) exit 0 ;;
+esac
+exec /usr/bin/hardyd-priv libvirt-hook "$@"

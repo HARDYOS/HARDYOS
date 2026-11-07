@@ -16,7 +16,7 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
 
 .PHONY: build
-build: build-daemon build-web build-apps ## Build Go binaries, the web desktop and the app catalog
+build: build-daemon build-witness build-web build-apps ## Build Go binaries, the witness, the web desktop and the app catalog
 
 .PHONY: build-daemon
 build-daemon: ## Build hardyd, hardyd-priv and hardyctl into dist/bin
@@ -24,6 +24,22 @@ build-daemon: ## Build hardyd, hardyd-priv and hardyctl into dist/bin
 	cd daemon && CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -trimpath -ldflags "$(LDFLAGS)" -o $(DIST)/bin/ ./cmd/...
 	@# hardyos-nss asks NSS (winbind) for domain users' IDs, so it needs cgo (decision 93).
 	cd daemon && CGO_ENABLED=1 GOOS=linux GOARCH=$(GOARCH) go build -trimpath -ldflags "$(LDFLAGS)" -o $(DIST)/bin/hardyos-nss ./cmd/hardyos-nss
+
+# The cluster witness for the VPS (docs/cluster.md): pure Go and static, so
+# another architecture is one more entry here (e.g. WITNESS_ARCHES="amd64
+# arm64"); members serve the binary of their own architecture's package.
+WITNESS_ARCHES ?= $(ARCH)
+
+.PHONY: build-witness
+build-witness: ## Build hardyos-witness into dist/witness/<arch>/
+	@for a in $(WITNESS_ARCHES); do \
+		mkdir -p $(DIST)/witness/$$a && \
+		(cd daemon && CGO_ENABLED=0 GOOS=linux GOARCH=$$a go build -trimpath -ldflags "$(LDFLAGS)" \
+			-o $(DIST)/witness/$$a/hardyos-witness ./cmd/hardyos-witness) || exit 1; \
+	done
+	@# The package carries its own architecture's witness (nfpm doesn't
+	@# expand variables in content paths).
+	cp $(DIST)/witness/$(ARCH)/hardyos-witness $(DIST)/witness/hardyos-witness
 
 .PHONY: build-apps
 build-apps: ## Pack every app in apps/catalog into dist/apps/<id>.hardyapp

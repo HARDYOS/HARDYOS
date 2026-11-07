@@ -1067,6 +1067,9 @@ func (s *Server) handleAppUpdate(w http.ResponseWriter, r *http.Request, u *auth
 	if !ok {
 		return
 	}
+	if s.refuseClusterApp(w, a.ID) {
+		return
+	}
 	st := s.appStore()
 	if ref.Source == "" {
 		switch a.Source {

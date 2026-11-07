@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/hardyos/hardyos/daemon/internal/cluster"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/vms"
@@ -43,6 +44,9 @@ type vmCreateParams struct {
 type vmUpdateParams struct {
 	vms.UpdateArgs
 	PasswordRef string `json:"passwordRef,omitempty"`
+	// Cluster is set for a cluster VM placed here: after root saved the
+	// settings, its owner records their hash as approved (decision 386).
+	Cluster *cluster.Actor `json:"cluster,omitempty"`
 }
 
 // VMJobResult is what VM jobs return.
@@ -258,6 +262,12 @@ func registerVMJobs(m *jobs.Manager, pc *priv.Client) {
 		var r vms.Result
 		if err := call(jc, pc, 5*time.Minute, priv.OpVMsUpdate, args, &r); err != nil {
 			return nil, err
+		}
+		if p.Cluster != nil {
+			jc.Progress(95, "Recording the approved settings in the cluster")
+			if err := approveClusterVM(jc, args.Spec.ID, *p.Cluster); err != nil {
+				return nil, err
+			}
 		}
 		return VMJobResult{VM: r.VM, Warnings: r.Warnings}, nil
 	})

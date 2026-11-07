@@ -1,0 +1,20 @@
+[Unit]
+Description=HardyOS cluster storage firewall (saved table)
+Documentation=https://github.com/HARDYOS/HARDYOS
+# hardyd-priv writes the table (/etc/hardyos/cluster-storage.nft) and
+# loads it whenever the cluster changes; this loads the saved copy at boot
+# before the NFS server or anything on the storage network starts, so the
+# storage network is never open while hardyd-priv catches up (L1).
+DefaultDependencies=no
+Wants=network-pre.target
+Before=network-pre.target nfs-server.service rpcbind.service iscsid.service libvirtd.service
+After=local-fs.target
+ConditionPathExists=/etc/hardyos/cluster-storage.nft
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/hardyos/cluster-storage.nft
+
+[Install]
+WantedBy=sysinit.target

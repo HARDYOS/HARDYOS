@@ -34,6 +34,9 @@ MemoryDenyWriteExecute=yes
 RestrictRealtime=yes
 SystemCallArchitectures=native
 ReadWritePaths=-/run/hardyos
+# LIO's configfs holds the iSCSI CHAP secrets: hardyd never sees it (M3;
+# hardyd-priv also makes the target folder root's alone).
+InaccessiblePaths=-/sys/kernel/config
 
 [Install]
 WantedBy=multi-user.target

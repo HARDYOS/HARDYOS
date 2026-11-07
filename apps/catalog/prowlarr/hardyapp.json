@@ -16,5 +16,6 @@
   ],
   "folders": [
     { "path": "config", "mode": "0750" }
-  ]
+  ],
+  "storage": { "database": "sqlite" }
 }

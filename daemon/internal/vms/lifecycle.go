@@ -180,6 +180,18 @@ func (m *Manager) Start(ctx context.Context, id string) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	if st.cluster != nil {
+		// Only the cluster starts it, on the server it is placed on, with
+		// the generation of its grant (ClusterStart).
+		return nil, ErrClusterPlaced
+	}
+	return m.startStored(ctx, st)
+}
+
+// startStored starts a VM found by find; the caller holds its lock.
+func (m *Manager) startStored(ctx context.Context, st *stored) (*Result, error) {
+	id := st.spec.ID
+	var err error
 	switch m.state(ctx, id) {
 	case "running":
 		v, err := m.Get(ctx, id)
@@ -197,7 +209,11 @@ func (m *Manager) Start(ctx context.Context, id string) (*Result, error) {
 		return &Result{VM: v, Warnings: []string{}}, err
 	}
 	s := &st.spec
-	if err := s.Validate(m.host(ctx)); err != nil {
+	h := m.host(ctx)
+	if st.cluster != nil {
+		h.Pools = nil // its pool is the storage server's
+	}
+	if err := s.Validate(h); err != nil {
 		return nil, fmt.Errorf("the VM's settings need fixing first: %w", err)
 	}
 	if err := m.confined(ctx); err != nil {
@@ -802,6 +818,10 @@ func (m *Manager) OnStart(ctx context.Context) {
 		s := stats[st.spec.ID]
 		if s.State == "running" || s.State == "paused" {
 			m.setRunning(st.spec.ID, true)
+			continue
+		}
+		if st.cluster != nil {
+			// The cluster defines and starts it where it is placed.
 			continue
 		}
 		if err := m.define(ctx, st, nil); err != nil {

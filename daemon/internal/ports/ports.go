@@ -20,6 +20,9 @@ const (
 	AppProxyCount = 100
 	// Replication is the receiving side of replication (decision 190).
 	Replication = 44400
+	// Cluster is the cluster listener on members and the witness: Raft,
+	// the peer API and live migration relays (decision 321).
+	Cluster = 44500
 )
 
 // Fixed lists every single fixed port with its owner (the app proxy range
@@ -29,4 +32,5 @@ var Fixed = map[string]int{
 	"office origin":   Office,
 	"office internal": OfficeInternal,
 	"replication":     Replication,
+	"cluster":         Cluster,
 }
