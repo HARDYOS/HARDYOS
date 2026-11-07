@@ -37,6 +37,9 @@ build-witness: ## Build hardyos-witness into dist/witness/<arch>/
 		(cd daemon && CGO_ENABLED=0 GOOS=linux GOARCH=$$a go build -trimpath -ldflags "$(LDFLAGS)" \
 			-o $(DIST)/witness/$$a/hardyos-witness ./cmd/hardyos-witness) || exit 1; \
 	done
+	@# The package carries its own architecture's witness (nfpm doesn't
+	@# expand variables in content paths).
+	cp $(DIST)/witness/$(ARCH)/hardyos-witness $(DIST)/witness/hardyos-witness
 
 .PHONY: build-apps
 build-apps: ## Pack every app in apps/catalog into dist/apps/<id>.hardyapp

@@ -69,7 +69,7 @@ contents:
     file_info: { mode: 0755 }
   # The cluster witness binary members hand to the witness install script
   # over NetBird (never run on a member; docs/cluster.md).
-  - src: ../dist/witness/${ARCH}/hardyos-witness
+  - src: ../dist/witness/hardyos-witness
     dst: /usr/lib/hardyos/hardyos-witness
     file_info: { mode: 0644 }
   # Console login screen: the server's web address, kept current by hardyos-issue.service.

@@ -206,13 +206,17 @@ func ensureBackstore(fsys FS, d Desired, b Backstore, r Resolved) error {
 func setBackstoreAttrs(fsys FS, dir string, b Backstore, r Resolved) error {
 	for _, a := range []struct{ n, v string }{
 		{"emulate_tpu", "1"}, // discard -> zvol frees the blocks
-		{"emulate_write_cache", boolAttr(r.WriteCache)},
 		{"is_nonrot", boolAttr(b.NonRot)},
 	} {
 		if err := setAttr(fsys, dir+"/attrib/"+a.n, a.v); err != nil {
 			return fmt.Errorf("backstore %s: %s: %w", b.Name, a.n, err)
 		}
 	}
+	// iblock backstores report the block device's own write cache (the
+	// kernel refuses emulate_write_cache=1 with EINVAL when the backend has
+	// one, as iblock does): a zvol announces its cache itself and honours
+	// flushes. The attribute is set only where the kernel lets it be.
+	_ = setAttr(fsys, dir+"/attrib/emulate_write_cache", boolAttr(r.WriteCache))
 	return nil
 }
 

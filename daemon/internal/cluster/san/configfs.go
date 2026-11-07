@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 // ConfigFSRoot is LIO's configfs directory.
@@ -279,6 +280,10 @@ func (f *FakeFS) Write(p, value string) error {
 	}
 	if strings.HasSuffix(p, "/wwn/vpd_unit_serial") && f.linkedTo(strings.TrimSuffix(p, "/wwn/vpd_unit_serial")) {
 		return &fs.PathError{Op: "write", Path: p, Err: errors.New("unable to set the unit serial while exported")}
+	}
+	if strings.HasPrefix(p, "core/iblock_") && strings.HasSuffix(p, "/attrib/emulate_write_cache") && value == "1" {
+		// iblock reports the block device's own write cache.
+		return &fs.PathError{Op: "write", Path: p, Err: syscall.EINVAL}
 	}
 	switch {
 	case strings.HasSuffix(p, "/control"):
