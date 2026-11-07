@@ -23,6 +23,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/store"
+	"github.com/hardyos/hardyos/daemon/internal/vms"
 )
 
 // Parts are what parts A and B provide on this node. Any may be nil until
@@ -188,6 +189,7 @@ func (s *Service) Start(ctx context.Context) {
 	}
 	if s.Priv != nil {
 		run(s.watchPolkit)
+		run(s.setupMigration)
 	}
 	wg.Wait()
 }
@@ -219,6 +221,54 @@ func (s *Service) watchPolkit(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+		}
+	}
+}
+
+// MigrationSetupInterval is how often a compute server checks that live
+// migration is set up for its current storage address.
+var MigrationSetupInterval = time.Minute
+
+// setupMigration sets a compute server up to receive live migrations
+// (vms.migrate.setup: the migration user, polkit rules, libvirt's access
+// driver and QEMU's migration_address on the storage address) once it is
+// in the cluster with a storage address, and again whenever that address
+// changes. Root's setup is idempotent; a failure is retried.
+func (s *Service) setupMigration(ctx context.Context) {
+	t := time.NewTicker(MigrationSetupInterval)
+	defer t.Stop()
+	// Applied changes (joining, a new storage address) are checked at
+	// once; failures are retried on the ticker.
+	changes := s.Parts.Membership.Subscribe(ctx)
+	done, failed := "", ""
+	for {
+		if s.Member() {
+			if self, err := s.Parts.Membership.Self(); err == nil && self.Role == cluster.RoleCompute && self.Addresses.Storage.IsValid() {
+				addr := self.Addresses.Storage.String()
+				if addr != done {
+					cctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+					err := s.Priv.Call(cctx, priv.OpVMsMigrateSetup, vms.MigrateSetupArgs{StorageAddress: addr}, nil)
+					cancel()
+					switch {
+					case err == nil:
+						done, failed = addr, ""
+						s.audit("cluster.migration.setup", "this server", "live migration accepted on "+addr)
+					case err.Error() != failed && ctx.Err() == nil:
+						failed = err.Error()
+						s.log().Warn("cluster: setting up live migration", "storage", addr, "err", err)
+						s.auditOutcome("cluster.migration.setup", "this server", "live migration on "+addr, err)
+					}
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		case _, ok := <-changes:
+			if !ok {
+				changes = nil
+			}
 		}
 	}
 }

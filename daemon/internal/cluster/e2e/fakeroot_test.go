@@ -537,6 +537,8 @@ type computeRoot struct {
 	migAllowed map[cluster.NodeID]time.Time
 	migOpened  int
 	migRevoked int
+	// migrationAddr is the storage address vms.migrate.setup was given.
+	migrationAddr string
 }
 
 // allowsMigrationFrom says whether this destination's firewall lets the
@@ -839,6 +841,13 @@ func computeServer(w *world, node cluster.NodeID) (*priv.Server, *computeRoot) {
 		return nil, w.migrate(node, cluster.NodeID(a.To), ref, a.Generation, ok && r.Generation == a.Generation)
 	})
 	handle(s, priv.OpVMsMigrateEnd, func(context.Context, vms.MigrateEndArgs) (any, error) { return nil, nil })
+	handle(s, priv.OpVMsMigrateSetup, func(_ context.Context, a vms.MigrateSetupArgs) (any, error) {
+		h.mu.Lock()
+		h.migrationAddr = a.StorageAddress
+		h.mu.Unlock()
+		return nil, nil
+	})
+	handle(s, priv.OpVMsMigrateHealth, func(context.Context, none) (any, error) { return map[string]any{"ok": true}, nil })
 
 	// Cluster storage, as the storage node allows it now.
 	handle(s, sanclient.OpStatus, func(context.Context, none) (any, error) {

@@ -508,6 +508,19 @@ func TestClusterEndToEnd(t *testing.T) {
 	}
 
 	// ---- live migration c1 -> c2 and back, with both nodes on the LUN -------------------
+	// Each compute server set itself up for live migration on its own
+	// storage address (vms.migrate.setup, QEMU's migration_address).
+	h.eventually("live migration is set up on every compute server's storage address", 10*time.Second, func() error {
+		for _, n := range []*hnode{c1, c2, c3} {
+			n.root.mu.Lock()
+			got := n.root.migrationAddr
+			n.root.mu.Unlock()
+			if got != n.addrs.Storage.String() {
+				return fmt.Errorf("%s set up live migration on %q", n.id, got)
+			}
+		}
+		return nil
+	})
 	for _, hop := range [][2]*hnode{{c1, c2}, {c2, c1}} {
 		src, dst := hop[0], hop[1]
 		p, _ := placed(h.snap(), web)
