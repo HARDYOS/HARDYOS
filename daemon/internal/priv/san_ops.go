@@ -71,6 +71,10 @@ func RegisterSAN(s *Server, r *san.Root) {
 		res, err := r.VolumeResize(ctx, a.Cluster, a.VolumeArgs)
 		return res, sanErr(err)
 	}))
+	s.Handle(san.OpVolumeInfo, typed(func(ctx context.Context, a VolumeCreateArgs) (any, error) {
+		res, err := r.VolumeInfo(ctx, a.Cluster, a.VolumeArgs)
+		return res, sanErr(err)
+	}))
 	s.Handle(san.OpVolumeDestroy, typed(func(ctx context.Context, a san.DestroyArgs) (any, error) {
 		return map[string]bool{"destroyed": true}, sanErr(r.VolumeDestroy(ctx, a))
 	}))
@@ -83,6 +87,10 @@ func RegisterSAN(s *Server, r *san.Root) {
 	}))
 	s.Handle(san.OpDatasetInfo, typed(func(ctx context.Context, a san.WorkloadArgs) (any, error) {
 		res, err := r.DatasetInfo(ctx, a)
+		return res, sanErr(err)
+	}))
+	s.Handle(san.OpShareInfo, typed(func(ctx context.Context, a san.ShareArgs) (any, error) {
+		res, err := r.ShareInfo(ctx, a)
 		return res, sanErr(err)
 	}))
 	s.Handle(san.OpSnapshotCreate, typed(func(ctx context.Context, a san.SnapshotArgs) (any, error) {

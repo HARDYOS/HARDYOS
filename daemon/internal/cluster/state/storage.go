@@ -75,8 +75,8 @@ const (
 )
 
 var (
-	idRE   = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}[a-z0-9]$`)
-	poolRE = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_.:-]{0,63}$`)
+	idRE    = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}[a-z0-9]$`)
+	poolRE  = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_.:-]{0,63}$`)
 	fsidRE  = regexp.MustCompile(`^[0-9]{1,20}$`)
 	shareRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 	diskRE  = regexp.MustCompile(`^disk[0-9]$`)

@@ -722,6 +722,11 @@ type AppStorageRequest struct {
 	Pool string `json:"pool"`
 	// UID is the app's cluster-wide user id (CmdAppUID).
 	UID int `json:"uid"`
+	// Mode is the app's data mode ("" = StorageNFS); block mode also
+	// needs BlockFS (ext4 or xfs) and BlockSizeGB (part B, decision 341).
+	Mode        StorageMode `json:"mode,omitempty"`
+	BlockFS     string      `json:"blockFS,omitempty"`
+	BlockSizeGB int         `json:"blockSizeGB,omitempty"`
 }
 
 // SnapshotInfo is one snapshot of a workload's datasets on the storage node.

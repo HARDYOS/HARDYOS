@@ -144,6 +144,29 @@ func (r *Root) DatasetInfo(ctx context.Context, a WorkloadArgs) (*DatasetInfo, e
 	return r.datasetInfo(ctx, a.Dataset())
 }
 
+// ShareArgs names a shared folder on this storage node.
+type ShareArgs struct {
+	Pool string `json:"pool"`
+	ID   string `json:"id"`
+}
+
+// ShareInfo reports a shared folder's dataset, mountpoint and GUID (for
+// "Use in the cluster"); the dataset must be the folder's own.
+func (r *Root) ShareInfo(ctx context.Context, a ShareArgs) (*DatasetInfo, error) {
+	if !poolRE.MatchString(a.Pool) || !regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`).MatchString(a.ID) {
+		return nil, &ValidationError{fmt.Errorf("shared folder %s/%s isn't valid", a.Pool, a.ID)}
+	}
+	ds := a.Pool + "/shares/" + a.ID
+	p, err := r.props(ctx, ds, "type", "org.hardyos:share", "mounted")
+	if err != nil {
+		return nil, err
+	}
+	if p["type"] != "filesystem" || p["org.hardyos:share"] != a.ID || p["mounted"] != "yes" {
+		return nil, &ValidationError{fmt.Errorf("%s isn't a mounted shared folder", ds)}
+	}
+	return r.datasetInfo(ctx, ds)
+}
+
 // checkOwned verifies that ds is a cluster dataset or zvol of the workload.
 func (r *Root) checkOwned(ctx context.Context, a WorkloadArgs, ds string) error {
 	prop := ownerProp(a.Kind)
@@ -330,6 +353,21 @@ func (r *Root) waitDevice(ctx context.Context, dev string) error {
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
+}
+
+// VolumeInfo describes an existing cluster volume of the workload.
+func (r *Root) VolumeInfo(ctx context.Context, c cluster.ClusterID, a VolumeArgs) (*VolumeInfo, error) {
+	if err := a.check(); err != nil {
+		return nil, err
+	}
+	ds, err := a.dataset()
+	if err != nil {
+		return nil, err
+	}
+	if err := r.checkOwned(ctx, a.WorkloadArgs, ds); err != nil {
+		return nil, err
+	}
+	return r.volumeInfo(ctx, c, ds)
 }
 
 // VolumeResize grows a zvol (never shrinks it). A block volume's file
@@ -606,6 +644,10 @@ func (r *Root) Migrate(ctx context.Context, a MigrateArgs) (*MigrateResult, erro
 			return res, fmt.Errorf("the data was copied, but clearing the old copy failed: %w", err)
 		}
 		res.Removed = true
+		if a.To == cluster.StorageNFS {
+			// Give the freed blocks back to the pool (the zvol is sparse).
+			_, _ = sysexec.Output(ctx, r.Runner, "fstrim", mnt)
+		}
 	}
 	r.log().Info("san: app data moved", "app", a.App, "to", a.To, "snapshot", snap)
 	return res, nil

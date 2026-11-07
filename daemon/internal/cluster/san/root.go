@@ -172,10 +172,12 @@ const (
 	OpCHAPRotate     = "san.chap.rotate"
 	OpVolumeCreate   = "san.volume.create"
 	OpVolumeResize   = "san.volume.resize"
+	OpVolumeInfo     = "san.volume.info"
 	OpVolumeDestroy  = "san.volume.destroy"
 	OpDatasetCreate  = "san.dataset.create"
 	OpDatasetDestroy = "san.dataset.destroy"
 	OpDatasetInfo    = "san.dataset.info"
+	OpShareInfo      = "san.share.info"
 	OpSnapshotCreate = "san.snapshot.create"
 	OpSnapshotList   = "san.snapshot.list"
 	OpSnapshotRoll   = "san.snapshot.rollback"
@@ -432,7 +434,7 @@ func (r *Root) rebuild(ctx context.Context) error {
 	r.mu.Lock()
 	st, err := r.load()
 	r.mu.Unlock()
-	if err != nil || st.Desired.Cluster == "" {
+	if err != nil {
 		return err
 	}
 	var errs []error
@@ -440,6 +442,9 @@ func (r *Root) rebuild(ctx context.Context) error {
 		if err := r.applyFirewall(ctx, *st.Firewall, st); err != nil {
 			errs = append(errs, err)
 		}
+	}
+	if st.Desired.Cluster == "" {
+		return errors.Join(errs...) // a compute node: only its firewall
 	}
 	if err := r.apply(ctx, ApplyArgs{Desired: st.Desired}); err != nil {
 		errs = append(errs, err)

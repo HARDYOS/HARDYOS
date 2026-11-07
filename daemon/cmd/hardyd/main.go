@@ -244,6 +244,9 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		Alerts:      alerts, Monitor: mon, Mail: mailSvc,
 	})
 
+	if !live { // cluster storage (part B); part A passes its membership, peer client and peer API here
+		_ = wireClusterB(ctx, log, handler, db, pc, secrets, &audit.Log{DB: db, Events: broker}, clusterParts{})
+	}
 	go housekeeping(ctx, log, &auth.Sessions{DB: db})
 	go collector.Run(ctx) // CPU, memory and network history
 	if !live {
