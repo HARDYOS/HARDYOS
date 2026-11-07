@@ -691,6 +691,13 @@ func (s *Store) Detach(ctx context.Context, id int64) error {
 	return err
 }
 
+// SetAccount records an account's new name (renamed in the domain).
+func (s *Store) SetAccount(ctx context.Context, id int64, account string) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE mail_mailboxes SET account = ?, updated_at = ? WHERE id = ?`,
+		strings.ToLower(account), store.FormatTime(time.Now()), id)
+	return err
+}
+
 // ClearLegacy forgets the old-layout flags once root has moved the folders.
 func (s *Store) ClearLegacy(ctx context.Context) error {
 	_, err := s.DB.ExecContext(ctx, `UPDATE mail_mailboxes SET legacy_layout = 0 WHERE legacy_layout = 1`)

@@ -194,12 +194,15 @@ mailbox_size_limit = 0
 authorized_submit_users = root
 maximal_queue_lifetime = 5d
 bounce_queue_lifetime = 5d
-# No bounces to the internet (decision 311): a message without a return
-# address (a bounce or delivery notice) is only ever for mail that came in
-# from outside, often with a forged sender, so it's dropped here instead of
-# going out through Amazon SES. People signed in can't send without one.
+# No bounces to the internet (decisions 311, 319): a message without a
+# return address (a bounce or delivery notice) going outside is only ever
+# about mail that came in from outside, often with a forged sender, so it
+# never goes out through Amazon SES. It fails here instead, and Postfix
+# sends the postmaster a copy (a double bounce): logged and seen, not
+# silently dropped. Bounces to people on this server are delivered as usual.
+# People signed in can't send without a return address.
 sender_dependent_default_transport_maps = %s
-
+%s
 # Mailboxes (delivered by Dovecot over LMTP).
 virtual_mailbox_domains = %s
 virtual_mailbox_maps = %s
@@ -262,7 +265,7 @@ smtpd_soft_error_limit = 5
 smtpd_hard_error_limit = 10
 smtpd_error_sleep_time = 5s
 `, generatedHeader, c.Hostname, e.inetProtocols(), int64(c.MaxMessageMB)<<20,
-		maps("bounce_transport"),
+		maps("bounce_transport"), notices(c),
 		maps("domains"), maps("mailboxes"), maps("aliases"),
 		defaultTransport, ses,
 		"/run/hardyos-mail/tls/key.pem", "/run/hardyos-mail/tls/fullchain.pem",
@@ -354,7 +357,7 @@ postlog   unix-dgram n  -       n       -       1       postlogd
 		// Signed-in senders need a return address (the login map can't
 		// vouch for an empty one).
 		{Path: path.Join(PostfixMapsDir, "null_sender"), Mode: 0o644, Content: mapFile([][2]string{{"<>", "REJECT Signed-in senders need a return address"}})},
-		{Path: path.Join(PostfixMapsDir, "bounce_transport"), Mode: 0o644, Content: mapFile([][2]string{{"<>", "discard:"}})},
+		{Path: path.Join(PostfixMapsDir, "bounce_transport"), Mode: 0o644, Content: mapFile([][2]string{{"<>", BounceTransport}})},
 	}
 	sasl := [][2]string{}
 	if c.SES != nil {
@@ -362,6 +365,25 @@ postlog   unix-dgram n  -       n       -       1       postlogd
 	}
 	files = append(files, File{Path: path.Join(PostfixMapsDir, "sasl_passwd"), Mode: 0o600, Content: mapFile(sasl)})
 	return files
+}
+
+// BounceTransport is where a bounce to the internet goes: it fails, and
+// the postmaster gets a copy.
+const BounceTransport = "error:5.7.1 HardyOS sends no bounces to the internet"
+
+// notices sends Postfix's notices (double bounces among them) to the
+// postmaster mailbox, never to postmaster@<hostname> (which would leave
+// through SES); without a postmaster there are none.
+func notices(c RootConfig) string {
+	if c.Postmaster == "" {
+		return "notify_classes =\n"
+	}
+	return fmt.Sprintf(`notify_classes = 2bounce, resource, software
+2bounce_notice_recipient = %[1]s
+bounce_notice_recipient = %[1]s
+delay_notice_recipient = %[1]s
+error_notice_recipient = %[1]s
+`, c.Postmaster)
 }
 
 func hasMailbox(c RootConfig, addr string) bool {

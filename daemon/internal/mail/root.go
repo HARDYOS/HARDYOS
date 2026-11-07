@@ -404,21 +404,21 @@ func (r *Root) radicaleRoot(e Env) (*os.Root, error) {
 // for the system, the apps and snapshots. 0: no quota (the pool's size is
 // unknown and a mailbox has no limit).
 func StorageLimitMB(c RootConfig, poolMB int64) int64 {
-	if c.StorageLimitMB > 0 {
-		return int64(c.StorageLimitMB)
-	}
-	var sum int64
-	unlimited := false
-	for _, m := range c.Mailboxes {
-		if m.QuotaMB == 0 {
-			unlimited = true
+	limit := int64(c.StorageLimitMB)
+	if limit == 0 {
+		var sum int64
+		unlimited := false
+		for _, m := range c.Mailboxes {
+			if m.QuotaMB == 0 {
+				unlimited = true
+			}
+			sum += int64(m.QuotaMB)
 		}
-		sum += int64(m.QuotaMB)
+		if !unlimited {
+			limit = sum*5/4 + 5120
+		}
 	}
-	limit := int64(0)
-	if !unlimited {
-		limit = sum*5/4 + 5120
-	}
+	// Also a limit set by hand: room for the system stays.
 	if capMB := poolMB * 8 / 10; poolMB > 0 && (limit == 0 || capMB < limit) {
 		limit = capMB
 	}
@@ -428,7 +428,9 @@ func StorageLimitMB(c RootConfig, poolMB int64) int64 {
 	return limit
 }
 
-// storageLimit sets the dataset's quota (warnings only: mail runs without).
+// storageLimit sets the dataset's refquota (decision 319: what the mail
+// itself uses; snapshots don't count against it). Warnings only: mail runs
+// without. A limit below what the mail already uses isn't set.
 func (r *Root) storageLimit(ctx context.Context, cfg RootConfig, res *ApplyResult) {
 	if r.Dataset != nil {
 		return // tests: no ZFS
@@ -441,11 +443,21 @@ func (r *Root) storageLimit(ctx context.Context, cfg RootConfig, res *ApplyResul
 		}
 	}
 	limit := StorageLimitMB(cfg, poolMB)
+	if limit > 0 {
+		if out, err := r.run(ctx, "zfs", "get", "-H", "-p", "-o", "value", "referenced", cfg.Pool+"/mail"); err == nil {
+			usedMB, _ := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+			usedMB >>= 20
+			if usedMB >= limit {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("the mail storage limit (%d MB) is below what mail already uses (%d MB): not set; raise it or free space", limit, usedMB))
+				return
+			}
+		}
+	}
 	quota := "none"
 	if limit > 0 {
 		quota = fmt.Sprintf("%dM", limit)
 	}
-	if _, err := r.run(ctx, "zfs", "set", "quota="+quota, cfg.Pool+"/mail"); err != nil {
+	if _, err := r.run(ctx, "zfs", "set", "refquota="+quota, cfg.Pool+"/mail"); err != nil {
 		res.Warnings = append(res.Warnings, "couldn't limit the mail storage to "+quota+": "+err.Error())
 	}
 }

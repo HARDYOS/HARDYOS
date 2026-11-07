@@ -52,7 +52,18 @@ type Directory interface {
 // Passwords checks a domain account's password the way desktop sign-in
 // does (this server's own domain controller only).
 type Passwords interface {
-	CheckDomainPassword(ctx context.Context, account, password string) error
+	// CheckDomainPassword checks the password and returns the account's
+	// objectGUID ("" when the directory doesn't say).
+	CheckDomainPassword(ctx context.Context, account, password string) (guid string, err error)
+	// AccountGUID returns an account's objectGUID ("" when unknown).
+	AccountGUID(ctx context.Context, account string) (string, error)
+}
+
+// sameAccount reports whether the directory's account is the one the
+// mailbox belongs to (decision 319): a mailbox tied to an objectGUID opens
+// only for that account, whatever its name is now.
+func sameAccount(m *Mailbox, guid string) bool {
+	return m.AccountGUID == "" || guid == "" || strings.EqualFold(m.AccountGUID, guid)
 }
 
 // WebmailPrefix starts every webmail token (so a password can never be
@@ -173,8 +184,12 @@ func (s *Service) CheckLogin(ctx context.Context, login, secret string) error {
 	if s.Passwords == nil {
 		return mail.ErrBadLogin
 	}
-	if err := s.Passwords.CheckDomainPassword(ctx, m.Account, secret); err != nil {
+	guid, err := s.Passwords.CheckDomainPassword(ctx, m.Account, secret)
+	if err != nil {
 		return fmt.Errorf("%w: %v", mail.ErrBadLogin, err)
+	}
+	if !sameAccount(m, guid) {
+		return fmt.Errorf("%w (the account %s isn't the one this mailbox belongs to)", mail.ErrBadLogin, m.Account)
 	}
 	return nil
 }
@@ -194,6 +209,18 @@ func (s *Service) WebmailLogin(ctx context.Context, account, session string) (ad
 	}
 	if !m.CanSignIn() {
 		return "", "", errors.New("this mailbox is turned off")
+	}
+	if m.AccountGUID != "" {
+		if s.Passwords == nil {
+			return "", "", errors.New("can't tell whose mailbox this is")
+		}
+		guid, err := s.Passwords.AccountGUID(ctx, account)
+		if err != nil {
+			return "", "", err
+		}
+		if !sameAccount(m, guid) {
+			return "", "", errors.New("this mailbox belongs to another account of the same name")
+		}
 	}
 	now := time.Now()
 	s.mu.Lock()
@@ -509,8 +536,12 @@ func (s *Service) SyncAccounts(ctx context.Context) (*AccountSync, error) {
 		return nil, err
 	}
 	byAccount := map[string]*Mailbox{}
+	byGUID := map[string]*Mailbox{}
 	for i := range mbs {
 		byAccount[mbs[i].Account] = &mbs[i]
+		if g := strings.ToLower(mbs[i].AccountGUID); g != "" && !mbs[i].Deleting {
+			byGUID[g] = &mbs[i]
+		}
 	}
 	seen := map[string]bool{}
 	for _, u := range users {
@@ -524,6 +555,24 @@ func (s *Service) SyncAccounts(ctx context.Context) (*AccountSync, error) {
 			state = "disabled"
 		}
 		m := byAccount[acct]
+		// Renamed in the domain: the mailbox follows the account (by its
+		// objectGUID), keeping its address and mail (decision 319).
+		if g := byGUID[strings.ToLower(u.GUID)]; u.GUID != "" && g != nil && g.Account != acct {
+			if m != nil && m != g {
+				// Something else holds the new name: it isn't this account's.
+				if err := s.Store.Detach(ctx, m.ID); err != nil {
+					return nil, err
+				}
+				m.Account = fmt.Sprintf("@%d", m.ID)
+			}
+			if err := s.Store.SetAccount(ctx, g.ID, acct); err != nil {
+				return nil, err
+			}
+			seen[g.Account] = true // its old name isn't "gone"
+			g.Account = acct
+			byAccount[acct] = g
+			m = g
+		}
 		if m != nil && !m.Deleting && u.GUID != "" && !strings.EqualFold(m.AccountGUID, u.GUID) {
 			// The mailbox belongs to the account itself, not its name
 			// (decision 310). Another account under the same name (the

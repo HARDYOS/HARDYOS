@@ -62,7 +62,7 @@ func TestCatalogPolicy(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := r.check(mf, ProjectName(mf.ID), data, ports, binds); err != nil {
+		if err := r.check(mf, ProjectName(mf.ID), data, ports, binds, true); err != nil {
 			t.Errorf("%s: %v", mf.ID, err)
 		}
 	}

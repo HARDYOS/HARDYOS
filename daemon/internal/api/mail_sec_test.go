@@ -1,7 +1,10 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -25,6 +28,8 @@ func TestWebmailFormAndGatewayCredentials(t *testing.T) {
 		{"POST", "/?_task=login&_action=login", "_user=a&_pass=pw", true},
 		{"POST", "/?_task=mail&_action=refresh", "_remote=1", false},
 		{"GET", "/?_task=login&_action=login", "", false},
+		// Values from different places aren't glued together.
+		{"POST", "/?_task=log&_action=log", "_task=in&_action=in", false},
 	} {
 		r := httptest.NewRequest(c.method, c.target, strings.NewReader(c.body))
 		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -32,6 +37,21 @@ func TestWebmailFormAndGatewayCredentials(t *testing.T) {
 		if got != c.refused {
 			t.Errorf("%s %s %q: refused %v", c.method, c.target, c.body, got)
 		}
+	}
+	// A multipart form is read too.
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("_task", "login")
+	_ = mw.WriteField("_action", "login")
+	_ = mw.WriteField("_pass", "pw")
+	_ = mw.Close()
+	r := httptest.NewRequest("POST", "/", &buf)
+	r.Header.Set("Content-Type", mw.FormDataContentType())
+	if webmailFilter(r) == "" {
+		t.Error("a multipart sign-in form went through")
+	}
+	if b, _ := io.ReadAll(r.Body); !bytes.Contains(b, []byte("_pass")) {
+		t.Error("the body wasn't put back")
 	}
 	var seen http.Header
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { seen = r.Header.Clone() }))

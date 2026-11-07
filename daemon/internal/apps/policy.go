@@ -219,13 +219,13 @@ type Resolved map[string]any
 // manifest's ports. It also fills in what HardyOS always sets: a restart
 // policy and a label naming the app.
 func (r Resolved) Check(m Manifest, project, dataDir string, ports map[string]int) error {
-	return r.check(m, project, dataDir, ports, nil)
+	return r.check(m, project, dataDir, ports, nil, false)
 }
 
 // check is Check with the host folders chosen for the app's shares: binds
 // may also be inside those, and binds inside a share granted read-only are
 // made read-only.
-func (r Resolved) check(m Manifest, project, dataDir string, ports map[string]int, shares []shareBind) error {
+func (r Resolved) check(m Manifest, project, dataDir string, ports map[string]int, shares []shareBind, catalog bool) error {
 	var p Problems
 	for k := range r {
 		switch k {
@@ -250,7 +250,7 @@ func (r Resolved) check(m Manifest, project, dataDir string, ports map[string]in
 	networks, _ := r["networks"].(map[string]any)
 	for name, raw := range networks {
 		n, _ := raw.(map[string]any)
-		checkNetwork(&p, project, name, n)
+		checkNetwork(&p, project, name, n, catalog)
 	}
 
 	// The host ports the app may publish, and which are still unused.
@@ -337,7 +337,7 @@ func nestedBind(sources []string) (inner, outer string, found bool) {
 	return "", "", false
 }
 
-func checkNetwork(p *Problems, project, name string, n map[string]any) {
+func checkNetwork(p *Problems, project, name string, n map[string]any, catalog bool) {
 	for k, v := range n {
 		switch k {
 		case "name":
@@ -371,7 +371,8 @@ func checkNetwork(p *Problems, project, name string, n map[string]any) {
 						p.addf("network %s: subnet %q isn't valid", name, sub)
 						continue
 					}
-					if pre.Overlaps(portreg.WebmailSubnet) && project != ProjectName(WebmailAppID) {
+					// Only the catalog's own webmail app (decision 317).
+					if pre.Overlaps(portreg.WebmailSubnet) && (project != ProjectName(WebmailAppID) || !catalog) {
 						p.addf("network %s: %s is kept for the webmail app", name, portreg.WebmailSubnet)
 					}
 				}

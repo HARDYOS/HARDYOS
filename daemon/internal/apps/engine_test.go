@@ -697,7 +697,7 @@ func TestPolicyPermissionsV2(t *testing.T) {
 		{Name: "DL", Path: "/mnt/tank/shares/downloads", Write: true}}
 	r := resolved(t, `"volumes":[{"type":"bind","source":"/mnt/tank/shares/media","target":"/media"},
 		{"type":"bind","source":"/mnt/tank/shares/downloads/","target":"/dl"}]`, "")
-	if err := r.check(plain, "hardyos-notes", dataDir, ports, shares); err != nil {
+	if err := r.check(plain, "hardyos-notes", dataDir, ports, shares, false); err != nil {
 		t.Fatal(err)
 	}
 	bm := r.bindMounts()
@@ -707,11 +707,11 @@ func TestPolicyPermissionsV2(t *testing.T) {
 	// Only the share itself: a folder in it could be swapped for a link by
 	// anything else that writes in the share.
 	r = resolved(t, `"volumes":[{"type":"bind","source":"/mnt/tank/shares/media/TV","target":"/tv"}]`, "")
-	if err := r.check(plain, "hardyos-notes", dataDir, ports, shares); !strings.Contains(problemText(err), "${HARDY_SHARE_MEDIA}") {
+	if err := r.check(plain, "hardyos-notes", dataDir, ports, shares, false); !strings.Contains(problemText(err), "${HARDY_SHARE_MEDIA}") {
 		t.Errorf("a folder in a share: %v", err)
 	}
 	r = resolved(t, `"volumes":[{"type":"bind","source":"/mnt/tank/shares/mediax","target":"/x"}]`, "")
-	if err := r.check(plain, "hardyos-notes", dataDir, ports, shares); err == nil {
+	if err := r.check(plain, "hardyos-notes", dataDir, ports, shares, false); err == nil {
 		t.Error("a sibling of a share was allowed")
 	}
 }

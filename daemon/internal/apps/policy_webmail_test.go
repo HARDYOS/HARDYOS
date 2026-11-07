@@ -21,7 +21,12 @@ func TestPolicyKeepsWebmailSubnet(t *testing.T) {
 		t.Fatalf("an ordinary subnet: %v", err)
 	}
 	r = resolved(t, `"networks":{"default":null}`, net("hardyos-roundcube", "172.16.253.0/28"))
-	if err := r.Check(m, ProjectName(WebmailAppID), dataDir, ports); err != nil && strings.Contains(err.Error(), "kept for the webmail") {
-		t.Fatalf("the webmail app can't have its network: %v", err)
+	if err := r.check(m, ProjectName(WebmailAppID), dataDir, ports, nil, true); err != nil && strings.Contains(err.Error(), "kept for the webmail") {
+		t.Fatalf("the catalog's webmail app can't have its network: %v", err)
+	}
+	// An uploaded app calling itself roundcube can't.
+	r = resolved(t, `"networks":{"default":null}`, net("hardyos-roundcube", "172.16.253.0/28"))
+	if err := r.check(m, ProjectName(WebmailAppID), dataDir, ports, nil, false); err == nil || !strings.Contains(err.Error(), "kept for the webmail") {
+		t.Fatalf("an uploaded roundcube took the webmail network: %v", err)
 	}
 }

@@ -211,3 +211,37 @@ func TestLegacyLayoutFlag(t *testing.T) {
 		}
 	}
 }
+
+// Decision 319: a password check also proves the account is the mailbox's
+// (its objectGUID), webmail too; a renamed account keeps its mailbox.
+func TestGUIDAtSignInAndRenames(t *testing.T) {
+	s, _ := newSvc(t)
+	enable(t, s)
+	ctx := context.Background()
+	m, _ := s.Store.CreateMailbox(ctx, Mailbox{Account: "alice", Address: "alice@example.net", AccountState: "active", Enabled: true, AccountGUID: "aaaa-1"})
+	s.Passwords = fakePasswords{"alice": "pw", "guid:alice": "aaaa-1"}
+	if err := s.CheckLogin(ctx, "alice@example.net", "pw"); err != nil {
+		t.Fatalf("her own account: %v", err)
+	}
+	// Another account under the name alice (not synced yet).
+	s.Passwords = fakePasswords{"alice": "pw", "guid:alice": "bbbb-2"}
+	if err := s.CheckLogin(ctx, "alice@example.net", "pw"); err == nil {
+		t.Fatal("another account of the same name opened the mailbox")
+	}
+	if _, _, err := s.WebmailLogin(ctx, "alice", "sess"); err == nil {
+		t.Fatal("webmail for another account of the same name")
+	}
+	// Renamed: alice is now alicia; the mailbox follows.
+	s.Dir = fakeDir{{Username: "alicia", GivenName: "Alice", Enabled: true, GUID: "AAAA-1"}}
+	if _, err := s.SyncAccounts(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.Store.GetMailbox(ctx, m.ID)
+	if got.Account != "alicia" || got.AccountState != "active" || got.Address != "alice@example.net" {
+		t.Fatalf("after the rename: %+v", got)
+	}
+	mbs, _ := s.Store.Mailboxes(ctx)
+	if len(mbs) != 1 {
+		t.Fatalf("a second mailbox was made: %d", len(mbs))
+	}
+}

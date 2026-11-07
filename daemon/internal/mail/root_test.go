@@ -178,4 +178,38 @@ func TestStorageLimit(t *testing.T) {
 	if got := StorageLimitMB(c, 100000); got != 2048 {
 		t.Fatalf("set by hand: %d", got)
 	}
+	// A limit set by hand is capped too.
+	c.StorageLimitMB = 900000
+	if got := StorageLimitMB(c, 100000); got != 80000 {
+		t.Fatalf("hand-set limit over 80%% of the pool: %d", got)
+	}
+}
+
+// The limit is a refquota (snapshots don't count) and isn't set below what
+// mail already uses.
+func TestStorageLimitIsRefquota(t *testing.T) {
+	ctx := context.Background()
+	fake := (&sysexec.Fake{}).OnPrefix("zfs get -H -p -o value used,available tank", sysexec.Result{Stdout: []byte("10737418240\n10737418240\n")}).
+		OnPrefix("zfs get -H -p -o value referenced tank/mail", sysexec.Result{Stdout: []byte("1048576\n")}).
+		OnPrefix("zfs set", sysexec.Result{})
+	r := &Root{Runner: fake}
+	res := &ApplyResult{}
+	r.storageLimit(ctx, RootConfig{Pool: "tank", StorageLimitMB: 4096}, res)
+	found := false
+	for _, c := range fake.Calls {
+		if c.Line == "zfs set refquota=4096M tank/mail" {
+			found = true
+		}
+	}
+	if !found || len(res.Warnings) != 0 {
+		t.Fatalf("calls %+v warnings %v", fake.Calls, res.Warnings)
+	}
+	fake2 := (&sysexec.Fake{}).OnPrefix("zfs get -H -p -o value used,available tank", sysexec.Result{Stdout: []byte("10737418240\n10737418240\n")}).
+		OnPrefix("zfs get -H -p -o value referenced tank/mail", sysexec.Result{Stdout: []byte("8589934592\n")})
+	r = &Root{Runner: fake2}
+	res = &ApplyResult{}
+	r.storageLimit(ctx, RootConfig{Pool: "tank", StorageLimitMB: 4096}, res)
+	if len(res.Warnings) != 1 {
+		t.Fatalf("no warning for a limit below use: %v", res.Warnings)
+	}
 }

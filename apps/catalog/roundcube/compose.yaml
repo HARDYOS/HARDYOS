@@ -9,7 +9,7 @@
 # token tied to their desktop session as HTTP Basic credentials, which
 # Roundcube's bundled http_authentication plugin uses to sign in. hardyd
 # checks the token when Dovecot asks, and only from this app's own network
-# (172.16.253.0/28, below): from here no password is ever accepted, and a
+# (172.16.253.2 on 172.16.253.0/28, below): from here no password is ever accepted, and a
 # token works nowhere else (decision 305). Roundcube's own sign-in form is
 # shut: Apache answers nothing without the window proxy's credentials, and
 # HardyOS's proxies refuse the form's submission.
@@ -64,6 +64,10 @@ services:
       - "127.0.0.1:${HARDY_PORT_WEB}:80"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # hardyd takes webmail tokens from this address only (decision 317).
+    networks:
+      default:
+        ipv4_address: 172.16.253.2
     volumes:
       - ${HARDY_APP_DATA}/db:/var/roundcube/db
       - ${HARDY_APP_DATA}/config:/var/roundcube/config

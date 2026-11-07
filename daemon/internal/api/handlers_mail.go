@@ -1161,26 +1161,42 @@ func (s *Server) RunMail(ctx context.Context, opts MailOptions) {
 // sign-in (decision 78: this server's own domain controller only).
 type mailPasswords struct{ s *Server }
 
-func (m mailPasswords) CheckDomainPassword(ctx context.Context, account, password string) error {
+func (m mailPasswords) CheckDomainPassword(ctx context.Context, account, password string) (string, error) {
 	si := m.s.signin
 	if si == nil || si.Domain == nil {
-		return auth.ErrNoLocalDC
+		return "", auth.ErrNoLocalDC
 	}
 	info, err := si.Domain.Info(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if info == nil {
-		return auth.ErrNoLocalDC
+		return "", auth.ErrNoLocalDC
 	}
 	u, err := si.Authenticate(ctx, info.NetBIOS+`\`+account, password)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if u.Disabled {
-		return auth.ErrDisabledHere
+		return "", auth.ErrDisabledHere
 	}
-	return nil
+	return m.AccountGUID(ctx, account)
+}
+
+// AccountGUID is the account's objectGUID (the mailbox's anchor).
+func (m mailPasswords) AccountGUID(ctx context.Context, account string) (string, error) {
+	si := m.s.signin
+	if si == nil || si.Domain == nil {
+		return "", auth.ErrNoLocalDC
+	}
+	a, err := si.Domain.Account(ctx, account)
+	if err != nil {
+		return "", err
+	}
+	if a == nil || !a.Exists {
+		return "", auth.ErrBadCredentials
+	}
+	return strings.ToLower(a.ObjectGUID), nil
 }
 
 // mailDirectory lists domain accounts through hardyd-priv.

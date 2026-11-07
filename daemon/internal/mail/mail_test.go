@@ -100,6 +100,7 @@ func TestPostfixIsNoOpenRelay(t *testing.T) {
 		"milter_default_action = tempfail\n",
 		"smtpd_milters = unix:/var/spool/postfix/hardyos-rspamd/milter.sock\n",
 		"sender_dependent_default_transport_maps = texthash:/etc/postfix/hardyos/bounce_transport\n",
+		"notify_classes = 2bounce, resource, software\n2bounce_notice_recipient = alice@example.net\n",
 		"smtpd_client_event_limit_exceptions = 100.90.1.2/32 127.0.0.0/8 [::1]/128\n",
 	} {
 		if !strings.Contains(main, want) {
@@ -155,7 +156,7 @@ func TestPostfixIsNoOpenRelay(t *testing.T) {
 	if got := fs["/etc/postfix/hardyos/null_sender"].Content; !strings.Contains(got, "\n<> REJECT ") {
 		t.Errorf("null_sender = %q", got)
 	}
-	if got := fs["/etc/postfix/hardyos/bounce_transport"].Content; !strings.Contains(got, "\n<> discard:\n") {
+	if got := fs["/etc/postfix/hardyos/bounce_transport"].Content; !strings.Contains(got, "\n<> "+BounceTransport+"\n") {
 		t.Errorf("bounce_transport = %q", got)
 	}
 	if got := fs["/etc/postfix/hardyos/vps.cidr"].Content; !strings.Contains(got, "\n100.90.1.2/32 OK\n") {

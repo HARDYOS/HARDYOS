@@ -992,7 +992,7 @@ func (m *Manager) prepare(ctx context.Context, pkg *Package, a PrepareArgs, reco
 	if err != nil {
 		return nil, err
 	}
-	if err := resolved.check(mf, project, dataDir, ports, binds); err != nil {
+	if err := resolved.check(mf, project, dataDir, ports, binds, src == SourceCatalog); err != nil {
 		return nil, err
 	}
 	// After the check: what HardyOS itself adds.

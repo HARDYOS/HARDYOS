@@ -214,8 +214,29 @@ func securityReview(t *testing.T) {
 			t.Fatal("bounce transport not configured")
 		}
 		out, err := exec.Command("postmap", "-q", "<>", "texthash:"+filepath.Join(PostfixMapsDir, "bounce_transport")).Output()
-		if err != nil || strings.TrimSpace(string(out)) != "discard:" {
+		if err != nil || strings.TrimSpace(string(out)) != BounceTransport {
 			t.Fatalf("null sender transport: %v %q", err, out)
+		}
+		// A bounce for someone outside fails here, and the postmaster
+		// (alice) gets a copy instead of it leaving through SES.
+		before, _ := filepath.Glob(filepath.Join(itMailRoot, "vmail", itKeyAlice, "Maildir", "new", "*"))
+		cmd := exec.Command("/usr/sbin/sendmail", "-f", "<>", "forged-sender@elsewhere.test")
+		cmd.Stdin = strings.NewReader("From: MAILER-DAEMON@" + itHost + "\r\nTo: forged-sender@elsewhere.test\r\nSubject: Undelivered Mail Returned to Sender\r\n\r\nbounce\r\n")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("sendmail: %v %s", err, out)
+		}
+		_, _ = exec.Command("postqueue", "-f").CombinedOutput()
+		deadline := time.Now().Add(60 * time.Second)
+		for {
+			after, _ := filepath.Glob(filepath.Join(itMailRoot, "vmail", itKeyAlice, "Maildir", "new", "*"))
+			if len(after) > len(before) {
+				break
+			}
+			if time.Now().After(deadline) {
+				q, _ := exec.Command("postqueue", "-p").CombinedOutput()
+				t.Fatalf("the postmaster got no copy of the failed bounce\n%s", q)
+			}
+			time.Sleep(time.Second)
 		}
 	})
 }

@@ -61,11 +61,16 @@ func (d fakeDir) Users(context.Context) ([]DirUser, error) { return d, nil }
 
 type fakePasswords map[string]string
 
-func (p fakePasswords) CheckDomainPassword(_ context.Context, account, pw string) error {
+// fakePasswords: account -> password; "guid:"+account -> its objectGUID.
+func (p fakePasswords) CheckDomainPassword(ctx context.Context, account, pw string) (string, error) {
 	if p[account] == pw && pw != "" {
-		return nil
+		return p.AccountGUID(ctx, account)
 	}
-	return errors.New("bad password")
+	return "", errors.New("bad password")
+}
+
+func (p fakePasswords) AccountGUID(_ context.Context, account string) (string, error) {
+	return p["guid:"+account], nil
 }
 
 func newSvc(t *testing.T) (*Service, *fakePriv) {
