@@ -5701,6 +5701,15 @@ paths:
             application/x-apple-aspen-config:
               schema: { type: string, format: binary }
         "404": { $ref: "#/components/responses/NotFound" }
+  # ---- Phase 8 part A (cluster core): /cluster, /cluster/nodes, /cluster/join, /cluster/witness, /nodes/{node}/... below this line (tag cluster)
+  #
+  #
+  # ---- Phase 8 part B (cluster storage): /cluster/storage/... below this line (tag cluster-storage)
+  #
+  #
+  # ---- Phase 8 part C (placement, moves, HA): /cluster/workloads/..., /cluster/moves/..., /cluster/ha/... below this line (tag cluster-ha)
+  #
+  #
 components:
   securitySchemes:
     session:
