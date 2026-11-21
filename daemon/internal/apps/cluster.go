@@ -160,7 +160,7 @@ func (m *Manager) clusterRecheck(ctx context.Context, ia *installedApp) error {
 		return err
 	}
 	dataDir := filepath.Join(ia.dir, dataDirName)
-	if err := r.check(ia.manifest, ProjectName(ia.state.ID), dataDir, ia.state.Ports, binds); err != nil {
+	if err := r.check(ia.manifest, ProjectName(ia.state.ID), dataDir, ia.state.Ports, binds, ia.state.Source == SourceCatalog); err != nil {
 		return fmt.Errorf("the app's compose file on cluster storage no longer passes the policy check: %w", err)
 	}
 	return nil

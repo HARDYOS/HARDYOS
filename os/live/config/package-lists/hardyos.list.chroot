@@ -136,6 +136,7 @@ dovecot-sieve
 rspamd
 redis-server
 radicale
+gunicorn
 clamav-daemon
 clamav-freshclam
 

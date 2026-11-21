@@ -278,12 +278,8 @@ func (s *Store) AllocateProxyPort(ctx context.Context, appID string, base int, a
 			taken[p] = true
 		}
 	}
-	fixed := map[int]bool{}
-	for _, p := range ports.Fixed {
-		fixed[p] = true
-	}
 	for port := base; port < base+ports.AppProxyCount && port <= 65535; port++ {
-		if taken[port] || avoid[port] || fixed[port] {
+		if taken[port] || avoid[port] || ports.Reserved(port) {
 			continue
 		}
 		if _, err := db.ExecContext(ctx, `INSERT INTO app_proxy_ports (app_id, port) VALUES (?, ?)

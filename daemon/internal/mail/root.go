@@ -213,7 +213,253 @@ func (r *Root) ensureDir(dir string, mode os.FileMode, uid, gid int) error {
 	if err := unix.Fchown(fd, uid, gid); err != nil {
 		return err
 	}
-	return unix.Fchmod(fd, uint32(mode.Perm()))
+	perm := uint32(mode.Perm())
+	if mode&os.ModeSetgid != 0 {
+		perm |= unix.S_ISGID
+	}
+	return unix.Fchmod(fd, perm)
+}
+
+// socketDirs makes the folders of Rspamd's and Radicale's sockets
+// (decisions 309, 319). Each is
+// setgid to the group that may connect, so the socket Rspamd makes in it
+// (mode 0660) belongs to that group: Postfix for the milter, the mail user
+// (Dovecot's learning script) for the controller.
+func (r *Root) socketDirs(e Env, rspamdUID int) error {
+	if r.Chown != nil {
+		return nil // tests: no system folders
+	}
+	postfixGID, err := r.lookupGroup("postfix")
+	if err != nil {
+		return err
+	}
+	if err := rootfile.EnsureRootDir("/run/hardyos-mail", 0o755); err != nil {
+		return err
+	}
+	if err := r.ensureDir(RspamdMilterDir, 0o750|os.ModeSetgid, rspamdUID, postfixGID); err != nil {
+		return err
+	}
+	if err := r.ensureDir(RspamdCtlDir, 0o750|os.ModeSetgid, rspamdUID, e.VMailGID); err != nil {
+		return err
+	}
+	// Radicale's socket: only hardyd's group (decision 319).
+	radUID, _, err := r.lookupUser("radicale")
+	if err != nil {
+		return err
+	}
+	hardydGID, err := r.lookupGroup("hardyd")
+	if err != nil {
+		return err
+	}
+	return r.ensureDir(RadicaleSocketDir, 0o750|os.ModeSetgid, radUID, hardydGID)
+}
+
+// LayoutVersion is the mail dataset's layout: 2 keeps mailboxes and
+// calendars under their key (decision 310). The version is recorded in
+// the dataset (layoutFile), so the move from the old layout runs once.
+const LayoutVersion = 2
+
+// OrphanedDir holds folders from the old layout that belonged to no
+// mailbox being moved (vmail/.orphaned/<time>/, root only; Radicale's in
+// radicale/collections/.orphaned/<time>/): the administrator decides.
+const OrphanedDir = ".orphaned"
+
+func layoutFile(e Env) string { return filepath.Join(e.MailRoot, ".hardyos-layout") }
+
+func readLayout(e Env) int {
+	b, err := readNoFollow(layoutFile(e), 64)
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	return n
+}
+
+// migrateLayout moves mailboxes and calendars kept under their address
+// (vmail/<domain>/<local>, Radicale's collection-root/<address>; HardyOS
+// before decision 310) to their key, once (decision 318). Only mailboxes
+// hardyd flagged as made under the old layout (Legacy) take their address's
+// folder: a mailbox that has the address now might not be the person who
+// had it then. Every other address-named folder goes to OrphanedDir, never
+// into a mailbox.
+func (r *Root) migrateLayout(e Env, cfg RootConfig) error {
+	if readLayout(e) >= LayoutVersion {
+		return nil
+	}
+	stamp := time.Now().UTC().Format("20060102-150405")
+	vm, err := os.OpenRoot(e.VMailDir())
+	if err != nil {
+		return err
+	}
+	defer vm.Close()
+	for _, m := range cfg.Mailboxes {
+		if !m.Legacy {
+			continue
+		}
+		local, dom, _ := SplitAddress(m.Address)
+		old := filepath.Join(dom, local)
+		if st, err := vm.Lstat(old); err == nil && st.IsDir() {
+			if _, err := vm.Lstat(m.Key); errors.Is(err, fs.ErrNotExist) {
+				if err := vm.Rename(old, m.Key); err != nil {
+					return fmt.Errorf("moving %s's mail: %w", m.Address, err)
+				}
+				r.log().Info("mail: moved a mailbox to its key", "address", m.Address, "key", m.Key)
+			}
+		}
+	}
+	// What's left of the old layout: every folder that isn't a key.
+	if err := r.orphan(vm, ".", stamp, func(name string) bool { return !keyRE.MatchString(name) }, 0); err != nil {
+		return fmt.Errorf("putting old mail folders aside: %w", err)
+	}
+	if rad, err := r.radicaleRoot(e); err == nil {
+		defer rad.Close()
+		for _, m := range cfg.Mailboxes {
+			if !m.Legacy {
+				continue
+			}
+			oldCal := filepath.Join("collection-root", m.Address)
+			if st, err := rad.Lstat(oldCal); err == nil && st.IsDir() {
+				if _, err := rad.Lstat(filepath.Join("collection-root", m.Key)); errors.Is(err, fs.ErrNotExist) {
+					if err := rad.Rename(oldCal, filepath.Join("collection-root", m.Key)); err != nil {
+						return fmt.Errorf("moving %s's calendars: %w", m.Address, err)
+					}
+				}
+			}
+		}
+		// Calendars of addresses (collection-root/<address>) nobody moved.
+		if _, err := rad.Lstat("collection-root"); err == nil {
+			if err := r.orphan(rad, "collection-root", stamp, func(name string) bool { return strings.Contains(name, "@") }, 1); err != nil {
+				return fmt.Errorf("putting old calendars aside: %w", err)
+			}
+		}
+	}
+	return r.write(layoutFile(e), []byte(strconv.Itoa(LayoutVersion)+"\n"), 0o600)
+}
+
+// orphan moves the entries of dir (inside root) that match into
+// <OrphanedDir>/<stamp>/ at depth levels above dir (0: dir itself), a folder
+// only root may open.
+func (r *Root) orphan(root *os.Root, dir, stamp string, match func(string) bool, up int) error {
+	f, err := root.Open(dir)
+	if err != nil {
+		return err
+	}
+	names, err := f.Readdirnames(-1)
+	f.Close()
+	if err != nil {
+		return err
+	}
+	base := dir
+	for i := 0; i < up; i++ {
+		base = filepath.Dir(base)
+	}
+	target := filepath.Join(base, OrphanedDir, stamp)
+	made := false
+	for _, n := range names {
+		if n == OrphanedDir || !match(n) {
+			continue
+		}
+		if st, err := root.Lstat(filepath.Join(dir, n)); err != nil || !st.IsDir() {
+			continue
+		}
+		if !made {
+			for _, d := range []string{filepath.Join(base, OrphanedDir), target} {
+				if err := root.Mkdir(d, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+					return err
+				}
+				if r.Chown == nil {
+					if err := root.Lchown(d, 0, 0); err != nil {
+						return err
+					}
+				}
+				if err := root.Chmod(d, 0o700); err != nil {
+					return err
+				}
+			}
+			made = true
+		}
+		if err := root.Rename(filepath.Join(dir, n), filepath.Join(target, n)); err != nil {
+			return err
+		}
+		r.log().Warn("mail: put a folder from the old layout aside", "folder", n, "to", filepath.Join(root.Name(), target))
+	}
+	return nil
+}
+
+// radicaleRoot opens Radicale's storage (collections/) so that nothing in
+// it, all of which Radicale's user may change, can lead root outside: a
+// link anywhere in the tree can't point out of the radicale folder.
+func (r *Root) radicaleRoot(e Env) (*os.Root, error) {
+	rr, err := os.OpenRoot(e.RadicaleDir())
+	if err != nil {
+		return nil, err
+	}
+	defer rr.Close()
+	return rr.OpenRoot("collections")
+}
+
+// StorageLimitMB is the quota on <pool>/mail (decision 311): the limit set
+// in Control Panel › Mail, else a quarter more than all mailboxes' quotas
+// together plus 5 GB, and never more than 80% of the pool, which keeps room
+// for the system, the apps and snapshots. 0: no quota (the pool's size is
+// unknown and a mailbox has no limit).
+func StorageLimitMB(c RootConfig, poolMB int64) int64 {
+	limit := int64(c.StorageLimitMB)
+	if limit == 0 {
+		var sum int64
+		unlimited := false
+		for _, m := range c.Mailboxes {
+			if m.QuotaMB == 0 {
+				unlimited = true
+			}
+			sum += int64(m.QuotaMB)
+		}
+		if !unlimited {
+			limit = sum*5/4 + 5120
+		}
+	}
+	// Also a limit set by hand: room for the system stays.
+	if capMB := poolMB * 8 / 10; poolMB > 0 && (limit == 0 || capMB < limit) {
+		limit = capMB
+	}
+	if limit != 0 && limit < 1024 {
+		limit = 1024
+	}
+	return limit
+}
+
+// storageLimit sets the dataset's refquota (decision 360: what the mail
+// itself uses; snapshots don't count against it). Warnings only: mail runs
+// without. A limit below what the mail already uses isn't set.
+func (r *Root) storageLimit(ctx context.Context, cfg RootConfig, res *ApplyResult) {
+	if r.Dataset != nil {
+		return // tests: no ZFS
+	}
+	var poolMB int64
+	if out, err := r.run(ctx, "zfs", "get", "-H", "-p", "-o", "value", "used,available", cfg.Pool); err == nil {
+		for _, f := range strings.Fields(string(out)) {
+			n, _ := strconv.ParseInt(f, 10, 64)
+			poolMB += n >> 20
+		}
+	}
+	limit := StorageLimitMB(cfg, poolMB)
+	if limit > 0 {
+		if out, err := r.run(ctx, "zfs", "get", "-H", "-p", "-o", "value", "referenced", cfg.Pool+"/mail"); err == nil {
+			usedMB, _ := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+			usedMB >>= 20
+			if usedMB >= limit {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("the mail storage limit (%d MB) is below what mail already uses (%d MB): not set; raise it or free space", limit, usedMB))
+				return
+			}
+		}
+	}
+	quota := "none"
+	if limit > 0 {
+		quota = fmt.Sprintf("%dM", limit)
+	}
+	if _, err := r.run(ctx, "zfs", "set", "refquota="+quota, cfg.Pool+"/mail"); err != nil {
+		res.Warnings = append(res.Warnings, "couldn't limit the mail storage to "+quota+": "+err.Error())
+	}
 }
 
 // Layout of the mail dataset.
@@ -280,14 +526,18 @@ func (r *Root) apply(ctx context.Context, a ApplyArgs, save bool) (*ApplyResult,
 	if err != nil {
 		return nil, err
 	}
-	rspamdGID, err := r.lookupGroup("_rspamd")
+	rspamdUID, rspamdGID, err := r.lookupUser("_rspamd")
 	if err != nil {
 		return nil, err
 	}
 	if err := r.layout(e, radUID, rspamdGID); err != nil {
 		return nil, err
 	}
+	if err := r.migrateLayout(e, cfg); err != nil {
+		return nil, err
+	}
 	res := &ApplyResult{DKIM: map[string]string{}, Warnings: []string{}, Services: []string{}}
+	r.storageLimit(ctx, cfg, res)
 	for _, d := range cfg.Domains {
 		pub, err := r.ensureDKIM(e, d.Name, d.Selector, rspamdGID)
 		if err != nil {
@@ -299,6 +549,9 @@ func (r *Root) apply(ctx context.Context, a ApplyArgs, save bool) (*ApplyResult,
 		return nil, err
 	}
 	if err := r.installTLS(e); err != nil {
+		return nil, err
+	}
+	if err := r.socketDirs(e, rspamdUID); err != nil {
 		return nil, err
 	}
 	if cfg.SharedCalendar {
@@ -997,20 +1250,26 @@ func (r *Root) Kick(ctx context.Context, a AddressArgs) error {
 	return nil
 }
 
-// DeleteArgs deletes a mailbox's messages for good.
+// DeleteArgs deletes a mailbox's messages and calendars for good.
 type DeleteArgs struct {
-	Pool    string `json:"pool"`
+	Pool string `json:"pool"`
+	// Key is the mailbox's storage key; Address its (last) address.
+	Key     string `json:"key"`
 	Address string `json:"address"`
 	// Confirm must be the address typed again.
 	Confirm string `json:"confirm"`
 }
 
-// DeleteMailbox removes a mailbox's folder (every message in it). Its
-// address must have been removed from the configuration first.
+// DeleteMailbox removes a mailbox's folder (every message in it) and its
+// calendars and address books. The mailbox must have been removed from the
+// configuration first.
 func (r *Root) DeleteMailbox(ctx context.Context, a DeleteArgs) error {
 	local, dom, err := SplitAddress(a.Address)
 	if err != nil {
 		return err
+	}
+	if !keyRE.MatchString(a.Key) {
+		return invalid("invalid mailbox key")
 	}
 	if a.Confirm != a.Address {
 		return invalid("type the mailbox's address to confirm")
@@ -1022,8 +1281,12 @@ func (r *Root) DeleteMailbox(ctx context.Context, a DeleteArgs) error {
 	defer r.mu.Unlock()
 	if b, err := rootfile.ReadFile(r.stateFile()); err == nil {
 		var cur ApplyArgs
-		if json.Unmarshal(b, &cur) == nil && hasMailbox(cur.Config, a.Address) {
-			return invalid("%s is still a mailbox; remove it from the mail server first", a.Address)
+		if json.Unmarshal(b, &cur) == nil {
+			for _, m := range cur.Config.Mailboxes {
+				if m.Key == a.Key || m.Address == a.Address {
+					return invalid("%s is still a mailbox; remove it from the mail server first", a.Address)
+				}
+			}
 		}
 	}
 	e, err := r.env(ctx, a.Pool)
@@ -1036,8 +1299,25 @@ func (r *Root) DeleteMailbox(ctx context.Context, a DeleteArgs) error {
 		return err
 	}
 	defer root.Close()
+	if err := root.RemoveAll(a.Key); err != nil {
+		return err
+	}
+	// Mail from before decision 310, if it was never moved.
 	if err := root.RemoveAll(filepath.Join(dom, local)); err != nil {
 		return err
+	}
+	rad, err := r.radicaleRoot(e)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer rad.Close()
+	for _, p := range []string{a.Key, a.Address} {
+		if err := rad.RemoveAll(filepath.Join("collection-root", p)); err != nil {
+			return fmt.Errorf("deleting the calendars: %w", err)
+		}
 	}
 	return nil
 }
@@ -1105,11 +1385,29 @@ func ParseQuota(addr string, b []byte) Usage {
 
 // familyCollections makes the shared calendar and address book in
 // Radicale's storage when they're missing.
+// Everything happens inside Radicale's storage opened as an os.Root
+// (radicaleRoot): Radicale's user owns that tree, so a link it put there
+// can't send root's mkdir, chown or write anywhere outside it.
 func (r *Root) familyCollections(e Env, rad int) error {
-	base := filepath.Join(e.RadicaleDir(), "collections", "collection-root")
-	fam := filepath.Join(base, "family")
-	for _, d := range []string{base, fam, filepath.Join(fam, "calendar"), filepath.Join(fam, "contacts")} {
-		if err := r.ensureDir(d, 0o750, rad, rad); err != nil {
+	rr, err := r.radicaleRoot(e)
+	if err != nil {
+		return err
+	}
+	defer rr.Close()
+	fam := filepath.Join("collection-root", "family")
+	for _, d := range []string{"collection-root", fam, filepath.Join(fam, "calendar"), filepath.Join(fam, "contacts")} {
+		st, err := rr.Lstat(d)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			if err := rr.Mkdir(d, 0o750); err != nil {
+				return err
+			}
+		case err != nil:
+			return err
+		case !st.IsDir():
+			return fmt.Errorf("%s in Radicale's storage isn't a folder", d)
+		}
+		if err := r.rootChown(rr, d, rad); err != nil {
 			return err
 		}
 	}
@@ -1119,17 +1417,33 @@ func (r *Root) familyCollections(e Env, rad int) error {
 	}
 	for name, p := range props {
 		fp := filepath.Join(fam, name, ".Radicale.props")
-		if _, err := os.Lstat(fp); err == nil {
+		if _, err := rr.Lstat(fp); err == nil {
 			continue
 		}
-		if err := writeNew(fp, []byte(p), 0o640); err != nil {
+		f, err := rr.OpenFile(fp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)
+		if err != nil {
 			return err
 		}
-		if err := r.chown(fp, rad, rad); err != nil {
+		_, werr := f.Write([]byte(p))
+		if cerr := f.Close(); werr == nil {
+			werr = cerr
+		}
+		if werr != nil {
+			return werr
+		}
+		if err := r.rootChown(rr, fp, rad); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// rootChown gives name (inside rr, never through a link) to Radicale.
+func (r *Root) rootChown(rr *os.Root, name string, rad int) error {
+	if r.Chown != nil {
+		return r.Chown(filepath.Join(rr.Name(), name), rad, rad)
+	}
+	return rr.Lchown(name, rad, rad)
 }
 
 // readNoFollow reads a regular file without following a link at its last

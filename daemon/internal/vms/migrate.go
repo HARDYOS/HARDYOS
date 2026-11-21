@@ -42,6 +42,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/hardyos/hardyos/daemon/internal/ports"
 )
 
 // Migration defaults.
@@ -58,8 +60,8 @@ const (
 	LibvirtdConf = "/etc/libvirt/libvirtd.conf"
 	// MigratePortMin and MigratePortMax are QEMU's migration ports
 	// (libvirt's defaults; the storage firewall opens them to members).
-	MigratePortMin = 49152
-	MigratePortMax = 49215
+	MigratePortMin = ports.MigrateFirst
+	MigratePortMax = ports.MigrateFirst + ports.MigrateCount - 1
 	// MaxMigrateDeadline bounds an admission.
 	MaxMigrateDeadline = 10 * time.Minute
 )

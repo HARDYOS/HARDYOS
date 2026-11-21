@@ -361,14 +361,21 @@ until its probe is built, so LAN isolation never triggers.
 - A change of a kind a server doesn't know never stops the cluster: every
   server refuses it, unless the cluster enabled a feature level that server
   lacks (then it stops and asks to be updated).
-- **How far members trust each other is still open** (the owner's
-  decision). Today a server whose root is compromised can act as an
-  administrator on the others within the limits above, can misbehave as a
-  leader of the log (Raft isn't Byzantine fault tolerant), and its relayed
-  requests are limited per server. Keeping a compromised member out
-  entirely would need every server to authenticate the person itself
-  (re-sign-in on the target); that waits for the decision. Both ends audit
-  every forwarded change with the person and the server.
+- **Members of one cluster trust each other fully**, as in Proxmox
+  (the owner's decision, decision 399). A cluster is one administrative
+  domain: add only servers you'd give the same administrators and the same
+  root. A member whose root is compromised is out of scope: it can act as
+  an administrator on the others within the limits above, misbehave as a
+  leader of the log (Raft isn't Byzantine fault tolerant), and reach
+  cluster storage. Not planned, because of that: the target re-asking the
+  person to sign in (or step up) before destroying storage, the storage
+  server checking the log itself, limiting which members may propose
+  placements, deaths and moves, encrypting the storage network, and
+  end-to-end libvirt TLS for migrations. The checks described here stay:
+  they stop mistakes, a hung or confused hardyd and replays, not a hostile
+  member. Each server can still turn off administrators of other servers
+  (**Cluster › Servers**), and both ends audit every forwarded change with
+  the person and the server.
 - Known limit: a server that was offline while another server joined (or
   rejoined after a fence) catches up once the leader is a server it already
   knows as active; until then it stays behind (the others are unaffected).
@@ -392,7 +399,8 @@ until its probe is built, so LAN isolation never triggers.
   squashing, so it is never exported when the storage network is the LAN
   itself: use a dedicated port or a VLAN. The storage network carries no
   encryption: a server on that network could still pretend to be another
-  (decision 379); encrypting it is a later step.
+  (decision 379); under full trust between members (decision 399) that is
+  accepted and encrypting it is not planned.
 - Compute servers never treat cluster disks as their own (they aren't
   offered for pools, imported or probed), and a block volume another server
   wrote is checked before it is mounted.

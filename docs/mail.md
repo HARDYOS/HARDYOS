@@ -27,7 +27,7 @@ decisions 239-249.
    │         :465/:587 (LAN)  ── Rspamd (spam, DKIM) ── Dovecot LMTP     │
    │ Dovecot :993 (LAN)  :10993 (PROXY, VPS only)  ── mailboxes on       │
    │                                                  <pool>/mail        │
-   │ hardyd: sign-ins (127.0.0.1:44250), /dav-mail/ → Radicale,          │
+   │ hardyd: sign-ins (Unix socket), /dav-mail/ → Radicale,              │
    │         autoconfig/autodiscover, Control Panel › Mail               │
    │ Roundcube (App Store) in the desktop, signed in by HardyOS          │
    └──────────────┬──────────────────────────────────────────────────────┘
@@ -175,7 +175,8 @@ Radicale keeps calendars and contacts on the mail dataset. hardyd serves
 them at `https://mail.<base>/dav-mail/` (and on the desktop's address):
 each request signs in with the person's mail address and domain password,
 which hardyd checks (with the same limits as mail sign-ins) before talking
-to Radicale on 127.0.0.1. The **family calendar** and **family address
+to Radicale over a Unix socket only hardyd can open (Radicale has no network
+port). The **family calendar** and **family address
 book** (`/dav-mail/family/calendar/`, `/dav-mail/family/contacts/`) are
 shared by everyone with a mailbox. Apple's profile adds them; other apps add
 them by URL (most apps only discover a person's own collections).
@@ -210,18 +211,64 @@ connection and rate limits.
   ports at all.
 - **Sign-ins** are checked by hardyd: domain passwords with this server's own
   domain controller (like a desktop sign-in), webmail tokens against the
-  desktop session they were made for. Wrong passwords from the internet
-  block the address for an hour after 10 failures in 15 minutes and slow
-  down further guesses at that mailbox; sign-ins from the LAN, NetBird or
-  the server itself are only ever slowed down and never share a counter
-  with the internet, so an attacker can't lock anyone at home out.
+  desktop session they were made for. Dovecot asks hardyd over a Unix
+  socket that only Dovecot may open (`/run/hardyos-mail-auth.sock`, made by
+  `hardyd-mail-auth.socket`), never over a TCP port another program could
+  take first; nothing caches a sign-in. Whatever refuses a sign-in is tied
+  to where the wrong passwords came from, so nobody can lock someone else
+  out: from the internet, an address (an IPv6 address's whole /64) is
+  blocked for an hour after 10 failures in 15 minutes, and a mailbox is
+  refused for a growing wait only from the network (/24, /48) that guessed;
+  a network the person signed in from in the last 30 days keeps working.
+  From the LAN, NetBird or the server itself, only the device that guessed
+  waits a little. Across all sources a guessed mailbox is just slowed down
+  (at most 10 seconds), never refused. Sign-ins through the VPS's forwarded
+  ports (told by the port they really arrived on) or the published gateway
+  count as the internet's whatever address they claim. Alerts about blocked
+  addresses come at most once an hour, grouped by network.
+- **Senders**: signed-in people may only use their own addresses (and their
+  aliases and groups) as the envelope sender *and* in the From header
+  (Rspamd refuses the message otherwise, also for Sender/Resent-* headers,
+  two From headers, groups and display names showing another address), and
+  always need a return address. Read receipts sent with an empty return
+  address aren't delivered outside.
+  HardyOS's notifications send from an address of their own that no
+  mailbox, alias or group may use.
+- **Rspamd** talks to Postfix and Dovecot over Unix sockets only (the
+  milter: Postfix only; the controller, for learning from Junk: the mail
+  user only, with a password).
+- **Mailboxes** are kept by a key of their own (`vmail/<key>`, calendars too),
+  tied to the domain account's objectGUID (checked at every sign-in): an
+  account deleted and made again under the same name gets a new, empty
+  mailbox, never the old one's mail, and a renamed account keeps its
+  mailbox. Deleting a mailbox removes its messages, calendars and contacts.
+  Folders from before this layout that belong to no mailbox are moved once
+  to `vmail/.orphaned/` (root only) for you to look at or delete.
+- **Full disks**: `<pool>/mail` has a ZFS `refquota` (set in Settings, or
+  worked out from the mailboxes' quotas; never over 80% of the pool, and not
+  set below what mail already uses); a full mailbox makes new mail wait (on
+  the VPS) instead of bouncing, and Junk empties itself after 30 days.
+- **Bounces**: nothing bounces to the internet from home (a bounce would go
+  out through SES to a sender that is often forged): such a bounce fails
+  and the postmaster mailbox gets a copy. Bounces to people on this server
+  are delivered. The VPS keeps mail it can't hand to HardyOS for 14 days and
+  then bounces it itself (from the VPS, not SES); unknown addresses are
+  refused there at once, before the VPS accepts anything.
+- **The VPS** limits each client address (connections, messages,
+  recipients, errors; HAProxy: 20 connections at once, 60 a minute) and
+  turns away bots that talk before its greeting (postscreen). Relayed and
+  forwarded connections are accepted at home only from the VPS's NetBird
+  address through the NetBird interface.
 - **Secrets**: the SES secret key, the Cloudflare token, the notification
   sign-in and the Dovecot ↔ hardyd secret are sealed in hardyd's database.
   DKIM keys and the TLS key are made by the root helper on the mail dataset
   (DKIM `0640 root:_rspamd`, TLS `0600 root`) and never reach hardyd.
 - **Webmail** only opens through HardyOS's window proxy (Roundcube listens
   on 127.0.0.1), signed in with a token that lasts as long as the person's
-  desktop session.
+  desktop session. Tokens work only from the webmail app's own address
+  (172.16.253.2, never through the VPS) and no password works from it;
+  Roundcube's own sign-in form is shut, and the app gateway never passes
+  credentials to it.
 
 ## Backups
 

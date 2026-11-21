@@ -37,7 +37,10 @@ func newMailEnv(t *testing.T) (*testEnv, *manage.Service, string) {
 		t.Fatal(err)
 	}
 	etc := t.TempDir()
-	pool := t.TempDir()
+	pool := filepath.Join(etc, "pool") // the mail dataset
+	if err := os.MkdirAll(pool, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	ps := &priv.Server{AllowedUIDs: []uint32{uint32(os.Getuid())}}
 	priv.RegisterBuiltins(ps)
 	fake := (&sysexec.Fake{}).OnPrefix("systemctl", sysexec.Result{}).OnPrefix("nft", sysexec.Result{}).

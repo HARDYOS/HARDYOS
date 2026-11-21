@@ -24,16 +24,17 @@ import (
 	"strings"
 
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
+	"github.com/hardyos/hardyos/daemon/internal/ports"
 )
 
 // Ports of the storage network.
 const (
-	ISCSIPort = 3260
-	NFSPort   = 2049
+	ISCSIPort = ports.ISCSI
+	NFSPort   = ports.NFS
 	// MigrateFirst..MigrateLast is the live-migration memory range compute
 	// nodes open to members' storage addresses (QEMU's default 49152+).
-	MigrateFirst = 49152
-	MigrateLast  = 49215
+	MigrateFirst = ports.MigrateFirst
+	MigrateLast  = ports.MigrateFirst + ports.MigrateCount - 1
 )
 
 // HBA is the iblock HBA HardyOS's backstores live in

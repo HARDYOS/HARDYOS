@@ -711,10 +711,12 @@ MACs and closes NFSv3's side protocols, node-written file systems are
 checked before any kernel mounts them, and cluster LUNs are invisible to
 the compute host's own disk tools.
 
-**Open question (owner): do members fully trust each other?** Proxmox-style
-clusters do (section 8: a member's root is a cluster compromise). If
-instead a compromised compute node must not be able to reach other
-workloads' storage, these remain, in order of value:
+**Answered (owner, decision 399): members fully trust each other**, as
+in Proxmox (section 8: a member's root is a cluster compromise, and a
+compromised member is out of scope). The items below, which would keep a
+compromised compute node from reaching other workloads' storage, are
+therefore not planned; they stay here as the record of what isolation
+would take:
 
 1. **Root-side log verification on the storage node.** Root keeps the
    members' keys (seeded from the pins) and verifies every applied entry

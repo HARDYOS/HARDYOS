@@ -12,12 +12,15 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"github.com/hardyos/hardyos/daemon/internal/mail"
 	"log/slog"
+	"net/netip"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/hardyos/hardyos/daemon/internal/mail"
 
 	"github.com/hardyos/hardyos/daemon/internal/notify"
 	"golang.org/x/text/unicode/norm"
@@ -35,6 +38,10 @@ type DirUser struct {
 	DisplayName string
 	Enabled     bool
 	Builtin     bool
+	// GUID and SID are the account's objectGUID and objectSid: they stay
+	// with the account itself, not its name.
+	GUID string
+	SID  string
 }
 
 // Directory lists the domain's accounts (nil, nil without a domain).
@@ -45,12 +52,23 @@ type Directory interface {
 // Passwords checks a domain account's password the way desktop sign-in
 // does (this server's own domain controller only).
 type Passwords interface {
-	CheckDomainPassword(ctx context.Context, account, password string) error
+	// CheckDomainPassword checks the password and returns the account's
+	// objectGUID ("" when the directory doesn't say).
+	CheckDomainPassword(ctx context.Context, account, password string) (guid string, err error)
+	// AccountGUID returns an account's objectGUID ("" when unknown).
+	AccountGUID(ctx context.Context, account string) (string, error)
+}
+
+// sameAccount reports whether the directory's account is the one the
+// mailbox belongs to (decision 361): a mailbox tied to an objectGUID opens
+// only for that account, whatever its name is now.
+func sameAccount(m *Mailbox, guid string) bool {
+	return m.AccountGUID == "" || guid == "" || strings.EqualFold(m.AccountGUID, guid)
 }
 
 // WebmailPrefix starts every webmail token (so a password can never be
 // mistaken for one).
-const WebmailPrefix = "hwm1."
+const WebmailPrefix = mail.WebmailTokenPrefix
 
 // webmailTTL bounds a webmail token even while its window stays open.
 const webmailTTL = 12 * time.Hour
@@ -65,9 +83,12 @@ type Service struct {
 	// NetBirdAddr is this server's NetBird address ("" when not on
 	// NetBird).
 	NetBirdAddr func(ctx context.Context) string
-	Resolver    mail.Resolver
-	Log         *slog.Logger
-	Throttle    *mail.Throttle
+	// NetBirdNet is the NetBird network and its interface ("", "" when
+	// unknown: the defaults below).
+	NetBirdNet func(ctx context.Context) (network, iface string)
+	Resolver   mail.Resolver
+	Log        *slog.Logger
+	Throttle   *mail.Throttle
 	// SessionAlive says whether a Mail app window session (the window
 	// proxy's) is still signed in: a webmail token lasts as long.
 	SessionAlive func(key string) bool
@@ -81,6 +102,27 @@ type Service struct {
 	conds    map[string]string       // alert key -> last body
 	certPin  []byte                  // the server's leaf (DER), for LoopbackTLS
 	certTime time.Time
+	// Sign-in alerts, gathered (decision 306): blocked networks since the
+	// last alert, and when it went out.
+	blockedNets map[string]bool
+	lastBlocked time.Time
+	// authErr: hardyd's sign-in socket isn't serving (nil: it is).
+	authErr error
+}
+
+// Default NetBird network and interface (NetBird's own defaults) when
+// NetBird can't be asked.
+const (
+	DefaultNetBirdNet   = "100.64.0.0/10"
+	DefaultNetBirdIface = "wt0"
+)
+
+// SetAuthListener records whether hardyd's mail sign-in socket is serving
+// (nil) or why not; CheckHealth alerts while it isn't.
+func (s *Service) SetAuthListener(err error) {
+	s.mu.Lock()
+	s.authErr = err
+	s.mu.Unlock()
 }
 
 type webmailGrant struct {
@@ -142,8 +184,12 @@ func (s *Service) CheckLogin(ctx context.Context, login, secret string) error {
 	if s.Passwords == nil {
 		return mail.ErrBadLogin
 	}
-	if err := s.Passwords.CheckDomainPassword(ctx, m.Account, secret); err != nil {
+	guid, err := s.Passwords.CheckDomainPassword(ctx, m.Account, secret)
+	if err != nil {
 		return fmt.Errorf("%w: %v", mail.ErrBadLogin, err)
+	}
+	if !sameAccount(m, guid) {
+		return fmt.Errorf("%w (the account %s isn't the one this mailbox belongs to)", mail.ErrBadLogin, m.Account)
 	}
 	return nil
 }
@@ -163,6 +209,18 @@ func (s *Service) WebmailLogin(ctx context.Context, account, session string) (ad
 	}
 	if !m.CanSignIn() {
 		return "", "", errors.New("this mailbox is turned off")
+	}
+	if m.AccountGUID != "" {
+		if s.Passwords == nil {
+			return "", "", errors.New("can't tell whose mailbox this is")
+		}
+		guid, err := s.Passwords.AccountGUID(ctx, account)
+		if err != nil {
+			return "", "", err
+		}
+		if !sameAccount(m, guid) {
+			return "", "", errors.New("this mailbox belongs to another account of the same name")
+		}
 	}
 	now := time.Now()
 	s.mu.Lock()
@@ -212,14 +270,15 @@ func (s *Service) EndWebmail(session string) {
 	}
 }
 
-// DAVPassword is the password hardyd uses with Radicale for a mailbox.
-func (s *Service) DAVPassword(ctx context.Context, address string) (string, error) {
+// DAVPassword is the password hardyd uses with Radicale for a mailbox (by
+// its storage key, Radicale's user name for it).
+func (s *Service) DAVPassword(ctx context.Context, mailboxKey string) (string, error) {
 	key, err := s.Store.EnsureSecret(ctx, SecretDAV)
 	if err != nil {
 		return "", err
 	}
 	mac := hmac.New(sha256.New, []byte(key))
-	mac.Write([]byte("dav\x00" + address))
+	mac.Write([]byte("dav\x00" + mailboxKey))
 	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
@@ -247,23 +306,50 @@ func (s *Service) RootArgs(ctx context.Context) (*mail.ApplyArgs, error) {
 	if err != nil {
 		return nil, err
 	}
+	nbNet, nbIface := "", ""
+	if s.NetBirdNet != nil {
+		nbNet, nbIface = s.NetBirdNet(ctx)
+	}
+	if nbNet == "" {
+		nbNet = DefaultNetBirdNet
+	}
+	if nbIface == "" {
+		nbIface = DefaultNetBirdIface
+	}
 	cfg := mail.RootConfig{Pool: st.Pool, Hostname: st.Hostname, VPSPeer: st.VPSPeer, Postmaster: st.Postmaster,
 		ClamAV: st.ClamAV, JunkScore: st.JunkScore, MaxMessageMB: st.MaxMessageMB, SendPerHour: st.SendPerHour,
-		NotifyFrom: st.NotifyFrom, SharedCalendar: st.SharedCalendar}
+		NotifyFrom: st.NotifyFrom, SharedCalendar: st.SharedCalendar, NetBirdNet: nbNet, NetBirdIface: nbIface,
+		StorageLimitMB: st.StorageLimitMB}
 	sec := mail.RootSecrets{AuthSecret: authSecret, DAV: map[string]string{}}
 	for _, d := range doms {
 		cfg.Domains = append(cfg.Domains, mail.RootDomain{Name: d.Name, Selector: d.Selector})
 	}
+	live := map[string]bool{}
 	for _, m := range mbs {
-		cfg.Mailboxes = append(cfg.Mailboxes, mail.RootMailbox{Address: m.Address, Aliases: m.Aliases, QuotaMB: m.QuotaMB})
+		if m.Deleting {
+			continue // leaving the server
+		}
+		live[m.Address] = true
+		cfg.Mailboxes = append(cfg.Mailboxes, mail.RootMailbox{Key: m.Key, Legacy: m.Legacy, Address: m.Address, Aliases: m.Aliases, QuotaMB: m.QuotaMB})
 		if m.CanSignIn() {
-			if sec.DAV[m.Address], err = s.DAVPassword(ctx, m.Address); err != nil {
+			if sec.DAV[m.Key], err = s.DAVPassword(ctx, m.Key); err != nil {
 				return nil, err
 			}
 		}
 	}
+	if !live[cfg.Postmaster] {
+		cfg.Postmaster = ""
+	}
 	for _, g := range gs {
-		cfg.GroupAliases = append(cfg.GroupAliases, mail.RootGroupAlias{Address: g.Address, Targets: g.Targets})
+		var targets []string
+		for _, t := range g.Targets {
+			if live[t] {
+				targets = append(targets, t)
+			}
+		}
+		if len(targets) > 0 {
+			cfg.GroupAliases = append(cfg.GroupAliases, mail.RootGroupAlias{Address: g.Address, Targets: targets})
+		}
 	}
 	if st.SESRegion != "" && st.SESAccessID != "" {
 		secret, err := s.Store.Secret(ctx, SecretSES)
@@ -291,6 +377,10 @@ func (s *Service) Apply(ctx context.Context, progress func(float64, string)) (*m
 	progress(30, "Writing the mail server's settings and starting it")
 	var res mail.ApplyResult
 	if err := s.Priv.Call(ctx, mail.OpApply, args, &res); err != nil {
+		return nil, err
+	}
+	// Root moved the old layout's folders (once): the flags are done.
+	if err := s.Store.ClearLegacy(ctx); err != nil {
 		return nil, err
 	}
 	for _, d := range args.Config.Domains {
@@ -446,8 +536,12 @@ func (s *Service) SyncAccounts(ctx context.Context) (*AccountSync, error) {
 		return nil, err
 	}
 	byAccount := map[string]*Mailbox{}
+	byGUID := map[string]*Mailbox{}
 	for i := range mbs {
 		byAccount[mbs[i].Account] = &mbs[i]
+		if g := strings.ToLower(mbs[i].AccountGUID); g != "" && !mbs[i].Deleting {
+			byGUID[g] = &mbs[i]
+		}
 	}
 	seen := map[string]bool{}
 	for _, u := range users {
@@ -461,6 +555,49 @@ func (s *Service) SyncAccounts(ctx context.Context) (*AccountSync, error) {
 			state = "disabled"
 		}
 		m := byAccount[acct]
+		// Renamed in the domain: the mailbox follows the account (by its
+		// objectGUID), keeping its address and mail (decision 361).
+		if g := byGUID[strings.ToLower(u.GUID)]; u.GUID != "" && g != nil && g.Account != acct {
+			if m != nil && m != g {
+				// Something else holds the new name: it isn't this account's.
+				if err := s.Store.Detach(ctx, m.ID); err != nil {
+					return nil, err
+				}
+				m.Account = fmt.Sprintf("@%d", m.ID)
+			}
+			if err := s.Store.SetAccount(ctx, g.ID, acct); err != nil {
+				return nil, err
+			}
+			seen[g.Account] = true // its old name isn't "gone"
+			g.Account = acct
+			byAccount[acct] = g
+			m = g
+		}
+		if m != nil && !m.Deleting && u.GUID != "" && !strings.EqualFold(m.AccountGUID, u.GUID) {
+			// The mailbox belongs to the account itself, not its name
+			// (decision 310). Another account under the same name (the
+			// old one deleted and made again), or a mailbox whose account
+			// can't be told apart any more: the mailbox stays, detached,
+			// and the new account gets one of its own. A mailbox made
+			// before HardyOS knew its account's GUID takes the GUID of the
+			// account it still serves.
+			if m.AccountGUID == "" && m.AccountState != "deleted" {
+				if err := s.Store.SetAnchor(ctx, m.ID, u.GUID, u.SID); err != nil {
+					return nil, err
+				}
+				m.AccountGUID = u.GUID
+			} else {
+				if err := s.Store.Detach(ctx, m.ID); err != nil {
+					return nil, err
+				}
+				if m.AccountState != "deleted" {
+					out.Deleted = append(out.Deleted, m.Address)
+				}
+				s.log().Warn("mail: an account came back under a name whose mailbox was another account's; it gets a new mailbox",
+					"account", acct, "mailbox", m.Address)
+				m = nil
+			}
+		}
 		if m == nil {
 			if st.DefaultDomain == "" {
 				continue
@@ -468,7 +605,8 @@ func (s *Service) SyncAccounts(ctx context.Context) (*AccountSync, error) {
 			addr := addressFor(u, st.AddressStyle, st.DefaultDomain, used)
 			used[addr] = true
 			if _, err := s.Store.CreateMailbox(ctx, Mailbox{Account: acct, Address: addr, DisplayName: u.DisplayName,
-				Aliases: []string{}, QuotaMB: st.DefaultQuotaMB, Enabled: true, AccountState: state}); err != nil {
+				Aliases: []string{}, QuotaMB: st.DefaultQuotaMB, Enabled: true, AccountState: state,
+				AccountGUID: u.GUID, AccountSID: u.SID}); err != nil {
 				return nil, err
 			}
 			out.Created = append(out.Created, addr)
@@ -610,15 +748,72 @@ func (s *Service) clear(ctx context.Context, key, kind, title, link string) {
 	}
 }
 
-// AuthEvent raises an alert when an internet address was blocked.
+// signinAlertEvery is how often at most a "sign-ins blocked" alert goes out.
+const signinAlertEvery = time.Hour
+
+// maxConds bounds the alert conditions remembered.
+const maxConds = 500
+
+// AuthEvent gathers blocked internet addresses into one alert an hour at
+// most (decision 306), by network (IPv4 /24, IPv6 /48): an attack from many
+// addresses is one notification, not thousands.
 func (s *Service) AuthEvent(e mail.AuthEvent) {
 	if !e.Blocked {
 		return
 	}
-	s.raise(context.Background(), "signin:"+e.Remote, "mail.signin", notify.SeverityWarning,
-		"Mail sign-ins blocked from "+e.Remote,
-		fmt.Sprintf("%s tried wrong passwords for mail (%s, last as %s) and is blocked for an hour. People on your network aren't affected.",
-			e.Remote, e.Protocol, e.Login), "control-panel/mail")
+	a, _ := netip.ParseAddr(e.Remote)
+	s.mu.Lock()
+	if s.blockedNets == nil {
+		s.blockedNets = map[string]bool{}
+	}
+	if len(s.blockedNets) < 10000 {
+		s.blockedNets[mail.AlertKey(a)] = true
+	}
+	s.mu.Unlock()
+	s.flushSigninAlert(context.Background(), time.Now())
+}
+
+// flushSigninAlert sends the gathered sign-in alert when the last one is
+// over an hour old.
+func (s *Service) flushSigninAlert(ctx context.Context, now time.Time) {
+	s.mu.Lock()
+	if len(s.blockedNets) == 0 || now.Sub(s.lastBlocked) < signinAlertEvery {
+		s.mu.Unlock()
+		return
+	}
+	nets := make([]string, 0, len(s.blockedNets))
+	for n := range s.blockedNets {
+		nets = append(nets, n)
+	}
+	s.blockedNets, s.lastBlocked = map[string]bool{}, now
+	s.mu.Unlock()
+	sort.Strings(nets)
+	list := nets
+	if len(list) > 5 {
+		list = list[:5]
+	}
+	title := "Mail sign-ins blocked from " + nets[0]
+	if len(nets) > 1 {
+		title = fmt.Sprintf("Mail sign-ins blocked from %d networks", len(nets))
+	}
+	body := fmt.Sprintf("Wrong passwords for mail from the internet: %s%s. Each address is blocked for an hour; people on your network aren't affected.",
+		strings.Join(list, ", "), map[bool]string{true: fmt.Sprintf(" and %d more", len(nets)-len(list)), false: ""}[len(nets) > len(list)])
+	if s.Notify != nil {
+		s.Notify.Notify(ctx, notify.Event{Kind: "mail.signin", Severity: notify.SeverityWarning, Title: title, Body: body,
+			Link: "control-panel/mail", Time: now})
+	}
+}
+
+// pruneConds forgets alert conditions for things that no longer exist
+// (domains removed) and keeps the map bounded.
+func (s *Service) pruneConds(keep func(key string) bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k := range s.conds {
+		if !keep(k) || len(s.conds) > maxConds {
+			delete(s.conds, k)
+		}
+	}
 }
 
 // QueueStuckAfter is how long a deferred message may wait before an alert.
@@ -630,6 +825,18 @@ func (s *Service) CheckHealth(ctx context.Context) {
 	st, err := s.Store.LoadSettings(ctx)
 	if err != nil || !st.Enabled {
 		return
+	}
+	s.flushSigninAlert(ctx, time.Now())
+	s.mu.Lock()
+	authErr := s.authErr
+	s.mu.Unlock()
+	if authErr != nil {
+		s.raise(ctx, "signin-socket", "mail.service", notify.SeverityCritical, "Nobody can sign in to mail",
+			"hardyd can't answer the mail server's sign-in questions: "+mail.ClipText(authErr.Error(), 300)+
+				". Restart HardyOS's services (or the server); if this stays, the mail sign-in socket (hardyd-mail-auth.socket) is missing.",
+			"control-panel/mail")
+	} else {
+		s.clear(ctx, "signin-socket", "mail.service", "Mail sign-in works again", "control-panel/mail")
 	}
 	var status mail.Status
 	if err := s.Priv.Call(ctx, mail.OpStatus, mail.StatusArgs{Pool: st.Pool}, &status); err != nil {
@@ -694,6 +901,11 @@ func (s *Service) CheckAllDNS(ctx context.Context) {
 	if err != nil {
 		return
 	}
+	have := map[string]bool{}
+	for _, d := range doms {
+		have["dns:"+d.Name] = true
+	}
+	s.pruneConds(func(k string) bool { return !strings.HasPrefix(k, "dns:") || have[k] })
 	for _, d := range doms {
 		state, err := s.CheckDomain(ctx, d.Name)
 		if err != nil {
