@@ -221,7 +221,10 @@ func TestPublicSSOFailuresDontLockTheLANAndAdminsAreRefused(t *testing.T) {
 	}
 	// kid signs in at home all the same.
 	home := e.client(t)
-	if code := home.do("POST", "/api/v1/auth/login", map[string]string{"username": "kid", "password": "kidpassword1"}, nil); code != 200 {
+	// (kid has two-factor sign-in now, so the password is answered with
+	// the code step: it wasn't locked out.)
+	var ch LoginChallenge
+	if code := home.do("POST", "/api/v1/auth/login", map[string]string{"username": "kid", "password": "kidpassword1"}, &ch); code != 202 || ch.Step != "totp" {
 		t.Fatalf("kid at home after public failures = %d", code)
 	}
 	// Administrators: the uniform answer from the internet by default.

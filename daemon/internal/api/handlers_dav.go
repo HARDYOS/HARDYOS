@@ -579,7 +579,13 @@ func (s *Server) davSignIn(w http.ResponseWriter, r *http.Request) (*auth.User, 
 	}
 	ctx := r.Context()
 	userKey := s.signin.LimitKey(ctx, name)
-	k := s.dav.cacheKey(userKey, pw)
+	outside := s.outside(r)
+	// A password that worked at home is never remembered for outside.
+	cachePrefix := "in:"
+	if outside {
+		cachePrefix = "out:"
+	}
+	k := s.dav.cacheKey(cachePrefix+userKey, pw)
 	if id, ok := s.dav.lookup(k); ok {
 		u, err := s.davUser(r, id)
 		if err == nil {
@@ -613,10 +619,23 @@ func (s *Server) davSignIn(w http.ResponseWriter, r *http.Request) (*auth.User, 
 			return nil, false
 		}
 	}
-	u, err := s.signin.AuthenticateDomain(ctx, name, pw)
+	// An app password (scope files) always works; the account's own
+	// password only at home and without two-factor sign-in (decision 445).
+	u, passwordOK, err := s.servicePassword(ctx, name, pw, auth.ScopeFiles, ip, outside)
+	how := "webdav, app password"
+	if u == nil && err == nil && passwordOK {
+		how = "webdav"
+		u, err = s.signin.AuthenticateDomain(ctx, name, pw)
+	}
 	if err != nil {
 		status, counts := davLoginStatus(err)
 		local := errors.Is(err, auth.ErrLocalAccount)
+		if errors.Is(err, errAppPasswordRequired) {
+			// The password wasn't even checked: counted against the
+			// address only, so an old client can't lock its owner out.
+			s.cfg.Limiter.Fail("ip:" + ip)
+			counts = false
+		}
 		if counts {
 			s.cfg.Limiter.Fail("ip:" + ip)
 			if local {
@@ -650,7 +669,7 @@ func (s *Server) davSignIn(w http.ResponseWriter, r *http.Request) (*auth.User, 
 	s.cfg.Limiter.Succeed(userKey)
 	s.dav.store(k, u.ID)
 	if s.dav.shouldLog(u.ID) {
-		s.record(r, u, "dav.login", u.Username, audit.Success, "webdav")
+		s.record(r, u, "dav.login", u.Username, audit.Success, how)
 	}
 	return u, true
 }
@@ -685,7 +704,7 @@ func davLoginStatus(err error) (int, bool) {
 	case isErr(err, auth.ErrLocalAccount, auth.ErrBadCredentials, auth.ErrUnknownDomain, auth.ErrAccountDisabled, auth.ErrAccountLocked,
 		auth.ErrAccountExpired, auth.ErrAccountRevoked, auth.ErrPasswordExpired):
 		return http.StatusUnauthorized, true
-	case errors.Is(err, auth.ErrDisabledHere):
+	case isErr(err, auth.ErrDisabledHere, errAppPasswordRequired, auth.ErrAccountReplaced):
 		return http.StatusUnauthorized, false
 	case isErr(err, auth.ErrClockSkew, auth.ErrDomainUnavailable, auth.ErrNoLocalDC):
 		return http.StatusServiceUnavailable, false

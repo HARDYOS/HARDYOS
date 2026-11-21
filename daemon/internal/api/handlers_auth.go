@@ -69,7 +69,7 @@ func (s *Server) handleSetupAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.record(r, u, "setup.admin", u.Username, audit.Success, "first administrator created")
-	s.startSession(w, r, u)
+	s.startSession(w, r, u, false)
 	writeJSON(w, http.StatusCreated, u)
 }
 
@@ -129,9 +129,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if u.Source == auth.SourceDomain {
 		detail = "domain account, role " + string(u.Role)
 	}
-	s.record(r, u, "auth.login", u.Username, audit.Success, detail)
-	s.startSession(w, r, u)
-	writeJSON(w, http.StatusOK, u)
+	// A session now, or a second step first (decisions 440-449).
+	s.afterPassword(w, r, u, detail)
 }
 
 // limiter is auth.LoginLimiter or, from the internet, auth.DelayLimiter.
@@ -141,8 +140,10 @@ type limiter interface {
 	Succeed(key string)
 }
 
-func (s *Server) startSession(w http.ResponseWriter, r *http.Request, u *auth.User) {
-	token, expires, err := s.sessions.Start(r.Context(), u, s.clientIP(r), r.UserAgent())
+// startSession signs this browser in; mfa records that a second factor
+// was used.
+func (s *Server) startSession(w http.ResponseWriter, r *http.Request, u *auth.User, mfa bool) {
+	token, expires, err := s.sessions.StartMFA(r.Context(), u, s.clientIP(r), r.UserAgent(), mfa)
 	if err != nil {
 		s.log.Error("create session", "err", err)
 		return
@@ -165,7 +166,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, u *auth.User) {
-	writeJSON(w, http.StatusOK, u)
+	writeJSON(w, http.StatusOK, s.withMFA(r.Context(), u))
 }
 
 type changePasswordRequest struct {
@@ -192,11 +193,18 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request, u 
 		writeUserError(s, w, err)
 		return
 	}
-	// Sign out every other session; keep this browser signed in with a fresh one.
+	// Sign out every other session; keep this browser signed in with a
+	// fresh one (as two-factor as this one was).
+	mfa := false
+	if tok, ok := s.sessionToken(r); ok {
+		if info, err := s.peekSession(r.Context(), tok); err == nil {
+			mfa = info.MFA
+		}
+	}
 	_ = s.sessions.RevokeUser(r.Context(), u.ID)
 	s.proxy.endUser(u.ID)
 	s.endOIDCUser(r.Context(), u.ID)
-	s.startSession(w, r, u)
+	s.startSession(w, r, u, mfa)
 	s.record(r, u, "auth.password.change", u.Username, audit.Success, "")
 	w.WriteHeader(http.StatusNoContent)
 }

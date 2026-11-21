@@ -56,6 +56,33 @@ undo only writes the network files).
 - hardyd serves HTTPS on 443 with a self-signed certificate created on first
   start; port 80 redirects to it.
 
+### Two-factor sign-in (decisions 440-449)
+
+- `internal/auth` holds the factors: `totp.go` (RFC 6238), `mfa.go`
+  (`user_totp`, `user_recovery_codes`; secrets sealed by an `auth.Sealer`,
+  which hardyd backs with secretbox purpose `totp`), `challenge.go` (second
+  steps in memory) and `apppasswords.go` (`app_passwords`). Migration
+  `0090_totp.sql` also adds `mfa` to `sessions` and `oidc_browser_sessions`.
+- `MFA.Requirement(user, outside)` says what a right password still needs:
+  nothing, a code (`totp`), enrollment (`enroll`, an administrator past the
+  grace period) or a setup code (`setup_code`, from outside without 2FA).
+  `api.Server.outside` decides "outside": the app gateway, or an address that
+  isn't loopback, private, link-local or NetBird's.
+- Desktop: `POST /auth/login` answers 202 with a challenge; `/auth/login/2fa`,
+  `/auth/login/enroll` and `/auth/login/enroll/confirm` finish it. The session
+  gate (`sessionGate`) refuses a session without `mfa` from outside and limits
+  an administrator past the grace period to enrollment; app windows and VM
+  consoles use the same gate.
+- Sign-in provider: after the password, `/login/code`, `/login/setup` and
+  `/login/enroll` (script-free pages, inline SVG QR code from
+  `internal/qrsvg`, forms bound to the browser like the login form).
+- Services without a code step (WebDAV, mail through Dovecot, calendars) go
+  through `servicePassword`: a scoped app password always, the account's own
+  password only from inside and only without 2FA.
+- SMB, Kerberos, LDAP and SFTP check domain passwords in Samba/winbind
+  themselves and are not covered (decision 447).
+- Recovery: recovery codes, an administrator's reset, `hardyctl reset-2fa`.
+
 ## Jobs and events
 
 Long operations run as jobs: queued, persisted in SQLite, run by a worker

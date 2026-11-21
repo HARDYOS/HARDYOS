@@ -1074,7 +1074,7 @@ func (s *Server) handleMailDAV(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(mail.WithSignIn(r.Context(), src, mail.ScopeCalendars), 20*time.Second)
 	err := svc.CheckLogin(ctx, login, pw)
 	cancel()
 	if svc.Throttle.ResultDAV(login, src, err == nil) {
@@ -1173,7 +1173,30 @@ func (m mailPasswords) CheckDomainPassword(ctx context.Context, account, passwor
 	if info == nil {
 		return "", auth.ErrNoLocalDC
 	}
-	u, err := si.Authenticate(ctx, info.NetBIOS+`\`+account, password)
+	// Two-factor sign-in (decision 446): an app password with the scope
+	// always works; the account's own password only from inside and only
+	// without two-factor sign-in. Without a recorded source, outside.
+	src, scope, known := mail.SignInFrom(ctx)
+	if !known || (scope != mail.ScopeMail && scope != mail.ScopeCalendars) {
+		scope = mail.ScopeMail
+	}
+	outside := !known || src.Internet || !src.Addr.IsValid()
+	ip := ""
+	if src.Addr.IsValid() {
+		ip = src.Addr.String()
+	}
+	principal := info.NetBIOS + `\` + account
+	apU, passwordOK, err := m.s.servicePassword(ctx, principal, password, scope, ip, outside)
+	if err != nil {
+		return "", err
+	}
+	if apU != nil {
+		return m.AccountGUID(ctx, account)
+	}
+	if !passwordOK {
+		return "", errAppPasswordRequired
+	}
+	u, err := si.Authenticate(ctx, principal, password)
 	if err != nil {
 		return "", err
 	}

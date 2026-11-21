@@ -28,7 +28,68 @@ Everything is set up in **Control Panel > Sign-in (OIDC)** (administrators).
 
 If you're already signed in in that browser (to an app through HardyOS in
 the last 12 hours, or to the desktop when the sign-in page is on the
-desktop's own address), HardyOS doesn't ask for the password again.
+desktop's own address), HardyOS doesn't ask for the password again (unless
+two-factor sign-in needs a code there and that sign-in didn't use one).
+
+## Two-factor sign-in
+
+After the password, HardyOS can ask for a 6-digit code from an
+authenticator app (Google Authenticator, Microsoft Authenticator,
+1Password, Bitwarden, Aegis…).
+
+- **Administrators must use it.** After their first sign-in that asks, they
+  have a grace period (7 days by default; Control Panel › Security, 0-30
+  days) shown in Users & Groups and in their account menu. After it, the
+  desktop shows nothing but the setup screen until it's done.
+- **Everyone else may**, from the account menu › *Two-factor sign-in*.
+- **Everyone needs it from outside**: the published desktop, `sso.<base>`
+  (and so every app that signs in with HardyOS from outside, Immich's phone
+  app included) and published apps. A desktop session made at home without
+  a code doesn't work through the published address.
+
+Setting up shows a QR code and the key to type, and turns on only after the
+first code works. You get **10 recovery codes**: each signs you in once if
+you lose your phone. Save them (Copy / Download) — they aren't shown again;
+*New recovery codes* replaces them.
+
+**From outside without two-factor sign-in** you can't sign in until it's set
+up. Set it up at home, or ask an administrator for a **setup code** (Users &
+Groups › the shield button): with your password and that code (24 hours,
+once) the sign-in page lets you set it up from outside. A password alone
+never can: whoever stole it would register their own phone.
+
+**Wrong codes**: 5 in 15 minutes pause code entry for that account for 15
+minutes; 20 wrong authenticator codes in a row turn authenticator codes off
+until a recovery code is used or an administrator resets it. A code works
+once (and only within about a minute and a half of your phone's clock).
+
+**Lost your phone?** Use a recovery code, then *New phone* in the account
+menu. No codes left: another administrator uses *Reset two-factor sign-in*
+(type the username to confirm; it signs the person out everywhere). The only
+administrator, with no codes: as root on the server's console,
+`hardyctl reset-2fa <username>`, then set it up again at the next sign-in
+from home. After restoring a server from the recovery kit your
+authenticator keeps working (the keys come back with it).
+
+### App passwords
+
+Mail apps (IMAP and SMTP), mapped drives (WebDAV) and calendar apps can't
+ask for a code, so they use **app passwords**: account menu › *Two-factor
+sign-in* › *App passwords* (domain accounts). Each is for one device, can
+sign in to the services you tick (files, mail, calendars), shows when it was
+last used, and can be revoked on its own. The rules:
+
+| | Your own password | An app password |
+| --- | --- | --- |
+| At home, without two-factor sign-in | works | works |
+| At home, with two-factor sign-in | refused | works |
+| From outside | refused | works |
+
+App passwords are removed when your domain password changes.
+
+**Not covered**: shared folders over SMB, SFTP, Windows sign-in, Kerberos and
+LDAP check the domain password in Samba itself, and keep doing so. HardyOS
+doesn't publish them outside.
 
 ## What apps learn about you
 

@@ -18,7 +18,7 @@ import (
 )
 
 var (
-	ssoInputRE   = regexp.MustCompile(`name="(id|csrf|next|sub|exp|sig)" value="([^"]*)"`)
+	ssoInputRE   = regexp.MustCompile(`name="(id|csrf|next|sub|exp|sig|challenge|secret)" value="([^"]*)"`)
 	ssoRefreshRE = regexp.MustCompile(`http-equiv="refresh" content="0;url=([^"]+)"`)
 )
 
@@ -36,7 +36,30 @@ func (b *gwBrowser) openApp(t *testing.T, u, user, pw string) (int, string) {
 	}
 	form.Set("username", user)
 	form.Set("password", pw)
-	req, _ := http.NewRequest("POST", "https://sso.home.example.net/login", strings.NewReader(form.Encode()))
+	// sso.<base> is outside: a second factor is required.
+	b.totp.enroll(t, user)
+	code, body = b.ssoPost(t, "/login", form)
+	if strings.Contains(body, `action="/login/code"`) {
+		form = ssoForm(body)
+		form.Set("code", b.totp.code(t, user))
+		code, body = b.ssoPost(t, "/login/code", form)
+	}
+	return b.follow(t, code, body)
+}
+
+// ssoForm is the hidden fields of a provider page's form.
+func ssoForm(body string) url.Values {
+	form := url.Values{}
+	for _, m := range ssoInputRE.FindAllStringSubmatch(body, -1) {
+		form.Set(m[1], html.UnescapeString(m[2]))
+	}
+	return form
+}
+
+// ssoPost posts a provider form like a browser on sso.<base>.
+func (b *gwBrowser) ssoPost(t *testing.T, path string, form url.Values) (int, string) {
+	t.Helper()
+	req, _ := http.NewRequest("POST", "https://sso.home.example.net"+path, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Origin", "https://sso.home.example.net")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
@@ -46,8 +69,7 @@ func (b *gwBrowser) openApp(t *testing.T, u, user, pw string) (int, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	code, body = res.StatusCode, readAll(res)
-	return b.follow(t, code, body)
+	return res.StatusCode, readAll(res)
 }
 
 // follow takes the provider's meta-refresh pages on (relative ones stay on

@@ -9,7 +9,9 @@ import { openLink } from "../links";
 import { openApp } from "../wm/open";
 import { useLogout } from "../hooks/session";
 import { BrandMark } from "../brand";
-import { BellIcon, KeyIcon, LogoutIcon } from "../icons";
+import { BellIcon, KeyIcon, LogoutIcon, ShieldIcon } from "../icons";
+import { TwoFactorDialog } from "../auth/TwoFactor";
+import { graceText } from "../auth/twoFactorRules";
 import { APP_WINDOW, appById } from "../shell";
 import { Alert, Button, Field, TextInput } from "../ui";
 import { Dialog } from "../ui/Dialog";
@@ -183,11 +185,19 @@ function ChangePasswordDialog({ onClose }: { onClose: () => void }) {
 function UserMenu({ user }: { user: User }) {
   const { open, setOpen, ref } = usePopover();
   const [changing, setChanging] = useState(false);
+  const [twoFactor, setTwoFactor] = useState(false);
   const logout = useLogout();
   const name = user.displayName || user.username;
+  const grace = graceText(user.twoFactor);
   return (
     <div className="popover-anchor" ref={ref}>
-      <button type="button" className="avatar avatar--sm" aria-label={`Account: ${name}`} aria-expanded={open} onClick={() => setOpen(!open)}>
+      <button
+        type="button"
+        className={`avatar avatar--sm${grace ? " avatar--attention" : ""}`}
+        aria-label={`Account: ${name}${grace ? ` (${grace})` : ""}`}
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+      >
         {initials(name)}
       </button>
       {open && (
@@ -211,12 +221,17 @@ function UserMenu({ user }: { user: User }) {
               <KeyIcon size={16} /> Change password
             </button>
           )}
+          <button type="button" role="menuitem" className="menu-item" onClick={() => { setOpen(false); setTwoFactor(true); }}>
+            <ShieldIcon size={16} /> Two-factor sign-in
+            {grace && <span className="menu-item__note">{grace}</span>}
+          </button>
           <button type="button" role="menuitem" className="menu-item" onClick={() => logout.mutate()}>
             <LogoutIcon size={16} /> Sign out
           </button>
         </div>
       )}
       {changing && <ChangePasswordDialog onClose={() => setChanging(false)} />}
+      {twoFactor && <TwoFactorDialog user={user} onClose={() => setTwoFactor(false)} />}
     </div>
   );
 }

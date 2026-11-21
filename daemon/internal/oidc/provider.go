@@ -130,6 +130,15 @@ type Config struct {
 	// (never finished silently on an existing session): Immich's mobile
 	// redirect, which hands the code to an app on another device.
 	ConfirmRedirect func(managedBy, redirectURI string) bool
+	// MFA asks for second factors after the password (decisions 440-449);
+	// nil: never.
+	MFA SecondFactors
+	// Outside reports whether a request is from outside (two-factor sign-in
+	// required there); nil: PublicOrigin.
+	Outside func(r *http.Request) bool
+	// TOTPIssuer names this server in authenticator apps (default
+	// "HardyOS").
+	TOTPIssuer func() string
 	// Insecure allows an http:// issuer (development without TLS).
 	Insecure bool
 	Log      *slog.Logger
@@ -152,6 +161,9 @@ type Provider struct {
 	anchorOK map[int64]time.Time
 	// pending counts sign-in requests in progress per client address.
 	pending map[string][]time.Time
+	// challenges are sign-ins whose password was right, waiting for a
+	// second factor.
+	challenges auth.Challenges
 }
 
 type settingsCache struct {
@@ -558,7 +570,9 @@ func (p *Provider) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.servePage(w, r, rest, base) {
 		return
 	}
-	r2 := r.Clone(r.Context())
+	// The op package's storage calls see only the context: tell them where
+	// the request came from (refresh from outside needs a second factor).
+	r2 := r.Clone(withOutside(r.Context(), p.outside(r)))
 	r2.URL.Path = rest
 	r2.URL.RawPath = ""
 	p.op.ServeHTTP(w, r2)

@@ -77,6 +77,61 @@
     <button type="submit" class="btn">Sign out</button>
   </form>
 
+  {{- else if eq .Kind "code"}}
+  {{- if .Error}}
+  <p class="error" role="alert" id="error">{{.Error}}</p>
+  {{- end}}
+  <form method="post" action="{{.Base}}/login/code" class="form" novalidate>
+    <input type="hidden" name="id" value="{{.ID}}">
+    <input type="hidden" name="challenge" value="{{.Challenge}}">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label for="code">Code</label>
+    <input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" autocapitalize="none" spellcheck="false"
+      required autofocus class="mono"{{if .Error}} aria-describedby="error"{{end}}>
+    <p class="hint">Lost your phone? Enter a recovery code (<span class="mono">xxxx-xxxx-xxxx-xxxx</span>) instead.</p>
+    <button type="submit" class="btn">Continue</button>
+  </form>
+
+  {{- else if eq .Kind "setup"}}
+  {{- if .Error}}
+  <p class="error" role="alert" id="error">{{.Error}}</p>
+  {{- end}}
+  <form method="post" action="{{.Base}}/login/setup" class="form" novalidate>
+    <input type="hidden" name="id" value="{{.ID}}">
+    <input type="hidden" name="challenge" value="{{.Challenge}}">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    {{- if .SetupCode}}
+    <label for="setup_code">Setup code from your administrator</label>
+    <input id="setup_code" name="setup_code" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" required autofocus class="mono"{{if .Error}} aria-describedby="error"{{end}}>
+    {{- end}}
+    <button type="submit" class="btn">Set up an authenticator</button>
+  </form>
+
+  {{- else if eq .Kind "enroll"}}
+  {{- if .QR}}<div class="qr">{{.QR}}</div>{{end}}
+  <p class="muted small">Can't scan? Add the key by hand (time-based, 6 digits):</p>
+  <p class="secret mono">{{.Secret}}</p>
+  {{- if .Error}}
+  <p class="error" role="alert" id="error">{{.Error}}</p>
+  {{- end}}
+  <form method="post" action="{{.Base}}/login/enroll" class="form" novalidate>
+    <input type="hidden" name="id" value="{{.ID}}">
+    <input type="hidden" name="challenge" value="{{.Challenge}}">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="secret" value="{{.Secret}}">
+    <label for="code">Code from the app</label>
+    <input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" required autofocus class="mono"{{if .Error}} aria-describedby="error"{{end}}>
+    <button type="submit" class="btn">Turn on two-factor sign-in</button>
+  </form>
+
+  {{- else if eq .Kind "recovery"}}
+  <ol class="codes mono">
+    {{- range .Codes}}
+    <li>{{.}}</li>
+    {{- end}}
+  </ol>
+  <p class="actions"><a class="btn" href="{{.Link}}">{{.LinkText}}</a></p>
+
   {{- else if eq .Kind "bounce"}}
   <p class="muted">Checking whether you're already signed in… <a href="{{.Link}}">Continue</a></p>
 

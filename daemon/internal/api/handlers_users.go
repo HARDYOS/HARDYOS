@@ -35,6 +35,9 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request, _ *auth
 	if list == nil {
 		list = []*auth.User{}
 	}
+	for i, u := range list {
+		list[i] = s.withMFA(r.Context(), u)
+	}
 	writeJSON(w, http.StatusOK, list)
 }
 
@@ -77,7 +80,7 @@ func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request, _ *auth.U
 		writeUserError(s, w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, u)
+	writeJSON(w, http.StatusOK, s.withMFA(r.Context(), u))
 }
 
 type updateUserRequest struct {

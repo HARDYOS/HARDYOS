@@ -493,6 +493,12 @@ func (s *storage) TokenRequestByRefreshToken(ctx context.Context, rt string) (op
 			err = s.p.allowed(ctx, c, u)
 		}
 	}
+	if err == nil && s.p.cfg.MFA != nil && outsideFrom(ctx) && !slices.Contains(g.AMR, "mfa") {
+		// From outside a second factor is required (decision 441): a
+		// sign-in made without one (at home, or before two-factor sign-in
+		// existed) can't be carried on from there.
+		err = errors.New("this sign-in was made without a second factor, which is needed from outside")
+	}
 	if err != nil {
 		_, _ = revokeWhere(ctx, db, now, `id = ?`, g.ID)
 		s.p.audit(ctx, "", nil, "oidc.token.revoke", g.ClientID, audit.Success, "sign-in ended at refresh: "+err.Error())

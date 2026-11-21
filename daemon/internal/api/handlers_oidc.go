@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -50,6 +51,9 @@ func (s *Server) newOIDC() *oidc.Provider {
 			}
 			s.proxy.endUser(id)
 		},
+		MFA:             s.mfa,
+		Outside:         s.outside,
+		TOTPIssuer:      s.totpIssuer,
 		ManagedAccess:   s.photosAccess,
 		ConfirmRedirect: photosConfirmRedirect,
 		Insecure:        s.cfg.Insecure,
@@ -104,6 +108,12 @@ func (s *Server) passwordSet(ctx context.Context, u *auth.User, at time.Time) {
 	if n > 0 {
 		s.recordSystem(ctx, "auth.session.end", u.Username, "the password was changed in the domain; sign-ins made before it ended")
 	}
+	if s.appPw != nil {
+		if k := s.appPw.RevokeBefore(ctx, u.ID, at); k > 0 {
+			s.dav.dropUser(u.ID)
+			s.recordSystem(ctx, "auth.app_password.delete", u.Username, fmt.Sprintf("the password was changed in the domain; %d app passwords made before it were removed", k))
+		}
+	}
 }
 
 // desktopUser is who is signed in to the desktop in this browser (the
@@ -120,6 +130,12 @@ func (s *Server) desktopUser(r *http.Request) (*auth.User, time.Time, bool) {
 	u, err := s.sessionUser(r, token, info.UserID)
 	if err != nil {
 		return nil, time.Time{}, false
+	}
+	// Reused only if it satisfies the two-factor rule here (decision 442).
+	if !info.MFA && s.mfa != nil {
+		if need, err := s.mfa.Requirement(r.Context(), u, s.outside(r)); err != nil || need != auth.NeedNothing {
+			return nil, time.Time{}, false
+		}
 	}
 	return u, info.CreatedAt, true
 }

@@ -42,6 +42,9 @@ Commands:
 Recovery (run as root on the server; works even if hardyd is down):
   reset-password <username>  set a new password, re-enable the account, sign out its sessions
   create-admin <username>    add a new administrator (if every admin is locked out)
+  reset-2fa <username>       remove the account's authenticator and recovery codes and sign
+                             out its sessions (lost phone); an administrator sets up a new
+                             one at the next sign-in
 
 Boot (run as root):
   boot-list                  list boot environments
@@ -83,6 +86,8 @@ func main() {
 		err = recovery(*dbPath, args, *pwStdin, false)
 	case "create-admin":
 		err = recovery(*dbPath, args, *pwStdin, true)
+	case "reset-2fa":
+		err = reset2FA(*dbPath, args)
 	case "app-pack":
 		err = appPack(args)
 	case "app-check":
@@ -186,6 +191,40 @@ func recovery(dbPath string, args []string, fromStdin, createAdmin bool) error {
 	_ = sessions.RevokeUser(ctx, u.ID)
 	_ = log.Record(ctx, audit.Entry{Actor: actor, Action: "recovery.reset_password", Target: u.Username, Outcome: audit.Success})
 	fmt.Printf("Password for %q reset; the account is enabled and its sessions were signed out.\n", u.Username)
+	return nil
+}
+
+// reset2FA removes an account's two-factor sign-in by writing the database
+// directly (root on the console): the way back in when the only
+// administrator lost their authenticator and recovery codes. It needs no
+// key: nothing sealed is read.
+func reset2FA(dbPath string, args []string) error {
+	if len(args) != 1 {
+		return errors.New("expected exactly one username")
+	}
+	ctx := context.Background()
+	db, err := store.Open(ctx, dbPath)
+	if err != nil {
+		return fmt.Errorf("open %s (run as root?): %w", dbPath, err)
+	}
+	defer db.Close()
+	users := &auth.Users{DB: db}
+	u, err := users.GetByName(ctx, args[0])
+	if err != nil {
+		return fmt.Errorf("user %q: %w", args[0], err)
+	}
+	m := &auth.MFA{DB: db}
+	if err := m.Reset(ctx, u.ID, u.Role == auth.RoleAdmin); err != nil {
+		return err
+	}
+	_ = (&auth.Sessions{DB: db}).RevokeUser(ctx, u.ID)
+	_, _ = db.ExecContext(ctx, `DELETE FROM oidc_browser_sessions WHERE user_id = ?`, u.ID)
+	_ = (&audit.Log{DB: db}).Record(ctx, audit.Entry{Actor: "hardyctl@" + hostname(), Action: "recovery.reset_2fa", Target: u.Username, Outcome: audit.Success})
+	fmt.Printf("Two-factor sign-in for %q removed and its sessions signed out.", u.Username)
+	if u.Role == auth.RoleAdmin {
+		fmt.Print(" It sets up a new authenticator at the next sign-in (from home).")
+	}
+	fmt.Println()
 	return nil
 }
 
