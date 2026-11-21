@@ -231,6 +231,15 @@ func (m *Manager) Start(ctx context.Context, id string) (*Result, error) {
 			return nil, err
 		}
 	}
+	if s.HasUnattendMedia() {
+		disc := filepath.Join(m.sys(st.dir), unattendFile)
+		if _, err := os.Lstat(disc); err != nil {
+			return nil, Problems{"the Windows answer disc is gone; take it out of the VM in Hardware"}
+		}
+		if err := m.ownSeed(disc); err != nil {
+			return nil, err
+		}
+	}
 	if s.Firmware.TPM {
 		if err := m.restoreTPM(st); err != nil {
 			m.log().Warn("vms: restoring the TPM state", "id", id, "err", err)
@@ -325,6 +334,9 @@ func (m *Manager) Start(ctx context.Context, id string) (*Result, error) {
 	}
 	m.setRunning(id, true)
 	undefineDevices()
+	if s.Unattend != nil && s.Unattend.Pending && s.HasUnattendMedia() {
+		m.answerBootPrompt(st)
+	}
 	m.log().Info("vms: started", "id", id)
 	v, err := m.Get(ctx, id)
 	if err != nil {
@@ -512,6 +524,7 @@ func notRunning(err error) bool {
 func (m *Manager) afterStop(ctx context.Context, st *stored) {
 	id := st.spec.ID
 	m.setRunning(id, false)
+	m.forgetHotplugged(id)
 	m.statsMu.Lock()
 	was := m.prepared[id]
 	delete(m.prepared, id)
@@ -527,6 +540,13 @@ func (m *Manager) afterStop(ctx context.Context, st *stored) {
 	if st.spec.Firmware.TPM {
 		if err := m.saveTPM(st); err != nil {
 			m.log().Warn("vms: saving the TPM state", "id", id, "err", err)
+		}
+	}
+	// An answer disc taken out while the VM ran goes now (it holds the
+	// Windows password).
+	if !st.spec.HasUnattendMedia() {
+		if _, err := os.Lstat(filepath.Join(m.sys(st.dir), unattendFile)); err == nil {
+			m.removeUnattend(st)
 		}
 	}
 }

@@ -3994,6 +3994,140 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/vms/catalog": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The verified images (Debian, Ubuntu, Home Assistant OS, VirtIO drivers) this server can fetch by name
+         * @description A create request names one in `catalog`; the root helper downloads it
+         *     only from the image's own hosts and checks it against its publisher's
+         *     checksums (Ubuntu's are signature-checked).
+         */
+        get: operations["listVMCatalog"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/usertemplates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Templates saved from VMs ("Make template") */
+        get: operations["listVMUserTemplates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/usertemplates/{tid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tid: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete a saved template (a job; its name typed to confirm). VMs made from it keep their disks */
+        delete: operations["deleteVMUserTemplate"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/template": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Save a stopped VM as a template (a job; its disks are copied, its identity left out) */
+        post: operations["makeVMTemplate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/schedule": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /** Set how many automatic snapshots of each kind the VM keeps (a job; all zero turns it off) */
+        put: operations["setVMSchedule"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/usb": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Plug a USB device (vendor:product) into the running VM (a job) */
+        post: operations["attachVMUSB"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/usb/detach": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Take a USB device out of the running VM (a job) */
+        post: operations["detachVMUSB"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/backup": {
         parameters: {
             query?: never;
@@ -7758,6 +7892,8 @@ export interface components {
             critical: string;
             owner: string;
             assigned: string[];
+            /** @description PCI address of the USB controller it's on (a whole controller can go to a VM as a PCI device) */
+            controller?: string;
         };
         GPUInfo: {
             address: string;
@@ -7989,15 +8125,46 @@ export interface components {
             import?: {
                 /** @description A disk image in the ISO library */
                 file: string;
+                /** @description sha256:<hex> or sha512:<hex>, checked again while the image is read (set by the server for catalog images) */
+                digest?: string;
+            };
+            clone?: {
+                /** @description A saved template whose disk of the same name is copied into this one */
+                template: string;
             };
         };
         VMMedia: {
             /**
-             * @description iso: a file from the ISO library; virtio: the VirtIO drivers disc; cloudinit: the generated cloud-init disc
+             * @description iso: a file from the ISO library; virtio: the VirtIO drivers disc; cloudinit: the generated cloud-init disc; unattend: the generated Windows answer disc (new VMs only)
              * @enum {string}
              */
-            kind: "iso" | "virtio" | "cloudinit" | "empty";
+            kind: "iso" | "virtio" | "cloudinit" | "unattend" | "empty";
             iso?: string;
+        };
+        VMUnattend: {
+            /** @description The local administrator account Windows Setup makes */
+            user: string;
+            computerName?: string;
+            /** @description Language and formats, like en-US */
+            locale: string;
+            /** @description Input locale (default the same as locale), or a layout like 0409:00000409 */
+            keyboard?: string;
+            /** @description A Windows time zone name, like W. Europe Standard Time */
+            timeZone?: string;
+            /** @description The edition to install, as the ISO names it (Windows 11 Pro) */
+            edition?: string;
+            /** @description Or its number in install.wim */
+            imageIndex?: number;
+            /** @description First-logon steps HardyOS ships (by name) */
+            hooks?: string[];
+            /** @description Windows isn't installed yet (set by the server) */
+            pending: boolean;
+        };
+        VMSchedule: {
+            hourly: number;
+            daily: number;
+            weekly: number;
+            monthly: number;
         };
         VMNIC: {
             /**
@@ -8058,6 +8225,14 @@ export interface components {
             labels?: {
                 [key: string]: string;
             };
+            /** @description An HD audio card, heard through the web console */
+            sound?: boolean;
+            /** @description Copy and paste with the web console (the guest needs spice-vdagent) */
+            clipboard?: boolean;
+            unattend?: components["schemas"]["VMUnattend"];
+            schedule?: components["schemas"]["VMSchedule"];
+            /** @description The saved template the VM was made from */
+            fromTemplate?: string;
         };
         VM: components["schemas"]["VMSpec"] & {
             dataset: string;
@@ -8073,6 +8248,8 @@ export interface components {
             diskUsage: {
                 [key: string]: number;
             };
+            /** @description USB devices plugged into the running VM by hand */
+            liveUSB: string[];
         };
         VMKeptDisk: {
             dataset: string;
@@ -8131,6 +8308,14 @@ export interface components {
             minDiskGB: number;
             images: components["schemas"]["VMImage"][] | null;
             notes: string[] | null;
+            /** @description The verified image (/vms/catalog) the template starts from */
+            catalog?: string;
+            /** @description Windows can install by itself */
+            unattend?: boolean;
+            /** @description Usual edition names; the first is the default */
+            editions?: string[];
+            sound?: boolean;
+            clipboard?: boolean;
         };
         VMArch: {
             arch: string;
@@ -8143,6 +8328,7 @@ export interface components {
             vmport?: boolean;
             legacyBios?: boolean;
             pit?: boolean;
+            soundModel?: string;
         };
         VMCapabilities: {
             supported: boolean;
@@ -8175,9 +8361,11 @@ export interface components {
         VMTask: {
             id: string;
             /** @enum {string} */
-            kind: "download" | "import";
+            kind: "download" | "import" | "template" | "clone";
             vm: string;
             file: string;
+            /** @description A catalog image's verified checksum (algo:hex) */
+            digest?: string;
             progress: number;
             message: string;
             done: boolean;
@@ -8221,6 +8409,8 @@ export interface components {
             start?: boolean;
             /** @description Files to download into the ISO library first */
             downloads?: components["schemas"]["VMDownload"][];
+            /** @description A verified image (/vms/catalog) for the first disk, fetched and checked by the server */
+            catalog?: string;
             /** @description Create the VM even when its (thin) disks are bigger than the pool's free space */
             allowOvercommit?: boolean;
         };
@@ -8253,6 +8443,50 @@ export interface components {
             bytes: number;
             /** @description The guest's file systems were frozen first (or it was off) */
             consistent: boolean;
+            /** @enum {string} */
+            kind: "manual" | "hourly" | "daily" | "weekly" | "monthly";
+        };
+        VMCatalogImage: {
+            id: string;
+            name: string;
+            /** @enum {string} */
+            kind: "disk" | "iso";
+            /** @description Its name in the ISO library */
+            file: string;
+            /** @description How it's checked */
+            verified: string;
+        };
+        VMUserTemplate: {
+            id: string;
+            name: string;
+            description: string;
+            pool: string;
+            /** Format: date-time */
+            created: string;
+            /** @description The VM it was made from */
+            from: string;
+            spec: components["schemas"]["VMSpec"];
+            /** Format: int64 */
+            bytes: number;
+        };
+        VMMakeTemplateRequest: {
+            /** @description Short name: 2-32 lowercase letters, digits and dashes */
+            templateId: string;
+            name: string;
+            description?: string;
+        };
+        VMTemplateDeleteRequest: {
+            /** @description The template's name or display name */
+            confirm: string;
+        };
+        VMScheduleRequest: {
+            schedule: components["schemas"]["VMSchedule"];
+        };
+        VMUSBRequest: {
+            /** @description vendor:product, like 046d:c52b */
+            device: string;
+            /** @description Also add it to (or remove it from) the VM's devices for its next start */
+            persist?: boolean;
         };
         VMSnapshotDeleteRequest: {
             /** @description The VM's name or display name */
@@ -15295,6 +15529,181 @@ export interface operations {
             400: components["responses"]["Invalid"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    listVMCatalog: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Images */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VMCatalogImage"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    listVMUserTemplates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Saved templates */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VMUserTemplate"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    deleteVMUserTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tid: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMTemplateDeleteRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    makeVMTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMMakeTemplateRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description The VM is running */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    setVMSchedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMScheduleRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    attachVMUSB: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMUSBRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description The VM isn't running */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    detachVMUSB: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMUSBRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description The VM isn't running */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     getCloudBackup: {

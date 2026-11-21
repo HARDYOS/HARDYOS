@@ -6,9 +6,11 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"net"
 	"net/http"
@@ -206,7 +208,7 @@ func (m *Manager) StartDownload(ctx context.Context, a DownloadArgs) (*Task, err
 	go func() {
 		bg, cancel := context.WithTimeout(context.Background(), 24*time.Hour)
 		defer cancel()
-		err := m.download(bg, t, f, u, name, unpack, sum, 0)
+		err := m.download(bg, t, f, m.client(), u, name, unpack, digest{Algo: "sha256", Hex: sum}, 0)
 		m.tasks.finish(t.ID, err)
 		if err != nil {
 			m.log().Warn("vms: download failed", "file", name, "err", err)
@@ -217,13 +219,26 @@ func (m *Manager) StartDownload(ctx context.Context, a DownloadArgs) (*Task, err
 	return m.tasks.get(t.ID), nil
 }
 
-func (m *Manager) download(ctx context.Context, t *Task, f *Folder, u *url.URL, name, unpack, sum string, wantSize int64) error {
+// digest is a checksum a download must have ("" Hex: none).
+type digest struct {
+	Algo string // sha256 or sha512
+	Hex  string
+}
+
+func (d digest) hash() hash.Hash {
+	if d.Algo == "sha512" {
+		return sha512.New()
+	}
+	return sha256.New()
+}
+
+func (m *Manager) download(ctx context.Context, t *Task, f *Folder, client *http.Client, u *url.URL, name, unpack string, want digest, wantSize int64) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("User-Agent", "HardyOS")
-	res, err := m.client().Do(req)
+	res, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("downloading from %s: %w", u.Host, err)
 	}
@@ -247,7 +262,7 @@ func (m *Manager) download(ctx context.Context, t *Task, f *Folder, u *url.URL, 
 			_ = removeFile(f, tmpName)
 		}
 	}()
-	h := sha256.New()
+	h := want.hash()
 	limit := int64(MaxDownloadBytes)
 	if wantSize > 0 {
 		limit = wantSize
@@ -284,9 +299,9 @@ func (m *Manager) download(ctx context.Context, t *Task, f *Folder, u *url.URL, 
 	if total > 0 && counted.n.Load() != total {
 		return fmt.Errorf("the download stopped early (%s of %s)", human(counted.n.Load()), human(total))
 	}
-	if sum != "" {
-		if got := hex.EncodeToString(h.Sum(nil)); got != sum {
-			return fmt.Errorf("the file's SHA-256 checksum is %s, not %s; it was damaged or changed, so it was deleted", got, sum)
+	if want.Hex != "" {
+		if got := hex.EncodeToString(h.Sum(nil)); got != want.Hex {
+			return fmt.Errorf("the file's %s checksum is %s, not %s; it was damaged or changed, so it was deleted", strings.ToUpper(want.Algo), got, want.Hex)
 		}
 	}
 	if err := out.Sync(); err != nil {
@@ -300,41 +315,13 @@ func (m *Manager) download(ctx context.Context, t *Task, f *Folder, u *url.URL, 
 }
 
 // EnsureVirtio downloads the VirtIO drivers disc if it isn't in the
-// library; the task is nil when it's already there.
+// library; the task is nil when it's already there. It's the catalog's
+// pinned virtio-win image (decision 410).
 func (m *Manager) EnsureVirtio(ctx context.Context, pool string) (*Task, error) {
 	if _, err := m.virtioPath(ctx); err == nil {
 		return nil, nil
 	}
-	for _, t := range m.tasks.list("download") {
-		if !t.Done && t.File == VirtioFile {
-			return m.tasks.get(t.ID), nil
-		}
-	}
-	f, err := m.folder(ctx, pool, pool != "")
-	if err != nil {
-		return nil, err
-	}
-	if f == nil {
-		return nil, Problems{"choose a pool for the ISOs shared folder"}
-	}
-	u, _ := url.Parse(VirtioURL)
-	t, err := m.tasks.start("download", "", VirtioFile)
-	if err != nil {
-		return nil, err
-	}
-	go func() {
-		bg, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
-		defer cancel()
-		// A file of that name that isn't the real disc (an earlier broken
-		// copy) makes way for it.
-		_ = removeFile(f, VirtioFile)
-		err := m.download(bg, t, f, u, VirtioFile, "", VirtioSHA256, VirtioSize)
-		m.tasks.finish(t.ID, err)
-		if err != nil {
-			m.log().Warn("vms: VirtIO drivers download failed", "err", err)
-		}
-	}()
-	return m.tasks.get(t.ID), nil
+	return m.FetchCatalog(ctx, FetchArgs{Image: CatalogVirtio, Pool: pool})
 }
 
 // virtioPath is the drivers disc's path, if it's there in full.
@@ -525,6 +512,8 @@ type Task struct {
 	Error    string    `json:"error"`
 	Started  time.Time `json:"started"`
 	Finished time.Time `json:"finished"`
+	// Digest is a catalog image's verified checksum (algo:hex).
+	Digest string `json:"digest,omitempty"`
 }
 
 // MaxTasks bounds downloads and imports running at once.
@@ -565,6 +554,14 @@ func (t *taskTable) progress(id string, pct float64, msg string) {
 	if x, ok := t.m[id]; ok && !x.Done {
 		x.Progress = min(max(pct, 0), 100)
 		x.Message = msg
+	}
+}
+
+func (t *taskTable) setDigest(id, d string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if x, ok := t.m[id]; ok {
+		x.Digest = d
 	}
 }
 

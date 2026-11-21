@@ -98,6 +98,16 @@ func (m *Manager) writeSeed(ctx context.Context, st *stored) error {
 	return os.Rename(m.sys(tmp), filepath.Join(m.sys(st.dir), seedFile))
 }
 
+// qemuOwned reports whether a state file may belong to QEMU's user: the
+// generated discs only QEMU reads (decision 141).
+func (m *Manager) qemuOwned(name string, uid uint32) bool {
+	if name != seedFile && name != unattendFile {
+		return false
+	}
+	q, err := m.qemuUID()
+	return err == nil && q == uid
+}
+
 // ownSeed makes the seed QEMU's own, mode 0600 (decision 141).
 func (m *Manager) ownSeed(path string) error {
 	uid, err := m.qemuUID()

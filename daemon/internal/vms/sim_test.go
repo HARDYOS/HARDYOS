@@ -282,6 +282,14 @@ func (s *sim) zfs(args []string) (sysexec.Result, error) {
 		return ok("")
 	case "rename":
 		from, to := args[1], args[2]
+		if strings.Contains(from, "@") {
+			if p, okp := s.snaps[from]; okp {
+				delete(s.snaps, from)
+				s.snaps[to] = p
+				return ok("")
+			}
+			return bad("no such snapshot")
+		}
 		for k, v := range s.datasets {
 			if k == from || strings.HasPrefix(k, from+"/") {
 				delete(s.datasets, k)
@@ -439,8 +447,14 @@ func (s *sim) virsh(args []string) (sysexec.Result, error) {
 			d.state = "in shutdown"
 		}
 		return ok("")
-	case "reboot", "reset", "domfsfreeze", "domfsthaw":
+	case "reboot", "reset", "domfsfreeze", "domfsthaw", "send-key":
 		return ok("")
+	case "attach-device", "detach-device":
+		b, err := os.ReadFile(filepath.Join(s.root, args[2]))
+		if err != nil || !strings.Contains(string(b), "<hostdev") {
+			return bad("no device file")
+		}
+		return ok("Device attached successfully")
 	case "undefine":
 		delete(s.domains, args[1])
 		delete(s.defined, args[1])

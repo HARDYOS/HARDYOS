@@ -86,6 +86,10 @@ type Manager struct {
 	HTTP *http.Client
 	// AllowLocalDownloads lets downloads reach local addresses (tests).
 	AllowLocalDownloads bool
+	// CatalogImages replaces the verified image catalog (tests).
+	CatalogImages []CatalogImage
+	// SendRecvFunc replaces zfs send | zfs receive (tests).
+	SendRecvFunc SendRecv
 	// Stream runs long commands with progress (default: real processes).
 	Stream Streamer
 	// QEMUUser is the user QEMU runs as (default libvirt-qemu).
@@ -118,8 +122,10 @@ type Manager struct {
 	running  map[string]bool // last seen state, for stop detection
 	restart  map[string]bool // hardware changed while running
 	addrs    map[string][]string
-	prepared map[string]bool            // devices prepared and not yet released
-	releases map[string]*pendingRelease // stopped VMs whose devices still go back
+	prepared map[string]bool // devices prepared and not yet released
+	// hotplugged: USB devices plugged into running VMs (usb.go).
+	hotplugged map[string][]string
+	releases   map[string]*pendingRelease // stopped VMs whose devices still go back
 }
 
 func (m *Manager) log() *slog.Logger {
@@ -598,6 +604,8 @@ type VM struct {
 	RestartNeeded bool `json:"restartNeeded"`
 	// DiskUsage is how much of each disk is in use on the pool (bytes).
 	DiskUsage map[string]int64 `json:"diskUsage"`
+	// LiveUSB are USB devices plugged into the running VM by hand.
+	LiveUSB []string `json:"liveUSB"`
 }
 
 func (m *Manager) view(st *stored, stats map[string]domStats) VM {
@@ -619,6 +627,10 @@ func (m *Manager) view(st *stored, stats map[string]domStats) VM {
 		v.Addresses = append(v.Addresses, a...)
 	}
 	m.statsMu.Unlock()
+	v.LiveUSB = []string{}
+	if v.State == "running" {
+		v.LiveUSB = m.liveUSB(st.spec.ID)
+	}
 	return v
 }
 
@@ -827,6 +839,15 @@ func (m *Manager) Create(ctx context.Context, a CreateArgs) (*Result, error) {
 	if err := s.Validate(m.host(ctx)); err != nil {
 		return nil, err
 	}
+	if s.Unattend != nil {
+		if p := s.Unattend.createProblems(&s); len(p) > 0 {
+			return nil, Problems(p)
+		}
+		s.Unattend.Pending = true
+	}
+	if err := m.checkClones(ctx, &s); err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, err := m.find(ctx, s.ID); err == nil {
@@ -873,6 +894,9 @@ func (m *Manager) Create(ctx context.Context, a CreateArgs) (*Result, error) {
 	}
 	st.spec = s
 	for _, d := range s.Disks {
+		if d.Clone != nil {
+			continue // copied from the template afterwards (StartClone)
+		}
 		if err := m.createDisk(ctx, &s, d); err != nil {
 			cleanup()
 			return nil, err
@@ -888,6 +912,13 @@ func (m *Manager) Create(ctx context.Context, a CreateArgs) (*Result, error) {
 			return nil, err
 		}
 	}
+	if s.HasUnattendMedia() {
+		if err := m.writeUnattend(ctx, st, a.Password); err != nil {
+			cleanup()
+			return nil, err
+		}
+	}
+
 	if err := m.define(ctx, st, nil); err != nil {
 		cleanup()
 		return nil, err
@@ -967,6 +998,23 @@ func (m *Manager) Update(ctx context.Context, a UpdateArgs) (*Result, error) {
 	if s.Template != prev.Template {
 		s.Template = prev.Template // the template is history, not a setting
 	}
+	// The snapshot schedule has its own operation; the saved template and
+	// the unattended install settings are history.
+	s.Schedule = prev.Schedule
+	s.FromTemplate = prev.FromTemplate
+	dropUnattend := false
+	switch {
+	case s.HasUnattendMedia() && !prev.HasUnattendMedia():
+		p = append(p, "the Windows answer disc only comes with a new VM")
+		s.Unattend = nil
+	case s.HasUnattendMedia():
+		s.Unattend = prev.Unattend
+	default:
+		// Taking the answer disc out ends the unattended install, and
+		// the disc (it holds the password) is deleted.
+		dropUnattend = prev.HasUnattendMedia()
+		s.Unattend = nil
+	}
 	if err := s.Validate(m.host(ctx)); err != nil {
 		var vp Problems
 		if errors.As(err, &vp) {
@@ -989,8 +1037,8 @@ func (m *Manager) Update(ctx context.Context, a UpdateArgs) (*Result, error) {
 		keep[d.Name] = true
 		switch {
 		case !ok:
-			if d.Import != nil {
-				p = append(p, fmt.Sprintf("%s: images can only be imported into a new VM's disks", d.Name))
+			if d.Import != nil || d.Clone != nil {
+				p = append(p, fmt.Sprintf("%s: images and templates can only fill a new VM's disks", d.Name))
 			}
 			add = append(add, d)
 		case d.SizeGB < o.SizeGB:
@@ -999,7 +1047,7 @@ func (m *Manager) Update(ctx context.Context, a UpdateArgs) (*Result, error) {
 			grow = append(grow, d)
 		}
 		if ok {
-			d.Import = o.Import
+			d.Import, d.Clone = o.Import, o.Clone
 		}
 	}
 	var remove []string
@@ -1072,7 +1120,7 @@ func (m *Manager) Update(ctx context.Context, a UpdateArgs) (*Result, error) {
 	// Disks keep their import record, so the restored history is honest.
 	for i, d := range s.Disks {
 		if o, ok := old[d.Name]; ok {
-			s.Disks[i].Import = o.Import
+			s.Disks[i].Import, s.Disks[i].Clone = o.Import, o.Clone
 		}
 	}
 	st.spec = s
@@ -1091,6 +1139,12 @@ func (m *Manager) Update(ctx context.Context, a UpdateArgs) (*Result, error) {
 	}
 	if err := m.define(ctx, st, nil); err != nil {
 		return nil, err
+	}
+	if dropUnattend && !running {
+		m.removeUnattend(st)
+	} else if dropUnattend {
+		// QEMU still has it open; it goes when the VM stops.
+		m.log().Info("vms: the Windows answer disc is deleted when the VM stops", "id", id)
 	}
 	var warnings []string
 	if running && hardwareChanged(&prev, &s) {
@@ -1120,7 +1174,7 @@ func sameCloudInit(a, b *CloudInit) bool {
 
 // hardwareChanged reports changes that only apply when the VM next starts.
 func hardwareChanged(a, b *Spec) bool {
-	ja, _ := json.Marshal([]any{a.CPU, a.Memory, a.Firmware, a.Disks, a.Media, a.NICs, a.Video, a.GuestAgent, a.Boot, a.Devices})
+	ja, _ := json.Marshal([]any{a.CPU, a.Memory, a.Firmware, a.Disks, a.Media, a.NICs, a.Video, a.GuestAgent, a.Boot, a.Devices, a.Sound, a.Clipboard})
 	jb, _ := json.Marshal([]any{b.CPU, b.Memory, b.Firmware, b.Disks, b.Media, b.NICs, b.Video, b.GuestAgent, b.Boot, b.Devices})
 	return string(ja) != string(jb)
 }
@@ -1166,6 +1220,8 @@ func (m *Manager) Delete(ctx context.Context, a DeleteArgs) error {
 		}
 	}
 	if a.KeepDisks {
+		// Kept disks don't keep the Windows answer disc (its password).
+		m.removeUnattend(st)
 		kept := fmt.Sprintf("%s/vms/%s-kept-%s", st.spec.Pool, st.spec.ID, m.now().Format("20060102-150405"))
 		if _, err := m.zfs(ctx, "rename", st.dataset, kept); err != nil {
 			return fmt.Errorf("keeping the disks: %w", err)
@@ -1266,7 +1322,7 @@ func (m *Manager) define(ctx context.Context, st *stored, devs []devices.Prepare
 // folder can come back from a backup, where a link must never make libvirt
 // open, say, a key file.
 func (m *Manager) checkStateFiles(st *stored) error {
-	for _, name := range []string{"nvram.fd", seedFile, "tpm"} {
+	for _, name := range []string{"nvram.fd", seedFile, unattendFile, "tpm"} {
 		fi, err := os.Lstat(filepath.Join(m.sys(st.dir), name))
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -1283,7 +1339,7 @@ func (m *Manager) checkStateFiles(st *stored) error {
 		if !fi.Mode().IsRegular() {
 			return fmt.Errorf("the VM's %s isn't a regular file", name)
 		}
-		if sys, ok := fi.Sys().(*syscall.Stat_t); ok && rootfile.Enforce && (sys.Uid != 0 || sys.Nlink != 1) {
+		if sys, ok := fi.Sys().(*syscall.Stat_t); ok && rootfile.Enforce && (sys.Nlink != 1 || (sys.Uid != 0 && !m.qemuOwned(name, sys.Uid))) {
 			return fmt.Errorf("the VM's %s isn't root's own file", name)
 		}
 	}
@@ -1298,6 +1354,9 @@ func (m *Manager) paths(ctx context.Context, st *stored) (Paths, error) {
 	}
 	if st.spec.CloudInit != nil {
 		p.CloudInit = filepath.Join(st.dir, seedFile)
+	}
+	if st.spec.HasUnattendMedia() {
+		p.Unattend = filepath.Join(st.dir, unattendFile)
 	}
 	if files := st.spec.Files(); len(files) > 0 || st.spec.NeedsVirtio() {
 		f, err := m.folder(ctx, "", false)
