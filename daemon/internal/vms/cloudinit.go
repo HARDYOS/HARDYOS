@@ -72,30 +72,47 @@ func (m *Manager) writeSeed(ctx context.Context, st *stored) error {
 	if err != nil {
 		return err
 	}
-	dir := filepath.Join(m.sys(st.dir), "cloud-init")
-	_ = os.RemoveAll(dir)
-	if err := os.Mkdir(dir, 0o700); err != nil {
+	// Everything is made inside a 0700 folder (the files and the disc
+	// xorriso writes with its own mode), so the password hash and keys are
+	// never readable by anyone else, even for a moment.
+	stage := filepath.Join(m.sys(st.dir), "cloud-init.stage")
+	_ = os.RemoveAll(stage)
+	if err := os.Mkdir(stage, 0o700); err != nil {
 		return err
 	}
-	defer os.RemoveAll(dir)
-	if err := os.WriteFile(filepath.Join(dir, "user-data"), ud, 0o600); err != nil {
+	defer os.RemoveAll(stage)
+	in := filepath.Join(stage, "in")
+	if err := os.Mkdir(in, 0o700); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "meta-data"), MetaData(&st.spec), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(in, "user-data"), ud, 0o600); err != nil {
 		return err
 	}
-	tmp := filepath.Join(st.dir, seedFile+".new")
+	if err := os.WriteFile(filepath.Join(in, "meta-data"), MetaData(&st.spec), 0o600); err != nil {
+		return err
+	}
+	rel := filepath.Join(st.dir, "cloud-init.stage") // as xorriso sees it
 	if _, err := m.run(ctx, "xorriso", "-as", "mkisofs", "-quiet", "-volid", "cidata", "-joliet", "-rock",
-		"-output", tmp, filepath.Join(st.dir, "cloud-init")); err != nil {
+		"-output", filepath.Join(rel, "out.iso"), filepath.Join(rel, "in")); err != nil {
 		return fmt.Errorf("making the cloud-init disc: %w", err)
 	}
 	// Only QEMU (and root) can read the seed: it has the user's password
 	// hash and SSH keys.
-	if err := m.ownSeed(m.sys(tmp)); err != nil {
-		_ = os.Remove(m.sys(tmp))
+	out := filepath.Join(stage, "out.iso")
+	if err := m.ownSeed(out); err != nil {
 		return err
 	}
-	return os.Rename(m.sys(tmp), filepath.Join(m.sys(st.dir), seedFile))
+	return os.Rename(out, filepath.Join(m.sys(st.dir), seedFile))
+}
+
+// qemuOwned reports whether a state file may belong to QEMU's user: the
+// generated discs only QEMU reads (decision 141).
+func (m *Manager) qemuOwned(name string, uid uint32) bool {
+	if name != seedFile {
+		return false
+	}
+	q, err := m.qemuUID()
+	return err == nil && q == uid
 }
 
 // ownSeed makes the seed QEMU's own, mode 0600 (decision 141).

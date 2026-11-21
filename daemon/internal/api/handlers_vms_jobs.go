@@ -36,6 +36,7 @@ type vmCreateParams struct {
 	Spec            vms.Spec           `json:"spec"`
 	Start           bool               `json:"start"`
 	Downloads       []vms.DownloadArgs `json:"downloads,omitempty"`
+	Catalog         string             `json:"catalog,omitempty"`
 	PasswordRef     string             `json:"passwordRef,omitempty"`
 	AllowOvercommit bool               `json:"allowOvercommit,omitempty"`
 }
@@ -73,29 +74,36 @@ func call(jc *jobs.Context, pc *priv.Client, d time.Duration, op string, args, o
 // followVMTask reports a download or import running in hardyd-priv until
 // it's over, scaled into from..to percent.
 func followVMTask(jc *jobs.Context, pc *priv.Client, t *vms.Task, from, to float64) error {
+	_, err := followVMTaskResult(jc, pc, t, from, to)
+	return err
+}
+
+// followVMTaskResult is followVMTask that also returns the finished task
+// (a catalog image's verified checksum is on it).
+func followVMTaskResult(jc *jobs.Context, pc *priv.Client, t *vms.Task, from, to float64) (*vms.Task, error) {
 	if t == nil {
-		return nil
+		return nil, nil
 	}
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
 	for {
 		var res priv.VMTaskResult
 		if err := call(jc, pc, 15*time.Second, priv.OpVMsTask, vms.TaskArgs{ID: t.ID}, &res); err != nil {
-			return err
+			return nil, err
 		}
 		if res.Task == nil {
-			return fmt.Errorf("lost track of %s", t.File)
+			return nil, fmt.Errorf("lost track of %s", t.File)
 		}
 		jc.Progress(from+(to-from)*res.Task.Progress/100, res.Task.Message)
 		if res.Task.Done {
 			if res.Task.Error != "" {
-				return fmt.Errorf("%s", res.Task.Error)
+				return res.Task, fmt.Errorf("%s", res.Task.Error)
 			}
-			return nil
+			return res.Task, nil
 		}
 		select {
 		case <-jc.Done():
-			return jc.Err()
+			return nil, jc.Err()
 		case <-tick.C:
 		}
 	}
@@ -177,6 +185,23 @@ func registerVMJobs(m *jobs.Manager, pc *priv.Client) {
 				return nil, err
 			}
 		}
+		// 1b. A verified catalog image, checked against its publisher's
+		// checksums by root; the import checks it again as it reads it.
+		if p.Catalog != "" {
+			jc.Progress(2, "Getting the verified image "+p.Catalog)
+			var res priv.VMTaskResult
+			if err := call(jc, pc, time.Minute, priv.OpVMsCatalogFetch, vms.FetchArgs{Image: p.Catalog, Pool: s.Pool}, &res); err != nil {
+				return nil, err
+			}
+			done, err := followVMTaskResult(jc, pc, res.Task, 2, 50)
+			if err != nil {
+				return nil, err
+			}
+			if done == nil || done.File == "" || done.Digest == "" || len(s.Disks) == 0 {
+				return nil, fmt.Errorf("the verified image %s isn't ready", p.Catalog)
+			}
+			s.Disks[0].Import = &vms.Import{File: done.File, Digest: done.Digest, Catalog: p.Catalog}
+		}
 		// 2. The home network's bridge, the first time a VM needs it.
 		if s.NeedsBridge() {
 			if err := ensureVMBridge(jc, pc, 52); err != nil {
@@ -200,8 +225,19 @@ func registerVMJobs(m *jobs.Manager, pc *priv.Client) {
 		if err := call(jc, pc, 5*time.Minute, priv.OpVMsCreate, vms.CreateArgs{Spec: s, Password: password, AllowOvercommit: p.AllowOvercommit}, &created); err != nil {
 			return nil, err
 		}
-		// 5. Disk images.
+		// 5. Disk images, and disks copied from a saved template.
 		for _, d := range s.Disks {
+			if d.Clone != nil {
+				jc.Progress(80, "Copying "+d.Name+" from the template "+d.Clone.Template)
+				var res priv.VMTaskResult
+				if err := call(jc, pc, time.Minute, priv.OpVMsClone, vms.ImportArgs{ID: s.ID, Disk: d.Name}, &res); err != nil {
+					return nil, err
+				}
+				if err := followVMTask(jc, pc, res.Task, 80, 97); err != nil {
+					return nil, &jobs.FailedWith{Err: fmt.Errorf("the VM was created, but copying its disk from the template failed: %w", err), Result: VMJobResult{VM: created.VM, Warnings: created.Warnings}}
+				}
+				continue
+			}
 			if d.Import == nil {
 				continue
 			}
@@ -266,6 +302,18 @@ func registerVMJobs(m *jobs.Manager, pc *priv.Client) {
 		var p priv.VMRef
 		if err := jc.Params(&p); err != nil {
 			return nil, err
+		}
+		// The VirtIO disc lives (checked) on the VM's pool: get it there
+		// first if it isn't (a VM from before, or a pool it moved to).
+		var cur vms.VM
+		if err := call(jc, pc, 30*time.Second, priv.OpVMsGet, p, &cur); err == nil && cur.NeedsVirtio() {
+			var res priv.VMTaskResult
+			if err := call(jc, pc, time.Minute, priv.OpVMsISOVirtio, priv.VMVirtioArgs{Pool: cur.Pool}, &res); err != nil {
+				return nil, err
+			}
+			if err := followVMTask(jc, pc, res.Task, 2, 28); err != nil {
+				return nil, fmt.Errorf("getting the VirtIO drivers disc: %w", err)
+			}
 		}
 		jc.Progress(30, "Starting")
 		var r vms.Result
