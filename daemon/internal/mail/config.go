@@ -9,8 +9,8 @@
 // renders every configuration file itself (render.go) and runs the
 // services. Root never accepts file contents from hardyd. Passwords are
 // never checked by the mail programs themselves: Dovecot asks hardyd
-// (auth.go: an OAuth2 password grant and an auth policy server on
-// 127.0.0.1), which checks domain passwords with this server's own domain
+// (auth.go: an OAuth2 password grant and an auth policy server on a Unix
+// socket only Dovecot may use), which checks domain passwords with this server's own domain
 // controller like a desktop sign-in.
 package mail
 
@@ -21,6 +21,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+
+	"github.com/hardyos/hardyos/daemon/internal/ports"
 )
 
 // ValidationError is a problem with what was asked for.
@@ -30,24 +32,73 @@ func (e *ValidationError) Error() string { return e.Msg }
 
 func invalid(f string, a ...any) error { return &ValidationError{Msg: fmt.Sprintf(f, a...)} }
 
-// Ports HardyOS's mail server listens on. The 10xxx ports take connections
-// forwarded by the VPS with the PROXY protocol (the client's real address);
-// only the VPS's NetBird address may reach them (nftables) and Dovecot
-// trusts PROXY headers from it alone (haproxy_trusted_networks).
+// Ports HardyOS's mail server listens on (all from the port registry,
+// internal/ports). The 10xxx ports take connections forwarded by the VPS
+// with the PROXY protocol (the client's real address); only the VPS's
+// NetBird address may reach them, through the NetBird interface (nftables),
+// and Dovecot trusts PROXY headers from it alone (haproxy_trusted_networks).
 const (
-	PortRelay        = 2525  // inbound mail relayed by the VPS's Postfix
-	PortSubmission   = 587   // STARTTLS submission (LAN, NetBird)
-	PortSubmissions  = 465   // implicit TLS submission (LAN, NetBird)
-	PortIMAPS        = 993   // IMAP over TLS (LAN, NetBird)
-	PortProxySubm    = 10587 // 587 forwarded by the VPS (PROXY v2)
-	PortProxySubms   = 10465 // 465 forwarded by the VPS (PROXY v2)
-	PortProxyIMAPS   = 10993 // 993 forwarded by the VPS (PROXY v2)
-	PortRadicale     = 5232  // Radicale on 127.0.0.1 (hardyd proxies /dav-mail/)
-	PortRspamdMilter = 11332 // Rspamd's milter (127.0.0.1)
-	PortRspamdCtl    = 11334 // Rspamd's controller (127.0.0.1)
-	// DefaultAuthPort is hardyd's mail sign-in listener on 127.0.0.1.
-	DefaultAuthPort = 44250
+	PortRelay       = ports.MailRelay            // inbound mail relayed by the VPS's Postfix
+	PortSubmission  = ports.MailSubmission       // STARTTLS submission (LAN, NetBird)
+	PortSubmissions = ports.MailSubmissions      // implicit TLS submission (LAN, NetBird)
+	PortIMAPS       = ports.MailIMAPS            // IMAP over TLS (LAN, NetBird)
+	PortProxySubm   = ports.MailProxySubmission  // 587 forwarded by the VPS (PROXY v2)
+	PortProxySubms  = ports.MailProxySubmissions // 465 forwarded by the VPS (PROXY v2)
+	PortProxyIMAPS  = ports.MailProxyIMAPS       // 993 forwarded by the VPS (PROXY v2)
 )
+
+// ProxiedPort reports whether a local port is one the VPS forwards to: a
+// sign-in there comes from the internet whatever address the PROXY header
+// names.
+func ProxiedPort(p int) bool {
+	return p == PortProxySubm || p == PortProxySubms || p == PortProxyIMAPS
+}
+
+// ProxySASLService is the SASL service name Postfix's forwarded submission
+// ports (10587, 10465) ask Dovecot with, so hardyd's auth policy knows
+// those sign-ins come from the internet (Postfix tells Dovecot no ports).
+const ProxySASLService = "smtp-vps"
+
+// Unix sockets between the mail programs and hardyd (decisions 304, 309).
+// Nothing on this server talks to them over TCP, so no local program can
+// take their place by binding a port first.
+const (
+	// AuthSocket is hardyd's mail sign-in listener: systemd makes it
+	// (hardyd-mail-auth.socket: owner hardyd, group dovecot, 0660) and
+	// hands it to hardyd, so only Dovecot's auth process can connect.
+	// Dovecot's HTTP client reaches it as its "proxy" (AuthURL's host is
+	// never resolved).
+	AuthSocket = "/run/hardyos-mail-auth.sock"
+	// AuthURL is what Dovecot puts in its requests. ".invalid" never
+	// resolves, so Dovecot can't reach anything else if the socket setting
+	// were lost.
+	AuthURL = "http://hardyd.invalid"
+	// RspamdMilterDir holds Rspamd's milter socket, inside Postfix's spool
+	// (_rspamd:postfix 0750: only Postfix may connect).
+	RspamdMilterDir    = "/var/spool/postfix/hardyos-rspamd"
+	RspamdMilterSocket = RspamdMilterDir + "/milter.sock"
+	// RspamdCtlDir holds Rspamd's controller socket (_rspamd:hardyos-vmail
+	// 0750: Dovecot's learning script, run as the mail user, and root).
+	RspamdCtlDir    = "/run/hardyos-mail/rspamd"
+	RspamdCtlSocket = RspamdCtlDir + "/controller.sock"
+	// RadicaleSocketDir holds Radicale's socket (gunicorn): setgid
+	// radicale:hardyd 0750, so only hardyd can reach Radicale and nothing
+	// can stand in for it (decision 319).
+	RadicaleSocketDir = "/run/hardyos-mail/radicale"
+	RadicaleSocket    = RadicaleSocketDir + "/radicale.sock"
+)
+
+// RadicaleCommand serves Radicale (its WSGI application) on RadicaleSocket
+// with gunicorn, as the radicale user (radicale.service's drop-in).
+func RadicaleCommand() []string {
+	return []string{"/usr/bin/gunicorn", "--bind", "unix:" + RadicaleSocket, "--umask", "0007",
+		"--workers", "2", "--threads", "8", "--timeout", "60", "--env", "RADICALE_CONFIG=" + RadicaleConf, "radicale"}
+}
+
+// WebmailTokenPrefix starts every webmail token (hardyd makes them for the
+// Mail app's window session): a password never does, and such a token is
+// only accepted from the webmail app's own network (decision 305).
+const WebmailTokenPrefix = "hwm1."
 
 // VMailUser owns every mailbox on disk; Dovecot's mail processes run as it.
 const VMailUser = "hardyos-vmail"
@@ -80,7 +131,13 @@ var (
 	sesUserRE  = regexp.MustCompile(`^[A-Z0-9]{16,128}$`)
 	secretRE   = regexp.MustCompile(`^[A-Za-z0-9_+/=.-]{16,256}$`)
 	poolRE     = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.:-]{0,63}$`)
+	// A mailbox's storage key and a network interface's name.
+	keyRE   = regexp.MustCompile(`^[0-9a-f]{24}$`)
+	ifaceRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
 )
+
+// ValidMailboxKey reports whether k is a mailbox's storage key.
+func ValidMailboxKey(k string) bool { return keyRE.MatchString(k) }
 
 // ValidDomain reports whether d is a lower-case DNS name with at least two
 // labels (no IDN in A-label form other than plain ASCII, no trailing dot).
@@ -144,6 +201,15 @@ type RootDomain struct {
 
 // RootMailbox is one mailbox as root needs it.
 type RootMailbox struct {
+	// Key names the mailbox's storage for good (decision 310): its folder
+	// (vmail/<key>) and its calendars (Radicale's user <key>). hardyd makes
+	// it at random with the mailbox; changing the address keeps it, and an
+	// address used again later never finds the old mailbox's mail.
+	Key string `json:"key"`
+	// Legacy: the mailbox was made under the old layout (its mail may still
+	// be in vmail/<domain>/<local>); only such a mailbox takes that folder,
+	// once (decision 318).
+	Legacy bool `json:"legacy,omitempty"`
 	// Address is the mailbox's own address; it is also what people sign in
 	// with in mail apps.
 	Address string `json:"address"`
@@ -198,10 +264,17 @@ type RootConfig struct {
 	MaxMessageMB int `json:"maxMessageMb"`
 	// SendPerHour is how many messages one person may send per hour.
 	SendPerHour int `json:"sendPerHour"`
-	// AuthPort is hardyd's mail sign-in listener on 127.0.0.1.
-	AuthPort int `json:"authPort"`
+	// NetBirdNet is the NetBird network (VPSPeer must be in it) and
+	// NetBirdIface its interface: relayed and forwarded connections are
+	// accepted only from the VPS, through that interface.
+	NetBirdNet   string `json:"netbirdNet"`
+	NetBirdIface string `json:"netbirdIface"`
+	// StorageLimitMB caps <pool>/mail with a ZFS quota (0: worked out from
+	// the mailboxes' quotas and the pool's size, Root.storageLimit).
+	StorageLimitMB int `json:"storageLimitMb"`
 	// NotifyFrom is the one address HardyOS's notifications may send from
-	// (NotifyLogin); "" turns that sign-in off.
+	// (NotifyLogin): an address of its own, not a mailbox, alias or group;
+	// "" turns that sign-in off.
 	NotifyFrom string `json:"notifyFrom"`
 	// SharedCalendar makes the family calendar and address book (Radicale
 	// collections everyone signed in may change).
@@ -217,9 +290,9 @@ type RootSecrets struct {
 	// Dovecot (the policy server's bearer token and the OAuth2 client
 	// secret). hardyd makes it; it's only in Dovecot's root-owned config.
 	AuthSecret string `json:"authSecret"`
-	// DAV maps each mailbox address to the password hardyd uses with
+	// DAV maps each mailbox's key to the password hardyd uses with
 	// Radicale on its behalf (hardyd checks the person's own password,
-	// then talks to Radicale on 127.0.0.1 with this).
+	// then talks to Radicale on 127.0.0.1 as the key with this).
 	DAV map[string]string `json:"dav,omitempty"`
 }
 
@@ -245,6 +318,18 @@ func (c RootConfig) Normalize(s RootSecrets) (RootConfig, error) {
 		return out, invalid("the VPS's NetBird address %q isn't valid", c.VPSPeer)
 	}
 	out.VPSPeer = vps.Unmap().String()
+	nb, err := netip.ParsePrefix(c.NetBirdNet)
+	if err != nil || nb.Bits() < 8 {
+		return out, invalid("the NetBird network %q isn't valid (is this server on NetBird?)", c.NetBirdNet)
+	}
+	nb = nb.Masked()
+	out.NetBirdNet = nb.String()
+	if !nb.Contains(vps.Unmap()) {
+		return out, invalid("the VPS's address %s isn't in this server's NetBird network %s", out.VPSPeer, out.NetBirdNet)
+	}
+	if !ifaceRE.MatchString(c.NetBirdIface) {
+		return out, invalid("the NetBird interface %q isn't valid", c.NetBirdIface)
+	}
 	if len(c.Domains) == 0 {
 		return out, invalid("add a mail domain first")
 	}
@@ -291,17 +376,22 @@ func (c RootConfig) Normalize(s RootSecrets) (RootConfig, error) {
 		return local == "postmaster" || local == "abuse"
 	}
 	out.Mailboxes = nil
+	keys := map[string]bool{}
 	for _, m := range c.Mailboxes {
 		if err := claim(m.Address, m.Address); err != nil {
 			return out, err
 		}
+		if !keyRE.MatchString(m.Key) || keys[m.Key] {
+			return out, invalid("%s: missing or repeated storage key", m.Address)
+		}
+		keys[m.Key] = true
 		if m.QuotaMB < 0 || m.QuotaMB > MaxQuotaMB {
 			return out, invalid("%s: the quota must be between 0 (none) and %d MB", m.Address, MaxQuotaMB)
 		}
 		if len(m.Aliases) > MaxAliases {
 			return out, invalid("%s: at most %d aliases", m.Address, MaxAliases)
 		}
-		nm := RootMailbox{Address: m.Address, QuotaMB: m.QuotaMB, Aliases: []string{}}
+		nm := RootMailbox{Key: m.Key, Legacy: m.Legacy, Address: m.Address, QuotaMB: m.QuotaMB, Aliases: []string{}}
 		for _, a := range m.Aliases {
 			if reserved(a) {
 				return out, invalid("%s is kept for the postmaster", a)
@@ -387,26 +477,28 @@ func (c RootConfig) Normalize(s RootSecrets) (RootConfig, error) {
 	if out.SendPerHour < 1 || out.SendPerHour > MaxSendHour {
 		return out, invalid("messages per hour must be 1 to %d", MaxSendHour)
 	}
-	if out.AuthPort == 0 {
-		out.AuthPort = DefaultAuthPort
-	}
-	if out.AuthPort < 1024 || out.AuthPort > 65535 {
-		return out, invalid("the sign-in port must be 1024-65535")
+	if out.StorageLimitMB != 0 && (out.StorageLimitMB < 1024 || out.StorageLimitMB > MaxQuotaMB) {
+		return out, invalid("the mail storage limit must be 0 (automatic) or 1024 to %d MB", MaxQuotaMB)
 	}
 	if out.NotifyFrom != "" {
-		if _, dom, err := SplitAddress(out.NotifyFrom); err != nil || !domains[dom] {
-			return out, invalid("the notification sender %q must be at one of the mail domains", out.NotifyFrom)
+		// An address of its own: the notification sign-in must not be able
+		// to send as a person, nor a person as it.
+		if reserved(out.NotifyFrom) {
+			return out, invalid("%s is kept for the postmaster", out.NotifyFrom)
+		}
+		if err := claim(out.NotifyFrom, "the notification sender"); err != nil {
+			return out, invalid("the notification sender needs an unused address at one of the mail domains: %v", err)
 		}
 	}
 	if !secretRE.MatchString(s.AuthSecret) || len(s.AuthSecret) < 32 {
 		return out, invalid("the sign-in secret is missing")
 	}
-	for addr, sec := range s.DAV {
-		if !isMailbox(addr) {
-			return out, invalid("calendar password for %s, which isn't a mailbox", addr)
+	for key, sec := range s.DAV {
+		if !keys[key] {
+			return out, invalid("calendar password for %q, which isn't a mailbox", key)
 		}
 		if !secretRE.MatchString(sec) || len(sec) < 32 {
-			return out, invalid("the calendar password for %s isn't valid", addr)
+			return out, invalid("the calendar password for mailbox %s isn't valid", key)
 		}
 	}
 	return out, nil

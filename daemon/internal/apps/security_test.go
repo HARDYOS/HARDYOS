@@ -164,11 +164,11 @@ func TestNestedBindsRefused(t *testing.T) {
 	// Shares too: the same share twice is fine, a folder in it isn't.
 	shares := []shareBind{{Name: "MEDIA", Path: "/mnt/tank/shares/media", Write: true}}
 	two := resolved(t, `"volumes":[{"type":"bind","source":"/mnt/tank/shares/media","target":"/a"},{"type":"bind","source":"/mnt/tank/shares/media","target":"/b"}]`, "")
-	if err := two.check(plain, "hardyos-notes", dataDir, ports, shares); err != nil {
+	if err := two.check(plain, "hardyos-notes", dataDir, ports, shares, false); err != nil {
 		t.Errorf("a share twice: %v", err)
 	}
 	in := resolved(t, `"volumes":[{"type":"bind","source":"/mnt/tank/shares/media","target":"/a"},{"type":"bind","source":"/mnt/tank/shares/media/x","target":"/b"}]`, "")
-	if err := in.check(plain, "hardyos-notes", dataDir, ports, shares); err == nil {
+	if err := in.check(plain, "hardyos-notes", dataDir, ports, shares, false); err == nil {
 		t.Error("a folder inside a share bind was allowed")
 	}
 }

@@ -3,11 +3,14 @@ package apps
 import (
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+
+	portreg "github.com/hardyos/hardyos/daemon/internal/ports"
 )
 
 // The policy below is checked against the compose file as Docker Compose
@@ -204,6 +207,10 @@ var refusedHint = map[string]string{
 	"container_name_prefix": "HardyOS names the containers itself",
 }
 
+// WebmailAppID is the catalog's webmail app (Roundcube): its network is
+// ports.WebmailSubnet, which no other app may take.
+const WebmailAppID = "roundcube"
+
 // Resolved is a compose project after `docker compose config --format json`.
 type Resolved map[string]any
 
@@ -212,13 +219,13 @@ type Resolved map[string]any
 // manifest's ports. It also fills in what HardyOS always sets: a restart
 // policy and a label naming the app.
 func (r Resolved) Check(m Manifest, project, dataDir string, ports map[string]int) error {
-	return r.check(m, project, dataDir, ports, nil)
+	return r.check(m, project, dataDir, ports, nil, false)
 }
 
 // check is Check with the host folders chosen for the app's shares: binds
 // may also be inside those, and binds inside a share granted read-only are
 // made read-only.
-func (r Resolved) check(m Manifest, project, dataDir string, ports map[string]int, shares []shareBind) error {
+func (r Resolved) check(m Manifest, project, dataDir string, ports map[string]int, shares []shareBind, catalog bool) error {
 	var p Problems
 	for k := range r {
 		switch k {
@@ -243,7 +250,7 @@ func (r Resolved) check(m Manifest, project, dataDir string, ports map[string]in
 	networks, _ := r["networks"].(map[string]any)
 	for name, raw := range networks {
 		n, _ := raw.(map[string]any)
-		checkNetwork(&p, project, name, n)
+		checkNetwork(&p, project, name, n, catalog)
 	}
 
 	// The host ports the app may publish, and which are still unused.
@@ -330,7 +337,7 @@ func nestedBind(sources []string) (inner, outer string, found bool) {
 	return "", "", false
 }
 
-func checkNetwork(p *Problems, project, name string, n map[string]any) {
+func checkNetwork(p *Problems, project, name string, n map[string]any, catalog bool) {
 	for k, v := range n {
 		switch k {
 		case "name":
@@ -350,6 +357,24 @@ func checkNetwork(p *Problems, project, name string, n map[string]any) {
 				ipam, _ := v.(map[string]any)
 				if d, _ := ipam["driver"].(string); d != "" && d != "default" {
 					p.addf("network %s: custom IPAM drivers aren't allowed", name)
+				}
+				// The webmail app's network is the only place hardyd's
+				// mail sign-in takes webmail tokens from (decision 305).
+				for _, c := range anyList(ipam["config"]) {
+					cm, _ := c.(map[string]any)
+					sub, _ := cm["subnet"].(string)
+					if sub == "" {
+						continue
+					}
+					pre, err := netip.ParsePrefix(sub)
+					if err != nil {
+						p.addf("network %s: subnet %q isn't valid", name, sub)
+						continue
+					}
+					// Only the catalog's own webmail app (decision 317).
+					if pre.Overlaps(portreg.WebmailSubnet) && (project != ProjectName(WebmailAppID) || !catalog) {
+						p.addf("network %s: %s is kept for the webmail app", name, portreg.WebmailSubnet)
+					}
 				}
 			}
 		default:

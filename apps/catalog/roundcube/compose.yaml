@@ -8,8 +8,11 @@
 # Sign-in: HardyOS's window proxy sends the person's mailbox address and a
 # token tied to their desktop session as HTTP Basic credentials, which
 # Roundcube's bundled http_authentication plugin uses to sign in. hardyd
-# checks the token when Dovecot asks. Without them (opened another way)
-# Roundcube shows its own sign-in form: mail address and domain password.
+# checks the token when Dovecot asks, and only from this app's own network
+# (172.16.253.2 on 172.16.253.0/28, below): from here no password is ever accepted, and a
+# token works nowhere else (decision 305). Roundcube's own sign-in form is
+# shut: Apache answers nothing without the window proxy's credentials, and
+# HardyOS's proxies refuse the form's submission.
 #
 # The web port is bound to 127.0.0.1 only: the window proxy is the way in.
 services:
@@ -48,17 +51,36 @@ services:
         $$config['use_https'] = true;
         $$config['session_lifetime'] = 60;
         PHP
+        cat > /etc/apache2/conf-enabled/hardyos.conf <<'APACHE'
+        # HardyOS: nothing without the window proxy's sign-in.
+        <Location "/">
+          <If "-z req('Authorization')">
+            Require all denied
+          </If>
+        </Location>
+        APACHE
         exec /docker-entrypoint.sh apache2-foreground
     ports:
       - "127.0.0.1:${HARDY_PORT_WEB}:80"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # hardyd takes webmail tokens from this address only (decision 317).
+    networks:
+      default:
+        ipv4_address: 172.16.253.2
     volumes:
       - ${HARDY_APP_DATA}/db:/var/roundcube/db
       - ${HARDY_APP_DATA}/config:/var/roundcube/config
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1/"]
+      # Any answer will do (without credentials it's 403).
+      test: ["CMD", "curl", "-sS", "-o", "/dev/null", "http://127.0.0.1/"]
       interval: 30s
       timeout: 5s
       start_period: 30s
       retries: 3
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.16.253.0/28

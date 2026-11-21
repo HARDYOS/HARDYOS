@@ -7226,6 +7226,8 @@ components:
         created: { type: string }
         lastLogon: { type: integer, format: int64, description: Unix seconds; 0 means never }
         builtin: { type: boolean }
+        objectGuid: { type: string, description: "The account's objectGUID; it stays when the account is renamed" }
+        sid: { type: string, description: "The account's objectSid" }
     DomainNewUser:
       type: object
       required: [username, password]
@@ -9464,7 +9466,8 @@ components:
         tlsMode: { type: string, enum: [self, manual, acme] }
         acmeEmail: { type: string }
         acmeStaging: { type: boolean }
-        notifyFrom: { type: string, description: Sender of HardyOS's notifications through this server ("" for none) }
+        notifyFrom: { type: string, description: 'Sender of HardyOS''s notifications through this server: an address of its own, no mailbox, alias or group (empty for none)' }
+        storageLimitMb: { type: integer, description: ZFS quota on <pool>/mail in MB; 0 works one out from the mailboxes' quotas (never over 80% of the pool) }
     MailSettingsRequest:
       type: object
       required: [settings]
@@ -9589,7 +9592,7 @@ components:
         publishedUrl: { type: string, description: "https://mail.<base> when published through Remote Access" }
     Mailbox:
       type: object
-      required: [id, account, address, displayName, aliases, quotaMb, enabled, accountState, customAddress, createdAt, updatedAt]
+      required: [id, account, address, displayName, aliases, quotaMb, enabled, accountState, customAddress, deleting, createdAt, updatedAt]
       properties:
         id: { type: integer }
         account: { type: string }
@@ -9600,6 +9603,7 @@ components:
         enabled: { type: boolean }
         accountState: { type: string, enum: [active, disabled, deleted] }
         customAddress: { type: boolean }
+        deleting: { type: boolean, description: Taken off the server; its messages, calendars and contacts are being deleted (run the deletion again if it stopped) }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
         usedKb: { type: integer }

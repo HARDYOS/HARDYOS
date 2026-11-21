@@ -6529,6 +6529,10 @@ export interface components {
              */
             lastLogon: number;
             builtin: boolean;
+            /** @description The account's objectGUID; it stays when the account is renamed */
+            objectGuid?: string;
+            /** @description The account's objectSid */
+            sid?: string;
         };
         DomainNewUser: {
             username: string;
@@ -8787,8 +8791,10 @@ export interface components {
             tlsMode?: "self" | "manual" | "acme";
             acmeEmail?: string;
             acmeStaging?: boolean;
-            /** @description Sender of HardyOS's notifications through this server ("" for none) */
+            /** @description Sender of HardyOS's notifications through this server: an address of its own, no mailbox, alias or group (empty for none) */
             notifyFrom?: string;
+            /** @description ZFS quota on <pool>/mail in MB; 0 works one out from the mailboxes' quotas (never over 80% of the pool) */
+            storageLimitMb?: number;
         };
         MailSettingsRequest: {
             settings: components["schemas"]["MailSettings"];
@@ -8915,6 +8921,8 @@ export interface components {
             /** @enum {string} */
             accountState: "active" | "disabled" | "deleted";
             customAddress: boolean;
+            /** @description Taken off the server; its messages */
+            deleting: boolean;
             /** Format: date-time */
             createdAt: string;
             /** Format: date-time */

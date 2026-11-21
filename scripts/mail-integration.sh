@@ -21,7 +21,7 @@ docker run --rm --cap-add NET_ADMIN -v "$out:/t:ro" debian:trixie bash -euo pipe
   apt-get update -qq
   echo "postfix postfix/main_mailer_type select No configuration" | debconf-set-selections
   apt-get install -y -qq postfix dovecot-core dovecot-imapd dovecot-lmtpd dovecot-sieve \
-    rspamd redis-server radicale nftables iproute2 procps openssl ca-certificates >/dev/null
+    rspamd redis-server radicale gunicorn nftables iproute2 procps openssl ca-certificates >/dev/null
   # What the image hook and hardyos-core'"'"'s postinst set up.
   adduser --system --group --no-create-home --home /nonexistent hardyos-vmail >/dev/null
   adduser _rspamd redis >/dev/null
