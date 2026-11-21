@@ -208,6 +208,9 @@ virtual_mailbox_domains = %s
 virtual_mailbox_maps = %s
 virtual_alias_maps = %s
 virtual_transport = lmtp:unix:private/dovecot-lmtp
+# A mailbox being restored waits (decision 462): empty except during a
+# restore's swap, when that mailbox's mail is deferred (retry).
+transport_maps = texthash:/etc/postfix/hardyos/hold
 lmtp_destination_recipient_limit = 1
 
 # Outgoing mail goes through Amazon SES only.
@@ -358,6 +361,7 @@ postlog   unix-dgram n  -       n       -       1       postlogd
 		// vouch for an empty one).
 		{Path: path.Join(PostfixMapsDir, "null_sender"), Mode: 0o644, Content: mapFile([][2]string{{"<>", "REJECT Signed-in senders need a return address"}})},
 		{Path: path.Join(PostfixMapsDir, "bounce_transport"), Mode: 0o644, Content: mapFile([][2]string{{"<>", BounceTransport}})},
+		{Path: path.Join(PostfixMapsDir, "hold"), Mode: 0o644, Content: mapFile(nil)},
 	}
 	sasl := [][2]string{}
 	if c.SES != nil {

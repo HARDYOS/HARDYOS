@@ -9,8 +9,8 @@ item of cloud backups (`internal/cloudbackup`, restic) and of replication
 between HardyOS servers (`internal/replica`, `internal/replication`). It is
 on by default: new backup and replication tasks have it ticked when the
 mail server is set up, and migration 0110 adds it to existing whole-server
-backup tasks (those with the settings item) and to the oldest replication
-task of each paired server.
+backup tasks (those with the settings item); the oldest enabled replication
+task of each paired server gets it once that server accepts it (see below).
 
 Covered: mailboxes (Maildirs under `<pool>/mail/vmail/<key>`), DKIM keys
 (`keys/dkim`), the TLS key, the configuration (domains, mailboxes,
@@ -54,6 +54,29 @@ version's mailbox can go into another mailbox only when the administrator
 picks it and types that mailbox's address. Every file copied is a regular
 file or folder (no links, devices, FIFOs), read without following links,
 written with the live owner and fixed modes.
+
+## Security review (PR #39) and what changed
+
+- H1/M1: overwrites build the version's Maildir next to the live one
+  (root 0700), then hold that mailbox's mail (Postfix `hold` transport map,
+  `retry:`; sessions kicked), take a second snapshot, swap with one
+  `renameat2(RENAME_EXCHANGE)`, merge in every message whose base name the
+  version lacks, resume delivery in a defer, and keep what was replaced
+  root-only for 14 days (`.replaced-<time>`, removed at an apply).
+- M2: a domain restore skips mailboxes now at another domain.
+- M3: Rspamd's dump never from replicas; from cloud versions only after
+  root's RDB reader (no functions or module data), `redis-check-rdb` as
+  Redis's user, and Redis starting with it (else the previous dump).
+- M4: only Maildir messages (cur, new, keywords); no indexes, uidlist,
+  Sieve or other dotfiles.
+- M5: a restore of everything starts the mail server again in a defer.
+- M6: existing replication tasks get Mail only when the peer's hello lists
+  `mail`; then a notification and a one-click "Stop replicating mail";
+  older peers make the item skipped, not failed.
+- L1-L8: descriptor-based chown/chmod, Nlink on the opened dump, no
+  Rspamd restart inside "everything", DKIM change noted, narrow locking,
+  stricter rebuild (empty dataset, matching TLS pair), Roundcube note,
+  free-space check and display.
 
 ## Pieces
 

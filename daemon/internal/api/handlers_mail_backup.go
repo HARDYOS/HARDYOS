@@ -51,6 +51,22 @@ func describeMailRestore(a *mail.RestoreArgs) string {
 
 // handleMailRestoreTargets lists this server's mailboxes by storage key,
 // what a restore puts a version's mailbox into (admin).
+// mailContentsResponse is a version's (or this server's) mailboxes and the
+// room the mail storage has now, for the restore's estimate.
+type mailContentsResponse struct {
+	cloudbackup.MailContents
+	FreeBytes *int64 `json:"freeBytes,omitempty"`
+}
+
+// mailFree asks root for the mail dataset's free space (nil if unknown).
+func (s *Server) mailFree(r *http.Request) *int64 {
+	var sp mail.Space
+	if s.cfg.Priv == nil || s.cfg.Priv.Call(r.Context(), mail.OpSpace, nil, &sp) != nil {
+		return nil
+	}
+	return &sp.FreeBytes
+}
+
 func (s *Server) handleMailRestoreTargets(w http.ResponseWriter, r *http.Request, _ *auth.User) {
 	svc := s.mailSvc()
 	out := cloudbackup.MailContents{Contents: mail.Contents{Domains: []string{}, Mailboxes: []mail.ContentsMailbox{}}}
@@ -79,7 +95,7 @@ func (s *Server) handleMailRestoreTargets(w http.ResponseWriter, r *http.Request
 	if st, err := svc.Store.LoadSettings(r.Context()); err == nil {
 		out.Hostname = st.Hostname
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, mailContentsResponse{MailContents: out, FreeBytes: s.mailFree(r)})
 }
 
 func (s *Server) handleCloudMailContents(w http.ResponseWriter, r *http.Request, _ *auth.User) {
@@ -94,5 +110,5 @@ func (s *Server) handleCloudMailContents(w http.ResponseWriter, r *http.Request,
 	if res.Mailboxes == nil {
 		res.Mailboxes = []mail.ContentsMailbox{}
 	}
-	writeJSON(w, http.StatusOK, res)
+	writeJSON(w, http.StatusOK, mailContentsResponse{MailContents: res, FreeBytes: s.mailFree(r)})
 }

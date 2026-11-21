@@ -276,6 +276,11 @@ Mail is backed up and replicated with everything else (decisions
 460-469), and it's on by default: a new task in **Backup** (cloud backups)
 or in its **Replication** tab has **Mail** ticked once the mail server is
 set up, and existing whole-server backup tasks got it with the update.
+An existing replication task gets it only once the other server is
+updated too: the oldest task to each server then copies the mail as well,
+you're notified ("Mail now replicates to …"), and the task shows **Stop
+replicating mail** to turn it off with one click. An older receiving
+server is skipped for mail with a note, never a failed run.
 
 **What's in it.** Every mailbox (all folders and messages), calendars and
 contacts (the family ones too), the DKIM and TLS keys, the configuration
@@ -300,7 +305,7 @@ Browse & restore… on the Mail row):
 
 | What | Into a new folder / as new | Replace what's there |
 | --- | --- | --- |
-| One mailbox | a folder "Restored &lt;date&gt;" with the old folders inside | its address typed; newer mail is removed |
+| One mailbox | a folder "Restored &lt;date&gt;" with the old folders inside | its address typed; the folders and messages become as in the version, and mail the version doesn't have (newer mail) stays |
 | One domain | a "Restored" folder in each of its mailboxes | the domain typed; mailboxes, their calendars and the DKIM key |
 | Calendars and contacts (one person) | new calendars "… (restored &lt;date&gt;)" | their address typed |
 | Everything | | `mail` typed: the mail server stops, everything goes back (webmail settings too in cloud backups), and it starts again |
@@ -308,7 +313,14 @@ Browse & restore… on the Mail row):
 Mailboxes are found by their storage key, not their address: if an account
 was deleted and made again, its old mail can be put into the new mailbox
 by choosing it under **Into** and typing its address. Anything that
-replaces data takes a snapshot `<pool>/mail@hardyos-manual-<time>` first.
+replaces data takes a snapshot `<pool>/mail@hardyos-manual-<time>` first
+and another right before the switch; while a mailbox is switched, its new
+mail waits in the queue for a moment, and what was replaced is kept (root
+only) for 14 days. Only messages come back: Dovecot rebuilds its indexes,
+and Sieve scripts and other files of the mailbox stay as they are now.
+Rspamd's learning comes back only from cloud backups (checked first),
+never from another server's copy. The restore panel shows the free space;
+a restore that clearly doesn't fit is refused before it starts.
 The mail server must be set up to restore into; on a rebuilt server,
 **Rebuild…** in the Backup app brings the whole mail server back, then turn
 it on in Control Panel › Mail.

@@ -12,6 +12,9 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 )
 
+// testRDB is a small Redis dump: header, an aux field, the end.
+const testRDB = "REDIS0011\xfa\x09redis-ver\x057.2.4\xff01234567"
+
 const (
 	mailKeyA = "a11ce0000000000000000001"
 	mailKeyB = "b0b000000000000000000002"
@@ -75,7 +78,7 @@ func TestBackupRestoreMail(t *testing.T) {
 	write(t, filepath.Join(md, "cur", "1700000000.M1P1.host,S=5:2,S"), "hello")
 	write(t, filepath.Join(md, ".Sent", "cur", "1700000001.M2P1.host:2,S"), "sent")
 	write(t, filepath.Join(mailDir, "radicale", "collections", "collection-root", mailKeyA, "home", "event.ics"), "BEGIN:VCALENDAR")
-	write(t, filepath.Join(mailDir, "..", "redis-mail", "dump.rdb"), "REDIS-learned")
+	write(t, filepath.Join(mailDir, "..", "redis-mail", "dump.rdb"), testRDB)
 	// Webmail: Roundcube's preferences.
 	rcDir := filepath.Join(e.base, "app-roundcube")
 	write(t, filepath.Join(rcDir, "data", "db", "sqlite.db"), "prefs v1")
@@ -144,7 +147,7 @@ func TestBackupRestoreMail(t *testing.T) {
 	if x.Error != "" {
 		t.Fatal(x.Error)
 	}
-	if read(t, filepath.Join(md, "cur", "1700000000.M1P1.host,S=5:2,S")) != "hello" || read(t, filepath.Join(mailDir, "..", "redis-mail", "dump.rdb")) != "REDIS-learned" {
+	if read(t, filepath.Join(md, "cur", "1700000000.M1P1.host,S=5:2,S")) != "hello" || read(t, filepath.Join(mailDir, "..", "redis-mail", "dump.rdb")) != testRDB {
 		t.Fatal("the mail server isn't back")
 	}
 	if read(t, filepath.Join(rcDir, "data", "db", "sqlite.db")) != "prefs v1" {

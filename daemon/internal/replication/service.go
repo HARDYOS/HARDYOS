@@ -59,6 +59,8 @@ const (
 	EventStale     = "replication.stale"
 	EventRecovered = "replication.recovered"
 	EventRestored  = "replication.restored"
+	// EventMailAdded: an existing task now replicates the mail too.
+	EventMailAdded = "replication.mail.added"
 )
 
 // DefaultPort is where a receiving server listens for other HardyOS
@@ -91,6 +93,9 @@ type Service struct {
 	ListenAddr string
 	// Secrets hands a job a pairing code kept out of its parameters.
 	Secrets func(ref string) (string, bool)
+	// acceptKinds replaces the kinds this server says it accepts (tests
+	// of an older receiving server).
+	acceptKinds []string
 	// Poll is how often streams are checked on (default 250ms).
 	Poll time.Duration
 

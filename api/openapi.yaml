@@ -9280,6 +9280,7 @@ components:
               key: { type: string }
               address: { type: string }
         webmail: { type: boolean, description: "The version has Roundcube's data" }
+        freeBytes: { type: integer, format: int64, description: "Free space on the mail storage now (a restore needs about the version's size; it's refused when clearly too little)" }
     # ---- end of cloud backup API schemas ----
     # ---- replication API schemas ----
     ReplicationKind:
@@ -9319,6 +9320,7 @@ components:
         name: { type: string }
         targetId: { type: string }
         items: { type: array, items: { $ref: "#/components/schemas/ReplicationItem" } }
+        mailAuto: { type: string, enum: ["", pending, added], description: "pending: Mail is added once the other server accepts mail replicas; added: it was (shown until the task is changed)" }
         intervalMinutes: { type: integer, minimum: 5, maximum: 10080 }
         bandwidthKBps: { type: integer, minimum: 0, description: KiB per second; 0 for no limit }
         keepLocal: { type: integer, minimum: 1 }

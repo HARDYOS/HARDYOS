@@ -8598,6 +8598,11 @@ export interface components {
             }[];
             /** @description The version has Roundcube's data */
             webmail: boolean;
+            /**
+             * Format: int64
+             * @description Free space on the mail storage now (a restore needs about the version's size; it's refused when clearly too little)
+             */
+            freeBytes?: number;
         };
         /** @enum {string} */
         ReplicationKind: "share" | "app" | "vm" | "mail";
@@ -8632,6 +8637,11 @@ export interface components {
             name: string;
             targetId: string;
             items: components["schemas"]["ReplicationItem"][];
+            /**
+             * @description pending: Mail is added once the other server accepts mail replicas; added: it was (shown until the task is changed)
+             * @enum {string}
+             */
+            mailAuto?: "" | "pending" | "added";
             intervalMinutes: number;
             /** @description KiB per second; 0 for no limit */
             bandwidthKBps: number;

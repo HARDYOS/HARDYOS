@@ -6,8 +6,9 @@ import (
 	"testing"
 )
 
-// Migration 0110 (decision 460): mail goes into whole-server backup tasks
-// and the oldest replication task of each paired server, once.
+// Migration 0110 (decisions 460, 469): mail goes into whole-server backup
+// tasks at once; the oldest enabled replication task of each paired server
+// is only marked to get it later (when that server accepts mail).
 func TestMigrationMailOnByDefault(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, filepath.Join(t.TempDir(), "hardyd.db"))
@@ -30,16 +31,16 @@ func TestMigrationMailOnByDefault(t *testing.T) {
 		{`INSERT INTO repl_tasks (id, name, target_id, items, interval_minutes, created_at, updated_at) VALUES ('new111', 'New', 'b', ?, 60, ?, ?)`, []any{`[{"kind":"vm","id":"web"}]`, later, later}},
 		{`INSERT INTO repl_tasks (id, name, target_id, items, interval_minutes, created_at, updated_at) VALUES ('cmail1', 'C1', 'c', ?, 60, ?, ?)`, []any{`[{"kind":"vm","id":"x"}]`, now, now}},
 		{`INSERT INTO repl_tasks (id, name, target_id, items, interval_minutes, created_at, updated_at) VALUES ('cmail2', 'C2', 'c', ?, 60, ?, ?)`, []any{`[{"kind":"mail","id":"mail"}]`, later, later}},
+		{`INSERT INTO repl_tasks (id, name, target_id, items, interval_minutes, enabled, created_at, updated_at) VALUES ('off111', 'Off', 'b', '[]', 60, 0, '2026-10-01T00:00:00Z', ?)`, []any{now}},
+		// As before 0110.
+		{`ALTER TABLE repl_tasks DROP COLUMN mail_auto`, nil},
 		{`DELETE FROM schema_migrations WHERE version = 110`, nil},
 	} {
 		if _, err := db.ExecContext(ctx, q.sql, q.args...); err != nil {
 			t.Fatalf("%s: %v", q.sql, err)
 		}
 	}
-	for i := 0; i < 2; i++ { // and again: nothing changes the second time
-		if i == 1 {
-			_, _ = db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version = 110`)
-		}
+	for i := 0; i < 1; i++ {
 		if err := db.migrate(ctx); err != nil {
 			t.Fatal(err)
 		}
@@ -54,13 +55,19 @@ func TestMigrationMailOnByDefault(t *testing.T) {
 			{"backup_tasks", "whole", `[{"kind":"share","id":"media"},{"kind":"system"},{"kind":"mail"}]`},
 			{"backup_tasks", "photos", `[{"kind":"share","id":"photos"}]`},
 			{"backup_tasks", "has", `[{"kind":"system"},{"kind":"mail"}]`},
-			{"repl_tasks", "old111", `[{"kind":"share","id":"media"},{"kind":"mail","id":"mail"}]`},
+			{"repl_tasks", "old111", `[{"kind":"share","id":"media"}]`},
 			{"repl_tasks", "new111", `[{"kind":"vm","id":"web"}]`},
 			{"repl_tasks", "cmail1", `[{"kind":"vm","id":"x"}]`},
 			{"repl_tasks", "cmail2", `[{"kind":"mail","id":"mail"}]`},
 		} {
 			if got := items(c.table, c.id); got != c.want {
 				t.Errorf("run %d: %s %s: %s, want %s", i, c.table, c.id, got, c.want)
+			}
+		}
+		for id, want := range map[string]string{"old111": "pending", "new111": "", "off111": "", "cmail1": "", "cmail2": ""} {
+			var got string
+			if err := db.QueryRowContext(ctx, `SELECT mail_auto FROM repl_tasks WHERE id = ?`, id).Scan(&got); err != nil || got != want {
+				t.Errorf("%s: mail_auto %q (%v), want %q", id, got, err, want)
 			}
 		}
 	}

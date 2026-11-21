@@ -80,6 +80,11 @@ type Root struct {
 	// SafetySnapshot replaces "zfs snapshot" of the mail dataset before a
 	// restore replaces anything (integration tests without ZFS).
 	SafetySnapshot func(ctx context.Context, dataset, name string) error
+	// Free replaces statfs for a restore's space check (tests).
+	Free func(dir string) (int64, error)
+
+	// restoreMu: one restore at a time (they take mu only to swap).
+	restoreMu sync.Mutex
 
 	mu sync.Mutex
 }
@@ -544,6 +549,8 @@ func (r *Root) apply(ctx context.Context, a ApplyArgs, save bool) (*ApplyResult,
 	if err := r.migrateLayout(e, cfg); err != nil {
 		return nil, err
 	}
+	// What restores replaced goes after ReplacedDays (decision 462).
+	r.cleanReplaced(e)
 	res := &ApplyResult{DKIM: map[string]string{}, Warnings: []string{}, Services: []string{}}
 	r.storageLimit(ctx, cfg, res)
 	for _, d := range cfg.Domains {

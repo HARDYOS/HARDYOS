@@ -36,11 +36,16 @@ export function MailRestoreForm({
   version,
   here,
   webmail,
+  size,
+  free,
   onRestore,
 }: {
   version: { mailboxes: MailBox[]; domains: string[] };
   here: { mailboxes: MailBox[]; domains: string[] };
   webmail?: boolean;
+  /** The version's size and the mail storage's free space, for the estimate. */
+  size?: number;
+  free?: number;
   onRestore: (args: MailRestoreArgs) => Promise<void>;
 }) {
   const first = version.mailboxes[0]?.key ?? "";
@@ -186,8 +191,8 @@ export function MailRestoreForm({
                   ? "Its mailboxes, their calendars and the domain's DKIM key become as in the version. "
                   : scope === "calendars"
                     ? "Their calendars and contacts become as in the version. "
-                    : "The mailbox becomes as in the version; newer mail is removed. "}
-                A snapshot of the mail is taken first, so this can be undone.
+                    : "The mailbox's folders and messages become as in the version; mail the version doesn't have (newer mail) stays. "}
+                A snapshot of the mail is taken first, and what was there is kept for 14 days.
               </span>
             </span>
           </label>
@@ -204,9 +209,29 @@ export function MailRestoreForm({
           {(id) => <TextInput id={id} className="input mono" value={confirm} autoComplete="off" onChange={(e) => setConfirm(e.target.value)} />}
         </Field>
       )}
+      {free !== undefined && size !== undefined && size > free && (
+        <Alert tone="bad" title="Probably not enough room">
+          The whole version is <span className="mono">{bytes(size)}</span> and the mail storage has <span className="mono">{bytes(free)}</span> free. A single mailbox may still
+          fit; the server refuses a restore that clearly doesn't.
+        </Alert>
+      )}
       {error && <Alert tone="bad">{error}</Alert>}
       <div className="bk-actionbar">
-        <span className="small muted">Restores are recorded in the audit log.</span>
+        <span className="small muted">
+          {free !== undefined && (
+            <>
+              <span className="mono">{bytes(free)}</span> free on the mail storage
+              {size !== undefined && (
+                <>
+                  {" "}
+                  · the version is <span className="mono">{bytes(size)}</span>
+                </>
+              )}
+              .{" "}
+            </>
+          )}
+          Restores are recorded in the audit log.
+        </span>
         <Button variant={need ? "danger" : "primary"} size="sm" type="submit" busy={busy} disabled={!ready}>
           Restore
         </Button>
@@ -255,6 +280,8 @@ export function CloudMailRestore({
           version={contents.data}
           here={here.data}
           webmail={!!item.webmail}
+          size={item.bytes}
+          free={here.data.freeBytes ?? undefined}
           onRestore={async (mail) => {
             const r = await restore({ target, snapshot: item.snapshot, mode: "mail", mail });
             onJob({ id: r.job.id, label: mail.scope === "all" ? "Restoring the mail server" : "Restoring mail" });

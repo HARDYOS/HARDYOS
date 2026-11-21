@@ -60,6 +60,10 @@ picks up where it stopped). **History** lists each run with what it sent.
   and TLS keys, its configuration and the spam filter's learning) is
   ticked for a new task, with the *Mail (Roundcube)* app for webmail
   settings, once the mail server is set up. A server without one skips it.
+  Existing tasks: the oldest one to each server gets Mail once that server
+  is updated too (it says it accepts mail replicas), with a notification and
+  a **Stop replicating mail** button on the task; until then, and with any
+  older receiving server, the mail item is skipped with a note.
   The receiving server never mounts or shows the mail copy (it can't be
   browsed there); it only ever goes back to this server.
 - A task that fails sends a notification once; one with no success for

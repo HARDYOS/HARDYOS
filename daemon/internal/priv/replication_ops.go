@@ -250,6 +250,8 @@ func (r *ReplicationItems) MailRestore(ctx context.Context, dir string, raw json
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return nil, nil, fmt.Errorf("%w: what to restore of the mail can't be read", replica.ErrInvalid)
 	}
+	// From another server: never its Rspamd data (decision 467).
+	a.FromReplica = true
 	res, err := r.Mail.RestoreFrom(ctx, dir, a)
 	if err != nil {
 		var ve *mail.ValidationError

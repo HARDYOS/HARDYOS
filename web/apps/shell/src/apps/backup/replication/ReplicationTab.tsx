@@ -313,6 +313,7 @@ function TasksCard({ targets, tasks, onChanged }: { targets: ReplicationTarget[]
                   </Alert>
                 )}
                 {!t.runningJob && !t.lastError && t.stale && <Alert tone="bad" title="Behind schedule">No run has succeeded for a while.</Alert>}
+                {t.mailAuto === "added" && <MailAddedNotice task={t} onChanged={onChanged} />}
               </div>
             );
           })}
@@ -862,6 +863,7 @@ function MailReplicaRestore({ target, item, onClose }: { target: ReplicationTarg
             <MailRestoreForm
               version={here.data}
               here={here.data}
+              free={here.data.freeBytes ?? undefined}
               onRestore={async (mail) => {
                 const r = await unwrap(
                   api.POST("/replication/targets/{id}/restore", {
@@ -876,5 +878,53 @@ function MailReplicaRestore({ target, item, onClose }: { target: ReplicationTarg
         </div>
       )}
     </Dialog>
+  );
+}
+
+/**
+ * An existing task got Mail with the update (decision 469): it now copies
+ * the mail and its DKIM keys to the other server. One click turns it off;
+ * Keep acknowledges it.
+ */
+function MailAddedNotice({ task, onChanged }: { task: ReplicationTask; onChanged: () => void }) {
+  const save = useMutation({
+    mutationFn: (keep: boolean) =>
+      unwrap(
+        api.PATCH("/replication/tasks/{id}", {
+          params: { path: { id: task.id } },
+          body: {
+            name: task.name,
+            targetId: task.targetId,
+            items: keep ? task.items : task.items.filter((i) => i.kind !== "mail"),
+            intervalMinutes: task.intervalMinutes,
+            bandwidthKBps: task.bandwidthKBps,
+            keepLocal: task.keepLocal,
+            keepRemote: task.keepRemote,
+            enabled: task.enabled,
+          },
+        }),
+      ),
+    onSuccess: (_r, keep) => {
+      toast("success", keep ? "Mail keeps replicating" : "Mail no longer replicates", task.targetName);
+      setTimeout(onChanged, 500);
+    },
+  });
+  return (
+    <Alert tone="warn" title={`Mail now replicates to ${task.targetName}`}>
+      <div className="stack" style={{ gap: 8 }}>
+        <span>
+          Since this update the task also copies this server's mail, calendars and DKIM keys to {task.targetName}, which keeps them read only and never shows them.
+        </span>
+        <div className="row">
+          <Button size="sm" variant="danger" busy={save.isPending && save.variables === false} onClick={() => save.mutate(false)}>
+            Stop replicating mail
+          </Button>
+          <Button size="sm" variant="ghost" busy={save.isPending && save.variables === true} onClick={() => save.mutate(true)}>
+            Keep it
+          </Button>
+        </div>
+        {save.isError && <span className="small">{errorMessage(save.error)}</span>}
+      </div>
+    </Alert>
   );
 }

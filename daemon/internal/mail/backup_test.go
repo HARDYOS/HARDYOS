@@ -23,7 +23,11 @@ type liveServer struct {
 	runner *sysexec.Fake
 	redis  string
 	starts int
+	holds  []string
 }
+
+// testRDB is a small Redis dump: header, an aux field, the end.
+const testRDB = "REDIS0011\xfa\x09redis-ver\x057.2.4\xff01234567"
 
 func newLiveServer(t *testing.T) *liveServer {
 	t.Helper()
@@ -46,6 +50,9 @@ func newLiveServer(t *testing.T) *liveServer {
 	}
 	// Generated files outside the dataset (/etc) aren't written.
 	ls.r.Write = func(p string, b []byte, m os.FileMode) error {
+		if p == HoldFile {
+			ls.holds = append(ls.holds, string(b))
+		}
 		if strings.HasPrefix(p, dir) {
 			return os.WriteFile(p, b, m)
 		}
@@ -68,7 +75,7 @@ func newLiveServer(t *testing.T) *liveServer {
 	write(t, filepath.Join(cal, ".Radicale.props"), `{"D:displayname": "Home", "tag": "VCALENDAR"}`)
 	write(t, filepath.Join(cal, "event.ics"), "BEGIN:VCALENDAR\nEND:VCALENDAR\n")
 	write(t, filepath.Join(cal, ".Radicale.cache", "x"), "cache")
-	write(t, filepath.Join(ls.redis, "dump.rdb"), "REDIS0011-learned")
+	write(t, filepath.Join(ls.redis, "dump.rdb"), testRDB)
 	return ls
 }
 
@@ -130,7 +137,7 @@ func TestPrepareBackup(t *testing.T) {
 	if st, err := os.Stat(dir); err != nil || st.Mode().Perm() != 0o700 {
 		t.Fatalf("backup folder: %v %v", st, err)
 	}
-	if read(t, filepath.Join(dir, BackupBayesName)) != "REDIS0011-learned" {
+	if read(t, filepath.Join(dir, BackupBayesName)) != testRDB {
 		t.Fatal("Rspamd's data isn't in the dataset")
 	}
 	cfg := read(t, filepath.Join(dir, BackupConfigName))
@@ -263,14 +270,42 @@ func TestRestoreMailbox(t *testing.T) {
 	if res.Safety != "hardyos-manual-20261121-153000" || !ls.ran("zfs snapshot tank/mail@hardyos-manual-20261121-153000") {
 		t.Fatalf("no safety snapshot: %+v", res)
 	}
-	if read(t, filepath.Join(md, "cur", "1700000000.M1P1.host,S=5:2,S")) != "one" || read(t, filepath.Join(md, "dovecot.index")) != "index" {
+	if read(t, filepath.Join(md, "cur", "1700000000.M1P1.host,S=5:2,S")) != "one" {
 		t.Fatal("the version isn't back")
 	}
-	if _, err := os.Stat(filepath.Join(md, "new", "1700000009.M9P1.host,S=5")); err == nil {
-		t.Fatal("overwrite kept mail the version didn't have")
+	// Decision 462: mail the version doesn't have (arrived since) is kept.
+	if read(t, filepath.Join(md, "new", "1700000009.M9P1.host,S=5")) != "later" || res.Kept != 1 {
+		t.Fatalf("newer mail lost: %+v", res)
 	}
-	if _, err := os.Stat(filepath.Join(md, "tmp", "partial")); err == nil {
-		t.Fatal("a delivery in progress was restored")
+	// Decision 467: only the Maildir's messages; Dovecot's indexes and
+	// deliveries in progress never come along.
+	for _, p := range []string{filepath.Join(md, "dovecot.index"), filepath.Join(md, "dovecot-uidlist"), filepath.Join(md, "tmp", "partial")} {
+		if _, err := os.Stat(p); err == nil {
+			t.Fatalf("%s came back", p)
+		}
+	}
+	// What was there is kept, root only.
+	if len(res.Replaced) != 1 || res.Replaced[0] != "vmail/"+keyAlice+"/.replaced-20261121-153000" {
+		t.Fatalf("replaced: %v", res.Replaced)
+	}
+	if st, err := os.Stat(filepath.Join(ls.e.VMailDir(), keyAlice, ".replaced-20261121-153000")); err != nil || st.Mode().Perm() != 0o700 {
+		t.Fatalf("replaced copy: %v %v", st, err)
+	}
+	if read(t, filepath.Join(ls.e.VMailDir(), keyAlice, ".replaced-20261121-153000", "dovecot.index")) != "index" {
+		t.Fatal("what was replaced isn't kept")
+	}
+	// Delivery was held for the swap, then sent on; a second snapshot was
+	// taken right before it.
+	lines := strings.Join(ls.runner.Lines(), "\n")
+	if !strings.Contains(lines, "zfs snapshot tank/mail@hardyos-manual-20261121-153000-2") || !strings.Contains(lines, "postfix reload") || !strings.Contains(lines, "postqueue -f") {
+		t.Fatalf("no hold or second snapshot: %s", lines)
+	}
+	held := false
+	for _, h := range ls.holds {
+		held = held || strings.Contains(h, "alice@example.net "+HoldTransport)
+	}
+	if !held || strings.Contains(ls.holds[len(ls.holds)-1], "alice@") {
+		t.Fatalf("holds: %q", ls.holds)
 	}
 	if !ls.ran("doveadm kick alice@example.net") || !ls.ran("doveadm force-resync -u alice@example.net *") || !ls.ran("doveadm quota recalc -u alice@example.net") {
 		t.Fatalf("Dovecot wasn't told: %v", ls.runner.Lines())
@@ -438,13 +473,13 @@ func TestRestoreEverything(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Bayes || read(t, filepath.Join(ls.redis, "dump.rdb")) != "REDIS0011-learned" {
+	if !res.Bayes || read(t, filepath.Join(ls.redis, "dump.rdb")) != testRDB {
 		t.Fatal("Rspamd's data isn't back")
 	}
 	if read(t, filepath.Join(ls.e.VMailDir(), keyAlice, "Maildir", "cur", "1700000000.M1P1.host,S=5:2,S")) != "one" {
 		t.Fatal("mail isn't back")
 	}
-	if !ls.ran("systemctl stop") || ls.starts != starts+1 || res.Safety == "" || len(res.DKIM) != 2 {
+	if !ls.ran("systemctl stop") || ls.starts != starts+1 || res.Safety == "" || len(res.DKIM) != 0 {
 		t.Fatalf("not stopped, snapshotted and started again: %+v %v", res, ls.runner.Lines())
 	}
 }
@@ -483,7 +518,7 @@ func TestRebuild(t *testing.T) {
 	if read(t, filepath.Join(e.RadicaleDir(), "collections", "collection-root", keyAlice, "home", "event.ics")) == "" {
 		t.Fatal("calendar")
 	}
-	if read(t, e.TLSKey()) != read(t, ls.e.TLSKey()) || read(t, filepath.Join(redis, "dump.rdb")) != "REDIS0011-learned" {
+	if read(t, e.TLSKey()) != read(t, ls.e.TLSKey()) || read(t, filepath.Join(redis, "dump.rdb")) != testRDB {
 		t.Fatal("TLS key or Rspamd's data")
 	}
 	if readLayout(e) != LayoutVersion {

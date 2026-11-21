@@ -54,6 +54,16 @@ func backupRoundTrip(t *testing.T, r *Root) {
 	if st, err := os.Stat(filepath.Join(itMailRoot, BackupDir, BackupBayesName)); err != nil || st.Mode().Perm() != 0o600 {
 		t.Fatalf("rdb: %v %v", st, err)
 	}
+	// The real Redis's dump passes root's own check (decision 467).
+	if f, err := os.Open(filepath.Join(itMailRoot, BackupDir, BackupBayesName)); err != nil {
+		t.Fatal(err)
+	} else {
+		err := CheckRDB(f)
+		f.Close()
+		if err != nil {
+			t.Fatalf("the real Redis dump was refused: %v", err)
+		}
+	}
 	ver := t.TempDir()
 	if out, err := exec.Command("cp", "-a", itMailRoot+"/.", ver).CombinedOutput(); err != nil {
 		t.Fatalf("cp: %v %s", err, out)
