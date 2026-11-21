@@ -72,6 +72,11 @@ type Root struct {
 	// StartServices replaces the firewall and systemd steps (tests in a
 	// container without systemd start the daemons themselves).
 	StartServices func(ctx context.Context, cfg RootConfig, res *ApplyResult) error
+	// RedisDir is where Rspamd's Redis keeps its data (default
+	// RedisDataDir; tests).
+	RedisDir string
+	// Now is the clock (restored folders' names); time.Now by default.
+	Now func() time.Time
 
 	mu sync.Mutex
 }
@@ -681,7 +686,7 @@ func (r *Root) ensureRedisDir() error {
 	if err != nil {
 		return err
 	}
-	return r.ensureDir(RedisDataDir, 0o750, uid, gid)
+	return r.ensureDir(r.redisDir(), 0o750, uid, gid)
 }
 
 // Stop turns the mail server off (data stays).

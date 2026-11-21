@@ -4717,6 +4717,23 @@ paths:
         "400": { $ref: "#/components/responses/Invalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /backup/targets/{id}/mail:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: snapshot, in: query, required: true, schema: { type: string } }
+    get:
+      operationId: backupMailContents
+      summary: The domains and mailboxes in a version of the mail
+      tags: [cloudbackup]
+      responses:
+        "200":
+          description: Contents
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackupMailContents" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /backup/tasks:
     get:
       operationId: listBackupTasks
@@ -8979,8 +8996,8 @@ components:
       type: object
       required: [kind]
       properties:
-        kind: { type: string, enum: [share, app, vm, system] }
-        id: { type: string, description: The shared folder's, app's or VM's id (none for system) }
+        kind: { type: string, enum: [share, app, vm, system, mail] }
+        id: { type: string, description: "The shared folder's, app's or VM's id (none for system and mail)" }
     BackupSchedule:
       type: object
       required: [frequency]
@@ -9117,9 +9134,10 @@ components:
       type: object
       required: [item, snapshot, time, files, bytes]
       properties:
-        item: { type: string, description: "share:<id>, app:<id>, vm:<id> or system" }
+        item: { type: string, description: "share:<id>, app:<id>, vm:<id>, system or mail" }
         snapshot: { type: string, description: The snapshot to browse and restore }
         disks: { type: object, additionalProperties: { type: string } }
+        webmail: { type: string, description: "mail: the webmail part (Roundcube's data), restored with everything" }
         time: { type: string, format: date-time }
         files: { type: integer, format: int64 }
         bytes: { type: integer, format: int64 }
@@ -9156,9 +9174,10 @@ components:
         target: { type: string }
         snapshot: { type: string }
         paths: { type: array, items: { type: string }, description: Inside the item; none = all }
-        mode: { type: string, enum: [copy, in_place, rollback] }
+        mode: { type: string, enum: [copy, in_place, rollback, mail] }
         folder: { type: string, description: "copy: the new folder's name" }
         confirm: { type: string, description: "rollback: the shared folder's, app's or VM's name (settings: \"settings\")" }
+        mail: { $ref: "#/components/schemas/MailRestoreArgs" }
     BackupRebuildRequest:
       type: object
       required: [target, run, pool, confirm]
@@ -9204,11 +9223,55 @@ components:
         hostname: { type: string }
         items: { type: array, items: { type: string } }
         target: { type: string }
+    MailRestoreArgs:
+      type: object
+      description: >-
+        What of the mail item to restore (mode mail; replication: kind mail).
+        Mailboxes are matched by storage key: key is the version's mailbox,
+        into the one it goes into here (default the same; another needs that
+        mailbox's address typed in confirm).
+      required: [scope]
+      properties:
+        scope: { type: string, enum: [mailbox, domain, calendars, all] }
+        key: { type: string, description: "mailbox, calendars: the version's mailbox key" }
+        into: { type: string, description: "mailbox, calendars: the mailbox key here" }
+        domain: { type: string, description: "domain: the domain" }
+        mode: { type: string, enum: [copy, overwrite], description: "copy: a new folder \"Restored <date>\" (calendars: new collections); overwrite: replaces what's there (all: always)" }
+        confirm: { type: string, description: "overwrite: the mailbox's address (domain: the domain); all: \"mail\"" }
+    MailRestoreResult:
+      type: object
+      required: [scope, mailboxes, messages, collections, bytes, dkim, bayes, notes]
+      properties:
+        scope: { type: string }
+        mailboxes: { type: integer }
+        messages: { type: integer }
+        collections: { type: integer }
+        bytes: { type: integer, format: int64 }
+        folder: { type: string, description: The new folder (copy) }
+        safety: { type: string, description: The snapshot of <pool>/mail taken first }
+        dkim: { type: array, items: { type: string } }
+        bayes: { type: boolean }
+        notes: { type: array, items: { type: string } }
+    BackupMailContents:
+      type: object
+      required: [hostname, domains, mailboxes, webmail]
+      properties:
+        hostname: { type: string }
+        domains: { type: array, items: { type: string } }
+        mailboxes:
+          type: array
+          items:
+            type: object
+            required: [key, address]
+            properties:
+              key: { type: string }
+              address: { type: string }
+        webmail: { type: boolean, description: "The version has Roundcube's data" }
     # ---- end of cloud backup API schemas ----
     # ---- replication API schemas ----
     ReplicationKind:
       type: string
-      enum: [share, app, vm]
+      enum: [share, app, vm, mail]
     ReplicationItem:
       type: object
       required: [kind, id]
@@ -9338,6 +9401,7 @@ components:
         newId: { type: string, description: "Shared folders: the new folder's id" }
         name: { type: string, description: "Shared folders: the new folder's name" }
         confirm: { type: boolean }
+        mail: { $ref: "#/components/schemas/MailRestoreArgs" }
     ReplicationRun:
       type: object
       required: [id, taskId, jobId, kind, startedAt, finishedAt, state, bytes, message]

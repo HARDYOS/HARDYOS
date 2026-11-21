@@ -811,6 +811,12 @@ func (s *Service) handleBrowse(w http.ResponseWriter, r *http.Request, src *Sour
 		replyErr(w, err)
 		return
 	}
+	if t.Kind == replica.KindMail {
+		// Mail replicas hold DKIM and TLS keys: never mounted here
+		// (decision 465).
+		replyError(w, http.StatusForbidden, "browse_off", "mail replicas can't be browsed; restore the mail to look inside")
+		return
+	}
 	if !src.AllowBrowse {
 		replyError(w, http.StatusForbidden, "browse_off", "browsing replicas is off for this server on the receiving server (its administrator can allow it); restore the item to look inside")
 		return

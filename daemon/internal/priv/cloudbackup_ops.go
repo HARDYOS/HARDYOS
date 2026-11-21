@@ -29,7 +29,8 @@ const (
 	OpCloudCancel       = "cloudbackup.cancel"
 	OpCloudVersions     = "cloudbackup.versions"
 	OpCloudBrowse       = "cloudbackup.browse"
-	OpCloudOffer        = "cloudbackup.offer"
+	OpCloudMailContents = "cloudbackup.mail.contents"
+	OpCloudOffer       = "cloudbackup.offer"
 	OpCloudOfferDismiss = "cloudbackup.offer.dismiss"
 	// Live installer only.
 	OpInstallCloudProbe = "install.cloud.probe"
@@ -137,13 +138,24 @@ func RegisterCloudBackup(s *Server, r *cloudbackup.Root) {
 				if it.Kind == cloudbackup.ItemSystem {
 					journal.Warn("AUDIT cloud backup: settings and keys backed up", "target", a.Target, "task", a.Task, "run", a.Run)
 				}
+				if it.Kind == cloudbackup.ItemMail {
+					journal.Warn("AUDIT cloud backup: mail and DKIM keys backed up", "target", a.Target, "task", a.Task, "run", a.Run)
+				}
 			}
 		}
 		return t, cloudErr(err)
 	}))
 	s.Handle(OpCloudRestore, typed(func(ctx context.Context, a cloudbackup.RestoreArgs) (any, error) {
 		t, err := r.StartRestore(ctx, a)
+		if err == nil && a.Mail != nil {
+			journal.Warn("AUDIT cloud backup: mail restore", "target", a.Target, "snapshot", a.Snapshot, "scope", a.Mail.Scope, "mode", a.Mail.Mode,
+				"key", a.Mail.Key, "into", a.Mail.Into, "domain", a.Mail.Domain)
+		}
 		return t, cloudErr(err)
+	}))
+	s.Handle(OpCloudMailContents, typed(func(ctx context.Context, a cloudbackup.MailContentsArgs) (any, error) {
+		c, err := r.MailContents(ctx, a)
+		return c, cloudErr(err)
 	}))
 	s.Handle(OpCloudPrune, typed(func(ctx context.Context, a CloudTargetRef) (any, error) {
 		t, err := r.StartPrune(a.ID)

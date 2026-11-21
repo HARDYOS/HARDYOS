@@ -2,6 +2,7 @@ package replication
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -202,6 +203,11 @@ func (s *Service) replicate(jc *jobs.Context, t *Task, pr *progress) (*RunResult
 			return nil, jc.Err()
 		}
 		li, ok := byKey[it.String()]
+		if !ok && it.Kind == replica.KindMail {
+			// On by default (decision 460): no mail server here, nothing
+			// to copy, not a failure.
+			continue
+		}
 		if !ok {
 			failed = append(failed, it.String()+": not on this server any more")
 			continue
@@ -371,6 +377,8 @@ type RestoreResult struct {
 	Bytes   int64  `json:"bytes"`
 	// Notes say what was changed on the way back (a VM's reset settings).
 	Notes []string `json:"notes"`
+	// Mail is what a mail restore did (mail.RestoreResult).
+	Mail json.RawMessage `json:"mail,omitempty"`
 }
 
 func (s *Service) restore(jc *jobs.Context, a RestoreParams) (any, error) {
@@ -394,6 +402,9 @@ func (s *Service) restore(jc *jobs.Context, a RestoreParams) (any, error) {
 		}
 	} else {
 		msg = fmt.Sprintf("%s/%s restored as %s", a.Kind, a.ID, res.Dataset)
+		if a.Kind == replica.KindMail {
+			msg = "the mail was restored (" + a.Mail.Scope + ")"
+		}
 		if len(res.Notes) > 0 {
 			msg += ". Changed: " + strings.Join(res.Notes, "; ")
 			jc.Progress(100, "Restored. Changed: "+strings.Join(res.Notes, "; "))
@@ -421,12 +432,27 @@ func (s *Service) restoreItem(jc *jobs.Context, p *peer, tgt *Target, a RestoreP
 	if err := replica.ValidSnap(a.Snapshot, ""); err != nil {
 		return nil, err
 	}
+	var mailArgs json.RawMessage
+	if a.Kind == replica.KindMail {
+		// The copy comes back under a new id, goes into the mail server as
+		// Mail says, and is removed (decision 466).
+		if a.Mail == nil {
+			return nil, errors.New("choose what of the mail to restore")
+		}
+		if err := a.Mail.Check(); err != nil {
+			return nil, err
+		}
+		mailArgs, _ = json.Marshal(a.Mail)
+		a.NewID, a.Pool, a.Name = "m"+newID(6), "", ""
+	} else if a.Mail != nil {
+		return nil, errors.New("only the mail item restores a mailbox, domain or calendars")
+	}
 	jc.Progress(3, "Looking at the replica on "+tgt.Name)
 	kids, err := p.children(jc, a.Kind, a.ID, a.Snapshot)
 	if err != nil {
 		return nil, err
 	}
-	finish := replica.RestoreFinishArgs{Kind: a.Kind, ID: a.ID, Pool: a.Pool, NewID: a.NewID, Snapshot: a.Snapshot}
+	finish := replica.RestoreFinishArgs{Kind: a.Kind, ID: a.ID, Pool: a.Pool, NewID: a.NewID, Snapshot: a.Snapshot, Mail: mailArgs}
 	pr := &progress{jc: jc, items: len(kids), started: time.Now()}
 	cleanup := func() {
 		if err := s.Root.RestoreAbort(context.Background(), finish); err != nil {
@@ -454,7 +480,7 @@ func (s *Service) restoreItem(jc *jobs.Context, p *peer, tgt *Target, a RestoreP
 	if notes == nil {
 		notes = []string{}
 	}
-	return &RestoreResult{Kind: a.Kind, ID: r.ID, Dataset: r.Dataset, Bytes: pr.total.Load(), Notes: notes}, nil
+	return &RestoreResult{Kind: a.Kind, ID: r.ID, Dataset: r.Dataset, Bytes: pr.total.Load(), Notes: notes, Mail: r.Mail}, nil
 }
 
 // pull receives one dataset of a replica's snapshot back here.

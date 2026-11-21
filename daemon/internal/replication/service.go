@@ -18,6 +18,7 @@ import (
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/mail"
 	"github.com/hardyos/hardyos/daemon/internal/ports"
 	"github.com/hardyos/hardyos/daemon/internal/replica"
 	"github.com/hardyos/hardyos/daemon/internal/store"
@@ -365,6 +366,8 @@ type RestoreParams struct {
 	Pool     string `json:"pool,omitempty"`
 	NewID    string `json:"newId,omitempty"`
 	Name     string `json:"name,omitempty"`
+	// Mail says what of the mail item goes back (kind mail only).
+	Mail *mail.RestoreArgs `json:"mail,omitempty"`
 }
 
 // PairingParams opens a pairing code (the code waits in Secrets).
