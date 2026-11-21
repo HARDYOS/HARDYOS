@@ -122,6 +122,16 @@ func publicOrigin(r *http.Request) bool {
 	return g != nil && g.public
 }
 
+// netbirdNetwork is NetBird's network as last seen (zero before).
+func (rt *remoteRuntime) netbirdNetwork() netip.Prefix {
+	if rt == nil {
+		return netip.Prefix{}
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.network
+}
+
 // publishedHost reports whether host is one the gateway serves.
 func (rt *remoteRuntime) publishedHost(host string) bool {
 	rt.mu.Lock()
@@ -687,6 +697,14 @@ func (rt *remoteRuntime) serveApp(w http.ResponseWriter, r *http.Request, route 
 	}
 	if why := crossSiteRequest(r, "https://"+r.Host); why != "" {
 		proxyPage(w, http.StatusForbidden, "Blocked a request from another page", why)
+		return
+	}
+	if !route.signin && !rt.s.signsInWithHardyOS(r.Context(), route.appID) {
+		// Published before two-factor sign-in: its own sign-in can't ask for
+		// a code, so it isn't served from outside until HardyOS sign-in is
+		// put in front (decision 441).
+		proxyPage(w, http.StatusForbidden, "This app needs HardyOS sign-in",
+			"From outside, HardyOS asks for a two-factor code before an app's own sign-in. An administrator can turn on HardyOS sign-in for it in Remote Access.")
 		return
 	}
 	var ss *proxySession

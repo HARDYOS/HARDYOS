@@ -322,9 +322,11 @@ func TestGatewayClientKeptAndAudited(t *testing.T) {
 	if !created {
 		t.Fatalf("the gateway's client wasn't audited as HardyOS's: %+v", list)
 	}
-	// No app asks for HardyOS sign-in any more: no redirect URI is left.
-	e.submit(t, "PUT", "/api/v1/apps/notes/publish", PublishRequest{Mode: publish.ModeNetBird, Auth: publish.AuthNone})
-	e.submit(t, "PUT", "/api/v1/apps/board/publish", PublishRequest{Mode: publish.ModePublic, Auth: publish.AuthSSO})
+	// No app asks for HardyOS sign-in any more (both unpublished; apps
+	// with their own sign-in can't be published without it): no redirect
+	// URI is left.
+	e.submit(t, "PUT", "/api/v1/apps/notes/publish", PublishRequest{Mode: publish.ModeOff, Auth: publish.AuthNone})
+	e.submit(t, "PUT", "/api/v1/apps/board/publish", PublishRequest{Mode: publish.ModeOff, Auth: publish.AuthSSO})
 	waitFor(t, "the redirect URIs to go", func() bool {
 		c, err := e.server.OIDC().Clients.Managed(e.ctx, gatewayClientKey)
 		return err == nil && len(c.RedirectURIs) == 0

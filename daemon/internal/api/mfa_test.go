@@ -71,6 +71,9 @@ func newMFAEnv(t *testing.T) *mfaEnv {
 		m.Wait()
 		db.Close()
 	})
+	// The LAN is 192.168.1.0/24 behind the router 192.168.1.1.
+	s.inside.lanFor = func() []netip.Prefix { return []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")} }
+	s.inside.routerFor = func() netip.Addr { return netip.MustParseAddr("192.168.1.1") }
 	env := &mfaEnv{davEnv: &davEnv{testEnv: &testEnv{srv: srv, db: db, broker: broker}, server: s, fk: fk, dc: dc, df: df}}
 	env.totp = newTOTPKit(s)
 	env.admin = env.client(t)
@@ -303,7 +306,7 @@ func TestMFAOutside(t *testing.T) {
 	if code := doFrom(out, outsideIP, "GET", "/api/v1/auth/me", nil, nil); code != 401 {
 		t.Fatalf("session after reset = %d", code)
 	}
-	if got := auditActions(e.admin, "users.2fa"); len(got) != 2 {
+	if got := auditActions(e.admin, "users.2fa"); len(got) != 3 {
 		t.Fatalf("audit %v", got)
 	}
 	// Non-admins can't reset anyone.

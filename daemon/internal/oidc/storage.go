@@ -52,6 +52,8 @@ type authRequest struct {
 	Subject  string    `json:"subject"`
 	AuthTime time.Time `json:"authTime"`
 	AMR      []string  `json:"amr"`
+	// Outside: the browser that signed in was outside (decision 441).
+	Outside bool `json:"outside"`
 
 	done     bool
 	codeHash string
@@ -107,6 +109,8 @@ type grant struct {
 	AMR       []string
 	ExpiresAt time.Time
 	Revoked   bool
+	// BrowserOutside: the sign-in was made by a browser outside.
+	BrowserOutside bool
 }
 
 func randomID(prefix string) string {
@@ -425,11 +429,11 @@ func (s *storage) newGrant(ctx context.Context, a *authRequest) (*grant, error) 
 	}
 	now := s.p.now()
 	g := &grant{ID: randomID("g_"), ClientID: a.ClientID, UserID: a.UserID, Subject: a.Subject, Scopes: a.Scopes,
-		AuthTime: a.AuthTime, AMR: a.AMR, ExpiresAt: now.Add(refreshMaxTTL)}
-	_, err := db.ExecContext(ctx, `INSERT INTO oidc_grants (id, client_id, user_id, subject, scopes, auth_time, amr, code_hash, created_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		AuthTime: a.AuthTime, AMR: a.AMR, ExpiresAt: now.Add(refreshMaxTTL), BrowserOutside: a.Outside}
+	_, err := db.ExecContext(ctx, `INSERT INTO oidc_grants (id, client_id, user_id, subject, scopes, auth_time, amr, code_hash, created_at, expires_at, browser_outside)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		g.ID, g.ClientID, g.UserID, g.Subject, jsonString(g.Scopes), store.FormatTime(g.AuthTime), jsonString(g.AMR), a.codeHash,
-		store.FormatTime(now), store.FormatTime(g.ExpiresAt))
+		store.FormatTime(now), store.FormatTime(g.ExpiresAt), g.BrowserOutside)
 	if err != nil {
 		return nil, err
 	}
@@ -447,8 +451,8 @@ func (s *storage) loadGrant(ctx context.Context, where string, arg any) (*grant,
 	var g grant
 	var scopes, authTime, amr, expires string
 	var revoked sql.NullString
-	err := s.p.cfg.DB.QueryRowContext(ctx, `SELECT id, client_id, user_id, subject, scopes, auth_time, amr, expires_at, revoked_at FROM oidc_grants WHERE `+where, arg).
-		Scan(&g.ID, &g.ClientID, &g.UserID, &g.Subject, &scopes, &authTime, &amr, &expires, &revoked)
+	err := s.p.cfg.DB.QueryRowContext(ctx, `SELECT id, client_id, user_id, subject, scopes, auth_time, amr, expires_at, revoked_at, browser_outside FROM oidc_grants WHERE `+where, arg).
+		Scan(&g.ID, &g.ClientID, &g.UserID, &g.Subject, &scopes, &authTime, &amr, &expires, &revoked, &g.BrowserOutside)
 	if err != nil {
 		return nil, err
 	}
@@ -493,11 +497,19 @@ func (s *storage) TokenRequestByRefreshToken(ctx context.Context, rt string) (op
 			err = s.p.allowed(ctx, c, u)
 		}
 	}
-	if err == nil && s.p.cfg.MFA != nil && outsideFrom(ctx) && !slices.Contains(g.AMR, "mfa") {
+	if err == nil && s.p.cfg.MFA != nil && !slices.Contains(g.AMR, "mfa") {
 		// From outside a second factor is required (decision 441): a
-		// sign-in made without one (at home, or before two-factor sign-in
-		// existed) can't be carried on from there.
-		err = errors.New("this sign-in was made without a second factor, which is needed from outside")
+		// sign-in made without one can't be carried on by a refresh from
+		// outside, nor one whose browser was outside (made before
+		// two-factor sign-in existed), nor while the person must set it up.
+		switch {
+		case outsideFrom(ctx) || g.BrowserOutside:
+			err = errors.New("this sign-in was made without a second factor, which is needed from outside")
+		default:
+			if must, merr := s.p.cfg.MFA.MustEnroll(ctx, u); merr != nil || must {
+				err = errors.New("this account must set up two-factor sign-in first")
+			}
+		}
 	}
 	if err != nil {
 		_, _ = revokeWhere(ctx, db, now, `id = ?`, g.ID)

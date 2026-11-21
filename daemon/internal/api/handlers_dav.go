@@ -626,6 +626,11 @@ func (s *Server) davSignIn(w http.ResponseWriter, r *http.Request) (*auth.User, 
 	if u == nil && err == nil && passwordOK {
 		how = "webdav"
 		u, err = s.signin.AuthenticateDomain(ctx, name, pw)
+		if err == nil {
+			if perr := s.passwordStillAllowed(ctx, u); perr != nil {
+				u, err = nil, perr
+			}
+		}
 	}
 	if err != nil {
 		status, counts := davLoginStatus(err)

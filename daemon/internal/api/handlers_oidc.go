@@ -54,6 +54,8 @@ func (s *Server) newOIDC() *oidc.Provider {
 		MFA:             s.mfa,
 		Outside:         s.outside,
 		TOTPIssuer:      s.totpIssuer,
+		Challenges:      s.challenges,
+		SecondFactorSet: s.secondFactorSet,
 		ManagedAccess:   s.photosAccess,
 		ConfirmRedirect: photosConfirmRedirect,
 		Insecure:        s.cfg.Insecure,
@@ -108,6 +110,9 @@ func (s *Server) passwordSet(ctx context.Context, u *auth.User, at time.Time) {
 	if n > 0 {
 		s.recordSystem(ctx, "auth.session.end", u.Username, "the password was changed in the domain; sign-ins made before it ended")
 	}
+	if s.mfa != nil && s.mfa.ClearOutsideLock(ctx, u.ID, at) {
+		s.recordSystem(ctx, "auth.2fa.outside_unlock", u.Username, "the password was changed in the domain: two-factor codes from outside work again")
+	}
 	if s.appPw != nil {
 		if k := s.appPw.RevokeBefore(ctx, u.ID, at); k > 0 {
 			s.dav.dropUser(u.ID)
@@ -118,26 +123,27 @@ func (s *Server) passwordSet(ctx context.Context, u *auth.User, at time.Time) {
 
 // desktopUser is who is signed in to the desktop in this browser (the
 // provider on the desktop's host reuses it), without sliding the session.
-func (s *Server) desktopUser(r *http.Request) (*auth.User, time.Time, bool) {
+func (s *Server) desktopUser(r *http.Request) (*auth.User, time.Time, bool, bool) {
 	token, ok := s.sessionToken(r)
 	if !ok {
-		return nil, time.Time{}, false
+		return nil, time.Time{}, false, false
 	}
 	info, err := s.peekSession(r.Context(), token)
 	if err != nil {
-		return nil, time.Time{}, false
+		return nil, time.Time{}, false, false
 	}
 	u, err := s.sessionUser(r, token, info.UserID)
 	if err != nil {
-		return nil, time.Time{}, false
+		return nil, time.Time{}, false, false
 	}
-	// Reused only if it satisfies the two-factor rule here (decision 442).
+	// Reused only if it satisfies the two-factor rule here (decision 442);
+	// whether it used a second factor goes into amr.
 	if !info.MFA && s.mfa != nil {
 		if need, err := s.mfa.Requirement(r.Context(), u, s.outside(r)); err != nil || need != auth.NeedNothing {
-			return nil, time.Time{}, false
+			return nil, time.Time{}, false, false
 		}
 	}
-	return u, info.CreatedAt, true
+	return u, info.CreatedAt, info.MFA, true
 }
 
 // endOIDCUser ends a person's app sign-ins (password changed, account

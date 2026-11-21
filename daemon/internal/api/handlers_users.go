@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
@@ -164,6 +165,10 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request, me 
 	_ = s.sessions.RevokeUser(r.Context(), id)
 	s.proxy.endUser(id)
 	s.endOIDCUser(r.Context(), id)
+	// A new password lifts the stop on two-factor codes from outside.
+	if s.mfa != nil && s.mfa.ClearOutsideLock(r.Context(), id, time.Now()) {
+		s.record(r, me, "auth.2fa.outside_unlock", u.Username, audit.Success, "new password set")
+	}
 	s.record(r, me, "user.password.reset", u.Username, audit.Success, "")
 	w.WriteHeader(http.StatusNoContent)
 }

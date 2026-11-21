@@ -205,6 +205,10 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request, u 
 	s.proxy.endUser(u.ID)
 	s.endOIDCUser(r.Context(), u.ID)
 	s.startSession(w, r, u, mfa)
+	// A new password lifts the stop on two-factor codes from outside.
+	if s.mfa != nil && s.mfa.ClearOutsideLock(r.Context(), u.ID, time.Now()) {
+		s.record(r, u, "auth.2fa.outside_unlock", u.Username, audit.Success, "new password")
+	}
 	s.record(r, u, "auth.password.change", u.Username, audit.Success, "")
 	w.WriteHeader(http.StatusNoContent)
 }

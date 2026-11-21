@@ -49,10 +49,29 @@ func (l *LoginLimiter) Allowed(key string) (bool, time.Duration) {
 	return true, 0
 }
 
+// Try reserves an attempt for key in one step: refused while key is
+// locked, otherwise counted as a failure right away (Succeed clears it).
+// Concurrent attempts can't all slip past Allowed before any Fail lands.
+func (l *LoginLimiter) Try(key string) (bool, time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if e := l.entries[key]; e != nil {
+		if now := l.clock(); now.Before(e.lockedUntil) {
+			return false, e.lockedUntil.Sub(now)
+		}
+	}
+	l.failLocked(key)
+	return true, 0
+}
+
 // Fail records a failed attempt for key.
 func (l *LoginLimiter) Fail(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.failLocked(key)
+}
+
+func (l *LoginLimiter) failLocked(key string) {
 	if l.entries == nil {
 		l.entries = map[string]*limitEntry{}
 	}

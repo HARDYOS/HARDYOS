@@ -58,17 +58,38 @@ Groups › the shield button): with your password and that code (24 hours,
 once) the sign-in page lets you set it up from outside. A password alone
 never can: whoever stole it would register their own phone.
 
-**Wrong codes**: 5 in 15 minutes pause code entry for that account for 15
-minutes; 20 wrong authenticator codes in a row turn authenticator codes off
-until a recovery code is used or an administrator resets it. A code works
-once (and only within about a minute and a half of your phone's clock).
+**Wrong codes**: they count per place. At home they're one bucket; from outside
+each address (each /64 for IPv6) is one. 5 in 15 minutes pause code entry from
+that place for 15 minutes, so a stranger can never pause it for you at home,
+and recovery codes always work.
+
+Wrong codes from outside also count in a rolling 60-day budget that a right code
+doesn't reset. At 20, authenticator codes stop working from outside (at home
+they keep working) until you change your password or an administrator resets
+two-factor sign-in. Administrators get a notification, and you see a notice in
+your account menu, when codes are paused, every 5 wrong codes from outside, and
+when they stop. Whoever typed them knows your password, so change it.
+
+A code works once, and only within about a minute and a half of your phone's
+clock.
+
+**What counts as outside**: anything through Remote Access, and any address
+that isn't this server's own network or NetBird. That includes apps' Docker
+networks, and the router's own address. A request from the router shows up
+when a phone at home uses the public address (hairpin NAT), or when the router
+forwards a port and hides who's visiting; Control Panel › Security then shows a
+warning. At home, use the server's local address. A home network with global
+IPv6 addresses still counts as home, as long as the server's own interface is
+on it.
 
 **Lost your phone?** Use a recovery code, then *New phone* in the account
 menu. No codes left: another administrator uses *Reset two-factor sign-in*
-(type the username to confirm; it signs the person out everywhere). The only
-administrator, with no codes: as root on the server's console,
-`hardyctl reset-2fa <username>`, then set it up again at the next sign-in
-from home. After restoring a server from the recovery kit your
+(type the username to confirm). It signs the person out everywhere and ends
+every app sign-in; their app passwords are revoked too, unless the tick is
+cleared. The only administrator, with no codes: as root on the server's
+console, `hardyctl reset-2fa <username>` (add `-keep-app-passwords` to keep
+them), then set it up again at the next sign-in from home. Setting up a new
+phone yourself also signs out everything else, apps included. After restoring a server from the recovery kit your
 authenticator keeps working (the keys come back with it).
 
 ### App passwords
@@ -90,6 +111,18 @@ App passwords are removed when your domain password changes.
 **Not covered**: shared folders over SMB, SFTP, Windows sign-in, Kerberos and
 LDAP check the domain password in Samba itself, and keep doing so. HardyOS
 doesn't publish them outside.
+
+**Published apps**: an app with its own sign-in is published only with HardyOS
+sign-in in front, which asks for the code from outside. Photos is the exception,
+because Immich signs in through HardyOS when "Sign in with HardyOS" is on. An
+app published without it before two-factor sign-in isn't served from outside
+until you turn it on in Remote Access.
+
+An app's own session (its cookie, a phone app's token) is the app's. Once
+someone signed in through HardyOS, HardyOS can end it only by ending the app
+sign-in. It does that when you reset two-factor sign-in, set up a new phone, or
+change the password. Phones signed in to Immich before two-factor sign-in
+existed sign in once more.
 
 ## What apps learn about you
 

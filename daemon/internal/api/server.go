@@ -165,6 +165,8 @@ type Server struct {
 	mfa        *auth.MFA
 	appPw      *auth.AppPasswords
 	challenges *auth.Challenges
+	// inside knows this server's LAN networks and router (inside.go).
+	inside insideNets
 }
 
 // New builds the API server and registers its routes.

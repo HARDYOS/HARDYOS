@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -105,11 +106,18 @@ func TestTOTPURI(t *testing.T) {
 }
 
 type mfaFixture struct {
-	m   *MFA
-	now time.Time
-	u   *User
-	adm *User
+	m      *MFA
+	now    time.Time
+	u      *User
+	adm    *User
+	mu     sync.Mutex
+	events []MFAEvent
 }
+
+var (
+	home = Inside
+	away = Origin{Outside: true, IP: "203.0.113.7"}
+)
 
 func newMFA(t *testing.T) *mfaFixture {
 	t.Helper()
@@ -125,15 +133,32 @@ func newMFA(t *testing.T) *mfaFixture {
 		t.Fatal(err)
 	}
 	f := &mfaFixture{now: time.Unix(1_800_000_000, 0), u: u, adm: adm}
-	f.m = &MFA{DB: db, Sealer: newTestSealer(), Now: func() time.Time { return f.now }}
+	f.m = &MFA{DB: db, Sealer: newTestSealer(), Now: func() time.Time { return f.now },
+		Notify: func(_ context.Context, e MFAEvent) { f.mu.Lock(); f.events = append(f.events, e); f.mu.Unlock() }}
+	f.m.init()
+	f.m.Limiter.now = func() time.Time { return f.now }
+	f.m.recovery.now = f.m.Limiter.now
+	f.m.enroll.now = f.m.Limiter.now
 	return f
+}
+
+func (f *mfaFixture) sawEvent(kind string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, e := range f.events {
+		if e.Kind == kind {
+			n++
+		}
+	}
+	return n
 }
 
 // enroll sets up u and returns its raw secret and recovery codes.
 func (f *mfaFixture) enroll(t *testing.T, u *User) ([]byte, []string) {
 	t.Helper()
 	ctx := context.Background()
-	e, err := f.m.BeginEnroll(ctx, u, "HardyOS")
+	e, err := f.m.BeginEnroll(ctx, u, "HardyOS", "b1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,10 +166,14 @@ func (f *mfaFixture) enroll(t *testing.T, u *User) ([]byte, []string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.m.ConfirmEnroll(ctx, u, "000000x"); !errors.Is(err, ErrBadCode) {
+	if _, err := f.m.ConfirmEnroll(ctx, u, "000000x", "b1", home); !errors.Is(err, ErrBadCode) {
 		t.Fatalf("bad first code: %v", err)
 	}
-	codes, err := f.m.ConfirmEnroll(ctx, u, TOTPCode(secret, TOTPStep(f.now)))
+	// Only what started the setup can finish it.
+	if _, err := f.m.ConfirmEnroll(ctx, u, TOTPCode(secret, TOTPStep(f.now)), "other", home); !errors.Is(err, ErrNoPending) {
+		t.Fatalf("finished from another challenge: %v", err)
+	}
+	codes, err := f.m.ConfirmEnroll(ctx, u, TOTPCode(secret, TOTPStep(f.now)), "b1", home)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,6 +182,9 @@ func (f *mfaFixture) enroll(t *testing.T, u *User) ([]byte, []string) {
 	}
 	return secret, codes
 }
+
+// code is the authenticator code n steps from now.
+func (f *mfaFixture) code(secret []byte, n int64) string { return TOTPCode(secret, TOTPStep(f.now)+n) }
 
 func TestMFAEnrollVerifyReplay(t *testing.T) {
 	f := newMFA(t)
@@ -168,20 +200,20 @@ func TestMFAEnrollVerifyReplay(t *testing.T) {
 		t.Fatalf("enrolled: %q", need)
 	}
 	// The enrollment code itself can't be used again.
-	if _, err := f.m.Verify(ctx, f.u, TOTPCode(secret, TOTPStep(f.now))); !errors.Is(err, ErrBadCode) {
+	if _, err := f.m.Verify(ctx, f.u, f.code(secret, 0), home); !errors.Is(err, ErrBadCode) {
 		t.Fatalf("enrollment code replayed: %v", err)
 	}
 	f.now = f.now.Add(30 * time.Second)
-	code := TOTPCode(secret, TOTPStep(f.now))
-	if fac, err := f.m.Verify(ctx, f.u, code[:3]+" "+code[3:]); err != nil || fac != FactorTOTP {
+	code := f.code(secret, 0)
+	if fac, err := f.m.Verify(ctx, f.u, code[:3]+" "+code[3:], home); err != nil || fac != FactorTOTP {
 		t.Fatalf("verify: %v %v", fac, err)
 	}
-	if _, err := f.m.Verify(ctx, f.u, code); !errors.Is(err, ErrBadCode) {
+	if _, err := f.m.Verify(ctx, f.u, code, home); !errors.Is(err, ErrBadCode) {
 		t.Fatalf("replay: %v", err)
 	}
 	// Concurrent use of one fresh code: exactly one wins.
 	f.now = f.now.Add(30 * time.Second)
-	code = TOTPCode(secret, TOTPStep(f.now))
+	code = f.code(secret, 0)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	wins := 0
@@ -189,7 +221,7 @@ func TestMFAEnrollVerifyReplay(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := f.m.Verify(ctx, f.u, code); err == nil {
+			if _, err := f.m.Verify(ctx, f.u, code, home); err == nil {
 				mu.Lock()
 				wins++
 				mu.Unlock()
@@ -218,7 +250,7 @@ func TestMFASecretSealedAtRest(t *testing.T) {
 	}
 	// Moved to another account's row, it doesn't open.
 	f.m.DB.Exec(`INSERT INTO user_totp (user_id, secret, enabled_at, updated_at) VALUES (?, ?, 'x', 'x')`, f.adm.ID, stored)
-	if _, err := f.m.Verify(context.Background(), f.adm, TOTPCode(secret, TOTPStep(f.now)+1)); !errors.Is(err, ErrSecretUnusable) {
+	if _, err := f.m.Verify(context.Background(), f.adm, f.code(secret, 1), home); !errors.Is(err, ErrSecretUnusable) {
 		t.Fatalf("moved secret: %v", err)
 	}
 }
@@ -227,17 +259,16 @@ func TestMFARecoveryCodesSingleUse(t *testing.T) {
 	f := newMFA(t)
 	ctx := context.Background()
 	_, codes := f.enroll(t, f.u)
-	if fac, err := f.m.Verify(ctx, f.u, strings.ToUpper(codes[0])); err != nil || fac != FactorRecovery {
+	if fac, err := f.m.Verify(ctx, f.u, strings.ToUpper(codes[0]), away); err != nil || fac != FactorRecovery {
 		t.Fatalf("recovery code: %v %v", fac, err)
 	}
-	if _, err := f.m.Verify(ctx, f.u, codes[0]); !errors.Is(err, ErrBadCode) {
+	if _, err := f.m.Verify(ctx, f.u, codes[0], home); !errors.Is(err, ErrBadCode) {
 		t.Fatalf("recovery code reused: %v", err)
 	}
 	st, _ := f.m.Status(ctx, f.u)
 	if st.RecoveryCodesLeft != RecoveryCodeCount-1 {
 		t.Fatalf("left %d", st.RecoveryCodesLeft)
 	}
-	// Only hashes are stored.
 	var n int
 	f.m.DB.QueryRow(`SELECT COUNT(*) FROM user_recovery_codes WHERE code_hash LIKE ?`, "%"+strings.ReplaceAll(codes[1], "-", "")+"%").Scan(&n)
 	if n != 0 {
@@ -247,48 +278,159 @@ func TestMFARecoveryCodesSingleUse(t *testing.T) {
 	if err != nil || len(fresh) != RecoveryCodeCount {
 		t.Fatal(err)
 	}
-	if _, err := f.m.Verify(ctx, f.u, codes[1]); !errors.Is(err, ErrBadCode) {
+	if _, err := f.m.Verify(ctx, f.u, codes[1], home); !errors.Is(err, ErrBadCode) {
 		t.Fatal("old recovery code still works after regenerating")
 	}
 }
 
-func TestMFARateLimitAndLockout(t *testing.T) {
+// Wrong codes from outside never lock the owner out at home (review H1).
+func TestMFAOutsideFailuresDontLockHome(t *testing.T) {
 	f := newMFA(t)
 	ctx := context.Background()
 	secret, codes := f.enroll(t, f.u)
-	clock := f.now
-	f.m.Limiter.now = func() time.Time { return clock }
 	for i := range 5 {
-		if _, err := f.m.Verify(ctx, f.u, "000000"); !errors.Is(err, ErrBadCode) {
+		if _, err := f.m.Verify(ctx, f.u, "000000", away); !errors.Is(err, ErrBadCode) {
 			t.Fatalf("try %d: %v", i, err)
 		}
 	}
 	var rl *CodeRateLimited
-	good := TOTPCode(secret, TOTPStep(f.now)+1)
-	if _, err := f.m.Verify(ctx, f.u, good); !errors.As(err, &rl) {
-		t.Fatalf("not rate limited: %v", err)
+	if _, err := f.m.Verify(ctx, f.u, f.code(secret, 1), away); !errors.As(err, &rl) {
+		t.Fatalf("outside address not paused: %v", err)
 	}
-	// Wrong codes in a row, across lockout windows, stop authenticator
-	// codes entirely.
-	for i := 0; i < MaxCodeFailures; i++ {
-		clock = clock.Add(16 * time.Minute)
-		_, _ = f.m.Verify(ctx, f.u, "000001")
+	if f.sawEvent("short_lock") != 1 {
+		t.Fatalf("pause not reported: %+v", f.events)
 	}
-	clock = clock.Add(16 * time.Minute)
+	// Another address and home are separate buckets.
+	if _, err := f.m.Verify(ctx, f.u, f.code(secret, 1), home); err != nil {
+		t.Fatalf("home blocked by outside failures: %v", err)
+	}
+	other := Origin{Outside: true, IP: "198.51.100.9"}
+	f.now = f.now.Add(30 * time.Second)
+	if _, err := f.m.Verify(ctx, f.u, f.code(secret, 1), other); err != nil {
+		t.Fatalf("another address blocked: %v", err)
+	}
+	// IPv6 counts per /64.
+	v6a, v6b := Origin{Outside: true, IP: "2001:db8:1:2::1"}, Origin{Outside: true, IP: "2001:db8:1:2::ffff"}
+	for range 5 {
+		_, _ = f.m.Verify(ctx, f.u, "000000", v6a)
+	}
+	if _, err := f.m.Verify(ctx, f.u, "000000", v6b); !errors.As(err, &rl) {
+		t.Fatalf("same /64 not shared: %v", err)
+	}
+	// Recovery codes have their own bucket: they work while codes are paused.
+	if _, err := f.m.Verify(ctx, f.u, codes[0], away); err != nil {
+		t.Fatalf("recovery code while paused: %v", err)
+	}
+	// Wrong codes at home don't count toward the budget.
 	f.now = f.now.Add(time.Hour)
-	if _, err := f.m.Verify(ctx, f.u, TOTPCode(secret, TOTPStep(f.now))); !errors.Is(err, ErrCodeLocked) {
-		t.Fatalf("not locked: %v", err)
+	for range 4 {
+		_, _ = f.m.Verify(ctx, f.u, "000001", home)
 	}
 	st, _ := f.m.Status(ctx, f.u)
-	if !st.Locked {
+	if st.OutsideFailures != 0 {
+		// The recovery code above started the budget again.
+		t.Fatalf("outside failures %d", st.OutsideFailures)
+	}
+}
+
+// The rolling budget: a right code doesn't reset it; at the budget codes
+// from outside stop until a new password or a reset, never at home
+// (review H1, M1).
+func TestMFAOutsideBudget(t *testing.T) {
+	f := newMFA(t)
+	ctx := context.Background()
+	secret, codes := f.enroll(t, f.u)
+	fail := func(n int) {
+		for range n {
+			f.now = f.now.Add(16 * time.Minute) // past each pause
+			_, _ = f.m.Verify(ctx, f.u, "000000", away)
+		}
+	}
+	fail(OutsideFailureBudget - 1)
+	if f.sawEvent("outside_failures") != (OutsideFailureBudget-1)/NoticeEvery {
+		t.Fatalf("notices %+v", f.events)
+	}
+	// A right code from outside works but doesn't reset the budget.
+	f.now = f.now.Add(16 * time.Minute)
+	if _, err := f.m.Verify(ctx, f.u, f.code(secret, 0), away); err != nil {
+		t.Fatalf("right code: %v", err)
+	}
+	fail(1)
+	if f.sawEvent("outside_lock") != 1 {
+		t.Fatalf("lock not reported: %+v", f.events)
+	}
+	f.now = f.now.Add(16 * time.Minute)
+	if _, err := f.m.Verify(ctx, f.u, f.code(secret, 0), away); !errors.Is(err, ErrCodeLocked) {
+		t.Fatalf("codes from outside after the budget: %v", err)
+	}
+	if st, _ := f.m.Status(ctx, f.u); !st.Locked {
 		t.Fatal("status doesn't show the lock")
 	}
-	// A recovery code still works and lifts it.
-	if _, err := f.m.Verify(ctx, f.u, codes[2]); err != nil {
+	// At home codes still work; a recovery code doesn't lift the lock.
+	if _, err := f.m.Verify(ctx, f.u, f.code(secret, 0), home); err != nil {
+		t.Fatalf("home after the lock: %v", err)
+	}
+	if _, err := f.m.Verify(ctx, f.u, codes[3], away); err != nil {
+		t.Fatalf("recovery code: %v", err)
+	}
+	f.now = f.now.Add(30 * time.Second)
+	if _, err := f.m.Verify(ctx, f.u, f.code(secret, 0), away); !errors.Is(err, ErrCodeLocked) {
+		t.Fatalf("lock lifted by a recovery code: %v", err)
+	}
+	// Re-enrolling doesn't lift it either.
+	f.now = f.now.Add(time.Minute)
+	e, _ := f.m.BeginEnroll(ctx, f.u, "HardyOS", "b2")
+	ns, _ := b32.DecodeString(strings.ReplaceAll(e.Secret, " ", ""))
+	if _, err := f.m.ConfirmEnroll(ctx, f.u, f.code(ns, 0), "b2", home); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.m.Verify(ctx, f.u, TOTPCode(secret, TOTPStep(f.now))); err != nil {
-		t.Fatalf("after recovery: %v", err)
+	f.now = f.now.Add(30 * time.Second)
+	if _, err := f.m.Verify(ctx, f.u, f.code(ns, 0), away); !errors.Is(err, ErrCodeLocked) {
+		t.Fatalf("lock lifted by re-enrolling: %v", err)
+	}
+	// A password set before the lock doesn't lift it; one after does.
+	if f.m.ClearOutsideLock(ctx, f.u.ID, f.now.Add(-24*time.Hour)) {
+		t.Fatal("an older password lifted the lock")
+	}
+	if !f.m.ClearOutsideLock(ctx, f.u.ID, f.now) {
+		t.Fatal("new password didn't lift the lock")
+	}
+	f.now = f.now.Add(30 * time.Second)
+	if _, err := f.m.Verify(ctx, f.u, f.code(ns, 0), away); err != nil {
+		t.Fatalf("after a new password: %v", err)
+	}
+	// Failures older than the window fall out.
+	fail(3)
+	f.now = f.now.Add(OutsideFailureWindow + time.Hour)
+	if st, _ := f.m.Status(ctx, f.u); st.OutsideFailures != 0 {
+		t.Fatalf("old failures still counted: %d", st.OutsideFailures)
+	}
+}
+
+// Attempts are reserved atomically: concurrent wrong codes can't buy more
+// than the limit (review L1).
+func TestMFAConcurrentTriesBounded(t *testing.T) {
+	f := newMFA(t)
+	ctx := context.Background()
+	f.enroll(t, f.u)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	tried := 0
+	for range 30 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := f.m.Verify(ctx, f.u, "000000", away)
+			if errors.Is(err, ErrBadCode) {
+				mu.Lock()
+				tried++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if tried != 5 {
+		t.Fatalf("%d codes were checked, want 5", tried)
 	}
 }
 
@@ -308,12 +450,18 @@ func TestMFAAdminGraceAndReset(t *testing.T) {
 	if st.GraceUntil == nil || !st.GraceUntil.Equal(f.now.Add(72*time.Hour).Truncate(time.Millisecond)) || !st.Required {
 		t.Fatalf("grace %+v", st)
 	}
+	if ok, _ := f.m.PasswordAllowed(ctx, f.adm, false); !ok {
+		t.Fatal("service password refused in grace")
+	}
 	f.now = f.now.Add(73 * time.Hour)
 	if need, _ := f.m.Requirement(ctx, f.adm, false); need != NeedEnroll {
 		t.Fatalf("admin past grace: %q", need)
 	}
 	if must, _ := f.m.MustEnroll(ctx, f.adm); !must {
 		t.Fatal("session not limited to enrollment")
+	}
+	if ok, _ := f.m.PasswordAllowed(ctx, f.adm, false); ok {
+		t.Fatal("service password allowed while enrollment is due")
 	}
 	f.enroll(t, f.adm)
 	if err := f.m.Disable(ctx, f.adm); !errors.Is(err, ErrAdminMustKeep) {
@@ -326,37 +474,56 @@ func TestMFAAdminGraceAndReset(t *testing.T) {
 		t.Fatalf("after reset an admin enrolls at once: %q", need)
 	}
 	f.enroll(t, f.u)
+	if ok, _ := f.m.PasswordAllowed(ctx, f.u, false); ok {
+		t.Fatal("service password allowed with 2FA on")
+	}
 	if err := f.m.Disable(ctx, f.u); err != nil {
 		t.Fatal(err)
 	}
 	if ok, _ := f.m.Enabled(ctx, f.u.ID); ok {
 		t.Fatal("still enabled")
 	}
+	if ok, _ := f.m.PasswordAllowed(ctx, f.u, true); ok {
+		t.Fatal("service password allowed from outside")
+	}
 }
 
 func TestMFASetupCode(t *testing.T) {
 	f := newMFA(t)
 	ctx := context.Background()
-	if err := f.m.CheckSetupCode(ctx, f.u.ID, "abcd-efgh-ijkm-npqr"); !errors.Is(err, ErrBadSetupCode) {
+	if err := f.m.ConsumeSetupCode(ctx, f.u.ID, "abcd-efgh-ijkm-npqr", away); !errors.Is(err, ErrBadSetupCode) {
 		t.Fatal("code accepted with none issued")
 	}
 	code, until, err := f.m.IssueSetupCode(ctx, f.u.ID)
 	if err != nil || !until.Equal(f.now.Add(SetupCodeTTL)) {
 		t.Fatal(err)
 	}
-	if err := f.m.CheckSetupCode(ctx, f.u.ID, code); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.m.CheckSetupCode(ctx, f.adm.ID, code); err == nil {
+	if err := f.m.ConsumeSetupCode(ctx, f.adm.ID, code, away); err == nil {
 		t.Fatal("another account's code accepted")
 	}
-	f.enroll(t, f.u) // uses it up
-	if err := f.m.CheckSetupCode(ctx, f.u.ID, code); !errors.Is(err, ErrBadSetupCode) {
-		t.Fatal("setup code reusable after enrollment")
+	// Exactly one of several concurrent uses wins.
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	wins := 0
+	for i := range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			o := Origin{Outside: true, IP: "203.0.113." + strconv.Itoa(10+i)}
+			if f.m.ConsumeSetupCode(ctx, f.u.ID, code, o) == nil {
+				mu.Lock()
+				wins++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if wins != 1 {
+		t.Fatalf("setup code used %d times", wins)
 	}
 	code, _, _ = f.m.IssueSetupCode(ctx, f.adm.ID)
 	f.now = f.now.Add(SetupCodeTTL + time.Second)
-	if err := f.m.CheckSetupCode(ctx, f.adm.ID, code); !errors.Is(err, ErrBadSetupCode) {
+	if err := f.m.ConsumeSetupCode(ctx, f.adm.ID, code, away); !errors.Is(err, ErrBadSetupCode) {
 		t.Fatal("expired setup code accepted")
 	}
 }
@@ -364,10 +531,10 @@ func TestMFASetupCode(t *testing.T) {
 func TestMFAPendingExpires(t *testing.T) {
 	f := newMFA(t)
 	ctx := context.Background()
-	e, _ := f.m.BeginEnroll(ctx, f.u, "HardyOS")
+	e, _ := f.m.BeginEnroll(ctx, f.u, "HardyOS", "b1")
 	secret, _ := b32.DecodeString(strings.ReplaceAll(e.Secret, " ", ""))
 	f.now = f.now.Add(pendingTTL + time.Minute)
-	if _, err := f.m.ConfirmEnroll(ctx, f.u, TOTPCode(secret, TOTPStep(f.now))); !errors.Is(err, ErrNoPending) {
+	if _, err := f.m.ConfirmEnroll(ctx, f.u, f.code(secret, 0), "b1", home); !errors.Is(err, ErrNoPending) {
 		t.Fatalf("stale enrollment confirmed: %v", err)
 	}
 }

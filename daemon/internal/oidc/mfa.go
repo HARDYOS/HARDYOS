@@ -19,13 +19,28 @@ import (
 // and enrollment.
 type SecondFactors interface {
 	Requirement(ctx context.Context, u *auth.User, outside bool) (auth.Need, error)
-	Verify(ctx context.Context, u *auth.User, code string) (auth.Factor, error)
-	CheckSetupCode(ctx context.Context, uid int64, code string) error
-	BeginEnroll(ctx context.Context, u *auth.User, issuer string) (*auth.Enrollment, error)
-	ConfirmEnroll(ctx context.Context, u *auth.User, code string) ([]string, error)
+	MustEnroll(ctx context.Context, u *auth.User) (bool, error)
+	Verify(ctx context.Context, u *auth.User, code string, o auth.Origin) (auth.Factor, error)
+	ConsumeSetupCode(ctx context.Context, uid int64, code string, o auth.Origin) error
+	BeginEnroll(ctx context.Context, u *auth.User, issuer, bind string) (*auth.Enrollment, error)
+	ConfirmEnroll(ctx context.Context, u *auth.User, code, bind string, o auth.Origin) ([]string, error)
 }
 
 var _ SecondFactors = (*auth.MFA)(nil)
+
+// chal is the challenges store: the desktop's own (one budget for both)
+// when hardyd shares it, else the provider's.
+func (p *Provider) chal() *auth.Challenges {
+	if p.cfg.Challenges != nil {
+		return p.cfg.Challenges
+	}
+	return &p.challenges
+}
+
+// origin is where r's codes count (decision 444).
+func (p *Provider) origin(r *http.Request) auth.Origin {
+	return auth.Origin{Outside: p.outside(r), IP: p.cfg.ClientIP(r)}
+}
 
 type outsideKey struct{}
 
@@ -74,7 +89,7 @@ func (p *Provider) totpIssuer() string {
 // askSecondFactor starts a challenge for a right password and shows the
 // page for what is still needed.
 func (p *Provider) askSecondFactor(w http.ResponseWriter, r *http.Request, base string, a *authRequest, c *Client, b string, u *auth.User, need auth.Need) {
-	tok, _, err := p.challenges.Issue(u.ID, need, p.outside(r))
+	tok, _, err := p.chal().Issue(u.ID, need, p.outside(r))
 	if err != nil {
 		p.problem(w, base, http.StatusServiceUnavailable, "Can't sign you in right now", sentence(err.Error()))
 		return
@@ -156,7 +171,7 @@ func (p *Provider) secondFactorPost(w http.ResponseWriter, r *http.Request, base
 	expired := func() {
 		p.problem(w, base, http.StatusUnauthorized, "This sign-in has expired", "Go back to the app and sign in again.")
 	}
-	ch, err := p.challenges.Get(tok)
+	ch, err := p.chal().Get(tok)
 	if err != nil || ch.Outside != p.outside(r) || p.cfg.MFA == nil {
 		expired()
 		return
@@ -164,7 +179,7 @@ func (p *Provider) secondFactorPost(w http.ResponseWriter, r *http.Request, base
 	ctx := r.Context()
 	u, err := p.cfg.LoadUser(ctx, ch.UserID)
 	if err != nil || u.Disabled || p.adminRefused(r, u) {
-		p.challenges.Done(tok)
+		p.chal().Done(tok)
 		expired()
 		return
 	}
@@ -176,7 +191,7 @@ func (p *Provider) secondFactorPost(w http.ResponseWriter, r *http.Request, base
 			expired()
 			return
 		}
-		fac, err := p.cfg.MFA.Verify(ctx, u, r.PostForm.Get("code"))
+		fac, err := p.cfg.MFA.Verify(ctx, u, r.PostForm.Get("code"), p.origin(r))
 		if err != nil {
 			p.audit(ctx, ip, u, "oidc.signin", c.Name, audit.Failure, "two-factor code: "+err.Error()+note)
 			status := http.StatusUnauthorized
@@ -187,7 +202,7 @@ func (p *Provider) secondFactorPost(w http.ResponseWriter, r *http.Request, base
 			p.codePage(w, status, base, a, c, b, tok, codeError(err))
 			return
 		}
-		p.challenges.Done(tok)
+		p.chal().Done(tok)
 		how := "password and two-factor code"
 		if fac == auth.FactorRecovery {
 			how = "password and recovery code (two-factor)"
@@ -200,43 +215,50 @@ func (p *Provider) secondFactorPost(w http.ResponseWriter, r *http.Request, base
 			expired()
 			return
 		}
-		if ch.Need == auth.NeedSetupCode {
-			if err := p.cfg.MFA.CheckSetupCode(ctx, u.ID, r.PostForm.Get("setup_code")); err != nil {
+		if ch.Need == auth.NeedSetupCode && !ch.SetupOK {
+			// Used up the moment it's accepted (one compare-and-clear).
+			if err := p.cfg.MFA.ConsumeSetupCode(ctx, u.ID, r.PostForm.Get("setup_code"), p.origin(r)); err != nil {
 				p.audit(ctx, ip, u, "oidc.signin", c.Name, audit.Failure, "two-factor setup code: "+err.Error()+note)
 				p.setupPage(w, http.StatusUnauthorized, base, a, c, b, tok, true, codeError(err))
 				return
 			}
 		}
-		e, err := p.cfg.MFA.BeginEnroll(ctx, u, p.totpIssuer())
+		p.chal().Update(tok, func(c *auth.Challenge) { c.SetupOK = true })
+		p.audit(ctx, ip, u, "auth.2fa.enroll_start", u.Username, audit.Success, "from the sign-in page"+note)
+		e, err := p.cfg.MFA.BeginEnroll(ctx, u, p.totpIssuer(), auth.BindHash("challenge", tok))
 		if err != nil {
 			p.cfg.Log.Error("oidc: begin two-factor enrollment", "err", err)
 			p.problem(w, base, http.StatusInternalServerError, "Something went wrong", "Go back to the app and sign in again.")
 			return
 		}
-		p.challenges.Update(tok, func(c *auth.Challenge) { c.Started, c.SetupOK = true, true })
+		p.chal().Update(tok, func(c *auth.Challenge) { c.Started, c.SetupOK = true, true })
 		p.enrollPage(w, http.StatusOK, base, a, c, b, tok, e, "")
 	case "enroll":
 		if (ch.Need != auth.NeedEnroll && ch.Need != auth.NeedSetupCode) || !ch.Started || !ch.SetupOK {
 			expired()
 			return
 		}
-		codes, err := p.cfg.MFA.ConfirmEnroll(ctx, u, r.PostForm.Get("code"))
+		codes, err := p.cfg.MFA.ConfirmEnroll(ctx, u, r.PostForm.Get("code"), auth.BindHash("challenge", tok), p.origin(r))
 		if err != nil {
 			p.audit(ctx, ip, u, "auth.2fa.enable", u.Username, audit.Failure, "from the sign-in page: "+err.Error()+note)
 			if errors.Is(err, auth.ErrNoPending) {
-				p.challenges.Done(tok)
+				p.chal().Done(tok)
 				expired()
 				return
 			}
 			p.enrollPage(w, http.StatusUnauthorized, base, a, c, b, tok, p.enrollmentFromForm(r.PostForm.Get("secret"), u), codeError(err))
 			return
 		}
-		p.challenges.Done(tok)
+		p.chal().Done(tok)
 		p.audit(ctx, ip, u, "auth.2fa.enable", u.Username, audit.Success, "set up from the sign-in page"+note)
-		// Whatever was signed in with the password alone ends.
-		if p.cfg.EndSessions != nil {
+		// Everything signed in before ends: desktop and app sessions, WebDAV,
+		// Office, and every app sign-in and token (decision 442).
+		if p.cfg.SecondFactorSet != nil {
+			p.cfg.SecondFactorSet(ctx, u.ID)
+		} else if p.cfg.EndSessions != nil {
 			p.cfg.EndSessions(ctx, u.ID)
 		}
+		p.EndUser(ctx, u.ID)
 		p.startSessionMFA(w, r, u, p.now(), true)
 		next := base + "/login?" + url.Values{"id": {a.ID}}.Encode()
 		p.render(w, http.StatusOK, &page{Kind: "recovery", Base: base, Title: "Recovery codes", Heading: "Save your recovery codes",

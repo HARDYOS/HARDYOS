@@ -1180,7 +1180,10 @@ func (m mailPasswords) CheckDomainPassword(ctx context.Context, account, passwor
 	if !known || (scope != mail.ScopeMail && scope != mail.ScopeCalendars) {
 		scope = mail.ScopeMail
 	}
-	outside := !known || src.Internet || !src.Addr.IsValid()
+	// Inside only from this server's own loopback, LAN and NetBird peers:
+	// Docker's networks (the webmail app's included) are outside here,
+	// whatever mail's throttling counts them as (review M3).
+	outside := !known || src.Forced || src.Internet || !m.s.insideAddr(src.Addr)
 	ip := ""
 	if src.Addr.IsValid() {
 		ip = src.Addr.String()
@@ -1202,6 +1205,9 @@ func (m mailPasswords) CheckDomainPassword(ctx context.Context, account, passwor
 	}
 	if u.Disabled {
 		return "", auth.ErrDisabledHere
+	}
+	if err := m.s.passwordStillAllowed(ctx, u); err != nil {
+		return "", err
 	}
 	return m.AccountGUID(ctx, account)
 }

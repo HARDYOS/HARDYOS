@@ -46,7 +46,7 @@ export const SCOPE_LABELS: Record<AppPasswordScope, string> = {
 export function twoFactorLabel(st: TwoFactorStatus | undefined): { text: string; tone: "good" | "warn" | "bad" | "neutral" } {
   if (!st) return { text: "Unknown", tone: "neutral" };
   if (st.enabled) {
-    if (st.locked) return { text: "2FA locked (wrong codes)", tone: "bad" };
+    if (st.locked) return { text: "2FA codes from outside off (wrong codes)", tone: "bad" };
     if (st.recoveryCodesLeft <= 2) return { text: `2FA on · ${st.recoveryCodesLeft} recovery codes left`, tone: "warn" };
     return { text: "2FA on", tone: "good" };
   }

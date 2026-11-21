@@ -173,6 +173,10 @@ export function TwoFactorDialog({ user, onClose }: { user: User; onClose: () => 
     },
   });
 
+  const dismiss = useMutation({
+    mutationFn: () => unwrap(api.POST("/auth/2fa/notice/dismiss")),
+    onSuccess: refresh,
+  });
   const st = status.data;
   const reset = () => {
     setAction(null);
@@ -225,11 +229,28 @@ export function TwoFactorDialog({ user, onClose }: { user: User; onClose: () => 
         <div className="row tfa-status">
           <ShieldIcon size={20} />
           {st.enabled ? <Badge tone="good">On</Badge> : <Badge tone={st.required ? "warn" : "neutral"}>Off</Badge>}
-          {st.locked && <Badge tone="bad">Codes locked: use a recovery code</Badge>}
+          {st.locked && <Badge tone="bad">Codes from outside off</Badge>}
         </div>
+        {st.notice && (
+          <Alert tone="warn" title="Wrong codes for your account" action={<Button size="sm" onClick={() => dismiss.mutate()}>Dismiss</Button>}>
+            {st.notice}
+          </Alert>
+        )}
+        {st.locked && (
+          <p className="small muted" style={{ margin: 0 }}>
+            Too many wrong codes from outside: authenticator codes work only at home until you change your password (or an administrator resets
+            two-factor sign-in). Recovery codes work everywhere.
+          </p>
+        )}
         {st.enabled ? (
           <p className="small muted" style={{ margin: 0 }}>
             Turned on {relativeTime(st.enabledAt)} · <span className="num">{st.recoveryCodesLeft}</span> recovery codes left
+            {st.outsideFailures > 0 && (
+              <>
+                {" "}
+                · <span className="num">{st.outsideFailures}</span> wrong codes from outside in 60 days
+              </>
+            )}
           </p>
         ) : (
           <p className="small muted" style={{ margin: 0 }}>

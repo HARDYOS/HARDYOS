@@ -8,8 +8,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/store"
@@ -50,9 +52,15 @@ const (
 	MaxAdminGraceDays     = 30
 	// RecoveryCodeCount codes are made at each enrollment.
 	RecoveryCodeCount = 10
-	// MaxCodeFailures wrong authenticator codes in a row stop authenticator
-	// codes until a recovery code or an administrator's reset.
-	MaxCodeFailures = 20
+	// OutsideFailureBudget wrong authenticator codes from outside within
+	// OutsideFailureWindow turn authenticator codes off from outside until
+	// the password changes or an administrator resets two-factor sign-in
+	// (decision 444). Codes at home keep working.
+	OutsideFailureBudget = 20
+	OutsideFailureWindow = 60 * 24 * time.Hour
+	// NoticeEvery: the person (and administrators) hear about every this
+	// many wrong codes from outside.
+	NoticeEvery = 5
 	// pendingTTL is how long a started enrollment waits for its first code.
 	pendingTTL = 15 * time.Minute
 	// SetupCodeTTL is how long an administrator's setup code is good for.
@@ -66,7 +74,7 @@ const (
 // Errors.
 var (
 	ErrBadCode         = errors.New("that code isn't right")
-	ErrCodeLocked      = errors.New("too many wrong codes: authenticator codes are turned off for this account until you use a recovery code or an administrator resets two-factor sign-in")
+	ErrCodeLocked      = errors.New("too many wrong codes from outside: authenticator codes are turned off from outside for this account until its password is changed or an administrator resets two-factor sign-in; at home they still work, and so do recovery codes")
 	ErrNotEnrolled     = errors.New("two-factor sign-in isn't set up for this account")
 	ErrNoPending       = errors.New("start setting up two-factor sign-in again: the setup has expired")
 	ErrAdminMustKeep   = errors.New("administrators must keep two-factor sign-in on; set up a new authenticator instead")
@@ -82,17 +90,72 @@ func (e *CodeRateLimited) Error() string {
 	return fmt.Sprintf("too many wrong codes; try again in %d minutes", int((e.Wait+time.Minute-1)/time.Minute))
 }
 
+// Origin is where a code was typed: at home (inside) or from outside, and
+// the client's address. Wrong codes count per account and origin (from
+// outside per address, IPv6 per /64), so guesses from the internet never
+// lock the owner out at home (decision 444).
+type Origin struct {
+	Outside bool
+	IP      string
+}
+
+// Inside is a code typed at home.
+var Inside = Origin{}
+
+func (o Origin) bucket(kind string, uid int64) string {
+	k := kind + ":" + strconv.FormatInt(uid, 10)
+	if !o.Outside {
+		return k + ":in"
+	}
+	return k + ":out:" + addrKey(o.IP)
+}
+
+// addrKey is an address as limits count it: IPv4 as is, IPv6 by /64.
+func addrKey(ip string) string {
+	a, err := netip.ParseAddr(ip)
+	if err != nil {
+		return "unknown"
+	}
+	a = a.Unmap()
+	if a.Is6() {
+		p, _ := a.Prefix(64)
+		return p.String()
+	}
+	return a.String()
+}
+
+// MFAEvent is something people should hear about (MFA.Notify).
+type MFAEvent struct {
+	UserID int64
+	// Kind: "short_lock" (code entry paused for an origin), "outside_failures"
+	// (every NoticeEvery wrong codes from outside), "outside_lock" (codes
+	// from outside turned off).
+	Kind    string
+	Outside bool
+	IP      string
+	// Count is the wrong codes from outside in the window.
+	Count int
+}
+
 // MFA keeps accounts' second factors.
 type MFA struct {
 	DB *store.DB
 	// Sealer encrypts authenticator secrets at rest (hardyd: secretbox with
 	// the purpose "totp").
 	Sealer Sealer
-	// Limiter counts wrong codes per account (default: 5 in 15 minutes
-	// locks code entry for 15 minutes), shared by every sign-in path.
+	// Limiter counts wrong authenticator codes per account and origin
+	// (default: 5 in 15 minutes pause code entry from there for 15
+	// minutes), shared by every sign-in path.
 	Limiter *LoginLimiter
+	// Notify hears about locks and wrong codes from outside (nil: nobody).
+	Notify func(ctx context.Context, e MFAEvent)
 	// Now replaces the clock (tests).
 	Now func() time.Time
+
+	once sync.Once
+	// recovery and enroll are the limits for recovery codes and for
+	// enrollment and setup codes (their own buckets: decision 444).
+	recovery, enroll *LoginLimiter
 }
 
 func (m *MFA) now() time.Time {
@@ -102,11 +165,20 @@ func (m *MFA) now() time.Time {
 	return time.Now()
 }
 
-func (m *MFA) limiter() *LoginLimiter {
-	if m.Limiter == nil {
-		m.Limiter = NewLoginLimiter()
+func (m *MFA) init() {
+	m.once.Do(func() {
+		if m.Limiter == nil {
+			m.Limiter = NewLoginLimiter()
+		}
+		m.recovery = &LoginLimiter{MaxFailures: 10, Window: 15 * time.Minute, Lockout: 15 * time.Minute}
+		m.enroll = NewLoginLimiter()
+	})
+}
+
+func (m *MFA) notify(ctx context.Context, e MFAEvent) {
+	if m.Notify != nil {
+		m.Notify(context.WithoutCancel(ctx), e)
 	}
-	return m.Limiter
 }
 
 // Status is an account's two-factor state as people see it.
@@ -119,29 +191,41 @@ type MFAStatus struct {
 	// GraceUntil is an administrator's deadline to set it up (nil: none yet
 	// or enabled).
 	GraceUntil *time.Time `json:"graceUntil"`
-	// Locked: too many wrong codes; only a recovery code works.
+	// Locked: too many wrong codes from outside; authenticator codes work
+	// only at home until the password changes or an administrator resets
+	// two-factor sign-in.
 	Locked bool `json:"locked"`
+	// OutsideFailures are wrong authenticator codes from outside in the
+	// last OutsideFailureWindow.
+	OutsideFailures int `json:"outsideFailures"`
 	// SetupCodeExpires: an administrator's setup code is waiting.
 	SetupCodeExpires *time.Time `json:"setupCodeExpires"`
 	// MustEnroll: an administrator past the grace period, who can use
 	// nothing but enrollment until it is set up.
 	MustEnroll bool `json:"mustEnroll"`
+	// Notice is the latest thing the person should know (wrong codes from
+	// outside), with when; empty when there is none.
+	Notice   string     `json:"notice,omitempty"`
+	NoticeAt *time.Time `json:"noticeAt,omitempty"`
 }
 
 type totpRow struct {
 	secret, pending       []byte
 	enabledAt, pendingAt  sql.NullString
+	pendingBind           sql.NullString
 	lastStep              int64
-	failures              int
 	graceUntil            sql.NullString
 	setupHash, setupUntil sql.NullString
+	outLockedAt           sql.NullString
+	notice, noticeAt      sql.NullString
 }
 
 func (m *MFA) row(ctx context.Context, uid int64) (*totpRow, error) {
 	var r totpRow
-	err := m.DB.QueryRowContext(ctx, `SELECT secret, pending_secret, enabled_at, pending_at, last_step, failures, grace_until, setup_code_hash, setup_code_expires
-		FROM user_totp WHERE user_id = ?`, uid).
-		Scan(&r.secret, &r.pending, &r.enabledAt, &r.pendingAt, &r.lastStep, &r.failures, &r.graceUntil, &r.setupHash, &r.setupUntil)
+	err := m.DB.QueryRowContext(ctx, `SELECT secret, pending_secret, enabled_at, pending_at, pending_bind, last_step, grace_until,
+		setup_code_hash, setup_code_expires, out_locked_at, notice, notice_at FROM user_totp WHERE user_id = ?`, uid).
+		Scan(&r.secret, &r.pending, &r.enabledAt, &r.pendingAt, &r.pendingBind, &r.lastStep, &r.graceUntil,
+			&r.setupHash, &r.setupUntil, &r.outLockedAt, &r.notice, &r.noticeAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -173,6 +257,13 @@ func (m *MFA) Enabled(ctx context.Context, uid int64) (bool, error) {
 	return r.enabled(), nil
 }
 
+func (m *MFA) outsideFailures(ctx context.Context, uid int64) (int, error) {
+	var n int
+	err := m.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM user_totp_failures WHERE user_id = ? AND at >= ?`,
+		uid, store.FormatTime(m.now().Add(-OutsideFailureWindow))).Scan(&n)
+	return n, err
+}
+
 // Status is u's two-factor state.
 func (m *MFA) Status(ctx context.Context, u *User) (*MFAStatus, error) {
 	r, err := m.row(ctx, u.ID)
@@ -184,10 +275,13 @@ func (m *MFA) Status(ctx context.Context, u *User) (*MFAStatus, error) {
 		return st, nil
 	}
 	st.Enabled = r.enabled()
-	st.Locked = st.Enabled && r.failures >= MaxCodeFailures
+	st.Locked = st.Enabled && r.outLockedAt.Valid
 	if st.Enabled {
 		st.EnabledAt = timePtr(r.enabledAt)
 		if err := m.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM user_recovery_codes WHERE user_id = ? AND used_at IS NULL`, u.ID).Scan(&st.RecoveryCodesLeft); err != nil {
+			return nil, err
+		}
+		if st.OutsideFailures, err = m.outsideFailures(ctx, u.ID); err != nil {
 			return nil, err
 		}
 	} else if u.IsAdmin() {
@@ -197,7 +291,26 @@ func (m *MFA) Status(ctx context.Context, u *User) (*MFAStatus, error) {
 	if t := timePtr(r.setupUntil); t != nil && r.setupHash.Valid && m.now().Before(*t) {
 		st.SetupCodeExpires = t
 	}
+	if r.notice.Valid && r.notice.String != "" {
+		st.Notice, st.NoticeAt = r.notice.String, timePtr(r.noticeAt)
+	}
 	return st, nil
+}
+
+// SetNotice records what the person should know (shown in their account
+// menu until DismissNotice).
+func (m *MFA) SetNotice(ctx context.Context, uid int64, text string) {
+	if err := m.ensureRow(ctx, uid); err != nil {
+		return
+	}
+	_, _ = m.DB.ExecContext(ctx, `UPDATE user_totp SET notice = ?, notice_at = ?, updated_at = ? WHERE user_id = ?`,
+		text, store.FormatTime(m.now()), store.Now(), uid)
+}
+
+// DismissNotice clears it.
+func (m *MFA) DismissNotice(ctx context.Context, uid int64) error {
+	_, err := m.DB.ExecContext(ctx, `UPDATE user_totp SET notice = NULL, notice_at = NULL, updated_at = ? WHERE user_id = ?`, store.Now(), uid)
+	return err
 }
 
 // GraceDays is the administrators' grace period.
@@ -287,6 +400,24 @@ func (m *MFA) MustEnroll(ctx context.Context, u *User) (bool, error) {
 	return !m.now().Before(until), nil
 }
 
+// PasswordAllowed reports whether u's own password may be used by a
+// service that can't ask for a code (WebDAV, mail, calendars): never
+// from outside, never once u has two-factor sign-in, and never while u
+// must set it up (decisions 445, L3 of the review).
+func (m *MFA) PasswordAllowed(ctx context.Context, u *User, outside bool) (bool, error) {
+	if outside {
+		return false, nil
+	}
+	if u == nil {
+		return true, nil
+	}
+	if on, err := m.Enabled(ctx, u.ID); err != nil || on {
+		return false, err
+	}
+	must, err := m.MustEnroll(ctx, u)
+	return !must, err
+}
+
 // ---- codes --------------------------------------------------------------------
 
 // Sealer encrypts and decrypts small secrets bound to aad. (It's an
@@ -322,19 +453,34 @@ func (m *MFA) open(ctx context.Context, uid int64, sealed []byte, kind string) (
 	return plain, nil
 }
 
-func (m *MFA) limitKey(uid int64) string { return "mfa:" + strconv.FormatInt(uid, 10) }
-
-// Verify checks a second factor for u: a 6-digit authenticator code or a
-// recovery code. It returns the factor that worked. Wrong codes count
-// against the account (CodeRateLimited), a replayed code is a wrong code,
-// and after MaxCodeFailures wrong authenticator codes in a row only
-// recovery codes work.
-func (m *MFA) Verify(ctx context.Context, u *User, code string) (Factor, error) {
-	lim := m.limiter()
-	key := m.limitKey(u.ID)
-	if ok, wait := lim.Allowed(key); !ok {
-		return "", &CodeRateLimited{Wait: wait}
+// try reserves one attempt in lim for key (counted as a failure until
+// Succeed), reporting a short-lock trip to Notify.
+func (m *MFA) try(lim *LoginLimiter, key string) error {
+	if ok, wait := lim.Try(key); !ok {
+		return &CodeRateLimited{Wait: wait}
 	}
+	return nil
+}
+
+// tripped tells Notify when a failure just paused code entry.
+func (m *MFA) tripped(ctx context.Context, lim *LoginLimiter, key string, uid int64, o Origin) {
+	if ok, _ := lim.Allowed(key); !ok {
+		m.notify(ctx, MFAEvent{UserID: uid, Kind: "short_lock", Outside: o.Outside, IP: o.IP})
+	}
+}
+
+// Verify checks a second factor for u typed at o: a 6-digit authenticator
+// code or a recovery code, and returns the factor that worked.
+//
+// Authenticator codes count wrong tries per account and origin (5 in 15
+// minutes pause that origin); from outside each wrong code also goes into
+// a rolling 60-day budget that success doesn't reset, and at
+// OutsideFailureBudget authenticator codes stop working from outside
+// until the password changes or an administrator resets (decision 444).
+// Recovery codes have their own bucket and work when codes are paused.
+// A replayed code is a wrong code.
+func (m *MFA) Verify(ctx context.Context, u *User, code string, o Origin) (Factor, error) {
+	m.init()
 	r, err := m.row(ctx, u.ID)
 	if err != nil {
 		return "", err
@@ -344,8 +490,12 @@ func (m *MFA) Verify(ctx context.Context, u *User, code string) (Factor, error) 
 	}
 	c := normalizeCode(code)
 	if len(c) == TOTPDigits && isDigits(c) {
-		if r.failures >= MaxCodeFailures {
+		if o.Outside && r.outLockedAt.Valid {
 			return "", ErrCodeLocked
+		}
+		key := o.bucket("mfa", u.ID)
+		if err := m.try(m.Limiter, key); err != nil {
+			return "", err
 		}
 		secret, err := m.open(ctx, u.ID, r.secret, "active")
 		if err != nil {
@@ -353,32 +503,94 @@ func (m *MFA) Verify(ctx context.Context, u *User, code string) (Factor, error) 
 		}
 		step, ok := TOTPMatch(secret, c, m.now(), r.lastStep)
 		if ok {
-			res, err := m.DB.ExecContext(ctx, `UPDATE user_totp SET last_step = ?, failures = 0, updated_at = ? WHERE user_id = ? AND last_step < ?`,
+			res, err := m.DB.ExecContext(ctx, `UPDATE user_totp SET last_step = ?, updated_at = ? WHERE user_id = ? AND last_step < ?`,
 				step, store.Now(), u.ID, step)
 			if err != nil {
 				return "", err
 			}
 			if n, _ := res.RowsAffected(); n == 1 {
-				lim.Succeed(key)
+				m.Limiter.Succeed(key)
 				return FactorTOTP, nil
 			}
 		}
-		lim.Fail(key)
-		_, _ = m.DB.ExecContext(ctx, `UPDATE user_totp SET failures = failures + 1, updated_at = ? WHERE user_id = ?`, store.Now(), u.ID)
-		if r.failures+1 >= MaxCodeFailures {
-			return "", ErrCodeLocked
+		m.tripped(ctx, m.Limiter, key, u.ID, o)
+		if o.Outside {
+			if err := m.outsideFailure(ctx, u.ID, o); err != nil {
+				return "", err
+			}
 		}
 		return "", ErrBadCode
+	}
+	key := o.bucket("mfa-rc", u.ID)
+	if err := m.try(m.recovery, key); err != nil {
+		return "", err
 	}
 	if ok, err := m.useRecoveryCode(ctx, u.ID, c); err != nil {
 		return "", err
 	} else if ok {
-		lim.Succeed(key)
-		_, _ = m.DB.ExecContext(ctx, `UPDATE user_totp SET failures = 0, updated_at = ? WHERE user_id = ?`, store.Now(), u.ID)
+		m.recovery.Succeed(key)
+		// The owner proved themselves: the budget starts again, unless it
+		// already ran out (then only a new password or a reset lifts it).
+		_, _ = m.DB.ExecContext(ctx, `DELETE FROM user_totp_failures WHERE user_id = ? AND NOT EXISTS (
+			SELECT 1 FROM user_totp WHERE user_id = ? AND out_locked_at IS NOT NULL)`, u.ID, u.ID)
 		return FactorRecovery, nil
 	}
-	lim.Fail(key)
+	m.tripped(ctx, m.recovery, key, u.ID, o)
 	return "", ErrBadCode
+}
+
+// outsideFailure records a wrong code from outside, tells people every
+// NoticeEvery, and turns codes from outside off at the budget.
+func (m *MFA) outsideFailure(ctx context.Context, uid int64, o Origin) error {
+	if _, err := m.DB.ExecContext(ctx, `INSERT INTO user_totp_failures (user_id, at, ip) VALUES (?, ?, ?)`,
+		uid, store.FormatTime(m.now()), clip(o.IP, 64)); err != nil {
+		return err
+	}
+	n, err := m.outsideFailures(ctx, uid)
+	if err != nil {
+		return err
+	}
+	if n >= OutsideFailureBudget {
+		var locked int64
+		err := m.DB.QueryRowContext(ctx, `UPDATE user_totp SET out_locked_at = ?, updated_at = ? WHERE user_id = ? AND out_locked_at IS NULL RETURNING user_id`,
+			store.FormatTime(m.now()), store.Now(), uid).Scan(&locked)
+		if err == nil && locked == uid {
+			m.notify(ctx, MFAEvent{UserID: uid, Kind: "outside_lock", Outside: true, IP: o.IP, Count: n})
+			return nil
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
+	if n%NoticeEvery == 0 {
+		m.notify(ctx, MFAEvent{UserID: uid, Kind: "outside_failures", Outside: true, IP: o.IP, Count: n})
+	}
+	return nil
+}
+
+func clip(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
+}
+
+// ClearOutsideLock lifts the stop on codes from outside and forgets the
+// failures, when the account's password was changed at or after since
+// (the directory's pwdLastSet, or now for a HardyOS password change).
+// It reports whether a lock was lifted.
+func (m *MFA) ClearOutsideLock(ctx context.Context, uid int64, since time.Time) bool {
+	ts := store.FormatTime(since)
+	res, err := m.DB.ExecContext(ctx, `UPDATE user_totp SET out_locked_at = NULL, updated_at = ? WHERE user_id = ? AND out_locked_at IS NOT NULL AND out_locked_at <= ?`,
+		store.Now(), uid, ts)
+	if err != nil {
+		return false
+	}
+	n, _ := res.RowsAffected()
+	if n > 0 {
+		_, _ = m.DB.ExecContext(ctx, `DELETE FROM user_totp_failures WHERE user_id = ? AND at <= ?`, uid, ts)
+	}
+	return n > 0
 }
 
 func codeHash(c string) string {
@@ -408,9 +620,18 @@ type Enrollment struct {
 	URI    string `json:"uri"`    // otpauth://totp/...
 }
 
-// BeginEnroll makes a new pending secret for u (replacing any pending one;
-// an enabled authenticator stays in use until ConfirmEnroll).
-func (m *MFA) BeginEnroll(ctx context.Context, u *User, issuer string) (*Enrollment, error) {
+// BindHash names what a pending enrollment belongs to (a sign-in
+// challenge or a desktop session) without keeping the token itself.
+func BindHash(kind, token string) string { return kind + ":" + codeHash(token) }
+
+// BeginEnroll makes a new pending secret for u, tied to bind (the sign-in
+// challenge or desktop session it was started from: only that one can
+// finish it). Any pending one is replaced; an enabled authenticator stays
+// in use until ConfirmEnroll.
+func (m *MFA) BeginEnroll(ctx context.Context, u *User, issuer, bind string) (*Enrollment, error) {
+	if bind == "" {
+		return nil, errors.New("enrollment needs a binding")
+	}
 	secret, err := NewTOTPSecret()
 	if err != nil {
 		return nil, err
@@ -422,28 +643,30 @@ func (m *MFA) BeginEnroll(ctx context.Context, u *User, issuer string) (*Enrollm
 	if err := m.ensureRow(ctx, u.ID); err != nil {
 		return nil, err
 	}
-	if _, err := m.DB.ExecContext(ctx, `UPDATE user_totp SET pending_secret = ?, pending_at = ?, updated_at = ? WHERE user_id = ?`,
-		sealed, store.FormatTime(m.now()), store.Now(), u.ID); err != nil {
+	if _, err := m.DB.ExecContext(ctx, `UPDATE user_totp SET pending_secret = ?, pending_at = ?, pending_bind = ?, updated_at = ? WHERE user_id = ?`,
+		sealed, store.FormatTime(m.now()), bind, store.Now(), u.ID); err != nil {
 		return nil, err
 	}
 	account := u.IdentityPrincipal()
 	return &Enrollment{Secret: TOTPSecretText(secret), URI: TOTPURI(issuer, account, secret)}, nil
 }
 
-// ConfirmEnroll checks the first code from the pending secret and makes it
-// u's authenticator, with fresh recovery codes (returned once). Any setup
-// code and grace deadline are cleared.
-func (m *MFA) ConfirmEnroll(ctx context.Context, u *User, code string) ([]string, error) {
-	lim := m.limiter()
-	key := m.limitKey(u.ID)
-	if ok, wait := lim.Allowed(key); !ok {
-		return nil, &CodeRateLimited{Wait: wait}
+// ConfirmEnroll checks the first code from the pending secret started for
+// bind and makes it u's authenticator, with fresh recovery codes
+// (returned once). The grace deadline is cleared; a stop on codes from
+// outside isn't (only a new password or a reset lifts it).
+func (m *MFA) ConfirmEnroll(ctx context.Context, u *User, code, bind string, o Origin) ([]string, error) {
+	m.init()
+	key := o.bucket("mfa-enroll", u.ID)
+	if err := m.try(m.enroll, key); err != nil {
+		return nil, err
 	}
 	r, err := m.row(ctx, u.ID)
 	if err != nil {
 		return nil, err
 	}
-	if r == nil || len(r.pending) == 0 || !r.pendingAt.Valid || m.now().Sub(store.ParseTime(r.pendingAt.String)) > pendingTTL {
+	if r == nil || len(r.pending) == 0 || !r.pendingAt.Valid || m.now().Sub(store.ParseTime(r.pendingAt.String)) > pendingTTL ||
+		bind == "" || !r.pendingBind.Valid || !constEq(r.pendingBind.String, bind) {
 		return nil, ErrNoPending
 	}
 	secret, err := m.open(ctx, u.ID, r.pending, "pending")
@@ -453,7 +676,7 @@ func (m *MFA) ConfirmEnroll(ctx context.Context, u *User, code string) ([]string
 	c := normalizeCode(code)
 	step, ok := TOTPMatch(secret, c, m.now(), 0)
 	if !ok || !isDigits(c) {
-		lim.Fail(key)
+		m.tripped(ctx, m.enroll, key, u.ID, o)
 		return nil, ErrBadCode
 	}
 	sealed, err := m.seal(ctx, secret, totpAAD(u.ID, "active"))
@@ -470,9 +693,9 @@ func (m *MFA) ConfirmEnroll(ctx context.Context, u *User, code string) ([]string
 	}
 	defer func() { _ = tx.Rollback() }()
 	now := store.Now()
-	res, err := tx.ExecContext(ctx, `UPDATE user_totp SET secret = ?, enabled_at = ?, pending_secret = NULL, pending_at = NULL,
-		last_step = ?, failures = 0, grace_until = NULL, setup_code_hash = NULL, setup_code_expires = NULL, updated_at = ?
-		WHERE user_id = ? AND pending_secret = ?`, sealed, now, step, now, u.ID, r.pending)
+	res, err := tx.ExecContext(ctx, `UPDATE user_totp SET secret = ?, enabled_at = ?, pending_secret = NULL, pending_at = NULL, pending_bind = NULL,
+		last_step = ?, grace_until = NULL, setup_code_hash = NULL, setup_code_expires = NULL, updated_at = ?
+		WHERE user_id = ? AND pending_secret = ? AND pending_bind = ?`, sealed, now, step, now, u.ID, r.pending, bind)
 	if err != nil {
 		return nil, err
 	}
@@ -485,7 +708,7 @@ func (m *MFA) ConfirmEnroll(ctx context.Context, u *User, code string) ([]string
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	lim.Succeed(key)
+	m.enroll.Succeed(key)
 	return codes, nil
 }
 
@@ -525,29 +748,41 @@ func replaceRecoveryCodes(ctx context.Context, tx *sql.Tx, uid int64, hashes []s
 }
 
 // Disable turns u's two-factor sign-in off (users only: administrators
-// must keep it, ErrAdminMustKeep).
+// must keep it, ErrAdminMustKeep). The record of wrong codes from outside
+// stays.
 func (m *MFA) Disable(ctx context.Context, u *User) error {
 	if u.IsAdmin() {
 		return ErrAdminMustKeep
 	}
-	return m.Reset(ctx, u.ID, false)
+	tx, err := m.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM user_recovery_codes WHERE user_id = ?`, u.ID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE user_totp SET secret = NULL, enabled_at = NULL, pending_secret = NULL, pending_at = NULL, pending_bind = NULL,
+		setup_code_hash = NULL, setup_code_expires = NULL, updated_at = ? WHERE user_id = ?`, store.Now(), u.ID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-// Reset removes an account's authenticator, recovery codes and setup code
-// (an administrator's reset, hardyctl reset-2fa). With enrollNow, an
-// administrator gets no new grace period: they set one up at their next
-// sign-in.
+// Reset removes an account's authenticator, recovery codes, setup code,
+// stop on codes from outside and record of wrong codes (an administrator's
+// reset, hardyctl reset-2fa). With enrollNow, an administrator gets no new
+// grace period: they set one up at their next sign-in.
 func (m *MFA) Reset(ctx context.Context, uid int64, enrollNow bool) error {
 	tx, err := m.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM user_recovery_codes WHERE user_id = ?`, uid); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM user_totp WHERE user_id = ?`, uid); err != nil {
-		return err
+	for _, q := range []string{`DELETE FROM user_recovery_codes WHERE user_id = ?`, `DELETE FROM user_totp_failures WHERE user_id = ?`, `DELETE FROM user_totp WHERE user_id = ?`} {
+		if _, err := tx.ExecContext(ctx, q, uid); err != nil {
+			return err
+		}
 	}
 	if enrollNow {
 		now := store.FormatTime(m.now())
@@ -578,25 +813,29 @@ func (m *MFA) IssueSetupCode(ctx context.Context, uid int64) (string, time.Time,
 	return groupCode(code), until, nil
 }
 
-// CheckSetupCode verifies (without using up) uid's setup code. Wrong codes
-// count like wrong authenticator codes.
-func (m *MFA) CheckSetupCode(ctx context.Context, uid int64, code string) error {
-	lim := m.limiter()
-	key := m.limitKey(uid)
-	if ok, wait := lim.Allowed(key); !ok {
-		return &CodeRateLimited{Wait: wait}
-	}
-	r, err := m.row(ctx, uid)
-	if err != nil {
+// ConsumeSetupCode uses up uid's setup code if code is it (one
+// compare-and-clear, so it works exactly once). Wrong codes count in the
+// enrollment bucket of o.
+func (m *MFA) ConsumeSetupCode(ctx context.Context, uid int64, code string, o Origin) error {
+	m.init()
+	key := o.bucket("mfa-enroll", uid)
+	if err := m.try(m.enroll, key); err != nil {
 		return err
 	}
 	c := normalizeCode(code)
-	if r == nil || !r.setupHash.Valid || !r.setupUntil.Valid || !m.now().Before(store.ParseTime(r.setupUntil.String)) ||
-		len(c) != setupCodeLen || !constEq(codeHash(c), r.setupHash.String) {
-		lim.Fail(key)
-		return ErrBadSetupCode
+	if len(c) == setupCodeLen {
+		res, err := m.DB.ExecContext(ctx, `UPDATE user_totp SET setup_code_hash = NULL, setup_code_expires = NULL, updated_at = ?
+			WHERE user_id = ? AND setup_code_hash = ? AND setup_code_expires > ?`, store.Now(), uid, codeHash(c), store.FormatTime(m.now()))
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 1 {
+			m.enroll.Succeed(key)
+			return nil
+		}
 	}
-	return nil
+	m.tripped(ctx, m.enroll, key, uid, o)
+	return ErrBadSetupCode
 }
 
 // ---- random codes --------------------------------------------------------------

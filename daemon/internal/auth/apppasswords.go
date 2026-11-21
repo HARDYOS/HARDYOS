@@ -169,6 +169,15 @@ func (a *AppPasswords) Delete(ctx context.Context, uid, id int64) error {
 	return nil
 }
 
+// DeleteAll revokes every app password of uid and says how many went.
+func (a *AppPasswords) DeleteAll(ctx context.Context, uid int64) (int64, error) {
+	res, err := a.DB.ExecContext(ctx, `DELETE FROM app_passwords WHERE user_id = ?`, uid)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // RevokeBefore removes uid's app passwords made before t (the domain says
 // the account's password was set then) and says how many went.
 func (a *AppPasswords) RevokeBefore(ctx context.Context, uid int64, t time.Time) int64 {

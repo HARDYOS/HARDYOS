@@ -178,10 +178,14 @@ export interface paths {
          * Finish a sign-in with an authenticator or recovery code
          * @description A 6-digit code (the current 30-second step or one either side, never
          *     one already used) or a recovery code (`xxxx-xxxx-xxxx-xxxx`, single
-         *     use). A challenge allows 5 tries in 10 minutes; 5 wrong codes in 15
-         *     minutes lock code entry for the account for 15 minutes (429); 20
-         *     wrong authenticator codes in a row turn them off until a recovery
-         *     code or an administrator's reset (`code_locked`).
+         *     use). A challenge allows 5 tries in 10 minutes. Wrong codes count
+         *     per account and origin (at home; from outside per address, IPv6 per
+         *     /64): 5 in 15 minutes pause code entry from there for 15 minutes
+         *     (429), and recovery codes have a bucket of their own. Wrong codes
+         *     from outside also count in a rolling 60-day budget that a right
+         *     code doesn't reset: at 20, authenticator codes stop working from
+         *     outside (`code_locked`; at home they still do) until the password
+         *     changes or an administrator resets two-factor sign-in.
          */
         post: operations["loginSecondFactor"];
         delete?: never;
@@ -315,6 +319,23 @@ export interface paths {
         put?: never;
         /** Replace your recovery codes */
         post: operations["regenerateRecoveryCodes"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/2fa/notice/dismiss": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Dismiss the notice about wrong codes from outside */
+        post: operations["dismissTwoFactorNotice"];
         delete?: never;
         options?: never;
         head?: never;
@@ -458,9 +479,12 @@ export interface paths {
         /**
          * Remove an account's authenticator and recovery codes (admin; lost phone)
          * @description Needs `confirm` set to the account's username (400 `confirm_required`
-         *     otherwise). Signs the account out everywhere and is audited
-         *     (`users.2fa.reset`). An administrator sets up a new authenticator at
-         *     the next sign-in, with no new grace period.
+         *     otherwise). Signs the account out everywhere, revokes every app
+         *     sign-in and refresh token, removes the stop on codes from outside
+         *     and the record of wrong codes, revokes the app passwords unless
+         *     `revokeAppPasswords` is false, and is audited (`users.2fa.reset`).
+         *     An administrator sets up a new authenticator at the next sign-in,
+         *     with no new grace period.
          */
         post: operations["resetUserTwoFactor"];
         delete?: never;
@@ -3396,7 +3420,15 @@ export interface paths {
         };
         /** How an app is published through NetBird */
         get: operations["getAppPublish"];
-        /** Publish an app NetBird-only or publicly, or not at all (job remote.service) */
+        /**
+         * Publish an app NetBird-only or publicly, or not at all (job remote.service)
+         * @description Two-factor sign-in (decision 441): an app is published only with
+         *     HardyOS sign-in in front (`hardyosSignIn`), since its own sign-in
+         *     can't ask for a code (400 `signin_required`), except an app whose
+         *     sign-in is HardyOS's own (Photos with "Sign in with HardyOS" on and
+         *     Immich's passwords off). One published without it before is refused
+         *     at the gateway until it is turned on.
+         */
         put: operations["publishApp"];
         post?: never;
         delete?: never;
@@ -5500,8 +5532,14 @@ export interface components {
              * @description An administrator's deadline to set it up (starts at the first sign-in that asks)
              */
             graceUntil: string | null;
-            /** @description Too many wrong codes; only a recovery code works */
+            /** @description Too many wrong codes from outside: authenticator codes work only at home (recovery codes everywhere) until the password changes or an administrator resets */
             locked: boolean;
+            /** @description Wrong authenticator codes from outside in the last 60 days (a right code doesn't reset them) */
+            outsideFailures: number;
+            /** @description What the person should know (wrong codes from outside); absent when there's nothing */
+            notice?: string;
+            /** Format: date-time */
+            noticeAt?: string | null;
             /**
              * Format: date-time
              * @description An administrator's setup code is waiting until then
@@ -5561,6 +5599,11 @@ export interface components {
             adminGraceDays: number;
             /** @description Always true — everyone needs a second factor from outside */
             outsideRequired: boolean;
+            /**
+             * Format: date-time
+             * @description When a request last came from the router's own address (hairpin NAT or a masqueraded port forward); such requests count as outside
+             */
+            routerSeenAt?: string | null;
         };
         TwoFactorPolicyRequest: {
             adminGraceDays: number;
@@ -5573,6 +5616,11 @@ export interface components {
         ConfirmUsernameRequest: {
             /** @description The account's username */
             confirm: string;
+            /**
+             * @description Also revoke the account's app passwords
+             * @default true
+             */
+            revokeAppPasswords: boolean;
         };
         /** @enum {string} */
         AppPasswordScope: "files" | "mail" | "calendars";
@@ -9939,6 +9987,24 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+        };
+    };
+    dismissTwoFactorNotice: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Dismissed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     getTwoFactorPolicy: {

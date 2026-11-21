@@ -148,7 +148,7 @@ describe("App", () => {
     mockServer({
       "GET /setup": () => ({ body: { needsAdmin: false } }),
       "GET /auth/me": () => ({
-        body: { ...admin, twoFactor: { enabled: false, enabledAt: null, recoveryCodesLeft: 0, required: true, graceUntil: "2026-11-01T00:00:00Z", locked: false, setupCodeExpires: null, mustEnroll: true } },
+        body: { ...admin, twoFactor: { enabled: false, enabledAt: null, recoveryCodesLeft: 0, required: true, graceUntil: "2026-11-01T00:00:00Z", locked: false, outsideFailures: 0, setupCodeExpires: null, mustEnroll: true } },
       }),
       "POST /auth/2fa/enroll": () => ({ body: { secret: "GEZD GNBV", uri: "otpauth://totp/x", qr: { size: 29, path: "M4 4h7v1h-7z" } } }),
       ...desktopRoutes,

@@ -188,7 +188,7 @@ function UserMenu({ user }: { user: User }) {
   const [twoFactor, setTwoFactor] = useState(false);
   const logout = useLogout();
   const name = user.displayName || user.username;
-  const grace = graceText(user.twoFactor);
+  const grace = graceText(user.twoFactor) ?? (user.twoFactor?.notice ? "Wrong codes were typed for you" : null);
   return (
     <div className="popover-anchor" ref={ref}>
       <button

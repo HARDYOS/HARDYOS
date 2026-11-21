@@ -66,8 +66,17 @@ undo only writes the network files).
 - `MFA.Requirement(user, outside)` says what a right password still needs:
   nothing, a code (`totp`), enrollment (`enroll`, an administrator past the
   grace period) or a setup code (`setup_code`, from outside without 2FA).
-  `api.Server.outside` decides "outside": the app gateway, or an address that
-  isn't loopback, private, link-local or NetBird's.
+  `api.Server.outside` (`inside.go`) decides "outside": the app gateway, or
+  an address that isn't hardyd's loopback, a LAN interface's network or
+  NetBird's (Docker, libvirt, the DC shim and the router's own address are
+  outside). Wrong codes count per account and `auth.Origin` (home, or the
+  outside address / IPv6 /64), with a rolling 60-day budget from outside
+  (`user_totp_failures`) that stops codes from outside at 20 until a new
+  password or a reset; `MFA.Notify` reaches administrators and the person.
+- Grants record `browser_outside`; refresh without a second factor is refused
+  from outside, for outside browsers and while enrollment is due. Apps are
+  published only with HardyOS sign-in in front (`signsInWithHardyOS` names
+  the exception, Photos).
 - Desktop: `POST /auth/login` answers 202 with a challenge; `/auth/login/2fa`,
   `/auth/login/enroll` and `/auth/login/enroll/confirm` finish it. The session
   gate (`sessionGate`) refuses a session without `mfa` from outside and limits

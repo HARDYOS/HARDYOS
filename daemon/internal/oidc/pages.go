@@ -434,9 +434,14 @@ func (p *Provider) existingSession(r *http.Request, base string) (*auth.User, ti
 		}
 	}
 	if base != "" && p.cfg.DesktopUser != nil {
-		if u, t, ok := p.cfg.DesktopUser(r); ok {
+		if u, t, mfa, ok := p.cfg.DesktopUser(r); ok {
 			if (u.IdentitySource() == auth.SourceDomain || local) && !p.adminRefused(r, u) {
-				return u, t, "desktop session", true
+				if mfa {
+					return u, t, "desktop session, two-factor", true
+				}
+				if p.secondFactorNeed(r, u) == auth.NeedNothing {
+					return u, t, "desktop session", true
+				}
 			}
 		}
 	}
@@ -632,6 +637,7 @@ func (p *Provider) proceed(w http.ResponseWriter, r *http.Request, base string, 
 		amr = append(amr, "otp", "mfa")
 	}
 	a.UserID, a.Subject, a.AuthTime, a.AMR = u.ID, sub, authTime.UTC(), amr
+	a.Outside = p.outside(r)
 	// A sign-in for an app on another device (Immich's phone app, through
 	// its mobile redirect) is always confirmed by the person: a link that
 	// starts one can't finish silently on an existing sign-in.

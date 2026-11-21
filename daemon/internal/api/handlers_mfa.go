@@ -6,14 +6,13 @@ import (
 	"fmt"
 	"math"
 	"net/http"
-	"net/netip"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
-	"github.com/hardyos/hardyos/daemon/internal/mail"
+	"github.com/hardyos/hardyos/daemon/internal/notify"
 	"github.com/hardyos/hardyos/daemon/internal/qrsvg"
 	"github.com/hardyos/hardyos/daemon/internal/secretbox"
 	"github.com/hardyos/hardyos/daemon/internal/store"
@@ -53,26 +52,9 @@ func (s *Server) newMFA() {
 	if src == nil {
 		src = secretbox.NewStaticSource()
 	}
-	s.mfa = &auth.MFA{DB: s.cfg.DB, Sealer: secretSealer{src: src}}
+	s.mfa = &auth.MFA{DB: s.cfg.DB, Sealer: secretSealer{src: src}, Notify: s.mfaNotify}
 	s.appPw = &auth.AppPasswords{DB: s.cfg.DB}
 	s.challenges = &auth.Challenges{}
-}
-
-// outside reports whether a request is from outside: through the app
-// gateway (any published service: NetBird's proxy terminated it), or from
-// an address that isn't loopback, private, link-local or NetBird's. There
-// everyone needs a second factor, and passwords never work for services
-// that can't ask for one.
-func (s *Server) outside(r *http.Request) bool {
-	if viaGateway(r) {
-		return true
-	}
-	a, err := netip.ParseAddr(s.clientIP(r))
-	if err != nil {
-		// An address we can't read is not trusted as inside.
-		return true
-	}
-	return !mail.Inside(a)
 }
 
 func (s *Server) totpIssuer() string {
@@ -97,6 +79,7 @@ func (s *Server) mfaRoutes() {
 	m.Handle("POST /api/v1/auth/2fa/confirm", s.authed(s.handle2FAConfirm))
 	m.Handle("POST /api/v1/auth/2fa/disable", s.authed(s.handle2FADisable))
 	m.Handle("POST /api/v1/auth/2fa/recovery-codes", s.authed(s.handle2FARecoveryCodes))
+	m.Handle("POST /api/v1/auth/2fa/notice/dismiss", s.authed(s.handle2FANoticeDismiss))
 	m.Handle("GET /api/v1/auth/2fa/policy", s.admin(s.handle2FAPolicy))
 	m.Handle("PUT /api/v1/auth/2fa/policy", s.admin(s.handle2FAPolicySet))
 
@@ -285,7 +268,7 @@ func (s *Server) handleLogin2FA(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	fac, err := s.mfa.Verify(r.Context(), u, req.Code)
+	fac, err := s.mfa.Verify(r.Context(), u, req.Code, s.origin(r))
 	if err != nil {
 		s.record(r, u, "auth.login", u.Username, audit.Failure, "two-factor code: "+err.Error())
 		s.writeCodeError(w, err)
@@ -337,14 +320,18 @@ func (s *Server) handleLoginEnroll(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if ch.Need == auth.NeedSetupCode {
-		if err := s.mfa.CheckSetupCode(r.Context(), u.ID, req.SetupCode); err != nil {
+	if ch.Need == auth.NeedSetupCode && !ch.SetupOK {
+		// Used up the moment it's accepted (one compare-and-clear); the
+		// pending secret then belongs to this challenge only.
+		if err := s.mfa.ConsumeSetupCode(r.Context(), u.ID, req.SetupCode, s.origin(r)); err != nil {
 			s.record(r, u, "auth.2fa.enable", u.Username, audit.Failure, "setup code at sign-in: "+err.Error())
 			s.writeCodeError(w, err)
 			return
 		}
+		s.challenges.Update(req.Challenge, func(c *auth.Challenge) { c.SetupOK = true })
+		s.record(r, u, "users.2fa.setup_code", u.Username, audit.Success, "setup code used at sign-in from outside")
 	}
-	e, err := s.mfa.BeginEnroll(r.Context(), u, s.totpIssuer())
+	e, err := s.mfa.BeginEnroll(r.Context(), u, s.totpIssuer(), auth.BindHash("challenge", req.Challenge))
 	if err != nil {
 		internalError(s, w, err)
 		return
@@ -355,6 +342,7 @@ func (s *Server) handleLoginEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.challenges.Update(req.Challenge, func(c *auth.Challenge) { c.Started, c.SetupOK = true, true })
+	s.record(r, u, "auth.2fa.enroll_start", u.Username, audit.Success, "at sign-in"+outsideNote(ch.Outside))
 	writeJSON(w, http.StatusOK, info)
 }
 
@@ -378,16 +366,15 @@ func (s *Server) handleLoginEnrollConfirm(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusConflict, "no_pending", auth.ErrNoPending.Error())
 		return
 	}
-	codes, err := s.mfa.ConfirmEnroll(r.Context(), u, req.Code)
+	codes, err := s.mfa.ConfirmEnroll(r.Context(), u, req.Code, auth.BindHash("challenge", req.Challenge), s.origin(r))
 	if err != nil {
 		s.record(r, u, "auth.2fa.enable", u.Username, audit.Failure, "at sign-in: "+err.Error())
 		s.writeCodeError(w, err)
 		return
 	}
 	s.challenges.Done(req.Challenge)
-	// What was signed in with the password alone ends.
-	s.endUserEverywhere(r.Context(), u.ID)
-	s.dav.dropUser(u.ID)
+	// Everything signed in before ends (decision 442).
+	s.secondFactorSet(r.Context(), u.ID)
 	where := ""
 	if ch.Outside {
 		where = "; from outside with a setup code"
@@ -453,13 +440,14 @@ func (s *Server) handle2FAEnroll(w http.ResponseWriter, r *http.Request, u *auth
 		return
 	}
 	if on {
-		if _, err := s.mfa.Verify(r.Context(), u, req.Code); err != nil {
+		if _, err := s.mfa.Verify(r.Context(), u, req.Code, s.origin(r)); err != nil {
 			s.record(r, u, "auth.2fa.replace", u.Username, audit.Failure, err.Error())
 			s.writeCodeError(w, err)
 			return
 		}
 	}
-	e, err := s.mfa.BeginEnroll(r.Context(), u, s.totpIssuer())
+	tok, _ := s.sessionToken(r)
+	e, err := s.mfa.BeginEnroll(r.Context(), u, s.totpIssuer(), auth.BindHash("session", tok))
 	if err != nil {
 		internalError(s, w, err)
 		return
@@ -469,6 +457,7 @@ func (s *Server) handle2FAEnroll(w http.ResponseWriter, r *http.Request, u *auth
 		internalError(s, w, err)
 		return
 	}
+	s.record(r, u, "auth.2fa.enroll_start", u.Username, audit.Success, map[bool]string{true: "new authenticator", false: "first authenticator"}[on]+outsideNote(s.outside(r)))
 	writeJSON(w, http.StatusOK, info)
 }
 
@@ -487,19 +476,18 @@ func (s *Server) handle2FAConfirm(w http.ResponseWriter, r *http.Request, u *aut
 		return
 	}
 	was, _ := s.mfa.Enabled(r.Context(), u.ID)
-	codes, err := s.mfa.ConfirmEnroll(r.Context(), u, req.Code)
+	tok, _ := s.sessionToken(r)
+	codes, err := s.mfa.ConfirmEnroll(r.Context(), u, req.Code, auth.BindHash("session", tok), s.origin(r))
 	if err != nil {
 		s.record(r, u, "auth.2fa.enable", u.Username, audit.Failure, err.Error())
 		s.writeCodeError(w, err)
 		return
 	}
-	// This browser has proved the new factor; every other session (signed
-	// in with the password alone, or with the old authenticator) ends.
-	if tok, ok := s.sessionToken(r); ok {
-		_ = s.sessions.MarkMFA(r.Context(), tok)
-		_ = s.sessions.RevokeOthers(r.Context(), u.ID, tok)
-	}
-	s.dav.dropUser(u.ID)
+	// Everything signed in before ends (desktop and app sessions, WebDAV,
+	// Office, app sign-ins and tokens); this browser gets a new two-factor
+	// session (decision 442).
+	s.secondFactorSet(r.Context(), u.ID)
+	s.startSession(w, r, u, true)
 	action := "auth.2fa.enable"
 	if was {
 		action = "auth.2fa.replace"
@@ -525,7 +513,7 @@ func (s *Server) handle2FADisable(w http.ResponseWriter, r *http.Request, u *aut
 	if !s.reauth(w, r, u, req.Password, "auth.2fa.disable") {
 		return
 	}
-	if _, err := s.mfa.Verify(r.Context(), u, req.Code); err != nil {
+	if _, err := s.mfa.Verify(r.Context(), u, req.Code, s.origin(r)); err != nil {
 		s.record(r, u, "auth.2fa.disable", u.Username, audit.Failure, err.Error())
 		s.writeCodeError(w, err)
 		return
@@ -546,7 +534,7 @@ func (s *Server) handle2FARecoveryCodes(w http.ResponseWriter, r *http.Request, 
 	if !s.reauth(w, r, u, req.Password, "auth.2fa.recovery_codes") {
 		return
 	}
-	if _, err := s.mfa.Verify(r.Context(), u, req.Code); err != nil {
+	if _, err := s.mfa.Verify(r.Context(), u, req.Code, s.origin(r)); err != nil {
 		s.record(r, u, "auth.2fa.recovery_codes", u.Username, audit.Failure, err.Error())
 		s.writeCodeError(w, err)
 		return
@@ -566,10 +554,23 @@ type TwoFactorPolicy struct {
 	// OutsideRequired is fixed: everyone needs a second factor from
 	// outside (the owner's choice, decision 440).
 	OutsideRequired bool `json:"outsideRequired"`
+	// RouterSeenAt is when a sign-in or service last came from the
+	// router's own address (hairpin NAT or a masqueraded port forward):
+	// such requests count as outside, and Security warns (nil: never since
+	// hardyd started).
+	RouterSeenAt *time.Time `json:"routerSeenAt"`
+}
+
+func (s *Server) policy(ctx context.Context, days int) TwoFactorPolicy {
+	p := TwoFactorPolicy{AdminGraceDays: days, OutsideRequired: true}
+	if t := s.routerSeen(); !t.IsZero() {
+		p.RouterSeenAt = &t
+	}
+	return p
 }
 
 func (s *Server) handle2FAPolicy(w http.ResponseWriter, r *http.Request, _ *auth.User) {
-	writeJSON(w, http.StatusOK, TwoFactorPolicy{AdminGraceDays: s.mfa.GraceDays(r.Context()), OutsideRequired: true})
+	writeJSON(w, http.StatusOK, s.policy(r.Context(), s.mfa.GraceDays(r.Context())))
 }
 
 type twoFactorPolicyRequest struct {
@@ -587,7 +588,7 @@ func (s *Server) handle2FAPolicySet(w http.ResponseWriter, r *http.Request, u *a
 		return
 	}
 	s.record(r, u, "auth.2fa.policy", "", audit.Success, fmt.Sprintf("administrators' grace period %d → %d days", old, req.AdminGraceDays))
-	writeJSON(w, http.StatusOK, TwoFactorPolicy{AdminGraceDays: req.AdminGraceDays, OutsideRequired: true})
+	writeJSON(w, http.StatusOK, s.policy(r.Context(), req.AdminGraceDays))
 }
 
 // ---- administrators: reset and setup codes ------------------------------------
@@ -596,6 +597,9 @@ type reset2FARequest struct {
 	// Confirm must be the account's username (destructive: the person
 	// can't sign in with their authenticator any more).
 	Confirm string `json:"confirm"`
+	// RevokeAppPasswords also removes the account's app passwords (default
+	// true: a lost phone usually holds some).
+	RevokeAppPasswords *bool `json:"revokeAppPasswords,omitempty"`
 }
 
 func (s *Server) handleUser2FAReset(w http.ResponseWriter, r *http.Request, admin *auth.User) {
@@ -623,9 +627,22 @@ func (s *Server) handleUser2FAReset(w http.ResponseWriter, r *http.Request, admi
 		return
 	}
 	s.challenges.DropUser(t.ID)
+	// Desktop and app sessions, WebDAV, Office, and every app sign-in and
+	// refresh token end.
 	s.endUserEverywhere(r.Context(), t.ID)
 	s.dav.dropUser(t.ID)
-	s.record(r, admin, "users.2fa.reset", t.Username, audit.Success, "authenticator and recovery codes removed; signed out everywhere")
+	detail := "authenticator, recovery codes and the record of wrong codes removed; signed out everywhere and app sign-ins revoked"
+	if req.RevokeAppPasswords == nil || *req.RevokeAppPasswords {
+		n, err := s.appPw.DeleteAll(r.Context(), t.ID)
+		if err != nil {
+			internalError(s, w, err)
+			return
+		}
+		detail += fmt.Sprintf("; %d app passwords revoked", n)
+	} else {
+		detail += "; app passwords kept"
+	}
+	s.record(r, admin, "users.2fa.reset", t.Username, audit.Success, detail)
 	writeJSON(w, http.StatusOK, s.withMFA(r.Context(), t))
 }
 
@@ -795,14 +812,98 @@ func (s *Server) servicePassword(ctx context.Context, typed, pw, scope, ip strin
 			return row, false, nil
 		}
 	}
-	enrolled := false
-	if row != nil {
-		if enrolled, err = s.mfa.Enabled(ctx, row.ID); err != nil {
-			return nil, false, err
-		}
+	ok, err := s.mfa.PasswordAllowed(ctx, row, outside)
+	if err != nil {
+		return nil, false, err
 	}
-	if !auth.PasswordPolicy(enrolled, outside) {
+	if !ok {
 		return nil, false, errAppPasswordRequired
 	}
 	return nil, true, nil
+}
+
+// passwordStillAllowed is checked again after an own password worked for
+// such a service (the account may have set up two-factor sign-in, or come
+// due for it, while Kerberos was being asked; and a first sign-in only
+// makes the row then).
+func (s *Server) passwordStillAllowed(ctx context.Context, u *auth.User) error {
+	if s.mfa == nil || u == nil {
+		return nil
+	}
+	ok, err := s.mfa.PasswordAllowed(ctx, u, false)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errAppPasswordRequired
+	}
+	return nil
+}
+
+// ---- helpers --------------------------------------------------------------------
+
+// origin is where r's codes count (decision 444).
+func (s *Server) origin(r *http.Request) auth.Origin {
+	return auth.Origin{Outside: s.outside(r), IP: s.clientIP(r)}
+}
+
+func outsideNote(outside bool) string {
+	if outside {
+		return "; from outside"
+	}
+	return ""
+}
+
+// secondFactorSet ends everything signed in before an authenticator was
+// set up or replaced: desktop sessions and app windows, WebDAV's
+// remembered sign-ins, Office sessions, HardyOS sign-in sessions and every
+// app sign-in and refresh token (decision 442).
+func (s *Server) secondFactorSet(ctx context.Context, uid int64) {
+	s.endUserEverywhere(ctx, uid)
+	s.dav.dropUser(uid)
+}
+
+// mfaNotify tells administrators (Notifications) and the person (their
+// account menu) about locks and wrong codes from outside, and audits it.
+func (s *Server) mfaNotify(ctx context.Context, e auth.MFAEvent) {
+	name := "an account"
+	if u, err := s.users.Get(ctx, e.UserID); err == nil {
+		name = u.Username
+	}
+	where := "at home"
+	if e.Outside {
+		where = "from outside (" + e.IP + ")"
+	}
+	var title, body, mine string
+	switch e.Kind {
+	case "short_lock":
+		title = "Two-factor codes paused for " + name
+		body = fmt.Sprintf("Too many wrong codes %s: code entry from there is paused for 15 minutes. Codes from other places keep working.", where)
+		mine = fmt.Sprintf("Someone typed several wrong two-factor codes for your account %s. If it wasn't you, change your password.", where)
+	case "outside_failures":
+		title = fmt.Sprintf("%d wrong two-factor codes from outside for %s", e.Count, name)
+		body = fmt.Sprintf("In the last 60 days, the latest from %s. Whoever types them knows the password.", e.IP)
+		mine = fmt.Sprintf("%d wrong two-factor codes were typed for your account from outside in the last 60 days (latest from %s). Someone may know your password: change it.", e.Count, e.IP)
+	case "outside_lock":
+		title = "Two-factor codes from outside turned off for " + name
+		body = fmt.Sprintf("%d wrong codes from outside in 60 days (latest from %s). Codes still work at home; changing the password or resetting two-factor sign-in turns them back on.", e.Count, e.IP)
+		mine = "Too many wrong two-factor codes from outside: codes from outside are off for your account. Change your password (or ask an administrator) to turn them back on; at home they still work."
+	default:
+		return
+	}
+	if s.cfg.Alerts != nil {
+		s.cfg.Alerts.Notify(ctx, notify.Event{Kind: "security.2fa", Severity: notify.SeverityWarning, Title: title, Body: body, Link: "control-panel/users", Time: time.Now()})
+	} else if s.cfg.Notify != nil {
+		_ = s.cfg.Notify.Send(ctx, notify.Notification{Level: notify.Warning, Title: title, Body: body, Source: "security", AdminOnly: true, Kind: "security.2fa", Link: "control-panel/users"})
+	}
+	s.mfa.SetNotice(ctx, e.UserID, mine)
+	s.recordSystem(ctx, "auth.2fa."+e.Kind, name, body)
+}
+
+func (s *Server) handle2FANoticeDismiss(w http.ResponseWriter, r *http.Request, u *auth.User) {
+	if err := s.mfa.DismissNotice(r.Context(), u.ID); err != nil {
+		internalError(s, w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

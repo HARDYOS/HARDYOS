@@ -104,7 +104,8 @@ type Config struct {
 	// DesktopUser is the person signed in to the desktop in this browser,
 	// when the request carries the desktop's session (the issuer is on the
 	// desktop's own host), and when that session started.
-	DesktopUser func(r *http.Request) (*auth.User, time.Time, bool)
+	// mfa reports whether that session used a second factor.
+	DesktopUser func(r *http.Request) (u *auth.User, at time.Time, mfa bool, ok bool)
 	// ClientIP is the request's address (trusted proxies honoured).
 	ClientIP   func(r *http.Request) string
 	Audit      AuditFunc
@@ -139,6 +140,14 @@ type Config struct {
 	// TOTPIssuer names this server in authenticator apps (default
 	// "HardyOS").
 	TOTPIssuer func() string
+	// Challenges holds sign-ins waiting for a second factor; hardyd shares
+	// the desktop's, so both count against one budget (nil: the
+	// provider's own).
+	Challenges *auth.Challenges
+	// SecondFactorSet is told when someone set up an authenticator on the
+	// provider's pages: everything signed in before ends (desktop, app
+	// windows, WebDAV, Office). nil: EndSessions.
+	SecondFactorSet func(ctx context.Context, userID int64)
 	// Insecure allows an http:// issuer (development without TLS).
 	Insecure bool
 	Log      *slog.Logger
@@ -612,6 +621,16 @@ func (p *Provider) RevokeClient(ctx context.Context, clientID string) (int64, er
 func (p *Provider) EndUser(ctx context.Context, userID int64) {
 	_, _ = p.cfg.DB.ExecContext(ctx, `DELETE FROM oidc_browser_sessions WHERE user_id = ?`, userID)
 	_, _ = revokeWhere(ctx, p.cfg.DB, p.now(), `user_id = ?`, userID)
+}
+
+// EndUserIn is EndUser without a running provider (hardyctl, as root on
+// the database): sign-in sessions end and every grant and token is
+// revoked. It reports how many grants were revoked.
+func EndUserIn(ctx context.Context, db *store.DB, userID int64) (int64, error) {
+	if _, err := db.ExecContext(ctx, `DELETE FROM oidc_browser_sessions WHERE user_id = ?`, userID); err != nil {
+		return 0, err
+	}
+	return revokeWhere(ctx, db, time.Now(), `user_id = ?`, userID)
 }
 
 // PasswordSet ends what a person signed in to with a password older than

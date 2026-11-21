@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { cleanCode, codeReady, graceText, isChallenge, recoveryCodesText, setupCodeReady, totpReady, twoFactorLabel } from "./twoFactorRules";
 
 const off: TwoFactorStatus = {
-  enabled: false, enabledAt: null, recoveryCodesLeft: 0, required: false, graceUntil: null, locked: false, setupCodeExpires: null, mustEnroll: false,
+  enabled: false, enabledAt: null, recoveryCodesLeft: 0, required: false, graceUntil: null, locked: false, outsideFailures: 0, setupCodeExpires: null, mustEnroll: false,
 };
 
 describe("two-factor rules", () => {
@@ -36,6 +36,7 @@ describe("two-factor rules", () => {
     expect(twoFactorLabel({ ...off, enabled: true, recoveryCodesLeft: 10 })).toEqual({ text: "2FA on", tone: "good" });
     expect(twoFactorLabel({ ...off, enabled: true, recoveryCodesLeft: 1 }).tone).toBe("warn");
     expect(twoFactorLabel({ ...off, enabled: true, locked: true }).tone).toBe("bad");
+    expect(twoFactorLabel({ ...off, enabled: true, outsideFailures: 3, recoveryCodesLeft: 9 }).text).toBe("2FA on");
     expect(twoFactorLabel({ ...off, required: true, mustEnroll: true, graceUntil: "2026-11-20T00:00:00Z" }).text).toBe("2FA required now");
     expect(twoFactorLabel(off).text).toBe("2FA off");
     expect(twoFactorLabel(undefined).tone).toBe("neutral");

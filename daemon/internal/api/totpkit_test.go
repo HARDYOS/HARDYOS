@@ -55,7 +55,7 @@ func (k *totpKit) enroll(t *testing.T, username string) []string {
 	if err != nil {
 		t.Fatalf("enroll %s: %v", username, err)
 	}
-	e, err := k.s.mfa.BeginEnroll(ctx, u, "HardyOS")
+	e, err := k.s.mfa.BeginEnroll(ctx, u, "HardyOS", "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func (k *totpKit) enroll(t *testing.T, username string) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	codes, err := k.s.mfa.ConfirmEnroll(ctx, u, auth.TOTPCode(secret, auth.TOTPStep(k.clock())))
+	codes, err := k.s.mfa.ConfirmEnroll(ctx, u, auth.TOTPCode(secret, auth.TOTPStep(k.clock())), "test", auth.Inside)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,6 +71,11 @@ func (k *totpKit) enroll(t *testing.T, username string) []string {
 	k.secrets[strings.ToLower(username)] = secret
 	k.mu.Unlock()
 	return codes
+}
+
+// b32NoPad decodes a secret as the API shows it (groups of four).
+func b32NoPad(s string) ([]byte, error) {
+	return base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.ReplaceAll(s, " ", ""))
 }
 
 // setSecret records a secret enrolled another way (through the API).

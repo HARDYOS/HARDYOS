@@ -22,6 +22,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/boot"
+	"github.com/hardyos/hardyos/daemon/internal/oidc"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
@@ -42,9 +43,10 @@ Commands:
 Recovery (run as root on the server; works even if hardyd is down):
   reset-password <username>  set a new password, re-enable the account, sign out its sessions
   create-admin <username>    add a new administrator (if every admin is locked out)
-  reset-2fa <username>       remove the account's authenticator and recovery codes and sign
-                             out its sessions (lost phone); an administrator sets up a new
-                             one at the next sign-in
+  reset-2fa <username>       remove the account's authenticator and recovery codes, sign out
+                             its sessions, revoke its app sign-ins and (unless
+                             -keep-app-passwords) its app passwords (lost phone); an
+                             administrator sets up a new one at the next sign-in
 
 Boot (run as root):
   boot-list                  list boot environments
@@ -64,6 +66,7 @@ func main() {
 	socket := flag.String("socket", priv.DefaultSocket, "hardyd-priv socket (for priv-ping)")
 	dbPath := flag.String("db", store.DefaultPath, "hardyd database (for recovery commands)")
 	pwStdin := flag.Bool("password-stdin", false, "read the new password from stdin instead of prompting")
+	keepAppPw := flag.Bool("keep-app-passwords", false, "reset-2fa: keep the account's app passwords (they are revoked by default)")
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, usage)
 		flag.PrintDefaults()
@@ -87,7 +90,7 @@ func main() {
 	case "create-admin":
 		err = recovery(*dbPath, args, *pwStdin, true)
 	case "reset-2fa":
-		err = reset2FA(*dbPath, args)
+		err = reset2FA(*dbPath, args, *keepAppPw)
 	case "app-pack":
 		err = appPack(args)
 	case "app-check":
@@ -189,6 +192,8 @@ func recovery(dbPath string, args []string, fromStdin, createAdmin bool) error {
 		return err
 	}
 	_ = sessions.RevokeUser(ctx, u.ID)
+	// A new password lifts the stop on two-factor codes from outside.
+	(&auth.MFA{DB: db}).ClearOutsideLock(ctx, u.ID, time.Now())
 	_ = log.Record(ctx, audit.Entry{Actor: actor, Action: "recovery.reset_password", Target: u.Username, Outcome: audit.Success})
 	fmt.Printf("Password for %q reset; the account is enabled and its sessions were signed out.\n", u.Username)
 	return nil
@@ -198,7 +203,7 @@ func recovery(dbPath string, args []string, fromStdin, createAdmin bool) error {
 // directly (root on the console): the way back in when the only
 // administrator lost their authenticator and recovery codes. It needs no
 // key: nothing sealed is read.
-func reset2FA(dbPath string, args []string) error {
+func reset2FA(dbPath string, args []string, keepAppPasswords bool) error {
 	if len(args) != 1 {
 		return errors.New("expected exactly one username")
 	}
@@ -218,9 +223,24 @@ func reset2FA(dbPath string, args []string) error {
 		return err
 	}
 	_ = (&auth.Sessions{DB: db}).RevokeUser(ctx, u.ID)
-	_, _ = db.ExecContext(ctx, `DELETE FROM oidc_browser_sessions WHERE user_id = ?`, u.ID)
-	_ = (&audit.Log{DB: db}).Record(ctx, audit.Entry{Actor: "hardyctl@" + hostname(), Action: "recovery.reset_2fa", Target: u.Username, Outcome: audit.Success})
-	fmt.Printf("Two-factor sign-in for %q removed and its sessions signed out.", u.Username)
+	// HardyOS sign-in sessions end and every app sign-in and refresh token
+	// is revoked.
+	grants, err := oidc.EndUserIn(ctx, db, u.ID)
+	if err != nil {
+		return fmt.Errorf("revoking app sign-ins: %w", err)
+	}
+	detail := fmt.Sprintf("%d app sign-ins revoked", grants)
+	if !keepAppPasswords {
+		n, err := (&auth.AppPasswords{DB: db}).DeleteAll(ctx, u.ID)
+		if err != nil {
+			return fmt.Errorf("revoking app passwords: %w", err)
+		}
+		detail += fmt.Sprintf("; %d app passwords revoked", n)
+	} else {
+		detail += "; app passwords kept"
+	}
+	_ = (&audit.Log{DB: db}).Record(ctx, audit.Entry{Actor: "hardyctl@" + hostname(), Action: "recovery.reset_2fa", Target: u.Username, Outcome: audit.Success, Detail: detail})
+	fmt.Printf("Two-factor sign-in for %q removed, its sessions signed out and its app sign-ins revoked (%s).", u.Username, detail)
 	if u.Role == auth.RoleAdmin {
 		fmt.Print(" It sets up a new authenticator at the next sign-in (from home).")
 	}

@@ -21,6 +21,7 @@ export function Users() {
   const [deleting, setDeleting] = useState<User | null>(null);
   const [resetting2FA, setResetting2FA] = useState<User | null>(null);
   const [setupFor, setSetupFor] = useState<User | null>(null);
+  const [revokeAppPw, setRevokeAppPw] = useState(true);
   const qc = useQueryClient();
 
   return (
@@ -125,7 +126,12 @@ export function Users() {
           typeToConfirm={resetting2FA.username}
           onClose={() => setResetting2FA(null)}
           onConfirm={async () => {
-            await unwrap(api.POST("/users/{id}/2fa/reset", { params: { path: { id: resetting2FA.id } }, body: { confirm: resetting2FA.username } }));
+            await unwrap(
+              api.POST("/users/{id}/2fa/reset", {
+                params: { path: { id: resetting2FA.id } },
+                body: { confirm: resetting2FA.username, revokeAppPasswords: revokeAppPw },
+              }),
+            );
             await qc.invalidateQueries({ queryKey: ["users"] });
             toast("success", `Two-factor sign-in reset for ${resetting2FA.username}`, "They were signed out everywhere.");
           }}
@@ -135,8 +141,12 @@ export function Users() {
             {resetting2FA.role === "admin"
               ? "As an administrator they set up a new authenticator at their next sign-in, from home."
               : "They can set it up again from home, or from outside with a setup code from you."}{" "}
-            Type the username to confirm.
+            Every app sign-in is revoked too. Type the username to confirm.
           </p>
+          <label className="row small" style={{ gap: 6 }}>
+            <input type="checkbox" checked={revokeAppPw} onChange={(e) => setRevokeAppPw(e.target.checked)} /> Also revoke their app passwords (mail,
+            WebDAV, calendars)
+          </label>
         </ConfirmDialog>
       )}
       {deleting && (
@@ -322,6 +332,7 @@ export function TwoFactorPolicyCard() {
   });
   if (policy.isPending) return <Loading />;
   if (policy.isError) return <ErrorBox error={policy.error} onRetry={() => policy.refetch()} />;
+  const routerSeen = policy.data.routerSeenAt;
   const value = days ?? String(policy.data.adminGraceDays);
   const n = Number(value);
   const valid = Number.isInteger(n) && n >= 0 && n <= 30;
@@ -346,6 +357,13 @@ export function TwoFactorPolicyCard() {
           Save
         </Button>
       </form>
+      {routerSeen && (
+        <Alert tone="warn" title="Sign-ins through the router's own address">
+          On {dateTime(routerSeen)} a request reached HardyOS from your router&apos;s address. That happens with hairpin NAT (a device at home using
+          the public address) or a port forward that hides where visitors come from. HardyOS counts these as outside, so they need two-factor sign-in.
+          Use the server&apos;s local address at home, and don&apos;t forward ports to it: Remote Access publishes through NetBird instead.
+        </Alert>
+      )}
       {save.error && <Alert tone="bad">{errorMessage(save.error)}</Alert>}
     </Card>
   );
