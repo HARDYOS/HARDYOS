@@ -1,0 +1,49 @@
+name: DIAG samba dns
+
+on:
+  push:
+    branches: [ci/diag-samba-dns]
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2, 3, 4, 5, 6]
+    name: diag ${{ matrix.n }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache: false
+      - name: host facts
+        run: |
+          uname -a; cat /etc/nsswitch.conf; cat /etc/resolv.conf; cat /etc/hosts; hostname -f || true
+          resolvectl status 2>/dev/null | head -30 || true
+          sysctl net.ipv4.ip_forward
+          sudo iptables-save | head -60 || true
+          ip route; ip -br addr
+          sudo ss -lunp | grep ':53 ' || true
+      - name: install Samba
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq samba samba-ad-dc samba-ad-provision samba-dsdb-modules samba-vfs-modules winbind libnss-winbind smbclient iputils-arping bind9-dnsutils
+          sudo systemctl stop smbd nmbd winbind samba-ad-dc 2>/dev/null || true
+          sudo sed -i -E '/^(passwd|group):/{/winbind/!s/$/ winbind/}' /etc/nsswitch.conf
+          sudo install -D -m 0755 packaging/domain/hardyos-dc-admin /usr/lib/hardyos/hardyos-dc-admin
+          sudo ip link add lan0 type dummy
+          sudo ip addr add 10.123.0.1/24 dev lan0
+          sudo ip link set lan0 up
+      - name: build test binary
+        working-directory: daemon
+        run: go test -c -o "$RUNNER_TEMP/domain.test" ./internal/domain
+      - name: member diag
+        run: |
+          sudo HARDYOS_DIAG=1 HARDYOS_DC_INTEGRATION=1 HARDYOS_DC_TEST_ADDRESS=10.123.0.20/24 HARDYOS_DC_TEST_GATEWAY=10.123.0.1 \
+            "$RUNNER_TEMP/domain.test" -test.run TestSMBMemberIntegration -test.v -test.timeout 10m || true
+          sudo sh -c 'tail -n 30 /var/lib/hardyos-dc/log/log.* 2>/dev/null' || true

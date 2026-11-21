@@ -160,6 +160,25 @@ func TestSMBMemberIntegration(t *testing.T) {
 	if out, err := exec.Command("getent", "passwd", `HOME\alice`).CombinedOutput(); err != nil || !strings.Contains(string(out), ":10") {
 		t.Fatalf("alice has no Linux ID: %v %s", err, out)
 	}
+	if os.Getenv("HARDYOS_DIAG") == "1" {
+		ip := c.IP()
+		for _, q := range []string{
+			"getent ahosts NASIT",
+			"dig +time=5 +tries=1 @" + ip + " nasit." + dom,
+			"dig +time=5 +tries=1 @" + ip + " NASIT",
+			"dig +time=5 +tries=1 @" + ip + " example.com",
+			"cat /etc/resolv.conf",
+		} {
+			argv := mr.wrap("sh", "-c", q)
+			t0 := time.Now()
+			out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput()
+			t.Logf("DIAG %q took %s err=%v\n%s", q, time.Since(t0).Round(time.Millisecond), err, out)
+		}
+		t0 := time.Now()
+		out, _ := exec.Command("smbclient", "-p", "4455", "-N", "-L", "//127.0.0.1", "-t", "60").CombinedOutput()
+		t.Logf("DIAG smbclient -L took %s\n%s", time.Since(t0).Round(time.Millisecond), out)
+		t.Fatal("DIAG stop")
+	}
 
 	// ---- who may do what --------------------------------------------------
 	type try struct {
