@@ -160,9 +160,14 @@ func main() {
 		priv.RegisterTerminal(s)
 		// Keys hardyd encrypts its own secrets with (sign-in provider keys).
 		priv.RegisterSecrets(s, zfs.KeyDir)
+		// The Cloudflare token for hostnames (decision 451): root's alone,
+		// used only for named DNS operations.
+		priv.RegisterDNS(s, priv.DNSEnv{KeyDir: zfs.KeyDir})
 		// Kept attached to the LAN and running through network changes and
 		// crashes.
 		priv.RegisterDomain(s, dc)
+		// The hostnames' records in the DC's DNS (decision 459).
+		priv.RegisterHostRecords(s, dc, zfs.KeyDir)
 		go dc.Watch(ctx)
 		// Docker apps: Docker stays off at boot until hardyd-priv has pointed
 		// it at its dataset on the pool, then the apps come back by themselves.

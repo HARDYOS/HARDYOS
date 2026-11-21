@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
+	"net/netip"
 
 	"github.com/hardyos/hardyos/daemon/internal/domain"
 )
@@ -43,7 +45,34 @@ const (
 	// OpDomainReplication reports replication from the partner DCs
 	// (samba-tool drs showrepl; monitoring).
 	OpDomainReplication = "domain.replication"
+
+	// OpDomainHostRecords keeps the hostnames' A records in the DC's DNS
+	// (decision 459): domain.HostRecordsArgs -> domain.HostRecordsResult.
+	// The address must be one of this server's own and the base the one
+	// root's Cloudflare token is for (RegisterHostRecords).
+	OpDomainHostRecords = "domain.dns.hostnames"
 )
+
+// ownAddress reports whether a is an address of this server (host network
+// namespace), not loopback. A variable for tests.
+var ownAddress = func(a string) bool {
+	want, err := netip.ParseAddr(a)
+	if err != nil || want.IsLoopback() {
+		return false
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, x := range addrs {
+		if n, ok := x.(*net.IPNet); ok {
+			if got, ok := netip.AddrFromSlice(n.IP); ok && got.Unmap() == want.Unmap() {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // DomainDestroyArgs confirms deleting the domain by naming it.
 type DomainDestroyArgs struct {

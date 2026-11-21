@@ -148,6 +148,9 @@ func (s *Server) newOffice() *officeRuntime {
 		if f := s.remote.filesURL(); f != "" && scheme == "https" && strings.EqualFold(host, strings.TrimPrefix(f, "https://")) {
 			return true
 		}
+		if o := s.hosts.officeHost(); o != "" && scheme == "https" && strings.EqualFold(host, o) {
+			return true
+		}
 		_, port, err := net.SplitHostPort(host)
 		rt.mu.Lock()
 		own := strconv.Itoa(rt.port())
@@ -378,6 +381,18 @@ func (s *Server) onFilesHost(r *http.Request) bool {
 		return false
 	}
 	return strings.EqualFold(hostOnly(r.Host), strings.TrimPrefix(u, "https://"))
+}
+
+// portHandler is the office port's handler: reached by a name under the
+// base it redirects to office.<base> (decision 458).
+func (rt *officeRuntime) portHandler() http.Handler {
+	h := rt.handler()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if rt.s.hosts.redirectOld(w, r, hostOfficeID) {
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 // officeHandler is the office origin's handler.
@@ -976,6 +991,9 @@ func desktopOrigin(r *http.Request) string {
 
 // originFor is the office origin as the browser behind r reaches it.
 func (rt *officeRuntime) originFor(r *http.Request) (string, bool) {
+	if o, ok := rt.s.hosts.officeOrigin(r); ok {
+		return o, true
+	}
 	rt.mu.Lock()
 	up := rt.srv != nil
 	tlsOn := rt.opts.TLS != nil
@@ -1031,6 +1049,10 @@ func (rt *officeRuntime) serveDesktopEditor(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	tok, ok := rt.s.sessionToken(r)
+	if d, isHost := r.Context().Value(officeDesktopKey{}).(string); isHost {
+		// office.<base>: the desktop session the host session follows.
+		tok, ok = d, d != ""
+	}
 	if !ok || hashSecret(tok) != t.sessHash {
 		office.ServeMessage(w, http.StatusForbidden, "Open the document again", "Open documents from the HardyOS desktop you're signed in to.", "")
 		return
@@ -1256,7 +1278,7 @@ func (rt *officeRuntime) reconcile(ctx context.Context) {
 		if err != nil {
 			rt.s.log.Warn("office: can't listen", "addr", addr, "err", err)
 		} else {
-			srv := &http.Server{Handler: rt.handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
+			srv := &http.Server{Handler: rt.portHandler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
 			if rt.opts.TLS != nil {
 				ln = tls.NewListener(ln, rt.opts.TLS)
 			}
