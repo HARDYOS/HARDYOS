@@ -123,8 +123,7 @@ func TestSMBMemberIntegration(t *testing.T) {
 	src := &listShares{l: []shares.Share{docs, guest}}
 
 	conf := sub("smb.conf")
-	mr := &memberRunner{conf: conf, resolv: sub("resolv.conf"), krb5: sub("krb5.conf"), log: sub("log"), procs: map[string]*memberProc{}}
-	t.Cleanup(mr.stopAll)
+	mr := newMemberRunner(t, tmp, "NASIT", dom)
 	m := &smb.Manager{
 		Runner: mr, Shares: src, ServerName: "NASIT", Port: 4455, NoDataset: true,
 		DataDir: sub("data"), ConfPath: conf, Krb5Conf: sub("krb5.conf"), NSSwitch: sub("nsswitch.conf"), AvahiService: sub("avahi", "hardyos-smb.service"),
@@ -139,7 +138,7 @@ func TestSMBMemberIntegration(t *testing.T) {
 		m.Wait()
 		if out, err := exec.Command("ls", "-la", sub("log")).CombinedOutput(); err == nil && t.Failed() {
 			t.Logf("member logs:\n%s", out)
-			b, _ := exec.Command("sh", "-c", "tail -40 "+sub("log")+"/log.*").CombinedOutput()
+			b, _ := exec.Command("sh", "-c", "tail -n 40 "+sub("log")+"/log.* && find "+sub("log")+"/cores -type f -ls").CombinedOutput()
 			t.Logf("%s", b)
 		}
 	})
@@ -160,6 +159,7 @@ func TestSMBMemberIntegration(t *testing.T) {
 	if out, err := exec.Command("getent", "passwd", `HOME\alice`).CombinedOutput(); err != nil || !strings.Contains(string(out), ":10") {
 		t.Fatalf("alice has no Linux ID: %v %s", err, out)
 	}
+	mr.checkSelfLookup(t)
 
 	// ---- who may do what --------------------------------------------------
 	type try struct {
@@ -266,12 +266,61 @@ func (s *listShares) set(i int, fn func(*shares.Share)) {
 
 // memberRunner runs the member server's smbd and winbindd from the test's
 // config and answers systemctl for their units; net runs where
-// resolv.conf and krb5.conf point at the test domain. Everything else
+// resolv.conf, krb5.conf and hosts are the member's. Everything else
 // runs as is.
 type memberRunner struct {
-	conf, resolv, krb5, log string
-	mu                      sync.Mutex
-	procs                   map[string]*memberProc
+	conf, resolv, krb5, hosts, log string
+	names                          []string // the member's own names, in its hosts file
+	mu                             sync.Mutex
+	procs                          map[string]*memberProc
+}
+
+// newMemberRunner sets up the member's files in dir (which holds its
+// smb.conf, resolv.conf, krb5.conf and log folder) for a member called
+// server in the domain dom.
+//
+// Its hosts file names the member itself, like a HardyOS server's (the
+// installer and the network settings write "127.0.1.1 <hostname>", and
+// the server's NetBIOS name is its hostname): smbd looks up its NetBIOS
+// name and the machine's hostname for every connection it negotiates,
+// and through the test domain's DNS each lookup takes as long as the DC's
+// forwarders take to time out, which they always do here (the DC's LAN is
+// a dummy interface). Two of them outlast smbclient's 20 s negotiation
+// timeout: runners whose /etc/hosts lacks their own hostname (the
+// AWS-hosted ubuntu-24.04 ones) failed every SMB call that way.
+func newMemberRunner(t *testing.T, dir, server, dom string) *memberRunner {
+	t.Helper()
+	sub := func(p string) string { return filepath.Join(dir, p) }
+	host, err := os.Hostname()
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, _, _ = strings.Cut(host, ".")
+	base, _ := os.ReadFile("/etc/hosts")
+	fqdn := strings.ToLower(server) + "." + dom
+	hosts := fmt.Sprintf("%s\n127.0.1.1\t%s %s\n127.0.1.1\t%s\n", strings.TrimRight(string(base), "\n"), fqdn, server, host)
+	if err := os.WriteFile(sub("hosts"), []byte(hosts), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mr := &memberRunner{conf: sub("smb.conf"), resolv: sub("resolv.conf"), krb5: sub("krb5.conf"), hosts: sub("hosts"), log: sub("log"),
+		names: []string{server, fqdn, host}, procs: map[string]*memberProc{}}
+	t.Cleanup(mr.stopAll)
+	return mr
+}
+
+// checkSelfLookup fails fast (rather than with every smbclient call
+// timing out) when the member's own names don't resolve at once where its
+// smbd runs.
+func (r *memberRunner) checkSelfLookup(t *testing.T) {
+	t.Helper()
+	for _, n := range r.names {
+		argv := r.wrap("getent", "ahosts", n)
+		t0 := time.Now()
+		out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput()
+		if took := time.Since(t0); err != nil || took > 2*time.Second {
+			t.Fatalf("the member's own name %s doesn't resolve locally (%v after %s): smbd would stall negotiating every connection\n%s", n, err, took.Round(time.Millisecond), out)
+		}
+	}
 }
 
 type memberProc struct {
@@ -280,7 +329,7 @@ type memberProc struct {
 }
 
 func (r *memberRunner) wrap(name string, args ...string) []string {
-	script := fmt.Sprintf(`mount --bind %s /etc/resolv.conf && mount --bind %s /etc/krb5.conf && exec "$@"`, r.resolv, r.krb5)
+	script := fmt.Sprintf(`mount --bind %s /etc/resolv.conf && mount --bind %s /etc/krb5.conf && mount --bind %s /etc/hosts && exec "$@"`, r.resolv, r.krb5, r.hosts)
 	return append([]string{"unshare", "-m", "--propagation", "private", "sh", "-c", script, "sh", name}, args...)
 }
 
