@@ -472,11 +472,17 @@ func (m *Manager) StartImport(ctx context.Context, a ImportArgs) (*Task, error) 
 	if m.state(ctx, a.ID) != "stopped" {
 		return nil, Problems{"the VM must be off while its disk is imported"}
 	}
-	f, err := m.folder(ctx, "", false)
-	if err != nil || f == nil {
-		return nil, Problems{"the ISOs shared folder isn't available"}
+	var src *os.File
+	if disk.Import.Catalog != "" {
+		// A verified image comes from root's own store, never the share.
+		src, err = m.openCatalogImport(ctx, st.spec.Pool, disk.Import)
+	} else {
+		f, ferr := m.folder(ctx, "", false)
+		if ferr != nil || f == nil {
+			return nil, Problems{"the ISOs shared folder isn't available"}
+		}
+		src, err = openFile(f, disk.Import.File)
 	}
-	src, err := openFile(f, disk.Import.File)
 	if err != nil {
 		return nil, err
 	}

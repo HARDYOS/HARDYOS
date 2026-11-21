@@ -18,8 +18,15 @@ the pool, like the rest of a VM).
   key (fingerprint in the code); Debian's `SHA512SUMS` (Debian publishes no
   signature for cloud images, so the TLS connection to cloud.debian.org is
   the anchor); Home Assistant OS and VirtIO drivers by SHA-256 and size pinned
-  in the code. A copy already in the ISO library is hashed again and reused
-  when it still matches ("cached on the pool"); otherwise it's replaced.
+  in the code. Ubuntu's signature must be no older than the pinned date or
+  the newest one seen on the pool (no replays).
+- **Catalog store** (security review H1): verified files are kept in
+  `<pool>/vm-catalog`, a root-only, never-shared dataset (files 0444, a
+  root-only `.verified` record of checksum, size, mtime and inode next to
+  each), not in the SMB-writable ISOs folder. The VirtIO disc a VM gets and
+  every catalog import come only from there and are checked against the
+  record at each use; the ISOs folder refuses files of catalog names; the
+  guest tools are found on the CD labelled `virtio-win*`.
 - **One-click Linux**: templates `debian13` and `ubuntu2404` (cloud install,
   catalog image, cloud-init NoCloud seed with user, password and/or SSH keys,
   host name, CPU/RAM/disk from the wizard). The older `linux` template stays
@@ -29,14 +36,21 @@ the pool, like the rest of a VM).
 - **Windows 11 / Windows Server 2025 unattended**: the person picks their own
   ISO (no licence handling, no product key). Root writes `autounattend.xml`
   (user, password, locale, keyboard, time zone, edition, computer name) on a
-  small extra disc (`unattend` media, QEMU-owned 0600, like the cloud-init
-  seed); the password is only on that disc, never in `vm.json`. The VirtIO
-  drivers disc is attached and its storage/network drivers are loaded in
-  Windows PE; first logon installs the VirtIO guest tools. Extra first-logon
-  steps come from named hooks registered in Go (`RegisterFirstLogonHook`),
-  so a later feature (Sunshine) adds its own steps without a new format.
-  The installer's "press any key to boot from CD" is answered by root
-  (`virsh send-key`) on the first start only.
+  small extra disc (`unattend` media) in `/run/hardyos-unattend/<uuid>.iso`
+  (tmpfs: in no dataset, snapshot, replica or backup; QEMU-owned 0600, made
+  in a 0700 staging folder); the password is only on that disc, never in
+  `vm.json`. The VirtIO drivers disc is attached and its storage/network
+  drivers are loaded in Windows PE; first logon installs the VirtIO guest
+  tools. Extra first-logon steps come from named hooks registered in Go
+  (`RegisterFirstLogonHook`, given only `HookVM{ID, User, Arch}`), so a later
+  feature (Sunshine) adds its own steps without a new format. The
+  installer's "press any key to boot from CD" is answered by root (`virsh
+  send-key`) on the first start only.
+- **Until Windows is installed** (review H2) the VM starts without its
+  passed-through devices and refuses USB hot-plug, so Setup can only wipe the
+  VM's own new disk; unattended installs can't use imported or template
+  disks. The install ends when the guest agent answers (or the person takes
+  the disc out): the disc is deleted and devices join at the next start.
 - **Make template from VM**: a stopped VM is copied (ZFS send/receive) to
   `<pool>/vm-templates/<id>` with its spec minus identity (UUID, MACs,
   cloud-init password, TPM and NVRAM). New VMs from it get full copies of its
@@ -54,10 +68,12 @@ unattended install attaches the VirtIO disc on its own.
   confirmation.
 - **Scheduled snapshots**: a per-VM schedule (hourly/daily/weekly/monthly,
   how many of each to keep) in `vm.json`, changed with its own op
-  (`vms.schedule.set`, a job) and kept by every other update. hardyd-priv
+  (`vms.schedule.set`, a job) and kept by every other update; counts that
+  would delete existing automatic snapshots need the VM's name. hardyd-priv
   takes due snapshots every minute (`vm-auto-<kind>-<slot>`), frozen through
   the guest agent when it runs, else crash-consistent and marked, and prunes
-  each kind to its count. Manual snapshots are never pruned.
+  each kind to its count. Manual snapshots are never pruned. A busy VM is
+  skipped (never holding up the others) and marked late after 5 rounds.
 - Cloud backups and replication already include VMs (fsfreeze or
   crash-consistent); the VM page shows how protected it is and the note.
 
@@ -68,8 +84,11 @@ unattended install attaches the VirtIO disc on its own.
   (QEMU's VNC audio extension, decoded by a small RFB subclass and played
   with Web Audio), full screen with keyboard lock.
 - USB hot-plug by vendor:product on a running VM (`vms.usb.attach`,
-  `vms.usb.detach`), through part D's checks (`devices.HotPlugger`), with
-  "keep it for next start" adding it to the spec.
+  `vms.usb.detach`), through part D's checks (`devices.HotPlugger`), refusing
+  devices a program or app on the server has open and keyboards/mice unless
+  confirmed, with "keep it for next start" adding it to the spec.
+- Clipboard is on by default for desktop templates only; every open screen
+  of a VM shares its clipboard (the UI says so).
 - USB controllers: the inventory says which controller each USB device is
   on; a controller passes through as a PCI device (existing path, refused
   while it holds something the server needs).

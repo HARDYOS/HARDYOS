@@ -113,6 +113,9 @@ func (s *Server) handleVMUserTemplateDelete(w http.ResponseWriter, r *http.Reque
 // VMScheduleRequest sets a VM's snapshot schedule (all zero: off).
 type VMScheduleRequest struct {
 	Schedule vms.Schedule `json:"schedule"`
+	// Confirm is the VM's name, needed when the counts delete automatic
+	// snapshots there are now.
+	Confirm string `json:"confirm,omitempty"`
 }
 
 func (s *Server) handleVMSchedule(w http.ResponseWriter, r *http.Request, u *auth.User) {
@@ -130,8 +133,20 @@ func (s *Server) handleVMSchedule(w http.ResponseWriter, r *http.Request, u *aut
 		writeError(w, http.StatusBadRequest, "invalid", fmt.Sprintf("keep at most %d hourly, %d daily, %d weekly and %d monthly snapshots", vms.MaxHourly, vms.MaxDaily, vms.MaxWeekly, vms.MaxMonthly))
 		return
 	}
-	s.submit(w, r, u, JobKindVMSchedule, "Snapshot schedule of "+v.Name, vms.SetScheduleArgs{ID: v.ID, Schedule: &sc},
-		"vms.schedule.set", fmt.Sprintf("%s hourly=%d daily=%d weekly=%d monthly=%d", v.ID, sc.Hourly, sc.Daily, sc.Weekly, sc.Monthly), nil)
+	// A quick answer here; hardyd-priv checks it again.
+	var snaps priv.VMSnapshotsResult
+	if err := s.vmCall(r, priv.OpVMsSnapshots, priv.VMRef{ID: v.ID}, &snaps); err != nil {
+		s.writePrivError(w, err)
+		return
+	}
+	pruned := len(vms.SchedulePrunes(snaps.Snapshots, &sc))
+	if pruned > 0 && !vms.Confirms(req.Confirm, &v.Spec) {
+		writeError(w, http.StatusBadRequest, "confirm_required",
+			fmt.Sprintf("these counts delete %d automatic snapshots %s has now; type the VM's name (%s) to confirm", pruned, v.Name, v.Name))
+		return
+	}
+	s.submit(w, r, u, JobKindVMSchedule, "Snapshot schedule of "+v.Name, vms.SetScheduleArgs{ID: v.ID, Schedule: &sc, Confirm: req.Confirm},
+		"vms.schedule.set", fmt.Sprintf("%s hourly=%d daily=%d weekly=%d monthly=%d prunes=%d", v.ID, sc.Hourly, sc.Daily, sc.Weekly, sc.Monthly, pruned), nil)
 }
 
 var (
@@ -143,6 +158,8 @@ var (
 type VMUSBRequest struct {
 	Device  string `json:"device"`
 	Persist bool   `json:"persist"`
+	// AllowInput confirms giving a keyboard or mouse to the VM.
+	AllowInput bool `json:"allowInput,omitempty"`
 }
 
 func (s *Server) vmUSB(w http.ResponseWriter, r *http.Request, u *auth.User, kind, verb string) {
@@ -163,8 +180,8 @@ func (s *Server) vmUSB(w http.ResponseWriter, r *http.Request, u *auth.User, kin
 		writeError(w, http.StatusConflict, "not_running", "the VM isn't running; change its USB devices in Hardware")
 		return
 	}
-	s.submit(w, r, u, kind, verb+" USB "+req.Device+" ("+v.Name+")", vms.USBArgs{ID: v.ID, Device: req.Device, Persist: req.Persist},
-		kind, fmt.Sprintf("%s %s persist=%t", v.ID, req.Device, req.Persist), nil)
+	s.submit(w, r, u, kind, verb+" USB "+req.Device+" ("+v.Name+")", vms.USBArgs{ID: v.ID, Device: req.Device, Persist: req.Persist, AllowInput: req.AllowInput},
+		kind, fmt.Sprintf("%s %s persist=%t allowInput=%t", v.ID, req.Device, req.Persist, req.AllowInput), nil)
 }
 
 func (s *Server) handleVMUSBAttach(w http.ResponseWriter, r *http.Request, u *auth.User) {

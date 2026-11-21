@@ -123,6 +123,9 @@ type Import struct {
 	// is read for the import: the catalog's verified checksum (decision
 	// 410). Empty: not checked (a file the person put there).
 	Digest string `json:"digest,omitempty"`
+	// Catalog: File is that verified image in the pool's catalog store,
+	// not a file in the ISOs shared folder.
+	Catalog string `json:"catalog,omitempty"`
 }
 
 func (i *Import) digest() digest {
@@ -243,14 +246,15 @@ var (
 	fileRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 ._()+,-]{0,199}$`)
 	sshRE  = regexp.MustCompile(`^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com) [A-Za-z0-9+/=]{16,}( [^\x00-\x1f\x7f]{0,200})?$`)
 	// cryptRE: SHA-512 crypt only.
-	cryptRE    = regexp.MustCompile(`^\$6\$(rounds=[0-9]{4,9}\$)?[./A-Za-z0-9]{1,16}\$[./A-Za-z0-9]{86}$`)
-	labelKeyRE = regexp.MustCompile(`^[a-z][a-z0-9.-]{0,30}$`)
-	pciRE      = regexp.MustCompile(`^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$`)
-	usbIDRE    = regexp.MustCompile(`^([0-9a-f]{4}:[0-9a-f]{4}|[0-9]{1,3}-[0-9]{1,3}(\.[0-9]{1,3}){0,6})$`)
-	vgpuTypeRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
-	romRE      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.(rom|bin)$`)
-	digestRE   = regexp.MustCompile(`^(sha256:[0-9a-f]{64}|sha512:[0-9a-f]{128})$`)
-	ifnameRE   = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
+	cryptRE     = regexp.MustCompile(`^\$6\$(rounds=[0-9]{4,9}\$)?[./A-Za-z0-9]{1,16}\$[./A-Za-z0-9]{86}$`)
+	labelKeyRE  = regexp.MustCompile(`^[a-z][a-z0-9.-]{0,30}$`)
+	pciRE       = regexp.MustCompile(`^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$`)
+	usbIDRE     = regexp.MustCompile(`^([0-9a-f]{4}:[0-9a-f]{4}|[0-9]{1,3}-[0-9]{1,3}(\.[0-9]{1,3}){0,6})$`)
+	vgpuTypeRE  = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	romRE       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.(rom|bin)$`)
+	digestRE    = regexp.MustCompile(`^(sha256:[0-9a-f]{64}|sha512:[0-9a-f]{128})$`)
+	catalogIDRE = regexp.MustCompile(`^[a-z][a-z0-9.-]{1,31}$`)
+	ifnameRE    = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
 )
 
 // ImageExtensions are the disk image formats an import accepts.
@@ -479,6 +483,9 @@ func (s *Spec) Validate(h Host) error {
 			}
 			if d.Import.Digest != "" && !digestRE.MatchString(d.Import.Digest) {
 				add("%s: the image's checksum must be sha256:<64 hex> or sha512:<128 hex>", d.Name)
+			}
+			if d.Import.Catalog != "" && (!catalogIDRE.MatchString(d.Import.Catalog) || d.Import.Digest == "") {
+				add("%s: a verified image needs its name and checksum", d.Name)
 			}
 		}
 		if d.Clone != nil {

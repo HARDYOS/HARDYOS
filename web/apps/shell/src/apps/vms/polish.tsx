@@ -1,9 +1,9 @@
 import type { Job, VM, VMSchedule } from "@hardy/api-client";
 import { useState } from "react";
-import { api, errorMessage, unwrap } from "../../api";
+import { ApiFailure, api, errorMessage, unwrap } from "../../api";
 import { TemplateIcon, TrashIcon, UsbIcon } from "../../icons";
 import { Alert, Badge, Button, Card, Field, IconButton, Select, TextInput, Toggle } from "../../ui";
-import { Dialog } from "../../ui/Dialog";
+import { ConfirmDialog, Dialog } from "../../ui/Dialog";
 import { toast } from "../../ui/toasts";
 import { useDevices } from "./devices/deviceApi";
 
@@ -34,15 +34,21 @@ export function scheduleSummary(s?: VMSchedule | null): string {
 export function ScheduleCard({ vm, onJob }: { vm: VM; onJob: (j: Job) => void }) {
   const [s, setS] = useState<VMSchedule>(() => ({ ...EMPTY, ...(vm.schedule ?? {}) }));
   const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState<string | null>(null);
   const problems = scheduleProblems(s);
   const dirty = JSON.stringify(s) !== JSON.stringify({ ...EMPTY, ...(vm.schedule ?? {}) });
+  const put = async (confirm?: string) => {
+    const r = await unwrap(api.PUT("/vms/{id}/schedule", { params: { path: { id: vm.id } }, body: { schedule: s, ...(confirm ? { confirm } : {}) } }));
+    onJob(r.job);
+  };
   const save = async () => {
     setBusy(true);
     try {
-      const r = await unwrap(api.PUT("/vms/{id}/schedule", { params: { path: { id: vm.id } }, body: { schedule: s } }));
-      onJob(r.job);
+      await put();
     } catch (e) {
-      toast("error", "Schedule not saved", errorMessage(e));
+      // Fewer of a kind would delete automatic snapshots there are now.
+      if (e instanceof ApiFailure && e.code === "confirm_required") setConfirming(e.message);
+      else toast("error", "Schedule not saved", errorMessage(e));
     } finally {
       setBusy(false);
     }
@@ -71,6 +77,11 @@ export function ScheduleCard({ vm, onJob }: { vm: VM; onJob: (j: Job) => void })
             </Field>
           ))}
         </div>
+        {vm.snapshotsBehind && (
+          <Alert tone="warn" title="Automatic snapshots are late">
+            A scheduled snapshot has been waiting: the VM is busy with something long (an import, a copy) or snapshots fail. See Log Center if it stays like this.
+          </Alert>
+        )}
         {problems.length > 0 && <span className="small" role="alert">{problems[0]}</span>}
         <div className="row">
           <Button variant="primary" disabled={!dirty || problems.length > 0} busy={busy} onClick={save}>
@@ -78,6 +89,17 @@ export function ScheduleCard({ vm, onJob }: { vm: VM; onJob: (j: Job) => void })
           </Button>
         </div>
       </div>
+      {confirming && (
+        <ConfirmDialog
+          title="Delete automatic snapshots?"
+          confirmLabel="Save and delete"
+          typeToConfirm={vm.name}
+          onClose={() => setConfirming(null)}
+          onConfirm={() => put(vm.name)}
+        >
+          <p>{confirming}</p>
+        </ConfirmDialog>
+      )}
     </Card>
   );
 }
@@ -183,10 +205,13 @@ export function LiveUSBCard({ vm, onJob }: { vm: VM; onJob: (j: Job) => void }) 
   const inv = useDevices();
   const [pick, setPick] = useState("");
   const [persist, setPersist] = useState(false);
+  const [allowInput, setAllowInput] = useState(false);
   const [busy, setBusy] = useState(false);
+  const installing = !!vm.unattend?.pending;
   const configured = new Set(vm.devices.filter((d) => d.kind === "usb").map((d) => d.id));
   const live = vm.liveUSB ?? [];
   const usb = (inv.data?.usb ?? []).filter((u) => !u.hub && !u.critical && !u.owner);
+  const picked = usb.find((u) => `${u.vendorId}:${u.productId}` === pick);
   const label = (id: string) => {
     const u = (inv.data?.usb ?? []).find((x) => `${x.vendorId}:${x.productId}` === id);
     return u ? [u.manufacturer, u.product].filter(Boolean).join(" ") || id : id;
@@ -194,9 +219,10 @@ export function LiveUSBCard({ vm, onJob }: { vm: VM; onJob: (j: Job) => void }) 
   const run = async (path: "/vms/{id}/usb" | "/vms/{id}/usb/detach", device: string, keep: boolean) => {
     setBusy(true);
     try {
-      const r = await unwrap(api.POST(path, { params: { path: { id: vm.id } }, body: { device, persist: keep } }));
+      const r = await unwrap(api.POST(path, { params: { path: { id: vm.id } }, body: { device, persist: keep, ...(allowInput ? { allowInput: true } : {}) } }));
       onJob(r.job);
       setPick("");
+      setAllowInput(false);
     } catch (e) {
       toast("error", "USB", errorMessage(e));
     } finally {
@@ -231,7 +257,7 @@ export function LiveUSBCard({ vm, onJob }: { vm: VM; onJob: (j: Job) => void }) 
                   const vp = `${u.vendorId}:${u.productId}`;
                   return (
                     <option key={u.port} value={vp} disabled={live.includes(vp)}>
-                      {[u.manufacturer, u.product].filter(Boolean).join(" ") || "USB device"} ({vp}, port {u.port})
+                      {[u.manufacturer, u.product].filter(Boolean).join(" ") || "USB device"} ({vp}, port {u.port}){u.input ? " · keyboard/mouse" : ""}
                     </option>
                   );
                 })}
@@ -239,12 +265,22 @@ export function LiveUSBCard({ vm, onJob }: { vm: VM; onJob: (j: Job) => void }) 
             )}
           </Field>
           <Toggle label="Also at the next start" checked={persist} onChange={setPersist} />
-          <Button variant="primary" disabled={!pick} busy={busy} onClick={() => run("/vms/{id}/usb", pick, persist)}>
+          <Button variant="primary" disabled={!pick || installing || (!!picked?.input && !allowInput)} busy={busy} onClick={() => run("/vms/{id}/usb", pick, persist)}>
             <UsbIcon size={15} /> Plug in
           </Button>
         </div>
+        {picked?.input && (
+          <Toggle
+            label="Give it the keyboard or mouse"
+            description="The server's own console loses it while the VM has it."
+            checked={allowInput}
+            onChange={setAllowInput}
+          />
+        )}
+        {installing && <Alert tone="info">Windows is still installing by itself: USB devices can be plugged in once it's installed.</Alert>}
         <span className="small muted">
-          Devices the server needs (its boot stick, disks of a pool) aren't offered. A whole USB controller can go to a VM as a PCI device in Hardware › Devices.
+          Devices the server needs (its boot stick, disks of a pool) aren't offered, and one a program on the server has open (the UPS monitor, an app's Zigbee stick) is
+          refused. A whole USB controller can go to a VM as a PCI device in Hardware › Devices.
         </span>
       </div>
     </Card>
@@ -255,15 +291,17 @@ export function LiveUSBCard({ vm, onJob }: { vm: VM; onJob: (j: Job) => void }) 
 export function AnswerDiscNotice({ vm, onRemove }: { vm: VM; onRemove: () => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   if (!vm.media.some((m) => m.kind === "unattend")) return null;
+  const started = !!vm.unattend?.started;
   return (
-    <Alert tone={vm.unattend?.pending ? "info" : "warn"} title={vm.unattend?.pending ? "Windows installs by itself on the first start" : "Windows setup disc still attached"}>
+    <Alert tone="info" title={started ? "Windows is installing by itself" : "Windows installs by itself on the first start"}>
       <div className="stack" style={{ gap: 8 }}>
         <span>
-          {vm.unattend?.pending
-            ? "Start the VM and watch its screen: Setup picks the edition, partitions the disk, loads the VirtIO drivers and signs in as your account once."
-            : "The setup disc holds the Windows account's password. Once Windows is installed, take it out: HardyOS deletes it."}
+          {started
+            ? "Watch it on the VM's screen. When Windows has signed in and installed the guest tools, HardyOS sees the guest agent, takes the setup disc out and deletes it (it holds the account's password). The VM's passed-through devices join at the next start after that."
+            : "Start the VM and watch its screen: Setup picks the edition, wipes and partitions the VM's own new disk, loads the VirtIO drivers and signs in as your account once. Passed-through devices wait until Windows is installed, so Setup can't see them."}{" "}
+          The setup disc is kept in the server's memory only: it's in no snapshot or backup, and a restart of the server loses it.
         </span>
-        {!vm.unattend?.pending && (
+        {started && (
           <div>
             <Button
               size="sm"
@@ -277,7 +315,7 @@ export function AnswerDiscNotice({ vm, onRemove }: { vm: VM; onRemove: () => Pro
                 }
               }}
             >
-              Take out the setup disc
+              Windows is installed: take out the setup disc
             </Button>
           </div>
         )}

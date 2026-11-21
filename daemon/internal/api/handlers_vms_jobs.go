@@ -200,7 +200,7 @@ func registerVMJobs(m *jobs.Manager, pc *priv.Client) {
 			if done == nil || done.File == "" || done.Digest == "" || len(s.Disks) == 0 {
 				return nil, fmt.Errorf("the verified image %s isn't ready", p.Catalog)
 			}
-			s.Disks[0].Import = &vms.Import{File: done.File, Digest: done.Digest}
+			s.Disks[0].Import = &vms.Import{File: done.File, Digest: done.Digest, Catalog: p.Catalog}
 		}
 		// 2. The home network's bridge, the first time a VM needs it.
 		if s.NeedsBridge() {
@@ -302,6 +302,18 @@ func registerVMJobs(m *jobs.Manager, pc *priv.Client) {
 		var p priv.VMRef
 		if err := jc.Params(&p); err != nil {
 			return nil, err
+		}
+		// The VirtIO disc lives (checked) on the VM's pool: get it there
+		// first if it isn't (a VM from before, or a pool it moved to).
+		var cur vms.VM
+		if err := call(jc, pc, 30*time.Second, priv.OpVMsGet, p, &cur); err == nil && cur.NeedsVirtio() {
+			var res priv.VMTaskResult
+			if err := call(jc, pc, time.Minute, priv.OpVMsISOVirtio, priv.VMVirtioArgs{Pool: cur.Pool}, &res); err != nil {
+				return nil, err
+			}
+			if err := followVMTask(jc, pc, res.Task, 2, 28); err != nil {
+				return nil, fmt.Errorf("getting the VirtIO drivers disc: %w", err)
+			}
 		}
 		jc.Progress(30, "Starting")
 		var r vms.Result

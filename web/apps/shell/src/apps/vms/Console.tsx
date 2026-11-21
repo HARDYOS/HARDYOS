@@ -229,7 +229,7 @@ export function ClipboardDialog({ remote, onClose, onSend }: { remote: string; o
   return (
     <Dialog
       title="Clipboard"
-      description="Copy and paste between your computer and the VM. It needs the clipboard turned on in the VM's Hardware and spice-vdagent (or the VirtIO guest tools) running in it; otherwise use Type text."
+      description="Copy and paste between your computer and the VM. Everyone with this VM's screen open shares its clipboard: what's copied in the VM shows in every open screen. It needs the clipboard turned on in the VM's Hardware and spice-vdagent (or the VirtIO guest tools) running in it; otherwise use Type text."
       onClose={onClose}
       onSubmit={() => {
         onSend(text);

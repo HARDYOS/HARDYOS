@@ -30,6 +30,7 @@ type catalogServer struct {
 	sums     string
 	imgHits  atomic.Int32
 	redirect string // the image redirects here
+	onImage  func()
 }
 
 func newCatalogServer(t *testing.T) *catalogServer {
@@ -47,6 +48,9 @@ func newCatalogServer(t *testing.T) *catalogServer {
 				return
 			}
 			c.imgHits.Add(1)
+			if c.onImage != nil {
+				c.onImage()
+			}
 			_, _ = w.Write(c.image)
 		default:
 			http.NotFound(w, r)
@@ -87,22 +91,66 @@ func TestCatalogFetchVerifiesAndCaches(t *testing.T) {
 	if done.Error != "" || done.Digest != "sha512:"+hex.EncodeToString(sum[:]) || done.File != "debian-13-genericcloud-amd64.qcow2" {
 		t.Fatalf("task = %+v", done)
 	}
-	if b, err := os.ReadFile(filepath.Join(e.isoDir, done.File)); err != nil || string(b) != string(c.image) {
-		t.Fatalf("library copy: %v", err)
+	// In root's own store, sealed; never in the shared ISOs folder.
+	p := filepath.Join(e.root, "mnt/tank/vm-catalog", done.File)
+	if b, err := os.ReadFile(p); err != nil || string(b) != string(c.image) {
+		t.Fatalf("stored copy: %v", err)
 	}
-	// Again: the copy in the library still matches, nothing is downloaded.
-	task, _ = e.m.FetchCatalog(ctx, FetchArgs{Image: CatalogDebian13})
+	if fi, _ := os.Stat(p); fi.Mode().Perm() != 0o444 {
+		t.Fatalf("stored copy mode %v", fi.Mode())
+	}
+	if _, err := os.Stat(filepath.Join(e.isoDir, done.File)); err == nil {
+		t.Fatal("the image went into the shared folder")
+	}
+	// Again: the sealed copy is used, nothing is downloaded.
+	task, _ = e.m.FetchCatalog(ctx, FetchArgs{Image: CatalogDebian13, Pool: "tank"})
 	if d := waitDone(t, e.m, task.ID); d.Error != "" || c.imgHits.Load() != 1 {
 		t.Fatalf("cached fetch = %+v, %d downloads", d, c.imgHits.Load())
 	}
-	// A changed copy (someone wrote into the shared folder) is replaced.
-	write(t, filepath.Join(e.isoDir, done.File), "tampered")
-	task, _ = e.m.FetchCatalog(ctx, FetchArgs{Image: CatalogDebian13})
+	// A changed copy is checked again and replaced.
+	_ = os.Chmod(p, 0o644)
+	write(t, p, "tampered")
+	_ = os.Chmod(p, 0o444)
+	task, _ = e.m.FetchCatalog(ctx, FetchArgs{Image: CatalogDebian13, Pool: "tank"})
 	if d := waitDone(t, e.m, task.ID); d.Error != "" || c.imgHits.Load() != 2 {
 		t.Fatalf("refetch = %+v, %d downloads", d, c.imgHits.Load())
 	}
-	if b, _ := os.ReadFile(filepath.Join(e.isoDir, done.File)); string(b) != string(c.image) {
+	if b, _ := os.ReadFile(p); string(b) != string(c.image) {
 		t.Fatal("the tampered copy stayed")
+	}
+	// The ISO library won't take a file of a catalog image's name.
+	if _, err := e.m.StartDownload(ctx, DownloadArgs{URL: "https://example.com/debian-13-genericcloud-amd64.qcow2", Pool: "tank"}); err == nil || !strings.Contains(err.Error(), "verified image") {
+		t.Fatalf("library download of a catalog name: %v", err)
+	}
+	// A VM imports it from the store, checked again as it's read.
+	e.bridge.name = "br0"
+	sp := linuxSpec(t)
+	sp.Template = "debian13"
+	sp.Disks[0].Import = &Import{File: done.File, Digest: done.Digest, Catalog: CatalogDebian13}
+	if _, err := e.m.Create(ctx, CreateArgs{Spec: sp, Password: "longenough"}); err != nil {
+		t.Fatal(err)
+	}
+	e.stream.info = `{"format":"qcow2","virtual-size":1073741824,"format-specific":{"type":"qcow2","data":{}}}`
+	imp, err := e.m.StartImport(ctx, ImportArgs{ID: "web", Disk: "disk0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := waitDone(t, e.m, imp.ID); d.Error != "" {
+		t.Fatalf("import from the store = %+v", d)
+	}
+}
+
+func TestCatalogRetriesWhenLatestMoves(t *testing.T) {
+	e, c := catalogEnv(t)
+	good := c.sums
+	c.sums = strings.Repeat("ab", 64) + "  debian-13-genericcloud-amd64.qcow2\n"
+	c.onImage = func() { c.sums = good } // the image is newer than the list read first
+	task, err := e.m.FetchCatalog(context.Background(), FetchArgs{Image: CatalogDebian13, Pool: "tank"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := waitDone(t, e.m, task.ID); d.Error != "" || c.imgHits.Load() != 2 {
+		t.Fatalf("task = %+v, %d downloads", d, c.imgHits.Load())
 	}
 }
 
@@ -117,8 +165,10 @@ func TestCatalogRefusesWrongChecksum(t *testing.T) {
 	if !strings.Contains(d.Error, "SHA512 checksum") || d.Digest != "" {
 		t.Fatalf("task = %+v", d)
 	}
-	if _, err := os.Stat(filepath.Join(e.isoDir, "debian-13-genericcloud-amd64.qcow2")); err == nil {
-		t.Fatal("a file with the wrong checksum was kept")
+	for _, p := range []string{filepath.Join(e.isoDir, "debian-13-genericcloud-amd64.qcow2"), filepath.Join(e.root, "mnt/tank/vm-catalog/debian-13-genericcloud-amd64.qcow2")} {
+		if _, err := os.Stat(p); err == nil {
+			t.Fatal("a file with the wrong checksum was kept")
+		}
 	}
 }
 
@@ -168,8 +218,24 @@ func TestUbuntuSignature(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := verifySignature(ubuntuKey, UbuntuKeyFingerprint, sums, sig); err != nil {
-		t.Fatalf("the real signature: %v", err)
+	signed, err := verifySignature(ubuntuKey, UbuntuKeyFingerprint, sums, sig)
+	if err != nil || !signed.Equal(UbuntuMinSigned) {
+		t.Fatalf("the real signature: %v %v", signed, err)
+	}
+	// Replays: older than the pinned date, or than what the store saw.
+	r, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if err := checkFreshness(r, "ubuntu", signed.Add(-time.Hour), UbuntuMinSigned); err == nil {
+		t.Fatal("checksums older than the pinned date passed")
+	}
+	if err := checkFreshness(r, "ubuntu", signed.Add(48*time.Hour), UbuntuMinSigned); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkFreshness(r, "ubuntu", signed.Add(24*time.Hour), UbuntuMinSigned); err == nil {
+		t.Fatal("checksums older than ones already seen passed")
 	}
 	h, err := findSum(sums, "noble-server-cloudimg-amd64.img", "sha256")
 	if err != nil || len(h) != 64 {
@@ -177,10 +243,10 @@ func TestUbuntuSignature(t *testing.T) {
 	}
 	bad := append([]byte{}, sums...)
 	bad[0] ^= 1
-	if err := verifySignature(ubuntuKey, UbuntuKeyFingerprint, bad, sig); err == nil {
+	if _, err := verifySignature(ubuntuKey, UbuntuKeyFingerprint, bad, sig); err == nil {
 		t.Fatal("changed checksums passed the signature check")
 	}
-	if err := verifySignature(ubuntuKey, strings.Repeat("A", 40), sums, sig); err == nil {
+	if _, err := verifySignature(ubuntuKey, strings.Repeat("A", 40), sums, sig); err == nil {
 		t.Fatal("another key's fingerprint was accepted")
 	}
 }
@@ -286,7 +352,10 @@ var hookOnce sync.Once
 
 func TestAnswerFile(t *testing.T) {
 	hookOnce.Do(func() {
-		RegisterFirstLogonHook("test-hook", func(s *Spec) []LogonCommand {
+		RegisterFirstLogonHook("test-hook", func(vm HookVM) []LogonCommand {
+			if vm.ID != "win" || vm.User != "cade" || vm.Arch != "amd64" {
+				panic("hook got " + vm.ID + vm.User + vm.Arch)
+			}
 			return []LogonCommand{{Description: "Say hello", CommandLine: `cmd /c echo hello & echo <b>`}, {CommandLine: "bad\nline"}}
 		})
 	})
@@ -314,7 +383,7 @@ func TestAnswerFile(t *testing.T) {
 		`<TimeZone>Pacific Standard Time</TimeZone>`,
 		`<Name>cade</Name>`,
 		`<Type>EFI</Type>`,
-		`virtio-win-guest-tools.exe /install /quiet /norestart`,
+		esc(GuestToolsCommand),
 		`<CommandLine>cmd /c echo hello &amp; echo &lt;b&gt;</CommandLine>`,
 		`<PlainText>false</PlainText>`,
 		`<LogonCount>1</LogonCount>`,
@@ -371,9 +440,17 @@ func TestCreateUnattended(t *testing.T) {
 	e := newEnv(t)
 	e.bridge.name = "br0"
 	e.addISO(t, "Win11_24H2_English_x64.iso", 10)
-	e.addISO(t, VirtioFile, VirtioSize)
+	e.seedVirtio(t)
+	e.m.Devices = &fakeHotplug{fakeDevices: e.devs}
 	ctx := context.Background()
 	s := winSpec(t, "windows11")
+	// A template's disk can't be the one Setup wipes.
+	cl := s
+	cl.Disks = []Disk{{Name: "disk0", SizeGB: 64, Bus: BusVirtioSCSI, Clone: &Clone{Template: "base"}}}
+	if _, err := e.m.Create(ctx, CreateArgs{Spec: cl, Password: "longenough"}); err == nil || !strings.Contains(err.Error(), "wipes the first disk") {
+		t.Fatalf("unattended onto a template's disk: %v", err)
+	}
+	s.Devices = []devices.Device{{Kind: devices.KindPCI, ID: "0000:03:00.0"}}
 	// It needs the installer disc.
 	noISO := s
 	noISO.Media = noISO.Media[1:]
@@ -387,9 +464,16 @@ func TestCreateUnattended(t *testing.T) {
 	if res.VM.Unattend == nil || !res.VM.Unattend.Pending {
 		t.Fatalf("unattend = %+v", res.VM.Unattend)
 	}
-	disc := filepath.Join(e.root, "mnt/tank/vms/win", unattendFile)
+	// In /run, in no dataset (so in no snapshot, replica or backup).
+	disc := filepath.Join(e.root, UnattendRunDir, res.VM.UUID+".iso")
 	if fi, err := os.Stat(disc); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("answer disc: %v %v", fi, err)
+	}
+	if fi, _ := os.Stat(filepath.Join(e.root, UnattendRunDir)); fi.Mode().Perm() != 0o711 {
+		t.Fatalf("run folder mode %v", fi.Mode())
+	}
+	if left, _ := filepath.Glob(filepath.Join(e.root, UnattendRunDir, ".stage-*")); len(left) != 0 {
+		t.Fatalf("staging left: %v", left)
 	}
 	if !e.sim.has("xorriso -as mkisofs -quiet -volid UNATTEND") {
 		t.Fatal("no answer disc made")
@@ -398,13 +482,18 @@ func TestCreateUnattended(t *testing.T) {
 	if strings.Contains(string(spec), "Windows pass 1") || strings.Contains(string(spec), encodePassword("Windows pass 1", "Password")) {
 		t.Fatal("the password is in vm.json")
 	}
-	if !strings.Contains(e.sim.defined["win"], "unattend.iso") {
+	if !strings.Contains(e.sim.defined["win"], UnattendRunDir+"/"+res.VM.UUID+".iso") {
 		t.Fatal("the answer disc isn't in a drive")
 	}
-	// The first start answers the boot prompt, once.
+	// The first start answers the boot prompt, once, and leaves the
+	// passed-through device out while Windows installs.
 	BootKeyPresses, BootKeyEvery = 2, time.Millisecond
-	if _, err := e.m.Start(ctx, "win"); err != nil {
+	started, err := e.m.Start(ctx, "win")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if strings.Contains(e.devs.log(), "prepare win") || !strings.Contains(strings.Join(started.Warnings, " "), "join once Windows is installed") {
+		t.Fatalf("devices during the install: %s / %v", e.devs.log(), started.Warnings)
 	}
 	for i := 0; i < 100 && !e.sim.has("virsh -c qemu:///system -q send-key win KEY_ENTER"); i++ {
 		time.Sleep(5 * time.Millisecond)
@@ -413,27 +502,39 @@ func TestCreateUnattended(t *testing.T) {
 		t.Fatal("no key pressed for the installer")
 	}
 	v, _ := e.m.Get(ctx, "win")
-	if v.Unattend.Pending {
-		t.Fatal("still pending after the first start")
+	if !v.Unattend.Pending || !v.Unattend.Started {
+		t.Fatalf("after the first start: %+v", v.Unattend)
 	}
-	// Taking the disc out ends it and deletes the disc.
-	if _, err := e.m.Stop(ctx, StopArgs{ID: "win", Force: true}); err != nil {
-		t.Fatal(err)
+	if _, err := e.m.AttachUSB(ctx, USBArgs{ID: "win", Device: "046d:c52b"}); err == nil || !strings.Contains(err.Error(), "still installing") {
+		t.Fatalf("USB during the install: %v", err)
 	}
-	up := v.Spec
-	up.Media = up.Media[:len(up.Media)-1]
-	if _, err := e.m.Update(ctx, UpdateArgs{Spec: up}); err != nil {
-		t.Fatal(err)
+	// No guest agent yet: still installing.
+	e.m.checkInstalled(ctx, "win")
+	if v, _ := e.m.Get(ctx, "win"); v.Unattend == nil {
+		t.Fatal("finished without the guest agent")
+	}
+	// The agent answers: setup is done, the disc goes, devices next start.
+	e.sim.agent = true
+	e.m.checkInstalled(ctx, "win")
+	v, _ = e.m.Get(ctx, "win")
+	if v.Unattend != nil || v.HasUnattendMedia() || !v.RestartNeeded {
+		t.Fatalf("after the install: %+v %v restart=%v", v.Unattend, v.Media, v.RestartNeeded)
 	}
 	if _, err := os.Stat(disc); !os.IsNotExist(err) {
 		t.Fatalf("the answer disc is still there: %v", err)
 	}
-	v, _ = e.m.Get(ctx, "win")
-	if v.Unattend != nil {
-		t.Fatal("the settings stayed")
+	if _, err := e.m.Stop(ctx, StopArgs{ID: "win", Force: true}); err != nil {
+		t.Fatal(err)
 	}
+	if _, err := e.m.Start(ctx, "win"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(e.devs.log(), "prepare win") {
+		t.Fatalf("devices after the install: %s", e.devs.log())
+	}
+	_, _ = e.m.Stop(ctx, StopArgs{ID: "win", Force: true})
 	// And it can't come back.
-	up = v.Spec
+	up := v.Spec
 	up.Media = append(up.Media, Media{Kind: MediaUnattend})
 	up.Unattend = &Unattend{User: "cade", Locale: "en-US"}
 	if _, err := e.m.Update(ctx, UpdateArgs{Spec: up}); err == nil || !strings.Contains(err.Error(), "only comes with a new VM") {
@@ -520,6 +621,13 @@ func TestScheduledSnapshots(t *testing.T) {
 			t.Errorf("%s = %q, want %q (all: %v)", n, got[n], k, got)
 		}
 	}
+	// Fewer hourly ones would delete one there is: only with the name.
+	if _, err := e.m.SetSchedule(ctx, SetScheduleArgs{ID: "web", Schedule: &Schedule{Hourly: 1, Daily: 1}}); err == nil || !strings.Contains(err.Error(), "delete 1 automatic") {
+		t.Fatalf("pruning without confirming: %v", err)
+	}
+	if _, err := e.m.SetSchedule(ctx, SetScheduleArgs{ID: "web", Schedule: &Schedule{Hourly: 2, Daily: 3}}); err != nil {
+		t.Fatalf("more snapshots need no confirmation: %v", err)
+	}
 	// Updates keep the schedule; rollback to an automatic one works.
 	v, _ := e.m.Get(ctx, "web")
 	s := v.Spec
@@ -539,6 +647,52 @@ func TestScheduledSnapshots(t *testing.T) {
 	}
 	if v, _ := e.m.Get(ctx, "web"); v.Schedule != nil {
 		t.Fatal("an all-zero schedule stayed")
+	}
+}
+
+// A VM that's busy (a long import, a template copy) never holds up the
+// other VMs' scheduled snapshots; it's marked behind after a while.
+func TestScheduleSkipsBusyVM(t *testing.T) {
+	e := newEnv(t)
+	e.bridge.name = "br0"
+	e.addISO(t, "noble-server-cloudimg-amd64.img", 10)
+	ctx := context.Background()
+	for _, id := range []string{"busy", "free"} {
+		s := linuxSpec(t)
+		s.ID, s.Name = id, id
+		if _, err := e.m.Create(ctx, CreateArgs{Spec: s, Password: "longenough"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.m.SetSchedule(ctx, SetScheduleArgs{ID: id, Schedule: &Schedule{Hourly: 3}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unlock := e.m.lock("busy")
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < MissedWarn; i++ {
+			e.m.TickSchedules(ctx)
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a busy VM held up the schedule")
+	}
+	if l, _ := e.m.Snapshots(ctx, "free"); len(l) != 1 {
+		t.Fatalf("free VM's snapshots = %+v", l)
+	}
+	if l, _ := e.m.Snapshots(ctx, "busy"); len(l) != 0 {
+		t.Fatalf("busy VM's snapshots = %+v", l)
+	}
+	if v, _ := e.m.Get(ctx, "busy"); !v.SnapshotsBehind {
+		t.Fatal("the busy VM isn't marked behind")
+	}
+	unlock()
+	e.m.TickSchedules(ctx)
+	if v, _ := e.m.Get(ctx, "busy"); v.SnapshotsBehind {
+		t.Fatal("still behind after catching up")
 	}
 }
 
@@ -708,7 +862,7 @@ type fakeHotplug struct {
 	refuse  bool
 }
 
-func (f *fakeHotplug) HotplugUSB(_ context.Context, vm string, d devices.Device) (string, error) {
+func (f *fakeHotplug) HotplugUSB(_ context.Context, vm string, d devices.Device, _ devices.HotplugOptions) (string, error) {
 	if f.refuse {
 		return "", devices.Problems{{Device: d.ID, Message: "The USB device holds the boot disk."}}
 	}

@@ -11,12 +11,16 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
-	"golang.org/x/crypto/openpgp" //nolint:staticcheck // detached signature checks only; no keys are made or trusted beyond the pinned one
+	"golang.org/x/crypto/openpgp"        //nolint:staticcheck // detached signature checks only; no keys are made or trusted beyond the pinned one
+	"golang.org/x/crypto/openpgp/armor"  //nolint:staticcheck // armored signatures
+	"golang.org/x/crypto/openpgp/packet" //nolint:staticcheck // reads the signature's creation time
 )
 
 // The verified image catalog (decision 410). hardyd names an image, never
@@ -31,8 +35,9 @@ import (
 //   - Home Assistant OS and the VirtIO drivers: SHA-256 and size pinned
 //     here (a new version is a change to this file).
 //
-// The image is saved in the ISO library under its publisher's name; a copy
-// already there is hashed again and reused when it still matches.
+// The image is saved in the pool's catalog store (catalogstore.go), never
+// in the ISOs shared folder; a copy already there is reused while it's the
+// file root checked.
 
 // Catalog image names.
 const (
@@ -45,6 +50,10 @@ const (
 // UbuntuKeyFingerprint is the Ubuntu cloud image signing key ("UEC Image
 // Automatic Signing Key <cdimage@ubuntu.com>").
 const UbuntuKeyFingerprint = "D2EB44626FDDC30B513D5BB71A5D6C4C7DB87C81"
+
+// UbuntuMinSigned is when the newest checksums HardyOS was built against
+// were signed (testdata/catalog): older ones are refused.
+var UbuntuMinSigned = time.Unix(1792268628, 0).UTC()
 
 //go:embed ubuntu-cloud-images.asc
 var ubuntuKey string
@@ -76,10 +85,12 @@ type CatalogFile struct {
 	// Either the publisher's checksum list...
 	SumsURL  string `json:"-"`
 	SumsAlgo string `json:"-"` // sha256 or sha512
-	// SigURL is the list's detached OpenPGP signature (Key must sign it).
-	SigURL string `json:"-"`
-	Key    string `json:"-"` // armored public key
-	KeyFP  string `json:"-"` // its pinned fingerprint
+	// SigURL is the list's detached OpenPGP signature (Key must sign it),
+	// made no earlier than MinSigned.
+	SigURL    string    `json:"-"`
+	Key       string    `json:"-"` // armored public key
+	KeyFP     string    `json:"-"` // its pinned fingerprint
+	MinSigned time.Time `json:"-"`
 	// ...or a pinned checksum and size.
 	SHA256 string `json:"-"`
 	Size   int64  `json:"-"`
@@ -113,13 +124,13 @@ var Catalog = []CatalogImage{
 				URL:     "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
 				File:    "noble-server-cloudimg-amd64.img",
 				SumsURL: "https://cloud-images.ubuntu.com/noble/current/SHA256SUMS", SumsAlgo: "sha256",
-				SigURL: "https://cloud-images.ubuntu.com/noble/current/SHA256SUMS.gpg", Key: ubuntuKey, KeyFP: UbuntuKeyFingerprint,
+				SigURL: "https://cloud-images.ubuntu.com/noble/current/SHA256SUMS.gpg", Key: ubuntuKey, KeyFP: UbuntuKeyFingerprint, MinSigned: UbuntuMinSigned,
 			},
 			"aarch64": {
 				URL:     "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64.img",
 				File:    "noble-server-cloudimg-arm64.img",
 				SumsURL: "https://cloud-images.ubuntu.com/noble/current/SHA256SUMS", SumsAlgo: "sha256",
-				SigURL: "https://cloud-images.ubuntu.com/noble/current/SHA256SUMS.gpg", Key: ubuntuKey, KeyFP: UbuntuKeyFingerprint,
+				SigURL: "https://cloud-images.ubuntu.com/noble/current/SHA256SUMS.gpg", Key: ubuntuKey, KeyFP: UbuntuKeyFingerprint, MinSigned: UbuntuMinSigned,
 			},
 		},
 	},
@@ -215,34 +226,33 @@ func (m *Manager) FetchCatalog(ctx context.Context, a FetchArgs) (*Task, error) 
 	if err := ValidFile(cf.File); err != nil {
 		return nil, err
 	}
+	key := a.Pool + "/" + cf.File
 	for _, t := range m.tasks.list("download") {
-		if !t.Done && t.File == cf.File {
+		if !t.Done && t.File == key {
 			return m.tasks.get(t.ID), nil
 		}
 	}
-	f, err := m.folder(ctx, a.Pool, a.Pool != "")
+	c, err := m.store(ctx, a.Pool, true)
 	if err != nil {
 		return nil, err
 	}
-	if f == nil {
-		return nil, Problems{"choose a pool for the ISOs shared folder"}
-	}
-	t, err := m.tasks.start("download", "", cf.File)
+	t, err := m.tasks.start("download", "", key)
 	if err != nil {
 		return nil, err
 	}
 	go func() {
 		bg, cancel := context.WithTimeout(context.Background(), 12*time.Hour)
 		defer cancel()
-		d, err := m.fetch(bg, t, f, img, cf)
+		d, err := m.fetchInto(bg, t, c, img, cf)
 		if err == nil {
 			m.tasks.setDigest(t.ID, d.Algo+":"+d.Hex)
+			m.tasks.setFile(t.ID, cf.File)
 		}
 		m.tasks.finish(t.ID, err)
 		if err != nil {
-			m.log().Warn("vms: catalog image failed", "image", img.ID, "err", err)
+			m.log().Warn("vms: catalog image failed", "image", img.ID, "pool", c.pool, "err", err)
 		} else {
-			m.log().Info("vms: catalog image ready", "image", img.ID, "file", cf.File, "digest", d.Algo+":"+d.Hex)
+			m.log().Info("vms: catalog image ready", "image", img.ID, "pool", c.pool, "file", cf.File, "digest", d.Algo+":"+d.Hex)
 		}
 	}()
 	return m.tasks.get(t.ID), nil
@@ -275,13 +285,22 @@ func allowedURL(raw string, hosts []string) (*url.URL, error) {
 	return u, nil
 }
 
-func (m *Manager) fetch(ctx context.Context, t *Task, f *Folder, img CatalogImage, cf CatalogFile) (digest, error) {
+func (m *Manager) fetchInto(ctx context.Context, t *Task, c *catalogStore, img CatalogImage, cf CatalogFile) (digest, error) {
+	r, err := m.openStore(c)
+	if err != nil {
+		return digest{}, err
+	}
+	defer r.Close()
+	return m.fetch(ctx, t, r, img, cf)
+}
+
+func (m *Manager) fetch(ctx context.Context, t *Task, r *os.Root, img CatalogImage, cf CatalogFile) (digest, error) {
 	client := m.catalogClient(img.Hosts)
 	u, err := allowedURL(cf.URL, img.Hosts)
 	if err != nil {
 		return digest{}, err
 	}
-	want, err := m.expectedDigest(ctx, t, client, img, cf)
+	want, err := m.expectedDigest(ctx, t, client, r, img, cf)
 	if err != nil {
 		return digest{}, err
 	}
@@ -291,28 +310,44 @@ func (m *Manager) fetch(ctx context.Context, t *Task, f *Folder, img CatalogImag
 		// checksum came from the image's own host.
 		imageClient = m.client()
 	}
-	// A copy from before that still matches is used as it is.
-	if file, err := openFile(f, cf.File); err == nil {
-		m.tasks.progress(t.ID, 1, "Checking the copy of "+cf.File+" already in the ISO library")
-		h := want.hash()
-		n, cerr := io.Copy(h, io.LimitReader(file, MaxDownloadBytes+1))
-		file.Close()
-		if cerr == nil && hex.EncodeToString(h.Sum(nil)) == want.Hex && (cf.Size == 0 || n == cf.Size) {
+	// A copy from before: trusted as checked, or checked again.
+	if _, err := r.Lstat(cf.File); err == nil {
+		if checkStamp(r, cf.File, want, cf.Size) == nil {
 			return want, nil
 		}
-		m.log().Info("vms: the library's copy of a catalog image is out of date or damaged; downloading it again", "file", cf.File)
-		if err := removeFile(f, cf.File); err != nil {
-			return digest{}, fmt.Errorf("replacing the old %s: %w", cf.File, err)
+		m.tasks.progress(t.ID, 1, "Checking the stored copy of "+cf.File)
+		if got, n, err := hashStored(r, cf.File, want); err == nil && got == want.Hex && (cf.Size == 0 || n == cf.Size) {
+			if err := seal(r, cf.File, want); err == nil {
+				return want, nil
+			}
+		}
+		// Root's own store: an out-of-date or damaged copy is replaced.
+		m.log().Info("vms: the stored copy of a catalog image is out of date or damaged; downloading it again", "file", cf.File)
+		unseal(r, cf.File)
+	}
+	err = m.download(ctx, t, storeSink{r}, imageClient, u, cf.File, "", want, cf.Size)
+	var ce *checksumError
+	if errors.As(err, &ce) && cf.SumsURL != "" {
+		// "latest" may have moved on between the checksums and the image:
+		// once more, with fresh checksums.
+		again, derr := m.expectedDigest(ctx, t, client, r, img, cf)
+		if derr == nil && again != want {
+			want = again
+			err = m.download(ctx, t, storeSink{r}, imageClient, u, cf.File, "", want, cf.Size)
 		}
 	}
-	if err := m.download(ctx, t, f, imageClient, u, cf.File, "", want, cf.Size); err != nil {
+	if err != nil {
+		return digest{}, err
+	}
+	if err := seal(r, cf.File, want); err != nil {
+		unseal(r, cf.File)
 		return digest{}, err
 	}
 	return want, nil
 }
 
 // expectedDigest is the checksum the image must have.
-func (m *Manager) expectedDigest(ctx context.Context, t *Task, client *http.Client, img CatalogImage, cf CatalogFile) (digest, error) {
+func (m *Manager) expectedDigest(ctx context.Context, t *Task, client *http.Client, r *os.Root, img CatalogImage, cf CatalogFile) (digest, error) {
 	if cf.SHA256 != "" {
 		return digest{Algo: "sha256", Hex: cf.SHA256}, nil
 	}
@@ -329,7 +364,11 @@ func (m *Manager) expectedDigest(ctx context.Context, t *Task, client *http.Clie
 		if err != nil {
 			return digest{}, fmt.Errorf("getting the checksums' signature: %w", err)
 		}
-		if err := verifySignature(cf.Key, cf.KeyFP, sums, sig); err != nil {
+		signed, err := verifySignature(cf.Key, cf.KeyFP, sums, sig)
+		if err != nil {
+			return digest{}, err
+		}
+		if err := checkFreshness(r, img.ID, signed, cf.MinSigned); err != nil {
 			return digest{}, err
 		}
 	}
@@ -369,28 +408,71 @@ func getSmall(ctx context.Context, client *http.Client, raw string, hosts []stri
 	return b, nil
 }
 
-// verifySignature checks a detached signature (binary or armored) over
-// data with the one pinned key.
-func verifySignature(armoredKey, fingerprint string, data, sig []byte) error {
+// verifySignature checks a detached signature (armored, as Ubuntu's
+// SHA256SUMS.gpg is, or binary) over data with the one pinned key and
+// returns when it was made.
+func verifySignature(armoredKey, fingerprint string, data, sig []byte) (time.Time, error) {
 	ring, err := openpgp.ReadArmoredKeyRing(strings.NewReader(armoredKey))
 	if err != nil || len(ring) != 1 {
-		return fmt.Errorf("the pinned signing key can't be read: %v", err)
+		return time.Time{}, fmt.Errorf("the pinned signing key can't be read: %v", err)
 	}
 	if got := strings.ToUpper(hex.EncodeToString(ring[0].PrimaryKey.Fingerprint[:])); got != fingerprint {
-		return fmt.Errorf("the pinned signing key is %s, not %s", got, fingerprint)
+		return time.Time{}, fmt.Errorf("the pinned signing key is %s, not %s", got, fingerprint)
 	}
-	check := openpgp.CheckDetachedSignature
 	if bytes.HasPrefix(bytes.TrimSpace(sig), []byte("-----BEGIN PGP SIGNATURE-----")) {
-		check = openpgp.CheckArmoredDetachedSignature
+		blk, err := armor.Decode(bytes.NewReader(sig))
+		if err != nil || blk.Type != openpgp.SignatureType {
+			return time.Time{}, fmt.Errorf("the checksums' signature can't be read: %v", err)
+		}
+		if sig, err = io.ReadAll(io.LimitReader(blk.Body, maxSigBytes)); err != nil {
+			return time.Time{}, err
+		}
 	}
-	signer, err := check(ring, bytes.NewReader(data), bytes.NewReader(sig))
+	pkt, err := packet.Read(bytes.NewReader(sig))
 	if err != nil {
-		return fmt.Errorf("the checksums aren't signed by the image's publisher (%v); nothing was downloaded", err)
+		return time.Time{}, fmt.Errorf("the checksums' signature can't be read: %v", err)
+	}
+	sp, ok := pkt.(*packet.Signature)
+	if !ok {
+		return time.Time{}, errors.New("the checksums' signature isn't a signature")
+	}
+	signer, err := openpgp.CheckDetachedSignature(ring, bytes.NewReader(data), bytes.NewReader(sig))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("the checksums aren't signed by the image's publisher (%v); nothing was downloaded", err)
 	}
 	if got := strings.ToUpper(hex.EncodeToString(signer.PrimaryKey.Fingerprint[:])); got != fingerprint {
-		return fmt.Errorf("the checksums are signed by %s, not the image's publisher", got)
+		return time.Time{}, fmt.Errorf("the checksums are signed by %s, not the image's publisher", got)
 	}
-	return nil
+	return sp.CreationTime, nil
+}
+
+// checkFreshness refuses checksums signed before the pinned date or
+// before the newest ones this pool's store has seen (an old, validly
+// signed list replayed by a mirror or a man in the middle), and records
+// the newer date.
+func checkFreshness(r *os.Root, image string, signed, minimum time.Time) error {
+	if signed.Before(minimum) {
+		return fmt.Errorf("the checksums were signed %s, before the oldest HardyOS accepts (%s); something is replaying old ones", signed.UTC().Format(time.DateOnly), minimum.UTC().Format(time.DateOnly))
+	}
+	name := "." + image + ".signed"
+	if b, err := r.ReadFile(name); err == nil {
+		if last, err := time.Parse(time.RFC3339, strings.TrimSpace(string(b))); err == nil && signed.Before(last) {
+			return fmt.Errorf("the checksums were signed %s, before ones already seen (%s); something is replaying old ones", signed.UTC().Format(time.RFC3339), last.UTC().Format(time.RFC3339))
+		}
+	}
+	_ = r.Remove(name + ".new")
+	f, err := r.OpenFile(name+".new", os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return err
+	}
+	_, werr := f.WriteString(signed.UTC().Format(time.RFC3339) + "\n")
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		return werr
+	}
+	return r.Rename(name+".new", name)
 }
 
 var sumLineRE = regexp.MustCompile(`^([0-9a-fA-F]+) [ *]([^\s/]+)$`)

@@ -45,7 +45,7 @@ function vm(o: Record<string, unknown>) {
   return {
     description: "", uuid: "u", pool: "tank", video: "virtio", guestAgent: true, boot: ["disk"], autostart: { enabled: false, order: 0, delaySec: 0 },
     devices: [], media: [], firmware: { type: "uefi", secureBoot: false, tpm: false }, nics: [{ mode: "bridge", model: "virtio", mac: "52:54:00:00:00:01" }],
-    dataset: "tank/vms/x", cpuPercent: 0, memoryUsedMB: 0, addresses: [], passwordSet: false, restartNeeded: false, diskUsage: { disk0: 1e9 }, liveUSB: [],
+    dataset: "tank/vms/x", cpuPercent: 0, memoryUsedMB: 0, addresses: [], passwordSet: false, restartNeeded: false, diskUsage: { disk0: 1e9 }, liveUSB: [], snapshotsBehind: false,
     cpu: { cores: 2, threads: 1 }, memory: { mb: 4096, balloon: true }, disks: [{ name: "disk0", sizeGB: 32, bus: "virtio-scsi" }], os: "linux",
     ...o,
   };
@@ -55,7 +55,7 @@ const web = vm({ id: "web", name: "Web server", template: "linux", state: "runni
 const win = vm({
   id: "win", name: "Windows 11", template: "windows11", os: "windows", state: "stopped", guestAgent: false,
   media: [{ kind: "iso", iso: "Win11.iso" }, { kind: "virtio" }, { kind: "unattend" }],
-  unattend: { user: "kids", locale: "en-US", pending: false },
+  unattend: { user: "kids", locale: "en-US", pending: true, started: true },
 });
 
 function routes(extra: Record<string, Handler> = {}): Record<string, Handler> {
@@ -90,12 +90,38 @@ describe("VM polish on the VM's page", () => {
     expect(calls.find((c) => c.path === "/vms/win/schedule")!.body).toEqual({ schedule: { hourly: 0, daily: 7, weekly: 4, monthly: 0 } });
   });
 
+  it("asks for the VM's name when fewer automatic snapshots would delete some", async () => {
+    const calls: Call[] = [];
+    let tries = 0;
+    serve(
+      routes({
+        "PUT /vms/win/schedule": () =>
+          ++tries === 1
+            ? { __status: 400, code: "confirm_required", message: "these counts delete 1 automatic snapshots Windows 11 has now; type the VM's name (Windows 11) to confirm" }
+            : accepted("j9"),
+        "/jobs/j9": () => job("j9"),
+      }),
+      calls,
+    );
+    wrap(<VirtualMachinesView onOpenConsole={() => {}} />);
+    fireEvent.click(await screen.findByRole("article", { name: "Windows 11" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Snapshots" }));
+    fireEvent.change(await screen.findByLabelText("Hourly"), { target: { value: "1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save schedule" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/delete 1 automatic/)).toBeTruthy();
+    fireEvent.change(within(dialog).getByLabelText(/Type Windows 11 to confirm/), { target: { value: "Windows 11" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save and delete" }));
+    await waitFor(() => expect(tries).toBe(2));
+    expect(calls.filter((c) => c.path === "/vms/win/schedule")[1]!.body).toEqual({ schedule: { hourly: 1, daily: 0, weekly: 0, monthly: 0 }, confirm: "Windows 11" });
+  });
+
   it("takes the Windows setup disc out, and makes a template of a stopped VM", async () => {
     const calls: Call[] = [];
     serve(routes({ "PUT /vms/win": () => accepted("j2"), "/jobs/j2": () => job("j2"), "POST /vms/win/template": () => accepted("j3"), "/jobs/j3": () => job("j3") }), calls);
     wrap(<VirtualMachinesView onOpenConsole={() => {}} />);
     fireEvent.click(await screen.findByRole("article", { name: "Windows 11" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Take out the setup disc" }));
+    fireEvent.click(await screen.findByRole("button", { name: /take out the setup disc/ }));
     await waitFor(() => expect(calls.some((c) => c.method === "PUT" && c.path === "/vms/win")).toBe(true));
     const spec = (calls.find((c) => c.method === "PUT")!.body as { spec: { media: { kind: string }[]; unattend?: unknown } }).spec;
     expect(spec.media.map((m) => m.kind)).toEqual(["iso", "virtio"]);

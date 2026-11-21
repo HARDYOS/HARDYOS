@@ -696,7 +696,7 @@ function UnattendCard({ s, t, set }: { s: WizardState; t: VMTemplate; set: (p: P
       <div className="stack">
         <Toggle
           label="Install by itself"
-          description="Setup runs without questions: it wipes the new disk, loads the VirtIO drivers, makes your account and installs the guest tools. Your ISO, your licence."
+          description="Setup runs without questions: it wipes the VM's new disk, loads the VirtIO drivers, makes your account and installs the guest tools. Devices you pass through join only once Windows is installed, so Setup can never see (or wipe) them. Your ISO, your licence."
           checked={s.unattend}
           onChange={(v) => set({ unattend: v, virtio: v || s.virtio })}
         />
@@ -840,7 +840,15 @@ function ReviewStep({ s, t, caps, catalog, set }: { s: WizardState; t: VMTemplat
         <Toggle label="Start it when it's ready" description={iso ? "Then open its screen to install the system." : undefined} checked={s.start} onChange={(v) => set({ start: v })} />
         <Toggle label="Start with the server" description="After a power cut or restart, the VM starts by itself." checked={s.autostart} onChange={(v) => set({ autostart: v })} />
         <Toggle label="Sound" description="Heard in the VM's screen window." checked={s.sound} onChange={(v) => set({ sound: v })} />
-        <Toggle label="Clipboard" description="Copy and paste with the VM's screen (the guest needs spice-vdagent or the VirtIO guest tools)." checked={s.clipboard} onChange={(v) => set({ clipboard: v })} />
+        <Toggle
+          label="Clipboard"
+          description="Copy and paste with the VM's screen; everyone with its screen open shares it (the guest needs spice-vdagent or the VirtIO guest tools)."
+          checked={s.clipboard}
+          onChange={(v) => set({ clipboard: v })}
+        />
+        {s.unattend && t.unattend && s.devices.length > 0 && (
+          <Alert tone="info">The devices you chose join the VM after Windows has installed itself (restart it then); until then Setup only sees the VM's own new disk.</Alert>
+        )}
       </div>
       {!caps.kvm && <Alert tone="warn">Hardware virtualization is off: the VM won't start until it's turned on in the server's BIOS.</Alert>}
     </>

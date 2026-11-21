@@ -98,13 +98,22 @@ Standard (Desktop Experience)*…), the language (en-US) and optionally the
 time zone. HardyOS makes a small **Windows setup disc** with an answer file
 for Setup, attaches the VirtIO drivers disc, and on the first start
 presses the key Windows' installer waits for. Watch it on the VM's screen:
-Setup wipes the new disk, loads the VirtIO drivers, installs, makes your
-account, signs in once and installs the VirtIO guest tools (network,
+Setup wipes the VM's new disk, loads the VirtIO drivers, installs, makes
+your account, signs in once and installs the VirtIO guest tools (network,
 display, memory, clipboard and the guest agent).
 
-The setup disc holds the account's password, so once Windows is installed
-the VM's page asks you to **take out the setup disc**; HardyOS then deletes
-it. The password is never kept anywhere else.
+Until Windows is installed, the VM starts **without the devices you pass
+through** (a graphics card, a USB stick, a disk controller) and USB devices
+can't be plugged in, so Setup can only ever see, and wipe, the VM's own new
+disk. Restart the VM once Windows is installed and they join.
+
+The setup disc holds the account's password. It's kept only in the
+server's memory (never on a pool, so it's in no snapshot, replica or cloud
+backup), and as soon as Windows is installed and the guest agent answers,
+HardyOS takes it out of the VM and deletes it. You can also take it out
+yourself on the VM's page. If the server restarts during an install the
+disc is gone: finish Windows setup by hand on the VM's screen (take the
+disc out in Hardware), or make the VM again.
 
 Without it, install by hand: when Setup shows no disk, click **Load
 driver**, open the VirtIO drivers disc and pick the `vioscsi` folder for
@@ -119,9 +128,11 @@ type to SATA in **Hardware**.
 
 **Debian 13** and **Ubuntu Server 24.04** are one click: HardyOS downloads
 the official cloud image itself and checks it against its publisher's
-checksums (Ubuntu's are also checked against Ubuntu's signing key) before
-it's used. The image is kept in the ISO library and reused while it's
-still the current one. It's copied into the disk (growing the disk if the
+checksums (Ubuntu's are also checked against Ubuntu's signing key, and old
+signed checksums are refused) before it's used. Verified images (and the
+VirtIO drivers disc) are kept in a folder on the pool that only HardyOS can
+write, never in the ISOs shared folder, and reused while they're still the
+current ones. The ISOs folder doesn't take files of the same names. It's copied into the disk (growing the disk if the
 image is bigger) and set up with cloud-init: your user (with sudo), your
 SSH keys, the password if you gave one, the host name, and the QEMU guest
 agent. Sign in with `ssh <user>@<the VM's address>`; the address shows on
@@ -188,8 +199,9 @@ copied in the VM, and text to paste into it), switches between
 fit-to-window and actual size, turns the VM's **sound** on and off, and goes
 **full screen** (in Chrome and Edge, Esc and the Windows key then go to
 the VM too). Clipboard and sound are turned on per VM in **Hardware ›
-Screen**; the clipboard needs spice-vdagent in Linux guests or the VirtIO
-guest tools in Windows. Only administrators can open a VM's screen, and
+Screen** (the clipboard is on by default for desktops only); the clipboard
+needs spice-vdagent in Linux guests or the VirtIO guest tools in Windows,
+and everyone with the VM's screen open shares it. Only administrators can open a VM's screen, and
 every time it's opened is logged. The screen closes within 15 seconds when
 you sign out, or when your account stops being an administrator's.
 
@@ -208,7 +220,10 @@ and **unplug** takes it back. *Also at the next start* keeps it in the
 VM's devices. Devices the server needs (its boot stick, a pool's disks)
 aren't offered. To give a VM a whole USB controller (every port on it), add
 the controller as a PCI device in **Devices**; the device list says which
-controller each USB device is on.
+controller each USB device is on. A device a program on the server is
+using (the UPS monitor, an app's Zigbee stick) is refused until that stops,
+and a keyboard or mouse only goes when you confirm (the server's own console
+loses it).
 Removing a disk deletes it and its snapshots, so the VM must be off and
 you type its name to save. A VLAN card's VM starts only once its port is
 on its VLAN (checked); if the VLAN can't be set, the VM is turned off
@@ -232,8 +247,11 @@ systems; the list marks it *crash-consistent*).
 snapshots to keep (hourly on the hour, daily at midnight UTC, weekly on
 Mondays, monthly on the 1st). HardyOS takes them and deletes the oldest of
 each kind beyond its count; snapshots you take yourself are never deleted
-by the schedule. Setting a kind to 0 removes its automatic snapshots;
-turning the whole schedule off keeps the ones there are.
+by the schedule. Lowering a count (or setting a kind to 0) so that existing
+automatic snapshots would go asks you to type the VM's name; turning the
+whole schedule off keeps the ones there are. A VM busy with something long
+(an import, a copy) waits for its snapshot without holding up the other
+VMs; if it waits a while, the Snapshots tab says the snapshots are late.
 
 VMs are included in **cloud backups** and **replication** (Backup app)
 the same way: consistent with the guest agent, crash-consistent without

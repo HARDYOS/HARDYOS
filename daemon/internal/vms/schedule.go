@@ -88,6 +88,18 @@ func autoKind(name string) (snapshots.Kind, time.Time, bool) {
 type SetScheduleArgs struct {
 	ID       string    `json:"id"`
 	Schedule *Schedule `json:"schedule"`
+	// Confirm is the VM's name, needed when the new counts delete
+	// automatic snapshots there are now.
+	Confirm string `json:"confirm,omitempty"`
+}
+
+// SchedulePrunes lists the automatic snapshots a schedule would delete
+// from l (none while the schedule is off).
+func SchedulePrunes(l []Snapshot, sc *Schedule) []string {
+	if sc.Off() {
+		return nil
+	}
+	return pruneAuto(l, sc)
 }
 
 // SetSchedule saves a VM's snapshot schedule.
@@ -106,6 +118,13 @@ func (m *Manager) SetSchedule(ctx context.Context, a SetScheduleArgs) (*VM, erro
 		sc = nil
 	} else if p := sc.problems(); len(p) > 0 {
 		return nil, Problems(p)
+	}
+	existing, err := m.snapshots(ctx, st)
+	if err != nil {
+		return nil, err
+	}
+	if n := len(SchedulePrunes(existing, sc)); n > 0 && !Confirms(a.Confirm, &st.spec) {
+		return nil, Problems{fmt.Sprintf("these counts delete %d automatic snapshots %s has now; type the VM's name (%s) to confirm", n, st.spec.Name, st.spec.Name)}
 	}
 	st.spec.Schedule = sc
 	if err := m.saveSpec(st); err != nil {
@@ -142,18 +161,73 @@ func (m *Manager) TickSchedules(ctx context.Context) {
 		if st.spec.Schedule.Off() {
 			continue
 		}
-		if err := m.tickSchedule(ctx, st.spec.ID, now); err != nil {
+		// A VM busy with something long (an import, a template copy)
+		// waits; it never holds up the other VMs' snapshots.
+		unlock, ok := m.tryLock(st.spec.ID)
+		if !ok {
+			if m.scheduleDue(ctx, st, now) {
+				m.missedSchedule(st.spec.ID)
+			}
+			continue
+		}
+		err := m.tickSchedule(ctx, st.spec.ID, now)
+		unlock()
+		if err != nil {
 			m.log().Warn("vms: scheduled snapshot", "id", st.spec.ID, "err", err)
+			m.missedSchedule(st.spec.ID)
+		} else {
+			m.statsMu.Lock()
+			delete(m.schedMissed, st.spec.ID)
+			m.statsMu.Unlock()
 		}
 	}
 }
 
-func (m *Manager) tickSchedule(ctx context.Context, id string, now time.Time) error {
-	unlock, err := m.lockValid(id)
+// MissedWarn is how many rounds in a row a due snapshot can wait before
+// the VM is marked as behind and it's logged as a warning.
+const MissedWarn = 5
+
+// scheduleDue reports whether a VM has an automatic snapshot to take now.
+func (m *Manager) scheduleDue(ctx context.Context, st *stored, now time.Time) bool {
+	existing, err := m.snapshots(ctx, st)
 	if err != nil {
-		return err
+		return true
 	}
-	defer unlock()
+	have := map[string]bool{}
+	for _, s := range existing {
+		have[s.Name] = true
+	}
+	for _, k := range snapshots.Kinds {
+		if st.spec.Schedule.keep(k) > 0 && !have[AutoSnapName(k, now)] {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Manager) missedSchedule(id string) {
+	m.statsMu.Lock()
+	if m.schedMissed == nil {
+		m.schedMissed = map[string]int{}
+	}
+	m.schedMissed[id]++
+	n := m.schedMissed[id]
+	m.statsMu.Unlock()
+	if n == MissedWarn || n%60 == 0 {
+		m.log().Warn("vms: a VM's scheduled snapshot keeps waiting (the VM is busy or the snapshot fails)", "id", id, "rounds", n)
+	}
+}
+
+// schedBehind reports whether a VM's scheduled snapshots are late.
+func (m *Manager) schedBehind(id string) bool {
+	m.statsMu.Lock()
+	defer m.statsMu.Unlock()
+	return m.schedMissed[id] >= MissedWarn
+}
+
+// tickSchedule takes and prunes a VM's automatic snapshots; the caller
+// holds the VM's lock.
+func (m *Manager) tickSchedule(ctx context.Context, id string, now time.Time) error {
 	st, err := m.find(ctx, id) // fresh, under the lock
 	if err != nil {
 		return err

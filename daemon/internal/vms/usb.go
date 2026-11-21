@@ -27,6 +27,8 @@ type USBArgs struct {
 	Device string `json:"device"`
 	// Persist: also add it to (or remove it from) the VM's devices.
 	Persist bool `json:"persist"`
+	// AllowInput: the person confirmed giving a keyboard or mouse away.
+	AllowInput bool `json:"allowInput,omitempty"`
 }
 
 func (m *Manager) hotPlugger() (devices.HotPlugger, error) {
@@ -82,6 +84,9 @@ func (m *Manager) AttachUSB(ctx context.Context, a USBArgs) (*VM, error) {
 	if m.state(ctx, a.ID) != "running" {
 		return nil, Problems{"start the VM first; a VM that's off gets its USB devices in Hardware"}
 	}
+	if st.spec.InstallPending() {
+		return nil, Problems{"Windows is still installing by itself (it wipes the first disk it sees); plug USB devices in once it's installed"}
+	}
 	for _, d := range st.spec.Devices {
 		if d.Kind == devices.KindUSB && d.ID == a.Device {
 			return nil, Problems{fmt.Sprintf("%s already has the USB device %s", st.spec.Name, a.Device)}
@@ -91,7 +96,7 @@ func (m *Manager) AttachUSB(ctx context.Context, a USBArgs) (*VM, error) {
 		return nil, Problems{fmt.Sprintf("at most %d passed-through devices", MaxDevices)}
 	}
 	dev := devices.Device{Kind: devices.KindUSB, ID: a.Device}
-	frag, err := hp.HotplugUSB(ctx, a.ID, dev)
+	frag, err := hp.HotplugUSB(ctx, a.ID, dev, devices.HotplugOptions{AllowInput: a.AllowInput})
 	if err != nil {
 		return nil, err
 	}

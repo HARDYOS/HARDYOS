@@ -100,6 +100,8 @@ type USBDevice struct {
 	// Controller is the PCI address of the USB controller it's on, so a
 	// whole controller can go to a VM as a PCI device (decision 419).
 	Controller string `json:"controller"`
+	// Input: one of its interfaces is a keyboard, mouse or other HID.
+	Input bool `json:"input"`
 }
 
 // GPU is a graphics card (or integrated graphics) with its functions.
@@ -414,6 +416,17 @@ func groupExplanation(id int, devs []string, pci []PCIDevice) string {
 	return fmt.Sprintf("Group %d holds %d devices (%s). The hardware can't keep them apart, so when one goes to a VM the others are taken from the server too, for as long as the VM runs.", id, len(endpoints), strings.Join(endpoints, ", "))
 }
 
+// usbIsInput reports whether a USB device has a HID (class 03) interface.
+func (h *Host) usbIsInput(port string) bool {
+	matches, _ := filepath.Glob(h.path("/sys/bus/usb/devices/" + port + ":*/bInterfaceClass"))
+	for _, mt := range matches {
+		if b, err := os.ReadFile(mt); err == nil && strings.TrimSpace(string(b)) == "03" {
+			return true
+		}
+	}
+	return false
+}
+
 // usbController is the last PCI function on a USB device's sysfs path.
 func (h *Host) usbController(dir string) string {
 	real := h.resolve(dir)
@@ -447,6 +460,7 @@ func (h *Host) readUSB(crit map[string]string, st *state, assigned map[string][]
 		d.Bus, _ = h.readInt(dir + "/busnum")
 		d.Dev, _ = h.readInt(dir + "/devnum")
 		d.Controller = h.usbController(dir)
+		d.Input = h.usbIsInput(port)
 		id := d.VendorID + ":" + d.ProductID
 		if o := owners[id]; o != "" {
 			d.Owner = o

@@ -55,6 +55,10 @@ type UserTemplate struct {
 	Bytes int64 `json:"bytes"`
 }
 
+// templateLock is a template's lock name (never a VM name: VM names have
+// no colon).
+func templateLock(id string) string { return "template:" + id }
+
 // TemplateDataset is a saved template's dataset.
 func TemplateDataset(pool, id string) string { return pool + "/vm-templates/" + id }
 
@@ -225,14 +229,21 @@ func (m *Manager) MakeTemplate(ctx context.Context, a MakeTemplateArgs) (*Task, 
 		unlock()
 		return nil, err
 	}
+	unlockTpl, ok := m.tryLock(templateLock(a.ID))
+	if !ok {
+		unlock()
+		return nil, Problems{fmt.Sprintf("the template %s is busy", a.ID)}
+	}
 	t, err := m.tasks.start("template", a.VM, a.ID)
 	if err != nil {
+		unlockTpl()
 		unlock()
 		return nil, err
 	}
 	spec := st.spec
 	go func() {
 		defer unlock() // the VM stays off and unchanged while it's copied
+		defer unlockTpl()
 		bg, cancel := context.WithTimeout(context.Background(), 24*time.Hour)
 		defer cancel()
 		err := m.copyToTemplate(bg, t, st, spec, a)
@@ -319,6 +330,14 @@ type DeleteTemplateArgs struct {
 // DeleteTemplate destroys a saved template (VMs made from it keep their
 // own disks).
 func (m *Manager) DeleteTemplate(ctx context.Context, a DeleteTemplateArgs) error {
+	if !userTemplateRE.MatchString(a.ID) {
+		return Problems{fmt.Sprintf("there's no saved template called %q", a.ID)}
+	}
+	unlock, ok := m.tryLock(templateLock(a.ID))
+	if !ok {
+		return Problems{"a VM is being made from this template (or it's being made) right now; wait for it to finish"}
+	}
+	defer unlock()
 	t, ds, err := m.findTemplate(ctx, a.ID)
 	if err != nil {
 		return err
@@ -326,11 +345,6 @@ func (m *Manager) DeleteTemplate(ctx context.Context, a DeleteTemplateArgs) erro
 	c := strings.TrimSpace(a.Confirm)
 	if c == "" || (c != t.ID && c != t.Name) {
 		return Problems{fmt.Sprintf("type the template's name (%s) to confirm", t.Name)}
-	}
-	for _, tk := range m.tasks.list("clone") {
-		if !tk.Done && tk.File == t.ID {
-			return Problems{"a VM is being made from this template right now; wait for it to finish"}
-		}
 	}
 	if _, err := m.zfs(ctx, "destroy", "-r", ds); err != nil {
 		return fmt.Errorf("deleting the template: %w", err)
@@ -408,12 +422,19 @@ func (m *Manager) StartClone(ctx context.Context, a ImportArgs) (*Task, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The template's lock: it can't be deleted while it's copied from.
+	unlockTpl, ok := m.tryLock(templateLock(disk.Clone.Template))
+	if !ok {
+		return nil, Problems{"the template is busy (being made or deleted); try again in a moment"}
+	}
 	t, err := m.tasks.start("clone", a.ID, disk.Clone.Template)
 	if err != nil {
+		unlockTpl()
 		return nil, err
 	}
 	d := *disk
 	go func() {
+		defer unlockTpl()
 		bg, cancel := context.WithTimeout(context.Background(), 24*time.Hour)
 		defer cancel()
 		unlock := m.lock(a.ID)

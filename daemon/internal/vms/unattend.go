@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,8 +14,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf16"
+
+	"github.com/hardyos/hardyos/daemon/internal/rootfile"
 )
 
 // Unattended Windows installs (decision 412). The person brings their own
@@ -50,9 +54,20 @@ type Unattend struct {
 	ImageIndex int    `json:"imageIndex,omitempty"`
 	// Hooks are first-logon steps registered with RegisterFirstLogonHook.
 	Hooks []string `json:"hooks,omitempty"`
-	// Pending: Windows isn't installed yet; root answers the installer
-	// disc's "press any key" on the next start.
+	// Pending: Windows isn't installed yet. Until it is, the VM gets none
+	// of its passed-through devices and no USB hot-plug, so Setup only
+	// ever sees (and wipes) the VM's own new disks. It ends when the guest
+	// agent (installed at first logon) answers, or when the person takes
+	// the answer disc out.
 	Pending bool `json:"pending"`
+	// Started: the first start happened and root answered the installer
+	// disc's "press any key".
+	Started bool `json:"started,omitempty"`
+}
+
+// InstallPending reports a Windows install that isn't finished.
+func (s *Spec) InstallPending() bool {
+	return s.Unattend != nil && s.Unattend.Pending && s.HasUnattendMedia()
 }
 
 // LogonCommand is one first-logon step.
@@ -61,10 +76,21 @@ type LogonCommand struct {
 	CommandLine string
 }
 
+// HookVM is what a first-logon hook may know about the VM: values that
+// passed their patterns (VM name: lowercase letters, digits, dashes;
+// user: letters, digits, . _ -; arch: amd64 or arm64), never free text.
+// A hook still quotes them: no command line may interpolate a value
+// unquoted.
+type HookVM struct {
+	ID   string
+	User string
+	Arch string
+}
+
 // FirstLogonHook gives the commands of a named first-logon step for a VM.
 // Hooks are Go code (never data from hardyd), so what runs inside a
 // person's Windows is always something HardyOS ships.
-type FirstLogonHook func(s *Spec) []LogonCommand
+type FirstLogonHook func(vm HookVM) []LogonCommand
 
 var (
 	hooksMu         sync.RWMutex
@@ -106,8 +132,12 @@ func firstLogonHook(name string) (FirstLogonHook, bool) {
 	return h, ok
 }
 
-// unattendFile is the answer disc in the VM's folder.
-const unattendFile = "unattend.iso"
+// UnattendRunDir holds answer discs (<vm uuid>.iso): in /run, so the
+// password is in no dataset, snapshot, replica or backup, and gone with
+// the next boot of the server (decision 412).
+const UnattendRunDir = "/run/hardyos-unattend"
+
+func unattendPath(s *Spec) string { return filepath.Join(UnattendRunDir, s.UUID+".iso") }
 
 var (
 	winUserRE     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,19}$`)
@@ -193,8 +223,8 @@ func (u *Unattend) createProblems(s *Spec) []string {
 		p = append(p, "an unattended install needs the Windows installer disc")
 	}
 	for _, d := range s.Disks {
-		if d.Import != nil {
-			p = append(p, "an unattended install wipes the first disk, so it can't go with an imported disk image")
+		if d.Import != nil || d.Clone != nil {
+			p = append(p, "an unattended install wipes the first disk, so it can't go with an imported image or a template's disk")
 			break
 		}
 	}
@@ -242,9 +272,10 @@ func esc(s string) string {
 	return b.String()
 }
 
-// GuestToolsCommand installs the VirtIO guest tools from whichever drive
-// the drivers disc is in (network, display, balloon, guest agent).
-const GuestToolsCommand = `cmd /c for %d in (D E F G H I J K) do @if exist %d:\virtio-win-guest-tools.exe start "" /wait %d:\virtio-win-guest-tools.exe /install /quiet /norestart`
+// GuestToolsCommand installs the VirtIO guest tools (network, display,
+// balloon, guest agent) from the drive whose volume label is the drivers
+// disc's, never from whatever drive happens to have a file of that name.
+const GuestToolsCommand = `powershell -NoProfile -ExecutionPolicy Bypass -Command "$v = Get-Volume | Where-Object { $_.DriveType -eq 'CD-ROM' -and $_.FileSystemLabel -like 'virtio-win*' } | Select-Object -First 1; if ($v) { Start-Process -Wait -FilePath ($v.DriveLetter + ':\virtio-win-guest-tools.exe') -ArgumentList '/install','/quiet','/norestart' }"`
 
 // AnswerFile builds autounattend.xml for a VM. password is the account's.
 func AnswerFile(s *Spec, arch, password string) ([]byte, error) {
@@ -348,7 +379,7 @@ func AnswerFile(s *Spec, arch, password string) ([]byte, error) {
 		esc(u.User), esc(u.User), encodePassword(password, "Password"))
 	w(`<AutoLogon><Enabled>true</Enabled><LogonCount>1</LogonCount><Username>%s</Username><Password><Value>%s</Value><PlainText>false</PlainText></Password></AutoLogon>`,
 		esc(u.User), encodePassword(password, "Password"))
-	cmds := firstLogonCommands(s)
+	cmds := firstLogonCommands(s, arch)
 	if len(cmds) > 0 {
 		w(`<FirstLogonCommands>`)
 		for i, c := range cmds {
@@ -368,7 +399,7 @@ func AnswerFile(s *Spec, arch, password string) ([]byte, error) {
 }
 
 // firstLogonCommands are the steps run at the first sign-in, in order.
-func firstLogonCommands(s *Spec) []LogonCommand {
+func firstLogonCommands(s *Spec, arch string) []LogonCommand {
 	u := s.Unattend
 	cmds := []LogonCommand{{
 		Description: "The account's password doesn't expire",
@@ -377,9 +408,10 @@ func firstLogonCommands(s *Spec) []LogonCommand {
 	if s.NeedsVirtio() {
 		cmds = append(cmds, LogonCommand{Description: "VirtIO guest tools (drivers and the QEMU guest agent)", CommandLine: GuestToolsCommand})
 	}
+	hv := HookVM{ID: s.ID, User: u.User, Arch: winArch(arch)}
 	for _, name := range u.Hooks {
 		if h, ok := firstLogonHook(name); ok {
-			for _, c := range h(s) {
+			for _, c := range h(hv) {
 				if c.CommandLine != "" && !strings.ContainsAny(c.CommandLine, "\x00\r\n") && len(c.CommandLine) <= 1024 {
 					cmds = append(cmds, c)
 				}
@@ -389,39 +421,95 @@ func firstLogonCommands(s *Spec) []LogonCommand {
 	return cmds
 }
 
-// writeUnattend makes the VM's answer disc in its folder.
+// unattendDir makes sure /run/hardyos-unattend is root's own folder (0711:
+// QEMU reaches its own disc by name, nobody can list them).
+func (m *Manager) unattendDir() (string, error) {
+	dir := m.sys(UnattendRunDir)
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.Mkdir(dir, 0o711); err != nil && !os.IsExist(err) {
+		return "", err
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return "", err
+	}
+	if !fi.IsDir() {
+		return "", fmt.Errorf("%s isn't a folder", UnattendRunDir)
+	}
+	if sys, ok := fi.Sys().(*syscall.Stat_t); ok && rootfile.Enforce && sys.Uid != 0 {
+		return "", fmt.Errorf("%s isn't root's", UnattendRunDir)
+	}
+	if err := os.Chmod(dir, 0o711); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// writeUnattend makes the VM's answer disc. Everything is made in a 0700
+// folder, so neither the answer file nor the disc is readable by anyone
+// else at any moment, and the disc is QEMU's own (0600) before it's put in
+// place.
 func (m *Manager) writeUnattend(ctx context.Context, st *stored, password string) error {
 	xmlb, err := AnswerFile(&st.spec, m.arch().Arch, password)
 	if err != nil {
 		return err
 	}
-	dir := filepath.Join(m.sys(st.dir), "unattend")
-	_ = os.RemoveAll(dir)
-	if err := os.Mkdir(dir, 0o700); err != nil {
+	dir, err := m.unattendDir()
+	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(dir)
-	if err := os.WriteFile(filepath.Join(dir, "autounattend.xml"), xmlb, 0o600); err != nil {
+	stage, err := os.MkdirTemp(dir, ".stage-")
+	if err != nil {
 		return err
 	}
-	tmp := filepath.Join(st.dir, unattendFile+".new")
+	defer os.RemoveAll(stage)
+	if err := os.Chmod(stage, 0o700); err != nil {
+		return err
+	}
+	if err := os.Mkdir(filepath.Join(stage, "in"), 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(stage, "in", "autounattend.xml"), xmlb, 0o600); err != nil {
+		return err
+	}
+	rel := filepath.Join(UnattendRunDir, filepath.Base(stage)) // as xorriso sees it
 	if _, err := m.run(ctx, "xorriso", "-as", "mkisofs", "-quiet", "-volid", "UNATTEND", "-joliet", "-rock",
-		"-output", tmp, filepath.Join(st.dir, "unattend")); err != nil {
+		"-output", filepath.Join(rel, "out.iso"), filepath.Join(rel, "in")); err != nil {
 		return fmt.Errorf("making the Windows answer disc: %w", err)
 	}
-	if err := m.ownSeed(m.sys(tmp)); err != nil {
-		_ = os.Remove(m.sys(tmp))
+	out := filepath.Join(stage, "out.iso")
+	if err := m.ownSeed(out); err != nil {
 		return err
 	}
-	return os.Rename(m.sys(tmp), filepath.Join(m.sys(st.dir), unattendFile))
+	return os.Rename(out, m.sys(unattendPath(&st.spec)))
 }
 
 // removeUnattend deletes the answer disc (it holds the password).
 func (m *Manager) removeUnattend(st *stored) {
-	p := filepath.Join(m.sys(st.dir), unattendFile)
-	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+	if st.spec.UUID == "" {
+		return
+	}
+	if err := os.Remove(m.sys(unattendPath(&st.spec))); err != nil && !os.IsNotExist(err) {
 		m.log().Warn("vms: deleting the Windows answer disc", "id", st.spec.ID, "err", err)
 	}
+}
+
+// checkUnattendDisc makes sure the answer disc is QEMU's own plain file.
+func (m *Manager) checkUnattendDisc(s *Spec) error {
+	p := m.sys(unattendPath(s))
+	fi, err := os.Lstat(p)
+	if err != nil {
+		return Problems{"the Windows setup disc is gone (it's kept in memory so the password is never saved, and the server restarted); take it out of the VM in Hardware and finish Windows setup on its screen, or make the VM again"}
+	}
+	if !fi.Mode().IsRegular() {
+		return errors.New("the Windows setup disc isn't a file")
+	}
+	if sys, ok := fi.Sys().(*syscall.Stat_t); ok && rootfile.Enforce && (sys.Nlink != 1 || !m.qemuOwned(seedFile, sys.Uid)) {
+		return errors.New("the Windows setup disc isn't QEMU's own file")
+	}
+	return m.ownSeed(p)
 }
 
 // HasUnattendMedia reports whether the answer disc is in a drive.
@@ -443,10 +531,10 @@ var (
 )
 
 // answerBootPrompt presses Enter for the installer's boot prompt, in the
-// background, and marks the install as started.
+// background, on the first start only.
 func (m *Manager) answerBootPrompt(st *stored) {
 	id := st.spec.ID
-	st.spec.Unattend.Pending = false
+	st.spec.Unattend.Started = true
 	if err := m.saveSpec(st); err != nil {
 		m.log().Warn("vms: saving the VM after starting its unattended install", "id", id, "err", err)
 	}
@@ -461,4 +549,52 @@ func (m *Manager) answerBootPrompt(st *stored) {
 			time.Sleep(BootKeyEvery)
 		}
 	}()
+}
+
+// checkInstalled ends a running VM's unattended install once its guest
+// agent answers (the guest tools that bring it are installed at the first
+// sign-in, the last step of Setup): the answer disc comes out of the VM's
+// settings and is deleted, and its devices join at the next start.
+func (m *Manager) checkInstalled(ctx context.Context, id string) {
+	unlock, ok := m.tryLock(id)
+	if !ok {
+		return
+	}
+	defer unlock()
+	st, err := m.find(ctx, id)
+	if err != nil || !st.spec.InstallPending() || !st.spec.Unattend.Started || !st.spec.GuestAgent {
+		return
+	}
+	pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	_, err = m.virsh(pctx, "qemu-agent-command", id, `{"execute":"guest-ping"}`, "--timeout", "5")
+	cancel()
+	if err != nil {
+		return
+	}
+	s := st.spec
+	media := []Media{}
+	for _, md := range s.Media {
+		if md.Kind != MediaUnattend {
+			media = append(media, md)
+		}
+	}
+	s.Media, s.Unattend = media, nil
+	st.spec = s
+	if err := m.saveSpec(st); err != nil {
+		m.log().Warn("vms: saving the VM after its Windows install", "id", id, "err", err)
+		return
+	}
+	m.removeUnattend(st)
+	if err := m.define(ctx, st, nil); err != nil {
+		m.log().Warn("vms: redefining the VM after its Windows install", "id", id, "err", err)
+	}
+	if len(s.Devices) > 0 {
+		m.statsMu.Lock()
+		if m.restart == nil {
+			m.restart = map[string]bool{}
+		}
+		m.restart[id] = true
+		m.statsMu.Unlock()
+	}
+	m.log().Info("vms: Windows is installed; the setup disc is deleted", "id", id)
 }

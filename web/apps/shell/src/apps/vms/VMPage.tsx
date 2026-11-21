@@ -583,7 +583,7 @@ function HardwareTab({ vm, onJob }: { vm: VM; onJob: (j: Job) => void }) {
           />
           <Toggle
             label="Clipboard"
-            description="Copy and paste between your computer and the VM's screen. The guest needs spice-vdagent (Linux) or the VirtIO guest tools (Windows)."
+            description="Copy and paste between your computer and the VM's screen. Everyone with this VM's screen open shares its clipboard. The guest needs spice-vdagent (Linux) or the VirtIO guest tools (Windows)."
             checked={!!spec.clipboard}
             onChange={(v) => set({ clipboard: v || undefined })}
           />

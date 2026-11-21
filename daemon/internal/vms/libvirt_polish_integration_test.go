@@ -49,7 +49,7 @@ func TestLibvirtPolishIntegration(t *testing.T) {
 	m := &Manager{Runner: sysexec.Exec{}, Root: "/", Library: datasetLibrary{ds: pool + "/isos", mp: "/mnt/" + pool + "/isos"}}
 
 	// 1. The verified catalog, against Debian's real SHA512SUMS.
-	task, err := m.FetchCatalog(ctx, FetchArgs{Image: CatalogDebian13})
+	task, err := m.FetchCatalog(ctx, FetchArgs{Image: CatalogDebian13, Pool: pool})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestLibvirtPolishIntegration(t *testing.T) {
 		t.Fatalf("fetch = %+v", fetched)
 	}
 	// Again: reused from the library after hashing it.
-	again, err := m.FetchCatalog(ctx, FetchArgs{Image: CatalogDebian13})
+	again, err := m.FetchCatalog(ctx, FetchArgs{Image: CatalogDebian13, Pool: pool})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestLibvirtPolishIntegration(t *testing.T) {
 		ID: "deb", Name: "Debian", Template: "debian13", OS: "linux", Pool: pool,
 		CPU: CPU{Cores: 1, Threads: 1}, Memory: Memory{MB: 1024},
 		Firmware: Firmware{Type: FirmwareUEFI},
-		Disks:    []Disk{{Name: "disk0", SizeGB: 4, Bus: BusVirtioSCSI, Import: &Import{File: fetched.File, Digest: fetched.Digest}}},
+		Disks:    []Disk{{Name: "disk0", SizeGB: 4, Bus: BusVirtioSCSI, Import: &Import{File: fetched.File, Digest: fetched.Digest, Catalog: CatalogDebian13}}},
 		Media:    []Media{{Kind: MediaCloudInit}},
 		NICs:     []NIC{{Mode: NICNAT, Model: "virtio"}},
 		Video:    "virtio", Boot: []string{"disk"}, GuestAgent: true, Sound: true, Clipboard: true,
@@ -165,10 +165,11 @@ func TestLibvirtPolishIntegration(t *testing.T) {
 		Video:    "vga", Boot: []string{"cdrom", "disk"}, GuestAgent: true,
 		Unattend: &Unattend{User: "cade", Locale: "en-US", Edition: "Windows 11 Pro"},
 	}
-	if _, err := m.Create(ctx, CreateArgs{Spec: win, Password: "Windows pass 1", AllowOvercommit: true}); err != nil {
+	wres, err := m.Create(ctx, CreateArgs{Spec: win, Password: "Windows pass 1", AllowOvercommit: true})
+	if err != nil {
 		t.Fatal(err)
 	}
-	disc := "/mnt/" + pool + "/vms/win/" + unattendFile
+	disc := filepath.Join(UnattendRunDir, wres.VM.UUID+".iso")
 	out := filepath.Join(t.TempDir(), "autounattend.xml")
 	must(t, "xorriso", "-osirrox", "on", "-indev", disc, "-extract", "/autounattend.xml", out)
 	b, err := os.ReadFile(out)

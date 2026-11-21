@@ -39,6 +39,7 @@ type sim struct {
 	pvid      map[string]int   // tap -> untagged PVID
 	filtering int              // the bridge's vlan_filtering
 	vlanAdd   string           // a VLAN `bridge vlan add` ignores (fails silently)
+	agent     bool             // the guest agent answers
 }
 
 type simDomain struct {
@@ -449,6 +450,11 @@ func (s *sim) virsh(args []string) (sysexec.Result, error) {
 		return ok("")
 	case "reboot", "reset", "domfsfreeze", "domfsthaw", "send-key":
 		return ok("")
+	case "qemu-agent-command":
+		if s.agent {
+			return ok(`{"return":{}}`)
+		}
+		return bad("error: Guest agent is not responding")
 	case "attach-device", "detach-device":
 		b, err := os.ReadFile(filepath.Join(s.root, args[2]))
 		if err != nil || !strings.Contains(string(b), "<hostdev") {
@@ -664,6 +670,30 @@ func write(t *testing.T, p, s string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// seedVirtio puts a sealed (as if verified) VirtIO disc in tank's catalog
+// store.
+func (e *testEnv) seedVirtio(t *testing.T) {
+	t.Helper()
+	c, err := e.m.store(context.Background(), "tank", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := e.m.openStore(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	f, err := r.Create(VirtioFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Truncate(VirtioSize)
+	f.Close()
+	if err := seal(r, VirtioFile, digest{Algo: "sha256", Hex: VirtioSHA256}); err != nil {
 		t.Fatal(err)
 	}
 }

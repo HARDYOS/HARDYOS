@@ -7894,6 +7894,8 @@ export interface components {
             assigned: string[];
             /** @description PCI address of the USB controller it's on (a whole controller can go to a VM as a PCI device) */
             controller?: string;
+            /** @description It has a keyboard, mouse or other HID interface */
+            input?: boolean;
         };
         GPUInfo: {
             address: string;
@@ -8127,6 +8129,8 @@ export interface components {
                 file: string;
                 /** @description sha256:<hex> or sha512:<hex>, checked again while the image is read (set by the server for catalog images) */
                 digest?: string;
+                /** @description The verified image (set by the server): file is in the pool's root-only catalog store, not the ISOs shared folder */
+                catalog?: string;
             };
             clone?: {
                 /** @description A saved template whose disk of the same name is copied into this one */
@@ -8157,8 +8161,10 @@ export interface components {
             imageIndex?: number;
             /** @description First-logon steps HardyOS ships (by name) */
             hooks?: string[];
-            /** @description Windows isn't installed yet (set by the server) */
+            /** @description Windows isn't installed yet (set by the server); passed-through devices and USB hot-plug wait until it is */
             pending: boolean;
+            /** @description The install has started (the first start happened) */
+            started?: boolean;
         };
         VMSchedule: {
             hourly: number;
@@ -8250,6 +8256,8 @@ export interface components {
             };
             /** @description USB devices plugged into the running VM by hand */
             liveUSB: string[];
+            /** @description A scheduled snapshot has been waiting for a while (the VM is busy or snapshots fail) */
+            snapshotsBehind: boolean;
         };
         VMKeptDisk: {
             dataset: string;
@@ -8481,12 +8489,16 @@ export interface components {
         };
         VMScheduleRequest: {
             schedule: components["schemas"]["VMSchedule"];
+            /** @description The VM's name, needed (400 confirm_required otherwise) when the counts delete automatic snapshots it has now */
+            confirm?: string;
         };
         VMUSBRequest: {
             /** @description vendor:product, like 046d:c52b */
             device: string;
             /** @description Also add it to (or remove it from) the VM's devices for its next start */
             persist?: boolean;
+            /** @description Confirms giving a keyboard or mouse to the VM (refused otherwise) */
+            allowInput?: boolean;
         };
         VMSnapshotDeleteRequest: {
             /** @description The VM's name or display name */

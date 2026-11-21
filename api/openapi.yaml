@@ -8557,6 +8557,7 @@ components:
         owner: { type: string }
         assigned: { type: array, items: { type: string } }
         controller: { type: string, description: "PCI address of the USB controller it's on (a whole controller can go to a VM as a PCI device)" }
+        input: { type: boolean, description: "It has a keyboard, mouse or other HID interface" }
     GPUInfo:
       type: object
       required: [address, vendor, vendorName, model, vramBytes, sharedMemory, functions, driver, bootVga, iommuGroup, owner, users, assigned, problem, hints, vgpu]
@@ -8815,6 +8816,7 @@ components:
           properties:
             file: { type: string, description: A disk image in the ISO library, copied into the disk when the VM is created }
             digest: { type: string, description: "sha256:<hex> or sha512:<hex>, checked again while the image is read (set by the server for catalog images)" }
+            catalog: { type: string, description: "The verified image (set by the server): file is in the pool's root-only catalog store, not the ISOs shared folder" }
         clone:
           type: object
           required: [template]
@@ -8838,7 +8840,8 @@ components:
         edition: { type: string, description: "The edition to install, as the ISO names it (Windows 11 Pro)" }
         imageIndex: { type: integer, minimum: 0, maximum: 64, description: "Or its number in install.wim" }
         hooks: { type: array, items: { type: string }, description: First-logon steps HardyOS ships (by name) }
-        pending: { type: boolean, description: "Windows isn't installed yet (set by the server)" }
+        pending: { type: boolean, description: "Windows isn't installed yet (set by the server); passed-through devices and USB hot-plug wait until it is" }
+        started: { type: boolean, description: "The install has started (the first start happened)" }
     VMSchedule:
       type: object
       required: [hourly, daily, weekly, monthly]
@@ -8910,7 +8913,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/VMSpec"
         - type: object
-          required: [dataset, state, cpuPercent, memoryUsedMB, addresses, passwordSet, restartNeeded, diskUsage, liveUSB]
+          required: [dataset, state, cpuPercent, memoryUsedMB, addresses, passwordSet, restartNeeded, diskUsage, liveUSB, snapshotsBehind]
           properties:
             dataset: { type: string }
             state: { type: string, enum: [running, stopped, paused, shutting-down, crashed, suspended, unknown] }
@@ -8921,6 +8924,7 @@ components:
             restartNeeded: { type: boolean, description: Hardware changed while it ran }
             diskUsage: { type: object, additionalProperties: { type: integer, format: int64 }, description: Bytes each disk uses on the pool }
             liveUSB: { type: array, items: { type: string }, description: USB devices plugged into the running VM by hand }
+            snapshotsBehind: { type: boolean, description: "A scheduled snapshot has been waiting for a while (the VM is busy or snapshots fail)" }
     VMKeptDisk:
       type: object
       required: [dataset, vm, pool, bytes]
@@ -9141,12 +9145,14 @@ components:
       required: [schedule]
       properties:
         schedule: { $ref: "#/components/schemas/VMSchedule" }
+        confirm: { type: string, description: "The VM's name, needed (400 confirm_required otherwise) when the counts delete automatic snapshots it has now" }
     VMUSBRequest:
       type: object
       required: [device]
       properties:
         device: { type: string, description: "vendor:product, like 046d:c52b" }
         persist: { type: boolean, description: "Also add it to (or remove it from) the VM's devices for its next start" }
+        allowInput: { type: boolean, description: "Confirms giving a keyboard or mouse to the VM (refused otherwise)" }
     VMSnapshotDeleteRequest:
       type: object
       required: [confirm]

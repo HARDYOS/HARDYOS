@@ -135,7 +135,7 @@ var Templates = []Template{
 		DefaultPreset: "standard", MinMemoryMB: 2048, MinDiskGB: 32,
 		Images:   []Image{{Name: "Windows Server 2025 (evaluation)", Kind: "iso", Page: "https://www.microsoft.com/evalcenter/download-windows-server-2025"}},
 		Notes:    windowsNotes,
-		Unattend: true, Editions: server2025Edns, Clipboard: true,
+		Unattend: true, Editions: server2025Edns,
 	},
 	{
 		ID: "windows10", Name: "Windows 10", Summary: "For older software that needs Windows 10.",

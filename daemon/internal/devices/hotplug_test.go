@@ -12,7 +12,7 @@ func TestHotplugUSB(t *testing.T) {
 	ctx := context.Background()
 	f.usbDev("1-5", "0781", "5583")
 
-	frag, err := h.HotplugUSB(ctx, "web", Device{Kind: KindUSB, ID: "0781:5583"})
+	frag, err := h.HotplugUSB(ctx, "web", Device{Kind: KindUSB, ID: "0781:5583"}, HotplugOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,7 +23,7 @@ func TestHotplugUSB(t *testing.T) {
 	if p := problems(t, h.Check(ctx, "other", []Device{{Kind: KindUSB, ID: "0781:5583"}})); !hasProblem(p, "VM web") {
 		t.Fatalf("problems = %v", p)
 	}
-	if _, err := h.HotplugUSB(ctx, "web", Device{Kind: KindUSB, ID: "0781:5583"}); err == nil {
+	if _, err := h.HotplugUSB(ctx, "web", Device{Kind: KindUSB, ID: "0781:5583"}, HotplugOptions{}); err == nil {
 		t.Fatal("plugged twice")
 	}
 	inv, _ := h.Inventory(ctx)
@@ -47,7 +47,7 @@ func TestHotplugUSB(t *testing.T) {
 	}
 	// Only vendor:product, never a port or another kind.
 	for _, d := range []Device{{Kind: KindUSB, ID: "1-5"}, {Kind: KindPCI, ID: "0000:01:00.0"}, {Kind: KindUSB, ID: "0781:5583", Primary: true}} {
-		if _, err := h.HotplugUSB(ctx, "web", d); err == nil {
+		if _, err := h.HotplugUSB(ctx, "web", d, HotplugOptions{}); err == nil {
 			t.Errorf("%+v hot-plugged", d)
 		}
 	}
@@ -64,7 +64,7 @@ func TestHotplugRefusesCritical(t *testing.T) {
 	f.file("/dev/sdy", "")
 	f.link("/dev/disk/by-id/usb-Kingston-BOOT", "/dev/sdy")
 	f.file("/var/lib/hardyos/boot.json", `{"pool":"rpool","disks":[{"byId":"/dev/disk/by-id/usb-Kingston-BOOT","espPartUUID":"11111111-aaaa-bbbb-cccc-000000000001"}]}`)
-	if _, err := h.HotplugUSB(context.Background(), "web", Device{Kind: KindUSB, ID: "0951:1666"}); err == nil || !strings.Contains(err.Error(), "can't go to a VM") {
+	if _, err := h.HotplugUSB(context.Background(), "web", Device{Kind: KindUSB, ID: "0951:1666"}, HotplugOptions{}); err == nil || !strings.Contains(err.Error(), "can't go to a VM") {
 		t.Fatalf("boot stick: %v", err)
 	}
 }

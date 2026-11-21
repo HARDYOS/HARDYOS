@@ -18,7 +18,6 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -80,11 +79,8 @@ func (m *Manager) ListLibrary(ctx context.Context) (*LibraryView, error) {
 	if l, err := m.all(ctx); err == nil {
 		for _, st := range l {
 			names := st.spec.Files()
-			if st.spec.NeedsVirtio() {
-				names = append(names, VirtioFile)
-			}
 			for _, d := range st.spec.Disks {
-				if d.Import != nil {
+				if d.Import != nil && d.Import.Catalog == "" {
 					names = append(names, d.Import.File)
 				}
 			}
@@ -176,6 +172,9 @@ func (m *Manager) StartDownload(ctx context.Context, a DownloadArgs) (*Task, err
 	if err != nil {
 		return nil, err
 	}
+	if m.catalogNames()[name] {
+		return nil, Problems{fmt.Sprintf("%s is a verified image HardyOS gets itself (pick its template); save the download under another name", name)}
+	}
 	sum := strings.ToLower(strings.TrimSpace(a.SHA256))
 	if sum != "" {
 		if b, err := hex.DecodeString(sum); err != nil || len(b) != sha256.Size {
@@ -208,7 +207,7 @@ func (m *Manager) StartDownload(ctx context.Context, a DownloadArgs) (*Task, err
 	go func() {
 		bg, cancel := context.WithTimeout(context.Background(), 24*time.Hour)
 		defer cancel()
-		err := m.download(bg, t, f, m.client(), u, name, unpack, digest{Algo: "sha256", Hex: sum}, 0)
+		err := m.download(bg, t, folderSink{f}, m.client(), u, name, unpack, digest{Algo: "sha256", Hex: sum}, 0)
 		m.tasks.finish(t.ID, err)
 		if err != nil {
 			m.log().Warn("vms: download failed", "file", name, "err", err)
@@ -232,7 +231,26 @@ func (d digest) hash() hash.Hash {
 	return sha256.New()
 }
 
-func (m *Manager) download(ctx context.Context, t *Task, f *Folder, client *http.Client, u *url.URL, name, unpack string, want digest, wantSize int64) error {
+// sink is where a download is saved: the ISO library, or the catalog's
+// root-only store.
+type sink interface {
+	create(name string) (*os.File, error)
+	rename(from, to string) error
+	remove(name string) error
+}
+
+type folderSink struct{ f *Folder }
+
+func (s folderSink) create(name string) (*os.File, error) { return createTemp(s.f, name) }
+func (s folderSink) rename(from, to string) error         { return renameInto(s.f, from, to) }
+func (s folderSink) remove(name string) error             { return removeFile(s.f, name) }
+
+// checksumError is a download whose bytes didn't match.
+type checksumError struct{ msg string }
+
+func (e *checksumError) Error() string { return e.msg }
+
+func (m *Manager) download(ctx context.Context, t *Task, f sink, client *http.Client, u *url.URL, name, unpack string, want digest, wantSize int64) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return err
@@ -251,15 +269,15 @@ func (m *Manager) download(ctx context.Context, t *Task, f *Folder, client *http
 		return fmt.Errorf("the file is %d bytes, more than expected", total)
 	}
 	tmpName := "hardyos-download-" + randomHex(8) + ".part"
-	out, err := createTemp(f, tmpName)
+	out, err := f.create(tmpName)
 	if err != nil {
-		return fmt.Errorf("saving into the ISOs shared folder: %w", err)
+		return fmt.Errorf("saving the download: %w", err)
 	}
 	ok := false
 	defer func() {
 		out.Close()
 		if !ok {
-			_ = removeFile(f, tmpName)
+			_ = f.remove(tmpName)
 		}
 	}()
 	h := want.hash()
@@ -301,45 +319,27 @@ func (m *Manager) download(ctx context.Context, t *Task, f *Folder, client *http
 	}
 	if want.Hex != "" {
 		if got := hex.EncodeToString(h.Sum(nil)); got != want.Hex {
-			return fmt.Errorf("the file's %s checksum is %s, not %s; it was damaged or changed, so it was deleted", strings.ToUpper(want.Algo), got, want.Hex)
+			return &checksumError{fmt.Sprintf("the file's %s checksum is %s, not %s; it was damaged or changed, so it was deleted", strings.ToUpper(want.Algo), got, want.Hex)}
 		}
 	}
 	if err := out.Sync(); err != nil {
 		return err
 	}
-	if err := renameInto(f, tmpName, name); err != nil {
+	if err := f.rename(tmpName, name); err != nil {
 		return err
 	}
 	ok = true
 	return nil
 }
 
-// EnsureVirtio downloads the VirtIO drivers disc if it isn't in the
-// library; the task is nil when it's already there. It's the catalog's
-// pinned virtio-win image (decision 410).
+// EnsureVirtio gets the VirtIO drivers disc into the pool's catalog store
+// (checked against its pinned SHA-256); the task is nil when a verified
+// copy is already there (decision 410).
 func (m *Manager) EnsureVirtio(ctx context.Context, pool string) (*Task, error) {
-	if _, err := m.virtioPath(ctx); err == nil {
+	if _, err := m.virtioPath(ctx, pool); err == nil {
 		return nil, nil
 	}
 	return m.FetchCatalog(ctx, FetchArgs{Image: CatalogVirtio, Pool: pool})
-}
-
-// virtioPath is the drivers disc's path, if it's there in full.
-func (m *Manager) virtioPath(ctx context.Context) (string, error) {
-	f, err := m.folder(ctx, "", false)
-	if err != nil || f == nil {
-		return "", errors.New("no ISO library")
-	}
-	file, err := openFile(f, VirtioFile)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-	fi, err := file.Stat()
-	if err != nil || fi.Size() != VirtioSize {
-		return "", errors.New("the VirtIO drivers disc is incomplete")
-	}
-	return filepath.Join(f.Path, VirtioFile), nil
 }
 
 func randomHex(n int) string {
@@ -554,6 +554,14 @@ func (t *taskTable) progress(id string, pct float64, msg string) {
 	if x, ok := t.m[id]; ok && !x.Done {
 		x.Progress = min(max(pct, 0), 100)
 		x.Message = msg
+	}
+}
+
+func (t *taskTable) setFile(id, f string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if x, ok := t.m[id]; ok {
+		x.File = f
 	}
 }
 

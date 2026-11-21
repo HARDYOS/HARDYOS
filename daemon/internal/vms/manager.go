@@ -125,7 +125,9 @@ type Manager struct {
 	prepared map[string]bool // devices prepared and not yet released
 	// hotplugged: USB devices plugged into running VMs (usb.go).
 	hotplugged map[string][]string
-	releases   map[string]*pendingRelease // stopped VMs whose devices still go back
+	// schedMissed: rounds in a row a VM's due snapshot waited.
+	schedMissed map[string]int
+	releases    map[string]*pendingRelease // stopped VMs whose devices still go back
 }
 
 func (m *Manager) log() *slog.Logger {
@@ -191,6 +193,37 @@ func (m *Manager) lock(id string) func() {
 		}
 		m.vmMu.Unlock()
 	}
+}
+
+// tryLock takes id's lock only if nobody holds it.
+func (m *Manager) tryLock(id string) (func(), bool) {
+	m.vmMu.Lock()
+	if m.vmLock == nil {
+		m.vmLock = map[string]*vmLockEntry{}
+	}
+	l, ok := m.vmLock[id]
+	if !ok {
+		l = &vmLockEntry{}
+		m.vmLock[id] = l
+	}
+	if !l.mu.TryLock() {
+		if !ok {
+			delete(m.vmLock, id)
+		}
+		m.vmMu.Unlock()
+		return nil, false
+	}
+	l.users++
+	m.vmMu.Unlock()
+	return func() {
+		l.mu.Unlock()
+		m.vmMu.Lock()
+		l.users--
+		if l.users == 0 {
+			delete(m.vmLock, id)
+		}
+		m.vmMu.Unlock()
+	}, true
 }
 
 // lockValid checks a VM id and takes its lock.
@@ -564,7 +597,9 @@ func (m *Manager) Capabilities(ctx context.Context) *Capabilities {
 	}
 	if f, err := m.folder(ctx, "", false); err == nil && f != nil {
 		c.Library = f.Pool
-		if _, err := m.virtioPath(ctx); err == nil {
+	}
+	for _, pool := range c.Pools {
+		if _, err := m.virtioPath(ctx, pool); err == nil {
 			c.Virtio = true
 		}
 	}
@@ -606,6 +641,8 @@ type VM struct {
 	DiskUsage map[string]int64 `json:"diskUsage"`
 	// LiveUSB are USB devices plugged into the running VM by hand.
 	LiveUSB []string `json:"liveUSB"`
+	// SnapshotsBehind: a scheduled snapshot has been waiting for a while.
+	SnapshotsBehind bool `json:"snapshotsBehind"`
 }
 
 func (m *Manager) view(st *stored, stats map[string]domStats) VM {
@@ -631,6 +668,7 @@ func (m *Manager) view(st *stored, stats map[string]domStats) VM {
 	if v.State == "running" {
 		v.LiveUSB = m.liveUSB(st.spec.ID)
 	}
+	v.SnapshotsBehind = !st.spec.Schedule.Off() && m.schedBehind(st.spec.ID)
 	return v
 }
 
@@ -788,7 +826,7 @@ func (m *Manager) checkMedia(ctx context.Context, s *Spec) error {
 	var p Problems
 	files := s.Files()
 	for _, d := range s.Disks {
-		if d.Import != nil {
+		if d.Import != nil && d.Import.Catalog == "" {
 			files = append(files, d.Import.File)
 		}
 	}
@@ -1140,11 +1178,10 @@ func (m *Manager) Update(ctx context.Context, a UpdateArgs) (*Result, error) {
 	if err := m.define(ctx, st, nil); err != nil {
 		return nil, err
 	}
-	if dropUnattend && !running {
+	if dropUnattend {
+		// A running QEMU keeps what it has open; the name (and so the
+		// password, once QEMU closes it) is gone now.
 		m.removeUnattend(st)
-	} else if dropUnattend {
-		// QEMU still has it open; it goes when the VM stops.
-		m.log().Info("vms: the Windows answer disc is deleted when the VM stops", "id", id)
 	}
 	var warnings []string
 	if running && hardwareChanged(&prev, &s) {
@@ -1175,7 +1212,7 @@ func sameCloudInit(a, b *CloudInit) bool {
 // hardwareChanged reports changes that only apply when the VM next starts.
 func hardwareChanged(a, b *Spec) bool {
 	ja, _ := json.Marshal([]any{a.CPU, a.Memory, a.Firmware, a.Disks, a.Media, a.NICs, a.Video, a.GuestAgent, a.Boot, a.Devices, a.Sound, a.Clipboard})
-	jb, _ := json.Marshal([]any{b.CPU, b.Memory, b.Firmware, b.Disks, b.Media, b.NICs, b.Video, b.GuestAgent, b.Boot, b.Devices})
+	jb, _ := json.Marshal([]any{b.CPU, b.Memory, b.Firmware, b.Disks, b.Media, b.NICs, b.Video, b.GuestAgent, b.Boot, b.Devices, b.Sound, b.Clipboard})
 	return string(ja) != string(jb)
 }
 
@@ -1219,9 +1256,8 @@ func (m *Manager) Delete(ctx context.Context, a DeleteArgs) error {
 			return fmt.Errorf("removing the VM from libvirt: %w", err)
 		}
 	}
+	m.removeUnattend(st)
 	if a.KeepDisks {
-		// Kept disks don't keep the Windows answer disc (its password).
-		m.removeUnattend(st)
 		kept := fmt.Sprintf("%s/vms/%s-kept-%s", st.spec.Pool, st.spec.ID, m.now().Format("20060102-150405"))
 		if _, err := m.zfs(ctx, "rename", st.dataset, kept); err != nil {
 			return fmt.Errorf("keeping the disks: %w", err)
@@ -1322,7 +1358,7 @@ func (m *Manager) define(ctx context.Context, st *stored, devs []devices.Prepare
 // folder can come back from a backup, where a link must never make libvirt
 // open, say, a key file.
 func (m *Manager) checkStateFiles(st *stored) error {
-	for _, name := range []string{"nvram.fd", seedFile, unattendFile, "tpm"} {
+	for _, name := range []string{"nvram.fd", seedFile, "tpm"} {
 		fi, err := os.Lstat(filepath.Join(m.sys(st.dir), name))
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -1356,9 +1392,9 @@ func (m *Manager) paths(ctx context.Context, st *stored) (Paths, error) {
 		p.CloudInit = filepath.Join(st.dir, seedFile)
 	}
 	if st.spec.HasUnattendMedia() {
-		p.Unattend = filepath.Join(st.dir, unattendFile)
+		p.Unattend = unattendPath(&st.spec)
 	}
-	if files := st.spec.Files(); len(files) > 0 || st.spec.NeedsVirtio() {
+	if files := st.spec.Files(); len(files) > 0 {
 		f, err := m.folder(ctx, "", false)
 		if err != nil {
 			return p, err
@@ -1369,10 +1405,11 @@ func (m *Manager) paths(ctx context.Context, st *stored) (Paths, error) {
 		for _, name := range files {
 			p.ISOs[name] = filepath.Join(f.Path, name)
 		}
-		if st.spec.NeedsVirtio() {
-			if v, err := m.virtioPath(ctx); err == nil {
-				p.Virtio = v
-			}
+	}
+	if st.spec.NeedsVirtio() {
+		// Root's verified copy on the VM's pool (decision 410).
+		if v, err := m.virtioPath(ctx, st.spec.Pool); err == nil {
+			p.Virtio = v
 		}
 	}
 	return p, nil
