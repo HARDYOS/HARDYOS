@@ -126,7 +126,15 @@ func (r *Root) PrepareBackup(ctx context.Context) (*BackupSource, error) {
 	}
 	rd, err := os.OpenRoot(r.redisDir())
 	if err == nil {
-		err = copyRegular(rd, "dump.rdb", mr, path.Join(BackupDir, BackupBayesName), maxBayesBytes)
+		// Redis's user owns the folder: a file with one name only (not a
+		// hard link to something of root's), never through a link.
+		if st, lerr := rd.Lstat("dump.rdb"); lerr != nil {
+			err = lerr
+		} else if sys, ok := st.Sys().(*syscall.Stat_t); ok && sys.Nlink != 1 {
+			err = errors.New("Rspamd's dump has more than one name")
+		} else {
+			err = copyRegular(rd, "dump.rdb", mr, path.Join(BackupDir, BackupBayesName), maxBayesBytes)
+		}
 		rd.Close()
 	}
 	switch {
@@ -552,7 +560,14 @@ func (rs *restore) safety() error {
 		return nil
 	}
 	name := "hardyos-manual-" + rs.stamp
-	if _, err := rs.r.run(rs.ctx, "zfs", "snapshot", rs.live.Config.Pool+"/mail@"+name); err != nil {
+	ds := rs.live.Config.Pool + "/mail"
+	var err error
+	if rs.r.SafetySnapshot != nil {
+		err = rs.r.SafetySnapshot(rs.ctx, ds, name)
+	} else {
+		_, err = rs.r.run(rs.ctx, "zfs", "snapshot", ds+"@"+name)
+	}
+	if err != nil {
 		return fmt.Errorf("taking a snapshot of the mail first: %w", err)
 	}
 	rs.res.Safety = name

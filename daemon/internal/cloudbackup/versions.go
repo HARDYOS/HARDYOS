@@ -24,8 +24,8 @@ type VersionItem struct {
 	// Webmail is the mail item's webmail part (Roundcube's data).
 	Webmail string    `json:"webmail,omitempty"`
 	Time    time.Time `json:"time"`
-	Files    int64             `json:"files"`
-	Bytes    int64             `json:"bytes"`
+	Files   int64     `json:"files"`
+	Bytes   int64     `json:"bytes"`
 }
 
 // Version is one run.

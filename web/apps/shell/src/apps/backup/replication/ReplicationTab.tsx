@@ -8,7 +8,7 @@ import type {
   ReplicationTaskRequest,
 } from "@hardy/api-client";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, errorMessage, unwrap } from "../../../api";
 import { bytes, dateTime, relativeTime } from "../../../format";
 import { EditIcon, FolderIcon, NetworkIcon, PlayIcon, PlusIcon, RefreshIcon, StopIcon, TrashIcon } from "../../../icons";
@@ -16,6 +16,8 @@ import { Alert, Badge, Button, Card, EmptyState, ErrorBox, Field, Loading, Selec
 import { ConfirmDialog, Dialog } from "../../../ui/Dialog";
 import { toast } from "../../../ui/toasts";
 import { JobProgress, JobStateBadge } from "../../shared";
+import { useMailHere } from "../backupApi";
+import { MailRestoreForm } from "../MailRestore";
 import {
   KIND_LABEL,
   KIND_PLURAL,
@@ -377,6 +379,15 @@ function TaskDialog({ task, targets, onClose, onDone }: { task: ReplicationTask 
     enabled: task?.enabled ?? true,
   });
   const set = (p: Partial<Draft>) => setD((x) => ({ ...x, ...p }));
+  // Mail (and webmail's settings) are on by default for a new task
+  // (decision 460).
+  const defaulted = useRef(task !== null);
+  useEffect(() => {
+    if (defaulted.current || !items.data) return;
+    defaulted.current = true;
+    const extra = items.data.items.filter((i) => i.kind === "mail" || (i.kind === "app" && i.id === "roundcube"));
+    if (extra.length > 0) setD((x) => ({ ...x, items: [...x.items, ...extra.filter((e) => !x.items.some((y) => y.kind === e.kind && y.id === e.id)).map((e) => ({ kind: e.kind, id: e.id }))] }));
+  }, [items.data]);
   const req = taskRequest(d);
   const tooOften = req.intervalMinutes < 5;
   const save = useMutation({
@@ -430,7 +441,7 @@ function TaskDialog({ task, targets, onClose, onDone }: { task: ReplicationTask 
           <legend className="field__label">What to replicate</legend>
           {items.isPending && <Loading />}
           {items.isError && <ErrorBox error={items.error} />}
-          {(["share", "vm", "app"] as const).map((k) =>
+          {(["share", "vm", "app", "mail"] as const).map((k) =>
             byKind(k).length === 0 ? null : (
               <div key={k} className="stack" style={{ gap: 4 }}>
                 <span className="small muted">{KIND_PLURAL[k]}</span>
@@ -473,6 +484,12 @@ function TaskDialog({ task, targets, onClose, onDone }: { task: ReplicationTask 
           <Alert tone="info">
             Running VMs are frozen by their guest agent for the moment the snapshot takes; without one, the copy is like pulling the plug, which journaling
             file systems recover from. Snapshots count against a VM's space limit, so keep few here.
+          </Alert>
+        )}
+        {d.items.some((i) => i.kind === "mail") && (
+          <Alert tone="info">
+            The mail goes with its DKIM keys. The other server keeps the copy read only and never mounts or shows it; it only sends it back here when you restore.
+            Tick the Mail (Roundcube) app too to keep webmail settings.
           </Alert>
         )}
         {save.isError && <Alert tone="bad">{errorMessage(save.error)}</Alert>}
@@ -582,7 +599,8 @@ function RestoreCard({ targets }: { targets: ReplicationTarget[] }) {
           </table>
         </div>
       )}
-      {restoring && <RestoreDialog target={target} item={restoring} onClose={() => setRestoring(null)} />}
+      {restoring && restoring.kind === "mail" && <MailReplicaRestore target={target} item={restoring} onClose={() => setRestoring(null)} />}
+      {restoring && restoring.kind !== "mail" && <RestoreDialog target={target} item={restoring} onClose={() => setRestoring(null)} />}
     </Card>
   );
 }
@@ -774,6 +792,87 @@ function RestoreDialog({ target, item, onClose }: { target: ReplicationTarget; i
             <span>Copy it back as {where}. Nothing on this server is overwritten.</span>
           </label>
           {restore.isError && <Alert tone="bad">{errorMessage(restore.error)}</Alert>}
+        </div>
+      )}
+    </Dialog>
+  );
+}
+
+/** The mail item of a replica: pick a copy, then what of it to put back. */
+function MailReplicaRestore({ target, item, onClose }: { target: ReplicationTarget; item: ReplicationRemoteItem; onClose: () => void }) {
+  const snaps = useQuery({
+    queryKey: ["replication-snapshots", target.id, item.kind, item.id],
+    queryFn: () =>
+      unwrap(api.GET("/replication/targets/{id}/replicas/{kind}/{item}/snapshots", { params: { path: { id: target.id, kind: item.kind, item: item.id } } })),
+  });
+  const here = useMailHere();
+  const [snapshot, setSnapshot] = useState("");
+  const [job, setJob] = useState<string | null>(null);
+  const [notes, setNotes] = useState<string[]>([]);
+  const list = snaps.data?.snapshots ?? [];
+  const chosen = snapshot || list[list.length - 1]?.name || "";
+  return (
+    <Dialog
+      title={`Restore mail from ${target.name}`}
+      width={640}
+      onClose={onClose}
+      footer={
+        <Button variant={job ? "primary" : "ghost"} onClick={onClose}>
+          {job ? "Close" : "Cancel"}
+        </Button>
+      }
+    >
+      {job ? (
+        <div className="stack">
+          <JobProgress id={job} onDone={(j) => setNotes(((j.result ?? {}) as { notes?: string[] }).notes ?? [])} />
+          {notes.length > 0 && (
+            <Alert tone="info" title="Notes">
+              <ul style={{ margin: 0, paddingLeft: 18 }}>
+                {notes.map((n) => (
+                  <li key={n}>{n}</li>
+                ))}
+              </ul>
+            </Alert>
+          )}
+        </div>
+      ) : (
+        <div className="stack">
+          {(snaps.isPending || here.isPending) && <Loading />}
+          {snaps.isError && <ErrorBox error={snaps.error} />}
+          {here.isError && <ErrorBox error={here.error} />}
+          {list.length > 0 && (
+            <Field label="Copy from" hint="Mail copies can't be browsed: they hold the DKIM keys. The copy comes back to this server, then what you choose is put back.">
+              {(fid) => (
+                <Select id={fid} value={chosen} onChange={(e) => setSnapshot(e.target.value)}>
+                  {[...list].reverse().map((s) => (
+                    <option key={s.name} value={s.name}>
+                      {dateTime(snapshotTime(s.name))}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+          )}
+          {here.data && here.data.mailboxes.length === 0 && (
+            <Alert tone="info" title="Set the mail server up first">
+              Turn the mail server on in Control Panel › Mail, then restore into it.
+            </Alert>
+          )}
+          {here.data && here.data.mailboxes.length > 0 && chosen && (
+            <MailRestoreForm
+              version={here.data}
+              here={here.data}
+              onRestore={async (mail) => {
+                const r = await unwrap(
+                  api.POST("/replication/targets/{id}/restore", {
+                    params: { path: { id: target.id } },
+                    body: { kind: "mail", id: item.id, snapshot: chosen, confirm: true, mail },
+                  }),
+                );
+                setJob((r.job as { id: string }).id);
+              }}
+            />
+          )}
         </div>
       )}
     </Dialog>

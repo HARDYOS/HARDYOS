@@ -5363,6 +5363,19 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/MailOverview" }
+  /mail/restore-targets:
+    get:
+      operationId: getMailRestoreTargets
+      summary: This server's mailboxes by storage key, for restoring mail from a backup or replica (admin)
+      tags: [mail]
+      responses:
+        "200":
+          description: Domains and mailboxes (webmail is always false here)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackupMailContents" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /mail/settings:
     put:
       operationId: saveMailSettings

@@ -4735,6 +4735,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/mail/restore-targets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** This server's mailboxes by storage key, for restoring mail from a backup or replica (admin) */
+        get: operations["getMailRestoreTargets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/mail/settings": {
         parameters: {
             query?: never;
@@ -16475,6 +16492,28 @@ export interface operations {
                     "application/json": components["schemas"]["MailOverview"];
                 };
             };
+        };
+    };
+    getMailRestoreTargets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Domains and mailboxes (webmail is always false here) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupMailContents"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     saveMailSettings: {

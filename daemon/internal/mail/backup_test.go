@@ -152,6 +152,17 @@ func TestPrepareBackup(t *testing.T) {
 	if err != nil || src.Bayes || len(src.Warnings) == 0 {
 		t.Fatalf("a link was copied: %+v %v", src, err)
 	}
+	// Nor a hard link to someone else's file.
+	_ = os.Remove(filepath.Join(ls.redis, "dump.rdb"))
+	other := filepath.Join(ls.redis, "secret")
+	write(t, other, "root's secret")
+	if err := os.Link(other, filepath.Join(ls.redis, "dump.rdb")); err != nil {
+		t.Fatal(err)
+	}
+	src, err = ls.r.PrepareBackup(context.Background())
+	if err != nil || src.Bayes {
+		t.Fatalf("a hard link was copied: %+v %v", src, err)
+	}
 
 	// Not set up: nothing to back up.
 	r := &Root{StateFile: filepath.Join(t.TempDir(), "none.json")}

@@ -30,7 +30,7 @@ const (
 	OpCloudVersions     = "cloudbackup.versions"
 	OpCloudBrowse       = "cloudbackup.browse"
 	OpCloudMailContents = "cloudbackup.mail.contents"
-	OpCloudOffer       = "cloudbackup.offer"
+	OpCloudOffer        = "cloudbackup.offer"
 	OpCloudOfferDismiss = "cloudbackup.offer.dismiss"
 	// Live installer only.
 	OpInstallCloudProbe = "install.cloud.probe"

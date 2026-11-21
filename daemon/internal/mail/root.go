@@ -77,6 +77,9 @@ type Root struct {
 	RedisDir string
 	// Now is the clock (restored folders' names); time.Now by default.
 	Now func() time.Time
+	// SafetySnapshot replaces "zfs snapshot" of the mail dataset before a
+	// restore replaces anything (integration tests without ZFS).
+	SafetySnapshot func(ctx context.Context, dataset, name string) error
 
 	mu sync.Mutex
 }

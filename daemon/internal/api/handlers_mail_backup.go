@@ -49,6 +49,39 @@ func describeMailRestore(a *mail.RestoreArgs) string {
 	return d
 }
 
+// handleMailRestoreTargets lists this server's mailboxes by storage key,
+// what a restore puts a version's mailbox into (admin).
+func (s *Server) handleMailRestoreTargets(w http.ResponseWriter, r *http.Request, _ *auth.User) {
+	svc := s.mailSvc()
+	out := cloudbackup.MailContents{Contents: mail.Contents{Domains: []string{}, Mailboxes: []mail.ContentsMailbox{}}}
+	if svc == nil {
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	mbs, err := svc.Store.Mailboxes(r.Context())
+	if err != nil {
+		internalError(s, w, err)
+		return
+	}
+	doms, err := svc.Store.Domains(r.Context())
+	if err != nil {
+		internalError(s, w, err)
+		return
+	}
+	for _, d := range doms {
+		out.Domains = append(out.Domains, d.Name)
+	}
+	for _, m := range mbs {
+		if !m.Deleting && mail.ValidMailboxKey(m.Key) {
+			out.Mailboxes = append(out.Mailboxes, mail.ContentsMailbox{Key: m.Key, Address: m.Address})
+		}
+	}
+	if st, err := svc.Store.LoadSettings(r.Context()); err == nil {
+		out.Hostname = st.Hostname
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 func (s *Server) handleCloudMailContents(w http.ResponseWriter, r *http.Request, _ *auth.User) {
 	var res cloudbackup.MailContents
 	if err := s.cfg.Priv.Call(r.Context(), priv.OpCloudMailContents, cloudbackup.MailContentsArgs{Target: r.PathValue("id"), Snapshot: r.URL.Query().Get("snapshot")}, &res); err != nil {
