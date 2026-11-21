@@ -22,8 +22,14 @@ type Server struct {
 	// Tokens maps a token to its status ("active", "disabled").
 	Tokens map[string]string
 	// Zones maps a zone name to its id.
-	Zones   map[string]string
-	records map[string]*rec // by id
+	Zones map[string]string
+	// ZoneStatus overrides a zone's status (default "active").
+	ZoneStatus map[string]string
+	// Account owns every zone; AccountTokens are account-owned tokens
+	// (only /accounts/{Account}/tokens/verify knows them).
+	Account       string
+	AccountTokens map[string]bool
+	records       map[string]*rec // by id
 	// Calls counts requests by "METHOD path".
 	Calls map[string]int
 	// Seen are the Authorization headers received.
@@ -44,7 +50,7 @@ func id() string {
 // New starts a fake with one active token and one zone.
 func New(token, zone string) *Server {
 	s := &Server{Tokens: map[string]string{token: "active"}, Zones: map[string]string{zone: id()},
-		records: map[string]*rec{}, Calls: map[string]int{}}
+		records: map[string]*rec{}, Calls: map[string]int{}, ZoneStatus: map[string]string{}, Account: id(), AccountTokens: map[string]bool{}}
 	s.Server = httptest.NewServer(http.HandlerFunc(s.serve))
 	return s
 }
@@ -117,14 +123,28 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
 	switch {
 	case p == "/user/tokens/verify" && r.Method == http.MethodGet:
+		if s.AccountTokens[tok] {
+			s.reply(w, 401, nil, "Invalid API Token")
+			return
+		}
+		s.reply(w, 200, map[string]string{"id": "t", "status": st}, "")
+	case p == "/accounts/"+s.Account+"/tokens/verify" && r.Method == http.MethodGet:
+		if !s.AccountTokens[tok] {
+			s.reply(w, 401, nil, "Invalid API Token")
+			return
+		}
 		s.reply(w, 200, map[string]string{"id": "t", "status": st}, "")
 	case st != "active":
 		s.reply(w, http.StatusForbidden, nil, "token disabled")
 	case p == "/zones" && r.Method == http.MethodGet:
 		name := r.URL.Query().Get("name")
-		out := []map[string]string{}
+		out := []map[string]any{}
 		if zid, ok := s.Zones[name]; ok {
-			out = append(out, map[string]string{"id": zid, "name": name, "status": "active"})
+			zs := "active"
+			if v := s.ZoneStatus[name]; v != "" {
+				zs = v
+			}
+			out = append(out, map[string]any{"id": zid, "name": name, "status": zs, "account": map[string]string{"id": s.Account}})
 		}
 		s.reply(w, 200, out, "")
 	case strings.HasPrefix(p, "/zones/"):

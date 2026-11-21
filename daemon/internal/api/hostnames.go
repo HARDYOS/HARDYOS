@@ -83,8 +83,13 @@ type hostCode struct {
 	desktopToken string
 	stateHash    string
 	next         string
+	ip           string
 	expires      time.Time
 }
+
+// maxCodesEach bounds the codes waiting per desktop session and per
+// address (decision 457).
+const maxCodesEach = 5
 
 type hostProxy struct {
 	target string
@@ -104,6 +109,21 @@ type hostRuntime struct {
 	codes    map[string]hostCode
 	proxies  map[string]*hostProxy
 	problem  string
+	// cookies are the cookie names each app host's own responses set
+	// (decision 450 amended): a request cookie another app host set and
+	// this one never did was tossed in from a sibling and is dropped.
+	cookies map[string]map[string]bool
+}
+
+// maxLearnedCookies bounds the names remembered per app.
+const maxLearnedCookies = 200
+
+// hostsOffPage refuses a name under the base while hostnames are off
+// (decision 450 amended): never the desktop on an app's name, and the
+// browser forgets what an app stored there.
+func hostsOffPage(w http.ResponseWriter) {
+	w.Header().Set("Clear-Site-Data", `"storage", "cache"`)
+	proxyPage(w, http.StatusNotFound, "Hostnames are off", "Open apps from the HardyOS desktop at the server's own address.")
 }
 
 func (h *hostRuntime) snapshot() (active bool, base, desktop string) {
@@ -194,10 +214,26 @@ func (h *hostRuntime) refresh(ctx context.Context) {
 		desk = v
 	}
 	remoteBase, _ := s.cfg.DB.GetSetting(ctx, publish.SettingBaseDomain)
+	// The last base the hostnames were for: names under it are refused
+	// while they're off, even after the token is gone.
+	lastBase, _ := s.cfg.DB.GetSetting(ctx, settingLastBase)
+	if st, err := m.DNS.Status(ctx); err == nil && st.Set && st.Base != "" && st.Base != lastBase {
+		lastBase = st.Base
+		_ = s.cfg.DB.SetSetting(ctx, settingLastBase, lastBase)
+	}
 	problem := ""
 	active := set.Enabled && leaf != nil && certBase != ""
 	if active && remoteBase != "" && remoteBase != certBase {
 		active, problem = false, "Remote Access's base domain ("+remoteBase+") isn't the hostnames' ("+certBase+")"
+	}
+	if active && hostnames.Reserved(desk) {
+		active, problem = false, "the desktop's name ("+desk+") is one of HardyOS's own names; change it in Remote Access"
+	}
+	// The wildcard is only ever served while the names are (decision 450).
+	m.Certs.SetActive(active)
+	base := certBase
+	if !active || base == "" {
+		base = lastBase
 	}
 	var list map[string]apps.App
 	known := false
@@ -210,15 +246,22 @@ func (h *hostRuntime) refresh(ctx context.Context) {
 		}
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.active, h.base, h.desktop, h.problem = active, certBase, desk, problem
+	changed := h.active != active || (active && h.base != base)
+	h.active, h.base, h.desktop, h.problem = active, base, desk, problem
 	if known {
 		h.apps, h.appsKnow = list, true
 	}
 	if !active {
 		h.proxies = map[string]*hostProxy{}
 	}
+	h.mu.Unlock()
+	if changed {
+		// Immich's redirect URIs follow photos.<base> (decision 458).
+		s.photosNudge()
+	}
 }
+
+const settingLastBase = "hostnames.last_base"
 
 func (h *hostRuntime) app(id string) (apps.App, bool) {
 	h.mu.Lock()
@@ -332,15 +375,35 @@ func (h *hostRuntime) dropProxy(appID string) {
 // whether it did (false: the desktop's own routes).
 func (h *hostRuntime) serve(w http.ResponseWriter, r *http.Request) bool {
 	active, base, desk := h.snapshot()
-	if !active || r.TLS == nil {
+	if base == "" || r.TLS == nil {
 		return false
 	}
 	host := strings.ToLower(strings.TrimSuffix(hostOnly(r.Host), "."))
 	label, ok := strings.CutSuffix(host, "."+base)
-	if !ok || label == "" || strings.Contains(label, ".") {
+	if !ok || label == "" {
 		return false
 	}
 	s := h.s
+	if strings.Contains(label, ".") {
+		// x.photos.<base>: no name of HardyOS's (decision 456).
+		proxyPage(w, http.StatusNotFound, "Nothing is here", "No HardyOS app has this address.")
+		return true
+	}
+	if !active {
+		switch label {
+		case desk:
+			return false
+		case hostnames.SSOLabel:
+			// The provider may still be reached here (NetBird's name); never
+			// the desktop.
+			if s.oidc != nil && s.oidc.Owns(r) {
+				s.serveProvider(w, r, time.Now())
+				return true
+			}
+		}
+		hostsOffPage(w)
+		return true
+	}
 	switch label {
 	case desk:
 		switch {
@@ -446,11 +509,15 @@ func (h *hostRuntime) bind(w http.ResponseWriter, r *http.Request) {
 		proxyPage(w, http.StatusMethodNotAllowed, "Open the app again", "Open it from the HardyOS desktop.")
 		return
 	}
+	q := r.URL.Query()
 	if site := strings.ToLower(r.Header.Get("Sec-Fetch-Site")); site == "cross-site" {
-		proxyPage(w, http.StatusForbidden, "Open the app from the HardyOS desktop", "Another site can't sign you in to HardyOS apps.")
+		// Started from another site: one click on this page makes it
+		// same-origin. Safe either way: the code only ever goes to the app
+		// host, and only the browser holding the state cookie can use it.
+		q.Del("again")
+		hostContinuePage(w, hostBindPath+"?"+q.Encode())
 		return
 	}
-	q := r.URL.Query()
 	appID, sh, next := q.Get("app"), q.Get("s"), safeNext(q.Get("next"))
 	if !stateHashOK(sh) {
 		proxyPage(w, http.StatusBadRequest, "Open the app again", "This sign-in link isn't complete.")
@@ -507,13 +574,28 @@ func (h *hostRuntime) bind(w http.ResponseWriter, r *http.Request) {
 	if h.codes == nil {
 		h.codes = map[string]hostCode{}
 	}
-	full := len(h.codes) >= maxHostCodes
+	ip := s.clientIP(r)
+	now := time.Now()
+	perSession, perIP := 0, 0
+	for k, c := range h.codes {
+		if now.After(c.expires) {
+			delete(h.codes, k)
+			continue
+		}
+		if c.desktopToken == tok {
+			perSession++
+		}
+		if c.ip == ip {
+			perIP++
+		}
+	}
+	full := len(h.codes) >= maxHostCodes || perSession >= maxCodesEach || perIP >= maxCodesEach
 	if !full {
-		h.codes[stateHash(code)] = hostCode{appID: appID, userID: u.ID, desktopToken: tok, stateHash: sh, next: next, expires: time.Now().Add(hostCodeTTL)}
+		h.codes[stateHash(code)] = hostCode{appID: appID, userID: u.ID, desktopToken: tok, stateHash: sh, next: next, ip: ip, expires: now.Add(hostCodeTTL)}
 	}
 	h.mu.Unlock()
 	if full {
-		proxyPage(w, http.StatusServiceUnavailable, "Try again in a minute", "Too many sign-ins are waiting.")
+		proxyPage(w, http.StatusTooManyRequests, "Try again in a minute", "Too many sign-ins are waiting.")
 		return
 	}
 	http.Redirect(w, r, target+hostCallback+"?code="+url.QueryEscape(code), http.StatusSeeOther)
@@ -632,10 +714,12 @@ func (h *hostRuntime) proxyFor(a apps.App, webmail bool) *httputil.ReverseProxy 
 	if h.proxies == nil {
 		h.proxies = map[string]*hostProxy{}
 	}
-	if hp := h.proxies[a.ID]; hp != nil && hp.target == target.String() {
+	key := target.String() + " " + h.desktop + "." + h.base
+	if hp := h.proxies[a.ID]; hp != nil && hp.target == key {
 		return hp.rp
 	}
 	frame := "frame-ancestors 'self' https://" + h.desktop + "." + h.base
+	appID := a.ID
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
@@ -647,6 +731,7 @@ func (h *hostRuntime) proxyFor(a apps.App, webmail bool) *httputil.ReverseProxy 
 			pr.Out.Header.Set("X-Forwarded-Proto", "https")
 			pr.Out.Header.Set("X-Forwarded-Host", pr.In.Host)
 			gatewayRequestCookies(pr.Out.Header)
+			h.dropTossedCookies(pr.Out.Header, appID)
 			if webmail {
 				// Only HardyOS signs people in to webmail (decision 305).
 				pr.Out.Header.Del("Authorization")
@@ -657,6 +742,7 @@ func (h *hostRuntime) proxyFor(a apps.App, webmail bool) *httputil.ReverseProxy 
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			gatewayFixResponse(resp, target, hostOnly(resp.Request.Host), frame)
+			h.learnCookies(resp.Header, appID)
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
@@ -664,8 +750,82 @@ func (h *hostRuntime) proxyFor(a apps.App, webmail bool) *httputil.ReverseProxy 
 				"It may be starting or stopped. Check it in the App Store, then reload.")
 		},
 	}
-	h.proxies[a.ID] = &hostProxy{target: target.String(), rp: rp}
+	h.proxies[a.ID] = &hostProxy{target: key, rp: rp}
 	return rp
+}
+
+// learnCookies remembers the cookie names an app host's own responses set.
+func (h *hostRuntime) learnCookies(hdr http.Header, appID string) {
+	lines := hdr.Values("Set-Cookie")
+	if len(lines) == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cookies == nil {
+		h.cookies = map[string]map[string]bool{}
+	}
+	set := h.cookies[appID]
+	if set == nil {
+		set = map[string]bool{}
+		h.cookies[appID] = set
+	}
+	for _, l := range lines {
+		nv, _, _ := strings.Cut(l, ";")
+		name, _, _ := strings.Cut(nv, "=")
+		if name = strings.TrimSpace(name); name != "" && len(set) < maxLearnedCookies {
+			set[name] = true
+		}
+	}
+}
+
+// dropTossedCookies removes cookies a sibling app host could have set for
+// the whole base (a script's document.cookie with Domain=<base>): names
+// another app host's responses set and this one's never did, and every
+// name sent more than once (one of them isn't this host's own).
+func (h *hostRuntime) dropTossedCookies(hdr http.Header, appID string) {
+	lines := hdr.Values("Cookie")
+	if len(lines) == 0 {
+		return
+	}
+	h.mu.Lock()
+	own := h.cookies[appID]
+	others := map[string]bool{}
+	for id, set := range h.cookies {
+		if id == appID {
+			continue
+		}
+		for n := range set {
+			others[n] = true
+		}
+	}
+	h.mu.Unlock()
+	type kv struct{ name, part string }
+	var parts []kv
+	count := map[string]int{}
+	for _, line := range lines {
+		for _, part := range strings.Split(line, ";") {
+			part = strings.TrimSpace(part)
+			name, _, _ := strings.Cut(part, "=")
+			name = strings.TrimSpace(name)
+			if part == "" {
+				continue
+			}
+			parts = append(parts, kv{name, part})
+			count[name]++
+		}
+	}
+	var keep []string
+	for _, p := range parts {
+		if count[p.name] > 1 || (others[p.name] && !own[p.name]) {
+			continue
+		}
+		keep = append(keep, p.part)
+	}
+	hdr.Del("Cookie")
+	if len(keep) > 0 {
+		hdr.Set("Cookie", strings.Join(keep, "; "))
+	}
 }
 
 // serveOffice is office.<base>: the office origin's routes, with the

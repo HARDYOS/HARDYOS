@@ -5257,6 +5257,8 @@ export interface components {
             /** Format: date-time */
             verifiedAt: string | null;
             problem?: string;
+            /** @description The base is its Cloudflare zone's apex: this server's domain controller holds the names only when the base is the AD domain or inside it */
+            apex: boolean;
         };
         HostnamesCert: {
             names: string[];

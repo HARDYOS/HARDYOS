@@ -21,12 +21,13 @@ window proxy ports, the office port and the self-signed certificate stay.
    `RootKeyFor(keys, "dns-cloudflare")`) into `_hardyos-dns.json` in the keys
    folder and never hands it back. `dns.status` answers "set, base, zone,
    last verified". Named DNS operations only:
-   - `dns.acme.present` / `dns.acme.cleanup`: TXT `_acme-challenge.<name>`
-     for a name inside the base; root keeps the ids it made and deletes only
+   - `dns.acme.present` / `dns.acme.cleanup`: TXT exactly
+     `_acme-challenge.<base>`; root keeps the ids it made and deletes only
      those.
    - `dns.record.set`: A/AAAA/CNAME for a name strictly under the base (or
-     `*.<base>`), only creating or changing records marked `hardyos`. For the
-     NetBird take-over later; tested now, no UI.
+     `*.<base>`), only creating or changing records root made. For the
+     NetBird take-over later; code and tests now, not registered as an
+     operation until then.
    - `dns.token.verify`, `dns.token.clear` (confirmation = the base).
 2. **Wildcard certificate** (`internal/hostnames`). hardyd speaks ACME
    (golang.org/x/crypto/acme, already pinned in go.mod) for `*.<base>` with
@@ -72,3 +73,22 @@ window proxy ports, the office port and the self-signed certificate stay.
 - web: Control Panel › Hostnames rules (vitest).
 
 No real network in tests; nothing needs a CI job of its own.
+
+## After the security review (decisions 450-459 amended)
+
+- M1: the wildcard is served only while the hostnames are active and is
+  removed when they're turned off; app names under the last known base
+  then answer "Hostnames are off" with `Clear-Site-Data`, never the desktop.
+- M2: root decides which names go into the DC (HardyOS's own, the
+  desktop's, apps with a web page in root's apps state; never wpad, isatap
+  or a directory computer/SPN name); Cloudflare zones must be active.
+- M3: cookie tossing between app hosts is reduced, not gone: per-host
+  learned cookie names, foreign and duplicated names dropped.
+- L1-L8: deep names 404, only `_acme-challenge.<base>`, `dns.record.set`
+  unregistered, bind codes capped (5 per session and address), DC removal
+  deletes HardyOS's zone and works without the token, the apex refused,
+  proxy cache keyed on the desktop name, desktop names can't be HardyOS's
+  labels, one atomically replaced certificate file.
+- Cross-site starts get the Continue page; Photos re-syncs Immich's
+  redirect URIs when the hostnames turn on or off; account-owned
+  Cloudflare tokens verify at their account's endpoint.

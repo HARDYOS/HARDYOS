@@ -412,7 +412,7 @@ func TestHostnamesBind(t *testing.T) {
 		{admin, "?app=immich&s=short", "", http.StatusBadRequest},
 		{admin, "?app=sso&s=" + strings.Repeat("a", 64), "", http.StatusNotFound},
 		{admin, "?app=nope&s=" + strings.Repeat("a", 64), "", http.StatusNotFound},
-		{admin, good, "cross-site", http.StatusForbidden},
+		{admin, good, "cross-site", http.StatusOK}, // the continue page: one same-origin click
 	} {
 		req, _ := http.NewRequest("GET", desk+hostBindPath+x.q, nil)
 		if x.hdr != "" {
@@ -478,5 +478,122 @@ func TestHostnamesRedirectOldAddresses(t *testing.T) {
 	r = httptest.NewRequest("GET", "https://192.168.1.5:44301/", nil)
 	if h.redirectOld(w, r, "board") {
 		t.Fatal("redirected a request by address")
+	}
+}
+
+// probe dials name at the test server and says whether the fake CA's
+// wildcard came back, and what /api/v1/health answers there.
+func (e *hostsEnv) probe(c *hostsClient, name string) (bool, int, string) {
+	e.t.Helper()
+	pool := x509.NewCertPool()
+	pool.AddCert(e.hosts.ACME.CA())
+	conn, err := tls.Dial("tcp", e.srv.Listener.Addr().String(), &tls.Config{ServerName: name, RootCAs: pool})
+	wild := err == nil
+	if conn != nil {
+		conn.Close()
+	}
+	r, b := c.req("GET", "https://"+name+"/api/v1/health", nil)
+	return wild, r.StatusCode, b
+}
+
+func TestHostnamesOffRefusesAppNames(t *testing.T) {
+	e := newHostsEnv(t)
+	admin := e.activate()
+	if wild, code, body := e.probe(admin, "photos.home.example.net"); !wild || code != 200 || !strings.HasPrefix(body, "app:") {
+		t.Fatalf("on: wildcard=%v health=%d %s", wild, code, body)
+	}
+	r, b := admin.req("PUT", desk+"/api/v1/hostnames/settings", map[string]any{"enabled": false})
+	if j := e.waitJob(admin, b); r.StatusCode != http.StatusAccepted || j["state"] != "succeeded" {
+		t.Fatalf("%d %v", r.StatusCode, j)
+	}
+	// Off: no wildcard for any name, the certificate is gone, and app
+	// names never get the desktop or its API.
+	for _, n := range []string{"photos.home.example.net", "board.home.example.net", "files.home.example.net", "sso.home.example.net"} {
+		wild, code, body := e.probe(admin, n)
+		if wild || code != http.StatusNotFound || !strings.Contains(body, "Hostnames are off") {
+			t.Errorf("%s off: wildcard=%v %d %s", n, wild, code, body)
+		}
+	}
+	resp, _ := admin.req("GET", "https://photos.home.example.net/", nil)
+	if resp.Header.Get("Clear-Site-Data") == "" {
+		t.Fatal("no Clear-Site-Data")
+	}
+	if _, leaf := e.server.cfg.Hostnames.Certs.Wildcard(); leaf != nil {
+		t.Fatal("certificate kept while off")
+	}
+	// The desktop's own name still works.
+	if _, code, _ := e.probe(admin, "nas.home.example.net"); code != 200 {
+		t.Fatalf("desktop: %d", code)
+	}
+	// And after the token is forgotten too.
+	r, b = admin.req("DELETE", desk+"/api/v1/hostnames/token", map[string]string{"confirm": "home.example.net"})
+	e.waitJob(admin, b)
+	e.server.hosts.refresh(context.Background())
+	if _, code, body := e.probe(admin, "photos.home.example.net"); code != http.StatusNotFound || !strings.Contains(body, "Hostnames are off") {
+		t.Fatalf("after forgetting: %d %s", code, body)
+	}
+}
+
+func TestHostnamesUnknownAndDeepNames(t *testing.T) {
+	e := newHostsEnv(t)
+	admin := e.activate()
+	for _, n := range []string{"https://x.photos.home.example.net/api/v1/health", "https://a.b.home.example.net/", "https://nothing.home.example.net/"} {
+		if r, b := admin.req("GET", n, nil); r.StatusCode != http.StatusNotFound || strings.Contains(b, `"status"`) {
+			t.Errorf("%s: %d %s", n, r.StatusCode, b)
+		}
+	}
+}
+
+func TestHostnamesCookieTossing(t *testing.T) {
+	e := newHostsEnv(t)
+	admin := e.activate()
+	// Both apps' own responses set "sid" (Photos' is in the jar); Board's
+	// also sets board_token.
+	e.server.hosts.learnCookies(http.Header{"Set-Cookie": {"board_token=x; Path=/"}}, "board")
+	admin.req("GET", "https://board.home.example.net/", nil)
+	admin.req("GET", "https://photos.home.example.net/", nil)
+	for len(e.seen) > 0 {
+		<-e.seen
+	}
+	// A script on board.<base> wrote cookies for the whole base: one with
+	// Board's name, and a second immich_access_token on /api (the
+	// "Immich path" trick: sent before Immich's own).
+	req, _ := http.NewRequest("GET", "https://photos.home.example.net/api/x", nil)
+	req.Header.Set("Accept", "text/html")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.AddCookie(&http.Cookie{Name: "board_token", Value: "evil"})
+	req.AddCookie(&http.Cookie{Name: "immich_access_token", Value: "attacker"})
+	req.AddCookie(&http.Cookie{Name: "immich_access_token", Value: "real"})
+	resp, err := admin.hc.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	var got *http.Request
+	for len(e.seen) > 0 {
+		got = <-e.seen
+	}
+	if got == nil {
+		t.Fatalf("no request reached the app (%d)", resp.StatusCode)
+	}
+	c := got.Header.Get("Cookie")
+	if strings.Contains(c, "board_token") || strings.Contains(c, "immich_access_token") || !strings.Contains(c, "sid=1") {
+		t.Fatalf("cookies reaching Photos: %q", c)
+	}
+}
+
+func TestHostnamesBindCaps(t *testing.T) {
+	e := newHostsEnv(t)
+	e.activate()
+	admin := e.browser(false)
+	admin.req("POST", desk+"/api/v1/auth/login", map[string]string{"username": "cade", "password": "supersecret1"})
+	u := desk + hostBindPath + "?app=immich&s=" + strings.Repeat("a", 64)
+	for i := 0; i < maxCodesEach; i++ {
+		if r, _ := admin.req("GET", u, nil); r.StatusCode != http.StatusSeeOther {
+			t.Fatalf("%d: %d", i, r.StatusCode)
+		}
+	}
+	if r, _ := admin.req("GET", u, nil); r.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("over the cap: %d", r.StatusCode)
 	}
 }

@@ -5907,13 +5907,14 @@ components:
         address: { type: string, description: One of this server's addresses (lan.addresses) }
     HostnamesTokenState:
       type: object
-      required: [set, base, zone, verifiedAt]
+      required: [set, base, zone, verifiedAt, apex]
       properties:
         set: { type: boolean }
         base: { type: string }
         zone: { type: string }
         verifiedAt: { type: [string, "null"], format: date-time }
         problem: { type: string }
+        apex: { type: boolean, description: "The base is its Cloudflare zone's apex: this server's domain controller holds the names only when the base is the AD domain or inside it" }
     HostnamesCert:
       type: object
       required: [names, issuer, notBefore, notAfter, fingerprint, renewsAt]

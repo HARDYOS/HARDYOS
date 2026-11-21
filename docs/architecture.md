@@ -2116,11 +2116,13 @@ decisions 450-459.
 - **Token** (`priv/dns_ops.go`, `internal/cfdns`): root's only, sealed in
   `_hardyos-dns.json` in the keys folder with a root-only key; operations
   `dns.status`, `dns.token.set|verify|clear`, `dns.acme.present|cleanup`,
-  `dns.record.set` (for the NetBird take-over; no UI yet). Fake Cloudflare
+  `dns.record.set` (for the NetBird take-over; code and tests, not
+  registered yet). Fake Cloudflare
   for tests: `internal/cfdns/cftest`.
 - **Certificate** (`internal/hostnames`): hardyd makes the key and CSR,
-  answers DNS-01 through root, keeps `wildcard.crt`/`wildcard.key` in the
-  TLS folder; `tlscert.Store.GetCertificate` serves it for names one label
+  answers DNS-01 through root, keeps `wildcard.pem` (key and chain, one
+  atomically replaced file) in the TLS folder; `tlscert.Store.GetCertificate`
+  serves it, only while the hostnames are active, for names one label
   under the base on the desktop listener, the window proxies, the office
   port and the app gateway. `RunHostnames` refreshes the state every 30 s
   and checks renewal every 12 h (30 days before expiry). Fake ACME server
@@ -2139,9 +2141,16 @@ decisions 450-459.
   reached by a name under the base; `/oidc/*` on the desktop host redirects
   to `sso.<base>`. Photos adds `https://photos.<base>` to Immich's redirect
   URIs.
-- **LAN DNS**: `domain.dns.hostnames` (root) keeps A records for every name
-  in the DC's DNS, its own list in `hardyos-hostnames.json` in the DC's data
-  folder.
+- **Off**: names under the last known base other than the desktop's get
+  "Hostnames are off" with `Clear-Site-Data`, never the desktop.
+- **Cookies**: per app host, the cookie names its responses set are learned;
+  request cookies another app host set (and this one never did) and names
+  sent twice are dropped (cookie tossing, decision 450).
+- **LAN DNS**: `domain.dns.hostnames` (root) keeps A records in the DC's DNS
+  for the names root allows (HardyOS's, the desktop's, apps with a web
+  page in root's apps state; not wpad, isatap or directory computer/SPN
+  names, checked with the directory helper's `names.taken`), its own list
+  of records and zones in `hardyos-hostnames.json` in the DC's data folder.
 
 ## Data and state
 

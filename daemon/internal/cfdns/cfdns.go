@@ -184,12 +184,21 @@ func (c *Client) call(ctx context.Context, method, path string, q url.Values, bo
 	return nil
 }
 
-// Verify checks that the token is active.
-func (c *Client) Verify(ctx context.Context) error {
+// Verify checks that the token is active: a user token at
+// /user/tokens/verify, an account-owned token (accountID set) at
+// /accounts/{id}/tokens/verify.
+func (c *Client) Verify(ctx context.Context, accountID string) error {
 	var r struct {
 		Status string `json:"status"`
 	}
-	if err := c.call(ctx, http.MethodGet, "/user/tokens/verify", nil, nil, &r); err != nil {
+	path := "/user/tokens/verify"
+	if accountID != "" {
+		if !zoneIDRE.MatchString(accountID) {
+			return &Error{Msg: "bad account id"}
+		}
+		path = "/accounts/" + accountID + "/tokens/verify"
+	}
+	if err := c.call(ctx, http.MethodGet, path, nil, nil, &r); err != nil {
 		return err
 	}
 	if r.Status != "active" {
@@ -198,27 +207,40 @@ func (c *Client) Verify(ctx context.Context) error {
 	return nil
 }
 
-// Zone finds the zone holding name, walking up its labels; it returns the
-// zone's id and name.
-func (c *Client) Zone(ctx context.Context, name string) (id, zone string, err error) {
+// Zone finds the active zone holding name, walking up its labels; it
+// returns the zone's id and name and the account that owns it.
+func (c *Client) Zone(ctx context.Context, name string) (id, zone, account string, err error) {
 	labels := strings.Split(strings.ToLower(strings.TrimSuffix(name, ".")), ".")
 	for i := 0; i+2 <= len(labels); i++ {
 		cand := strings.Join(labels[i:], ".")
 		var zs []struct {
-			ID     string `json:"id"`
-			Name   string `json:"name"`
-			Status string `json:"status"`
+			ID      string `json:"id"`
+			Name    string `json:"name"`
+			Status  string `json:"status"`
+			Account struct {
+				ID string `json:"id"`
+			} `json:"account"`
 		}
 		if err := c.call(ctx, http.MethodGet, "/zones", url.Values{"name": {cand}}, nil, &zs); err != nil {
-			return "", "", err
+			return "", "", "", err
 		}
 		for _, z := range zs {
-			if strings.EqualFold(z.Name, cand) && zoneIDRE.MatchString(z.ID) {
-				return z.ID, strings.ToLower(z.Name), nil
+			if !strings.EqualFold(z.Name, cand) || !zoneIDRE.MatchString(z.ID) {
+				continue
 			}
+			if z.Status != "active" {
+				// A pending zone isn't the domain's DNS yet (its nameservers
+				// aren't Cloudflare's): records there prove nothing.
+				return "", "", "", &Error{Msg: "the zone " + cand + " isn't active in Cloudflare yet (" + clip(z.Status, 20) + ")"}
+			}
+			acct := ""
+			if zoneIDRE.MatchString(z.Account.ID) {
+				acct = z.Account.ID
+			}
+			return z.ID, strings.ToLower(z.Name), acct, nil
 		}
 	}
-	return "", "", &Error{Msg: "no zone for " + name + " is visible to this token (it needs Zone › DNS › Edit on that zone)"}
+	return "", "", "", &Error{Msg: "no zone for " + name + " is visible to this token (it needs Zone › DNS › Edit on that zone)"}
 }
 
 var zoneIDRE = regexp.MustCompile(`^[0-9a-f]{32}$`)

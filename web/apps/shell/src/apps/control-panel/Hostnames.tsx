@@ -34,7 +34,7 @@ export function Hostnames() {
       {st.token.set && <OnCard st={st} />}
       {st.token.set && <CertificateCard st={st} />}
       {st.names.length > 0 && <NamesCard st={st} />}
-      {st.token.set && <LANCard st={st} />}
+      {(st.token.set || st.lan.domainDns) && <LANCard st={st} />}
     </>
   );
 }
@@ -262,18 +262,25 @@ function LANCard({ st }: { st: HostnamesStatus }) {
       <h3 className="small">This server&apos;s domain DNS</h3>
       {st.lan.domainDns ? (
         <>
+          {st.token.apex && (
+            <Alert tone="warn" title="The base domain is a whole Cloudflare zone">
+              {st.token.base} is its zone&apos;s apex. Unless it is the domain&apos;s own name, the domain controller won&apos;t take it over (that would hide its
+              other public records at home): use a base domain under it, or your router.
+            </Alert>
+          )}
           <p className="small muted">
             Devices that use the <span className="mono">{st.lan.domain}</span> domain controller for DNS find the names by themselves once they&apos;re added.
             Names another record already uses are left alone.
           </p>
           <div className="row">
-            <Button variant="primary" busy={lan.isPending} disabled={!addr} onClick={() => lan.mutate(false)}>
+            <Button variant="primary" busy={lan.isPending} disabled={!addr || !st.token.set} onClick={() => lan.mutate(false)}>
               Add the names
             </Button>
             <Button variant="ghost" busy={lan.isPending} onClick={() => lan.mutate(true)}>
               Remove them
             </Button>
           </div>
+          <p className="small muted">Names a computer in the domain already uses, and wpad and isatap, are never added.</p>
         </>
       ) : (
         <p className="small muted">No domain controller runs on this server (Control Panel › Domain).</p>

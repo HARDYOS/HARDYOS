@@ -16,11 +16,15 @@ import (
 )
 
 // The wildcard certificate (decision 455): Let's Encrypt's *.<base>, served
-// for names one label under the base; the self-signed certificate for
-// everything else (the desktop by address or local name).
+// for names one label under the base while the hostnames are active; the
+// self-signed certificate for everything else (the desktop by address or
+// local name). Key and chain are one file, replaced in one rename.
+const WildcardFile = "wildcard.pem"
+
+// Older names (removed when a new certificate is saved).
 const (
-	WildcardCert = "wildcard.crt"
-	WildcardKey  = "wildcard.key"
+	oldWildcardCert = "wildcard.crt"
+	oldWildcardKey  = "wildcard.key"
 )
 
 // Store picks the certificate for each TLS handshake.
@@ -30,7 +34,16 @@ type Store struct {
 	wild     *tls.Certificate
 	leaf     *x509.Certificate
 	base     string
+	active   bool
 	now      func() time.Time
+}
+
+// SetActive says whether the hostnames are being served: only then does a
+// handshake for a name under the base get the wildcard (decision 450).
+func (s *Store) SetActive(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.active = on
 }
 
 // NewStore serves fallback until a wildcard certificate is set.
@@ -82,7 +95,7 @@ func Covers(base, name string) bool {
 func (s *Store) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.wild != nil && Covers(s.base, hello.ServerName) && s.now().Before(s.leaf.NotAfter) {
+	if s.active && s.wild != nil && Covers(s.base, hello.ServerName) && s.now().Before(s.leaf.NotAfter) {
 		return s.wild, nil
 	}
 	return s.fallback, nil
@@ -116,41 +129,54 @@ func ParseChain(base string, chainPEM, keyPEM []byte, now time.Time) (*tls.Certi
 
 // LoadWildcard reads the wildcard certificate kept in dir.
 func LoadWildcard(dir, base string, now time.Time) (*tls.Certificate, error) {
-	chain, err := os.ReadFile(filepath.Join(dir, WildcardCert))
+	b, err := os.ReadFile(filepath.Join(dir, WildcardFile))
 	if err != nil {
 		return nil, err
 	}
-	key, err := os.ReadFile(filepath.Join(dir, WildcardKey))
-	if err != nil {
-		return nil, err
-	}
-	return ParseChain(base, chain, key, now)
+	return ParseChain(base, b, b, now)
 }
 
-// SaveWildcard keeps a checked chain and its key in dir (key 0600), each
-// written to a temporary file and renamed so a reader never sees half.
+// SaveWildcard keeps a checked chain and its key in dir as one 0600 file
+// (key first), written to a temporary file, synced and renamed over the
+// old one: a reader sees the old pair or the new one, never a mix.
 func SaveWildcard(dir string, chainPEM, keyPEM []byte) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	write := func(name string, b []byte, mode os.FileMode) error {
-		tmp := filepath.Join(dir, "."+name+".tmp")
-		_ = os.Remove(tmp)
-		if err := os.WriteFile(tmp, b, mode); err != nil {
-			return err
-		}
-		return os.Rename(tmp, filepath.Join(dir, name))
-	}
-	if err := write(WildcardKey, keyPEM, 0o600); err != nil {
+	f, err := os.CreateTemp(dir, ".wildcard-*.tmp")
+	if err != nil {
 		return err
 	}
-	return write(WildcardCert, chainPEM, 0o644)
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(append(append([]byte{}, keyPEM...), chainPEM...)); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, filepath.Join(dir, WildcardFile)); err != nil {
+		return err
+	}
+	_ = os.Remove(filepath.Join(dir, oldWildcardCert))
+	_ = os.Remove(filepath.Join(dir, oldWildcardKey))
+	return nil
 }
 
-// RemoveWildcard deletes the wildcard certificate files.
+// RemoveWildcard deletes the wildcard certificate file.
 func RemoveWildcard(dir string) {
-	_ = os.Remove(filepath.Join(dir, WildcardCert))
-	_ = os.Remove(filepath.Join(dir, WildcardKey))
+	_ = os.Remove(filepath.Join(dir, WildcardFile))
+	_ = os.Remove(filepath.Join(dir, oldWildcardCert))
+	_ = os.Remove(filepath.Join(dir, oldWildcardKey))
 }
 
 // MarshalKey PEM-encodes an ECDSA key.

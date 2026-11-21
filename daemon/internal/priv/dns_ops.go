@@ -27,9 +27,10 @@ import (
 // secrets.key) in the keys folder, together with the base domain it was
 // pasted for. hardyd can then ask for exactly these things:
 //
-//   - an ACME DNS-01 challenge record, _acme-challenge.<name> for the base
-//     or a name under it, and its removal (only records root made);
-//   - one A, AAAA or CNAME record for a name strictly under the base (or
+//   - the wildcard's ACME DNS-01 challenge record, exactly
+//     _acme-challenge.<base>, and its removal (only records root made);
+//   - (not registered yet, decision 454) one A, AAAA or CNAME record for a
+//     name strictly under the base (or
 //     *.<base>), only creating records or changing ones HardyOS made.
 //
 // Root talks only to api.cloudflare.com (cfdns): nothing hardyd sends can
@@ -134,10 +135,13 @@ type DNSEnv struct {
 }
 
 type dnsState struct {
-	V          int              `json:"v"`
-	Base       string           `json:"base,omitempty"`
-	Zone       string           `json:"zone,omitempty"`
-	ZoneID     string           `json:"zoneId,omitempty"`
+	V      int    `json:"v"`
+	Base   string `json:"base,omitempty"`
+	Zone   string `json:"zone,omitempty"`
+	ZoneID string `json:"zoneId,omitempty"`
+	// AccountID is set for an account-owned token (verified at
+	// /accounts/{id}/tokens/verify).
+	AccountID  string           `json:"accountId,omitempty"`
 	Sealed     []byte           `json:"sealed,omitempty"`
 	SetAt      time.Time        `json:"setAt,omitzero"`
 	VerifiedAt time.Time        `json:"verifiedAt,omitzero"`
@@ -162,7 +166,9 @@ type dnsOps struct {
 var tokenRE = regexp.MustCompile(`^[A-Za-z0-9_-]{20,200}$`)
 
 // RegisterDNS adds the dns.* operations.
-func RegisterDNS(s *Server, env DNSEnv) {
+func RegisterDNS(s *Server, env DNSEnv) { registerDNS(s, env) }
+
+func registerDNS(s *Server, env DNSEnv) *dnsOps {
 	if env.Client == nil {
 		env.Client = cfdns.New
 	}
@@ -210,6 +216,12 @@ func RegisterDNS(s *Server, env DNSEnv) {
 		}
 		return d.cleanup(ctx, a.ID)
 	})
+	return d
+}
+
+// registerRecordSet adds dns.record.set. Not registered in hardyd-priv yet
+// (decision 454): the NetBird take-over registers it with its own review.
+func registerRecordSet(s *Server, d *dnsOps) {
 	s.Handle(OpDNSRecordSet, func(ctx context.Context, raw json.RawMessage) (any, error) {
 		var a DNSRecordSetArgs
 		if err := json.Unmarshal(raw, &a); err != nil {
@@ -219,14 +231,26 @@ func RegisterDNS(s *Server, env DNSEnv) {
 	})
 }
 
+// HostLabels are the names HardyOS itself serves under the base, whatever
+// is installed (decision 456).
+var HostLabels = []string{"sso", "files", "office", "photos", "mail"}
+
 // RegisterHostRecords adds domain.dns.hostnames: the hostnames' A records
-// in this server's own DC. The base must be the one root keeps with the
-// Cloudflare token (never one hardyd names on its own: a zone for any
-// other domain on the DC would take that domain over for the LAN), and the
-// address one of this server's.
-func RegisterHostRecords(s *Server, m *domain.Manager, keyDir string) {
+// in this server's own DC. Root decides what may be published, never
+// hardyd: the base is the one root keeps with the Cloudflare token (a zone
+// for any other domain on the DC would take that domain over for the LAN),
+// the labels are HardyOS's own, the desktop's (one valid label) and the ids
+// of apps with a web page in root's own apps state (apps), the address is
+// one of this server's, and a base that is its Cloudflare zone's apex gets
+// no zone of its own on the DC. Removing (no labels) needs none of that: it
+// works from the DC's own list, also after the token was forgotten.
+func RegisterHostRecords(s *Server, m *domain.Manager, keyDir string, apps func(context.Context) ([]string, error)) {
 	d := &dnsOps{env: DNSEnv{KeyDir: keyDir}}
 	s.Handle(OpDomainHostRecords, typed(func(ctx context.Context, a domain.HostRecordsArgs) (any, error) {
+		if len(a.Labels) == 0 {
+			r, err := m.RemoveHostRecords(ctx)
+			return r, domainErr(err)
+		}
 		d.mu.Lock()
 		st, err := d.load()
 		d.mu.Unlock()
@@ -240,6 +264,19 @@ func RegisterHostRecords(s *Server, m *domain.Manager, keyDir string) {
 		if !ownAddress(a.Address) {
 			return nil, Errorf(CodeBadArgs, "%q isn't an address of this server", a.Address)
 		}
+		allowed := append([]string{}, HostLabels...)
+		if desk := strings.ToLower(strings.TrimSpace(a.Desktop)); cfdns.Under(desk+"."+st.Base, st.Base, false) && !strings.Contains(desk, ".") {
+			allowed = append(allowed, desk)
+		}
+		if apps == nil {
+			return nil, Errorf(CodeUnavailable, "the apps state isn't available")
+		}
+		ids, err := apps(ctx)
+		if err != nil {
+			return nil, Errorf(CodeFailed, "apps state: %v", err)
+		}
+		allowed = append(allowed, ids...)
+		a.Allowed, a.PublicApex = allowed, st.Base == st.Zone
 		r, err := m.SetHostRecords(ctx, a)
 		return r, domainErr(err)
 	}))
@@ -360,12 +397,18 @@ func (d *dnsOps) setToken(ctx context.Context, a DNSTokenSetArgs) (any, error) {
 		return nil, Errorf(CodeBadArgs, "%q isn't a domain like home.example.net", a.Base)
 	}
 	cl := d.env.Client(tok)
-	if err := cl.Verify(ctx); err != nil {
-		return nil, cfFailed(err)
-	}
-	zid, zone, err := cl.Zone(ctx, base)
+	zid, zone, acct, err := cl.Zone(ctx, base)
 	if err != nil {
 		return nil, cfFailed(err)
+	}
+	// A user's token verifies at /user/tokens/verify; an account-owned
+	// token only at its account's (the zone says which account).
+	account := ""
+	if err := cl.Verify(ctx, ""); err != nil {
+		if acct == "" || cl.Verify(ctx, acct) != nil {
+			return nil, cfFailed(err)
+		}
+		account = acct
 	}
 	if zone != base && !strings.HasSuffix(base, "."+zone) {
 		return nil, Errorf(CodeFailed, "Cloudflare's zone %s doesn't hold %s", zone, base)
@@ -386,7 +429,7 @@ func (d *dnsOps) setToken(ctx context.Context, a DNSTokenSetArgs) (any, error) {
 		// longer its to change through this token.
 		st.Records, st.Challenges = nil, nil
 	}
-	st.Base, st.Zone, st.ZoneID, st.Sealed, st.SetAt, st.VerifiedAt, st.Problem = base, zone, zid, sealed, now, now, ""
+	st.Base, st.Zone, st.ZoneID, st.AccountID, st.Sealed, st.SetAt, st.VerifiedAt, st.Problem = base, zone, zid, account, sealed, now, now, ""
 	if err := d.save(st); err != nil {
 		return nil, Errorf(CodeFailed, "saving the token: %v", err)
 	}
@@ -405,9 +448,9 @@ func (d *dnsOps) verify(ctx context.Context) (any, error) {
 		return nil, err
 	}
 	st.Problem = ""
-	if err := cl.Verify(ctx); err != nil {
+	if err := cl.Verify(ctx, st.AccountID); err != nil {
 		st.Problem = err.Error()
-	} else if zid, _, err := cl.Zone(ctx, st.Base); err != nil {
+	} else if zid, _, _, err := cl.Zone(ctx, st.Base); err != nil {
 		st.Problem = err.Error()
 	} else if zid != st.ZoneID {
 		st.Problem = "the zone for " + st.Base + " changed in Cloudflare: paste the token again"
@@ -477,8 +520,9 @@ func (d *dnsOps) present(ctx context.Context, a DNSACMEPresentArgs) (any, error)
 		return nil, Errorf(CodeFailed, "dns state: %v", err)
 	}
 	name := cfdns.Normalize(a.Name)
-	if _, ok := cfdns.ChallengeTarget(name, st.Base); !ok || st.Base == "" {
-		return nil, Errorf(CodeBadArgs, "%q isn't an ACME challenge name for %s", a.Name, st.Base)
+	if st.Base == "" || name != "_acme-challenge."+st.Base {
+		// Only the wildcard's own challenge (decision 453).
+		return nil, Errorf(CodeBadArgs, "%q isn't the ACME challenge name for *.%s", a.Name, st.Base)
 	}
 	if !cfdns.ChallengeValueOK(a.Value) {
 		return nil, Errorf(CodeBadArgs, "that isn't a DNS-01 challenge value")

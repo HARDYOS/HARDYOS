@@ -58,6 +58,11 @@ func TestIssueWildcardThroughRootsDNS(t *testing.T) {
 	if n := len(env.CF.TXT("_acme-challenge.home.example.net")); n != 0 {
 		t.Fatalf("%d challenge records left", n)
 	}
+	// Never served while the hostnames aren't active.
+	if c, _ := certs.GetCertificate(&tls.ClientHelloInfo{ServerName: "photos.home.example.net"}); c.Leaf != nil && c.Leaf.Issuer.CommonName == "Fake ACME CA" {
+		t.Fatal("wildcard served while inactive")
+	}
+	certs.SetActive(true)
 	// Served for names one label under the base, not for others.
 	for name, want := range map[string]bool{"photos.home.example.net": true, "NAS.home.example.net.": true,
 		"a.b.home.example.net": false, "home.example.net": false, "192.168.1.5": false, "nas": false} {

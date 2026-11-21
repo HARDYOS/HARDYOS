@@ -24,7 +24,9 @@ func dnsServer(t *testing.T) (*Server, *cftest.Server, string, *time.Time) {
 	dir := filepath.Join(t.TempDir(), "keys")
 	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
 	s := &Server{}
-	RegisterDNS(s, DNSEnv{KeyDir: dir, Client: cf.Client, Now: func() time.Time { return now }})
+	d := registerDNS(s, DNSEnv{KeyDir: dir, Client: cf.Client, Now: func() time.Time { return now }})
+	// Not registered in hardyd-priv yet (decision 454), tested here.
+	registerRecordSet(s, d)
 	return s, cf, dir, &now
 }
 
@@ -142,10 +144,11 @@ func TestDNSACMEChallenges(t *testing.T) {
 	}
 	val := strings.Repeat("A", 42) + "_"
 	for _, bad := range []DNSACMEPresentArgs{
-		{Name: "_acme-challenge.example.net", Value: val},        // outside the base
-		{Name: "_acme-challenge.home.example.org", Value: val},   // another domain
-		{Name: "home.example.net", Value: val},                   // not a challenge name
-		{Name: "_acme-challenge.*.home.example.net", Value: val}, // wildcard label
+		{Name: "_acme-challenge.example.net", Value: val},             // outside the base
+		{Name: "_acme-challenge.home.example.org", Value: val},        // another domain
+		{Name: "home.example.net", Value: val},                        // not a challenge name
+		{Name: "_acme-challenge.*.home.example.net", Value: val},      // wildcard label
+		{Name: "_acme-challenge.photos.home.example.net", Value: val}, // only the base's own
 		{Name: "_acme-challenge.home.example.net", Value: "v=spf1 -all"},
 		{Name: "_acme-challenge.home.example.net", Value: strings.Repeat("a", 44)},
 	} {
@@ -160,7 +163,8 @@ func TestDNSACMEChallenges(t *testing.T) {
 	if got := cf.TXT("_acme-challenge.home.example.net"); len(got) != 1 || got[0] != val {
 		t.Fatalf("%v", got)
 	}
-	if err := dnsCall(t, s, OpDNSACMEPresent, DNSACMEPresentArgs{Name: "_acme-challenge.photos.home.example.net", Value: val}, nil); err != nil {
+	var stale DNSACMEPresentResult
+	if err := dnsCall(t, s, OpDNSACMEPresent, DNSACMEPresentArgs{Name: "_acme-challenge.home.example.net", Value: val}, &stale); err != nil {
 		t.Fatal(err)
 	}
 	// Someone else's TXT record can't be deleted through cleanup.
@@ -174,7 +178,7 @@ func TestDNSACMEChallenges(t *testing.T) {
 	if err := dnsCall(t, s, OpDNSACMECleanup, DNSACMECleanupArgs{ID: r.ID}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if got := cf.TXT("_acme-challenge.home.example.net"); len(got) != 1 || got[0] != "other" {
+	if got := cf.TXT("_acme-challenge.home.example.net"); len(got) != 2 {
 		t.Fatalf("after cleanup: %v", got)
 	}
 	// Old challenges are removed by themselves; the bound holds.
@@ -184,8 +188,10 @@ func TestDNSACMEChallenges(t *testing.T) {
 			t.Fatal(i, err)
 		}
 	}
-	if len(cf.TXT("_acme-challenge.photos.home.example.net")) != 0 {
-		t.Fatal("stale challenge kept")
+	for _, r := range cf.Find("_acme-challenge.home.example.net", "TXT") {
+		if r.ID == stale.ID {
+			t.Fatal("stale challenge kept")
+		}
 	}
 	if err := dnsCall(t, s, OpDNSACMEPresent, DNSACMEPresentArgs{Name: "_acme-challenge.home.example.net", Value: val}, nil); err == nil {
 		t.Fatal("more than the limit")
@@ -270,7 +276,7 @@ func TestDNSRecordSet(t *testing.T) {
 
 func TestHostRecordsBaseIsRoots(t *testing.T) {
 	s, _, dir, _ := dnsServer(t)
-	RegisterHostRecords(s, &domain.Manager{}, dir)
+	RegisterHostRecords(s, &domain.Manager{}, dir, func(context.Context) ([]string, error) { return []string{"board"}, nil })
 	call := func(a domain.HostRecordsArgs) error { return dnsCall(t, s, OpDomainHostRecords, a, nil) }
 	ok := domain.HostRecordsArgs{Base: "home.example.net", Address: "127.0.0.1", Labels: []string{"nas"}}
 	if err := call(ok); err == nil || !strings.Contains(err.Error(), "base domain") {
@@ -297,5 +303,38 @@ func TestHostRecordsBaseIsRoots(t *testing.T) {
 	a.Address = "127.0.0.1"
 	if err := call(a); err == nil || !strings.Contains(err.Error(), "address of this server") {
 		t.Fatalf("loopback: %v", err)
+	}
+}
+
+func TestDNSAccountTokensAndPendingZones(t *testing.T) {
+	s, cf, _, _ := dnsServer(t)
+	// An account-owned token: /user/tokens/verify doesn't know it, its
+	// account's endpoint does.
+	cf.AccountTokens[testCFToken] = true
+	var st DNSStatus
+	if err := dnsCall(t, s, OpDNSTokenSet, DNSTokenSetArgs{Token: testCFToken, Base: "home.example.net"}, &st); err != nil || !st.Set {
+		t.Fatalf("%+v %v", st, err)
+	}
+	if cf.Calls["GET /accounts/"+cf.Account+"/tokens/verify"] != 1 {
+		t.Fatalf("%v", cf.Calls)
+	}
+	if err := dnsCall(t, s, OpDNSTokenVerify, struct{}{}, &st); err != nil || st.Problem != "" {
+		t.Fatalf("%+v %v", st, err)
+	}
+	// A zone that isn't active yet (nameservers not moved) is refused.
+	cf.ZoneStatus["example.net"] = "pending"
+	if err := dnsCall(t, s, OpDNSTokenSet, DNSTokenSetArgs{Token: testCFToken, Base: "home.example.net"}, nil); err == nil ||
+		!strings.Contains(err.Error(), "isn't active") {
+		t.Fatalf("pending zone: %v", err)
+	}
+}
+
+func TestRecordSetIsNotRegistered(t *testing.T) {
+	s := &Server{}
+	RegisterDNS(s, DNSEnv{KeyDir: t.TempDir()})
+	for _, op := range s.Ops() {
+		if op == OpDNSRecordSet {
+			t.Fatal("dns.record.set is registered (decision 454: only with the NetBird take-over)")
+		}
 	}
 }

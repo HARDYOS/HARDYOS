@@ -56,6 +56,9 @@ type HostnamesTokenState struct {
 	Zone       string     `json:"zone"`
 	VerifiedAt *time.Time `json:"verifiedAt"`
 	Problem    string     `json:"problem,omitempty"`
+	// Apex: the base is its Cloudflare zone's apex (the DC can only hold
+	// the names when that's the AD domain or inside it).
+	Apex bool `json:"apex"`
 }
 
 // HostnamesCert is the certificate in service.
@@ -132,7 +135,8 @@ func (s *Server) handleHostnames(w http.ResponseWriter, r *http.Request, _ *auth
 	if st, err := m.DNS.Status(ctx); err != nil {
 		out.Token.Problem = "hardyd-priv didn't answer: " + err.Error()
 	} else {
-		out.Token = HostnamesTokenState{Set: st.Set, Base: st.Base, Zone: st.Zone, VerifiedAt: timePtr(st.VerifiedAt), Problem: st.Problem}
+		out.Token = HostnamesTokenState{Set: st.Set, Base: st.Base, Zone: st.Zone, VerifiedAt: timePtr(st.VerifiedAt), Problem: st.Problem,
+			Apex: st.Set && st.Base == st.Zone}
 	}
 	if _, leaf := m.Certs.Wildcard(); leaf != nil {
 		out.Certificate = &HostnamesCert{Names: leaf.DNSNames, Issuer: leaf.Issuer.CommonName, NotBefore: leaf.NotBefore, NotAfter: leaf.NotAfter,
@@ -451,6 +455,11 @@ func (s *Server) runHostnamesSettings(jc *jobs.Context) (any, error) {
 	if err := m.Store.Save(jc, set); err != nil {
 		return nil, err
 	}
+	if !set.Enabled {
+		// Off means off: the certificate goes, names under the base are
+		// refused (decision 450).
+		m.Remove()
+	}
 	if set.Enabled {
 		st, err := m.DNS.Status(jc)
 		if err != nil {
@@ -498,21 +507,20 @@ func (s *Server) runHostnamesLAN(jc *jobs.Context) (any, error) {
 	if m == nil {
 		return nil, errors.New("hostnames aren't available")
 	}
-	st, err := m.DNS.Status(jc)
-	if err != nil {
-		return nil, err
-	}
-	if !st.Set {
-		return nil, errors.New("save a Cloudflare token first")
-	}
-	s.hosts.refresh(jc)
-	args := domain.HostRecordsArgs{Base: st.Base, Address: req.Address, Labels: []string{}}
+	args := domain.HostRecordsArgs{Labels: []string{}}
 	if !req.Remove {
-		args.Labels = s.hosts.lanLabels(jc)
-	} else if args.Address == "" {
-		if a := lanAddresses(); len(a) > 0 {
-			args.Address = a[0]
+		// Removing works from the DC's own list (also after the token was
+		// forgotten); adding needs the token's base.
+		st, err := m.DNS.Status(jc)
+		if err != nil {
+			return nil, err
 		}
+		if !st.Set {
+			return nil, errors.New("save a Cloudflare token first")
+		}
+		s.hosts.refresh(jc)
+		_, _, desk := s.hosts.snapshot()
+		args = domain.HostRecordsArgs{Base: st.Base, Address: req.Address, Labels: s.hosts.lanLabels(jc), Desktop: desk}
 	}
 	jc.Progress(40, "Updating the domain's DNS")
 	var res domain.HostRecordsResult

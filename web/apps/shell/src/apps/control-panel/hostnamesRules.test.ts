@@ -8,7 +8,7 @@ function status(over: Partial<HostnamesStatus> = {}): HostnamesStatus {
   return {
     active: false,
     settings: { enabled: false, email: "", staging: false },
-    token: { set: false, base: "", zone: "", verifiedAt: null },
+    token: { set: false, base: "", zone: "", verifiedAt: null, apex: false },
     remoteBase: "",
     desktopUrl: "",
     certificate: null,
@@ -35,9 +35,9 @@ describe("hostnames rules", () => {
   });
   it("describes the state", () => {
     expect(hostnamesState(status()).label).toBe("Off");
-    expect(hostnamesState(status({ token: { set: true, base: "b.net", zone: "b.net", verifiedAt: null } })).label).toBe("Ready");
+    expect(hostnamesState(status({ token: { set: true, base: "b.net", zone: "b.net", verifiedAt: null, apex: true } })).label).toBe("Ready");
     expect(
-      hostnamesState(status({ token: { set: true, base: "b.net", zone: "b.net", verifiedAt: null }, settings: { enabled: true, email: "", staging: false } }))
+      hostnamesState(status({ token: { set: true, base: "b.net", zone: "b.net", verifiedAt: null, apex: true }, settings: { enabled: true, email: "", staging: false } }))
         .label,
     ).toBe("No certificate");
     expect(hostnamesState(status({ active: true })).tone).toBe("good");
