@@ -139,7 +139,7 @@ func TestSMBMemberIntegration(t *testing.T) {
 		m.Wait()
 		if out, err := exec.Command("ls", "-la", sub("log")).CombinedOutput(); err == nil && t.Failed() {
 			t.Logf("member logs:\n%s", out)
-			b, _ := exec.Command("sh", "-c", "tail -40 "+sub("log")+"/log.*").CombinedOutput()
+			b, _ := exec.Command("sh", "-c", "tail -n 40 "+sub("log")+"/log.* && find "+sub("log")+"/cores -type f -ls").CombinedOutput()
 			t.Logf("%s", b)
 		}
 	})
