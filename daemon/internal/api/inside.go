@@ -155,10 +155,10 @@ func (s *Server) insideAddr(a netip.Addr) bool {
 	n.refresh()
 	if n.router.IsValid() && a == n.router {
 		// Hairpin NAT or a masqueraded port forward: the internet can hide
-		// behind the router's address (decision 441; Control Panel ›
-		// Security warns).
+		// behind the router's address. It is on the LAN, so it counts as
+		// inside (a server in a VM behind NAT sees everyone this way), but
+		// Control Panel › Security warns (decision 441).
 		n.routerSeen = time.Now()
-		return false
 	}
 	if netbirdNet.Contains(a) || (s.remote.netbirdNetwork().IsValid() && s.remote.netbirdNetwork().Contains(a)) {
 		return true

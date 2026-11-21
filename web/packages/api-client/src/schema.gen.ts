@@ -5601,7 +5601,7 @@ export interface components {
             outsideRequired: boolean;
             /**
              * Format: date-time
-             * @description When a request last came from the router's own address (hairpin NAT or a masqueraded port forward); such requests count as outside
+             * @description When a request last came from the router's own address (hairpin NAT or a masqueraded port forward look like this): such requests count as inside, so this is a warning
              */
             routerSeenAt?: string | null;
         };

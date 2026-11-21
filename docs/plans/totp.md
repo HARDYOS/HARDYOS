@@ -22,11 +22,14 @@ when its client address isn't inside. Inside is only:
 - NetBird peers (100.64.0.0/10, or NetBird's own network).
 
 Docker's networks (the default bridge, compose bridges, the app and webmail
-networks), libvirt's, the domain controller's shim and **the router's own
-address** are outside. The router case covers hairpin NAT (a device at home
-using the public address) and a port forward the router masquerades: either
-would otherwise let the internet look like home. Control Panel › Security
-warns when a request came from the router.
+networks), libvirt's and the domain controller's shim are outside.
+
+**The router's own address** is on the LAN, so it counts as inside: a server
+running in a VM behind NAT sees every client that way. But it is also how
+hairpin NAT (a device at home using the public address) and a port forward the
+router masquerades show up, and those could let the internet look like home.
+So Control Panel › Security warns when a request came from the router, and the
+docs say not to forward ports to HardyOS.
 
 ## 2. Factors and storage
 

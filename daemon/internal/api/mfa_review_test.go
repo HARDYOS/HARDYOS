@@ -24,7 +24,7 @@ func TestInsideAddresses(t *testing.T) {
 	for addr, want := range map[string]bool{
 		"127.0.0.1": true, "::1": true, "192.168.1.20": true, "100.64.3.4": true,
 		"172.17.0.5": false, ports.WebmailAddr.String(): false, "10.9.0.1": false, "203.0.113.5": false,
-		"192.168.1.1": false, // the router: hairpin NAT or a masqueraded port forward
+		"192.168.1.1": true, // the router: on the LAN, but noted for the warning
 	} {
 		if got := s.insideAddr(netip.MustParseAddr(addr)); got != want {
 			t.Errorf("%s inside = %v, want %v", addr, got, want)

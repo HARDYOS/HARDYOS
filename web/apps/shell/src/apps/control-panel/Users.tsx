@@ -360,8 +360,9 @@ export function TwoFactorPolicyCard() {
       {routerSeen && (
         <Alert tone="warn" title="Sign-ins through the router's own address">
           On {dateTime(routerSeen)} a request reached HardyOS from your router&apos;s address. That happens with hairpin NAT (a device at home using
-          the public address) or a port forward that hides where visitors come from. HardyOS counts these as outside, so they need two-factor sign-in.
-          Use the server&apos;s local address at home, and don&apos;t forward ports to it: Remote Access publishes through NetBird instead.
+          the public address) or a port forward that hides where visitors come from, and HardyOS can&apos;t tell those from someone at home: they
+          don&apos;t get asked for two-factor sign-in. Don&apos;t forward ports to HardyOS (Remote Access publishes through NetBird instead), and use the
+          server&apos;s local address at home.
         </Alert>
       )}
       {save.error && <Alert tone="bad">{errorMessage(save.error)}</Alert>}

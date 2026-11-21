@@ -75,10 +75,13 @@ clock.
 
 **What counts as outside**: anything through Remote Access, and any address
 that isn't this server's own network or NetBird. That includes apps' Docker
-networks, and the router's own address. A request from the router shows up
-when a phone at home uses the public address (hairpin NAT), or when the router
-forwards a port and hides who's visiting; Control Panel › Security then shows a
-warning. At home, use the server's local address. A home network with global
+networks. The router's own address counts as home, since it's on your network
+(and a server in a VM behind NAT sees everyone that way). But a request from
+the router also shows up when a phone at home uses the public address (hairpin
+NAT), or when the router forwards a port and hides who's visiting, which would
+let the internet look like home. So Control Panel › Security shows a warning
+then. Don't forward ports to HardyOS (Remote Access publishes through NetBird
+instead), and at home use the server's local address. A home network with global
 IPv6 addresses still counts as home, as long as the server's own interface is
 on it.
 

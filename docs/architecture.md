@@ -68,8 +68,8 @@ undo only writes the network files).
   grace period) or a setup code (`setup_code`, from outside without 2FA).
   `api.Server.outside` (`inside.go`) decides "outside": the app gateway, or
   an address that isn't hardyd's loopback, a LAN interface's network or
-  NetBird's (Docker, libvirt, the DC shim and the router's own address are
-  outside). Wrong codes count per account and `auth.Origin` (home, or the
+  NetBird's (Docker, libvirt and the DC shim are outside; the router's own
+  address is inside but noted for a warning). Wrong codes count per account and `auth.Origin` (home, or the
   outside address / IPv6 /64), with a rolling 60-day budget from outside
   (`user_totp_failures`) that stops codes from outside at 20 until a new
   password or a reset; `MFA.Notify` reaches administrators and the person.
