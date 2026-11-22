@@ -73,7 +73,7 @@ func newMFAEnv(t *testing.T) *mfaEnv {
 	})
 	// The LAN is 192.168.1.0/24 behind the router 192.168.1.1.
 	s.inside.lanFor = func() []netip.Prefix { return []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")} }
-	s.inside.routerFor = func() netip.Addr { return netip.MustParseAddr("192.168.1.1") }
+	s.inside.routerFor = func() (netip.Addr, string) { return netip.MustParseAddr("192.168.1.1"), testRouterMAC }
 	env := &mfaEnv{davEnv: &davEnv{testEnv: &testEnv{srv: srv, db: db, broker: broker}, server: s, fk: fk, dc: dc, df: df}}
 	env.totp = newTOTPKit(s)
 	env.admin = env.client(t)

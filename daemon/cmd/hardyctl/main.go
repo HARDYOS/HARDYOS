@@ -47,6 +47,13 @@ Recovery (run as root on the server; works even if hardyd is down):
                              its sessions, revoke its app sign-ins and (unless
                              -keep-app-passwords) its app passwords (lost phone); an
                              administrator sets up a new one at the next sign-in
+  setup-code <username>      print a one-time setup code (24 hours): with it and the password
+                             the account sets up an authenticator from outside
+  trust-router on|off|status "this server is behind NAT: trust the router's address" for
+                             two-factor sign-in (bound to the router as it is now)
+  first-boot-code            on a new server's first boot, show a setup code for its only
+                             administrator on the console login screen (run by
+                             hardyos-setup-code.service; -issue sets the file)
 
 Boot (run as root):
   boot-list                  list boot environments
@@ -67,6 +74,7 @@ func main() {
 	dbPath := flag.String("db", store.DefaultPath, "hardyd database (for recovery commands)")
 	pwStdin := flag.Bool("password-stdin", false, "read the new password from stdin instead of prompting")
 	keepAppPw := flag.Bool("keep-app-passwords", false, "reset-2fa: keep the account's app passwords (they are revoked by default)")
+	issue := flag.String("issue", "", "first-boot-code: also write the code to this file for the console login screen")
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, usage)
 		flag.PrintDefaults()
@@ -91,6 +99,13 @@ func main() {
 		err = recovery(*dbPath, args, *pwStdin, true)
 	case "reset-2fa":
 		err = reset2FA(*dbPath, args, *keepAppPw)
+	case "setup-code":
+		err = setupCode(*dbPath, args, os.Stdout)
+	case "trust-router":
+		err = trustRouter(*dbPath, args, os.Stdout)
+	case "first-boot-code":
+		err = firstBootCode(*dbPath, *issue, os.Stdout)
+
 	case "app-pack":
 		err = appPack(args)
 	case "app-check":

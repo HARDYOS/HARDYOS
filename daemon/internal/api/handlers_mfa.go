@@ -554,27 +554,38 @@ type TwoFactorPolicy struct {
 	// OutsideRequired is fixed: everyone needs a second factor from
 	// outside (the owner's choice, decision 440).
 	OutsideRequired bool `json:"outsideRequired"`
-	// RouterSeenAt is when a sign-in or service last came from the
-	// router's own address (hairpin NAT or a masqueraded port forward):
-	// such requests count as outside, and Security warns (nil: never since
-	// hardyd started).
+	// RouterSeenAt is when a request last came from the router's own
+	// address (hairpin NAT, a port forward, a tunnel on the router): such
+	// requests count as outside unless TrustRouter is on (nil: never seen;
+	// kept across restarts).
 	RouterSeenAt *time.Time `json:"routerSeenAt"`
+	// TrustRouter is "this server is behind NAT: trust the router's
+	// address" (off by default, decision 441).
+	TrustRouter RouterTrust `json:"trustRouter"`
+	// CanChangeTrustRouter: this request is from home itself (not the
+	// router, not outside), where the setting may be changed.
+	CanChangeTrustRouter bool `json:"canChangeTrustRouter"`
 }
 
-func (s *Server) policy(ctx context.Context, days int) TwoFactorPolicy {
-	p := TwoFactorPolicy{AdminGraceDays: days, OutsideRequired: true}
-	if t := s.routerSeen(); !t.IsZero() {
+func (s *Server) policy(r *http.Request, days int) TwoFactorPolicy {
+	ctx := r.Context()
+	p := TwoFactorPolicy{AdminGraceDays: days, OutsideRequired: true, TrustRouter: s.routerTrust(ctx),
+		CanChangeTrustRouter: s.placeOfRequest(r) == placeHome}
+	if t := s.routerSeen(ctx); !t.IsZero() {
 		p.RouterSeenAt = &t
 	}
 	return p
 }
 
 func (s *Server) handle2FAPolicy(w http.ResponseWriter, r *http.Request, _ *auth.User) {
-	writeJSON(w, http.StatusOK, s.policy(r.Context(), s.mfa.GraceDays(r.Context())))
+	writeJSON(w, http.StatusOK, s.policy(r, s.mfa.GraceDays(r.Context())))
 }
 
 type twoFactorPolicyRequest struct {
 	AdminGraceDays int `json:"adminGraceDays"`
+	// TrustRouter turns "this server is behind NAT: trust the router's
+	// address" on or off (nil: unchanged). Only from home itself.
+	TrustRouter *bool `json:"trustRouter,omitempty"`
 }
 
 func (s *Server) handle2FAPolicySet(w http.ResponseWriter, r *http.Request, u *auth.User) {
@@ -582,13 +593,42 @@ func (s *Server) handle2FAPolicySet(w http.ResponseWriter, r *http.Request, u *a
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	// A change: on when it isn't on for this router (off, or lapsed), off
+	// when it's saved at all (on or lapsed).
+	if req.TrustRouter != nil && (*req.TrustRouter && !s.routerTrust(r.Context()).On ||
+		!*req.TrustRouter && s.loadTrustedRouter(r.Context()) != nil) {
+
+		// Changed only from home itself: never from outside, nor from the
+		// router's address (whatever comes through it would vouch for
+		// itself).
+		if s.placeOfRequest(r) != placeHome {
+			s.record(r, u, "auth.2fa.trust_router", "", audit.Failure, "refused: not from this server's own network")
+			writeError(w, http.StatusForbidden, "not_from_home", "the router's address can only be trusted from this server's own network (not through the router or from outside), or with hardyctl trust-router on")
+			return
+		}
+		if err := s.setRouterTrust(r.Context(), *req.TrustRouter, u.Username); err != nil {
+			if errors.Is(err, errNoRouter) {
+				writeError(w, http.StatusConflict, "no_router", err.Error())
+				return
+			}
+			internalError(s, w, err)
+			return
+		}
+		detail := "the router's address is no longer trusted"
+		if *req.TrustRouter {
+			detail = "this server is behind NAT: the router's address (" + s.routerTrust(r.Context()).IP + ") is trusted"
+		}
+		s.record(r, u, "auth.2fa.trust_router", "", audit.Success, detail)
+	}
 	old := s.mfa.GraceDays(r.Context())
 	if err := s.mfa.SetGraceDays(r.Context(), req.AdminGraceDays); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
-	s.record(r, u, "auth.2fa.policy", "", audit.Success, fmt.Sprintf("administrators' grace period %d → %d days", old, req.AdminGraceDays))
-	writeJSON(w, http.StatusOK, s.policy(r.Context(), req.AdminGraceDays))
+	if old != req.AdminGraceDays {
+		s.record(r, u, "auth.2fa.policy", "", audit.Success, fmt.Sprintf("administrators' grace period %d → %d days", old, req.AdminGraceDays))
+	}
+	writeJSON(w, http.StatusOK, s.policy(r, req.AdminGraceDays))
 }
 
 // ---- administrators: reset and setup codes ------------------------------------
@@ -844,7 +884,10 @@ func (s *Server) passwordStillAllowed(ctx context.Context, u *auth.User) error {
 
 // origin is where r's codes count (decision 444).
 func (s *Server) origin(r *http.Request) auth.Origin {
-	return auth.Origin{Outside: s.outside(r), IP: s.clientIP(r)}
+	// Codes from a trusted router aren't home's: their own bucket, and
+	// they count in the 60-day budget.
+	return auth.Origin{Outside: s.notHome(r), IP: s.clientIP(r)}
+
 }
 
 func outsideNote(outside bool) string {
@@ -892,9 +935,9 @@ func (s *Server) mfaNotify(ctx context.Context, e auth.MFAEvent) {
 		return
 	}
 	if s.cfg.Alerts != nil {
-		s.cfg.Alerts.Notify(ctx, notify.Event{Kind: "security.2fa", Severity: notify.SeverityWarning, Title: title, Body: body, Link: "control-panel/users", Time: time.Now()})
+		s.cfg.Alerts.Notify(ctx, notify.Event{Kind: "security.2fa", Severity: notify.SeverityWarning, Title: title, Body: body, Link: "control/security", Time: time.Now()})
 	} else if s.cfg.Notify != nil {
-		_ = s.cfg.Notify.Send(ctx, notify.Notification{Level: notify.Warning, Title: title, Body: body, Source: "security", AdminOnly: true, Kind: "security.2fa", Link: "control-panel/users"})
+		_ = s.cfg.Notify.Send(ctx, notify.Notification{Level: notify.Warning, Title: title, Body: body, Source: "security", AdminOnly: true, Kind: "security.2fa", Link: "control/security"})
 	}
 	s.mfa.SetNotice(ctx, e.UserID, mine)
 	s.recordSystem(ctx, "auth.2fa."+e.Kind, name, body)

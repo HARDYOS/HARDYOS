@@ -386,9 +386,9 @@ func (p *Provider) loginPage(w http.ResponseWriter, r *http.Request, base string
 		return
 	}
 	if !a.hasPrompt(oidc.PromptLogin) {
-		u, authTime, how, found := p.existingSession(r, base)
+		u, authTime, how, mfa, found := p.existingSession(r, base)
 		if found && fresh(a, authTime, p.now()) {
-			p.proceed(w, r, base, a, c, u, authTime, how, false)
+			p.proceed(w, r, base, a, c, u, authTime, how, mfa, false)
 			return
 		}
 	}
@@ -420,32 +420,32 @@ func loginHint(h string) string {
 
 // existingSession finds someone already signed in in this browser: to
 // HardyOS sign-in, or to the desktop when the provider is on its host.
-func (p *Provider) existingSession(r *http.Request, base string) (*auth.User, time.Time, string, bool) {
+func (p *Provider) existingSession(r *http.Request, base string) (*auth.User, time.Time, string, bool, bool) {
 	local := p.loadSettings(r.Context()).localAccounts
 	if u, t, mfa, ok := p.sessionUserMFA(r); ok && (u.IdentitySource() == auth.SourceDomain || local) && !p.adminRefused(r, u) {
 		// Reused only if it satisfies the two-factor rule for where this
 		// browser is now (an outside browser, an account that has set one
 		// up since, an administrator past the grace period).
 		if mfa {
-			return u, t, "existing HardyOS sign-in, two-factor", true
+			return u, t, "existing HardyOS sign-in, two-factor", true, true
 		}
 		if p.secondFactorNeed(r, u) == auth.NeedNothing {
-			return u, t, "existing HardyOS sign-in", true
+			return u, t, "existing HardyOS sign-in", false, true
 		}
 	}
 	if base != "" && p.cfg.DesktopUser != nil {
 		if u, t, mfa, ok := p.cfg.DesktopUser(r); ok {
 			if (u.IdentitySource() == auth.SourceDomain || local) && !p.adminRefused(r, u) {
 				if mfa {
-					return u, t, "desktop session, two-factor", true
+					return u, t, "desktop session, two-factor", true, true
 				}
 				if p.secondFactorNeed(r, u) == auth.NeedNothing {
-					return u, t, "desktop session", true
+					return u, t, "desktop session", false, true
 				}
 			}
 		}
 	}
-	return nil, time.Time{}, "", false
+	return nil, time.Time{}, "", false, false
 }
 
 // fresh applies max_age.
@@ -503,7 +503,11 @@ func (p *Provider) loginPost(w http.ResponseWriter, r *http.Request, base string
 	public := p.cfg.PublicOrigin(r)
 	var lim limiter = p.cfg.Limiter
 	prefix := ""
-	if public {
+	// The buckets follow where the browser is (outside: through the
+	// gateway or from an address that isn't inside), not only public
+	// services: a NetBird-only service, a forwarded port or the router's
+	// address mustn't lock anyone out at home either.
+	if p.notHome(r) {
 		lim, prefix = p.cfg.PublicLimiter, "pub-"
 	}
 	for _, key := range []string{prefix + "ip:" + ip, prefix + userKey} {
@@ -572,7 +576,7 @@ func (p *Provider) loginPost(w http.ResponseWriter, r *http.Request, base string
 	}
 	now := p.now()
 	p.startSession(w, r, u, now)
-	p.proceed(w, r, base, a, c, u, now, "password", true)
+	p.proceed(w, r, base, a, c, u, now, "password", false, true)
 }
 
 // limiter is auth.LoginLimiter or, for sign-ins from the internet,
@@ -602,8 +606,9 @@ func sentence(s string) string {
 }
 
 // proceed takes a signed-in person on: access check, subject, consent,
-// then back to the app.
-func (p *Provider) proceed(w http.ResponseWriter, r *http.Request, base string, a *authRequest, c *Client, u *auth.User, authTime time.Time, how string, posted bool) {
+// then back to the app. mfa says whether that sign-in used a second
+// factor (it goes into amr).
+func (p *Provider) proceed(w http.ResponseWriter, r *http.Request, base string, a *authRequest, c *Client, u *auth.User, authTime time.Time, how string, mfa, posted bool) {
 	ctx := r.Context()
 	ip := p.cfg.ClientIP(r)
 	if p.adminRefused(r, u) {
@@ -633,7 +638,7 @@ func (p *Provider) proceed(w http.ResponseWriter, r *http.Request, base string, 
 		return
 	}
 	amr := []string{"pwd"}
-	if strings.Contains(how, "two-factor") {
+	if mfa {
 		amr = append(amr, "otp", "mfa")
 	}
 	a.UserID, a.Subject, a.AuthTime, a.AMR = u.ID, sub, authTime.UTC(), amr

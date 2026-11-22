@@ -122,14 +122,18 @@ func publicOrigin(r *http.Request) bool {
 	return g != nil && g.public
 }
 
-// netbirdNetwork is NetBird's network as last seen (zero before).
+// netbirdNetwork is NetBird's network while NetBird is connected (zero
+// otherwise: then nothing in it counts as home, review M3).
 func (rt *remoteRuntime) netbirdNetwork() netip.Prefix {
 	if rt == nil {
 		return netip.Prefix{}
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	return rt.network
+	if !rt.connected {
+		return netip.Prefix{}
+	}
+	return rt.peers
 }
 
 // publishedHost reports whether host is one the gateway serves.
@@ -150,12 +154,16 @@ type remoteRuntime struct {
 	routes      map[string]*gwRoute // by host
 	byApp       map[string]*gwRoute
 	network     netip.Prefix
-	secret      string
-	srv         *http.Server
-	addr        string
-	problem     string
-	last        *RemoteSyncInfo
-	kick        chan struct{}
+	// connected: NetBird said it is connected at the last sync; peers is
+	// its network as it said then (home for two-factor sign-in).
+	connected bool
+	peers     netip.Prefix
+	secret    string
+	srv       *http.Server
+	addr      string
+	problem   string
+	last      *RemoteSyncInfo
+	kick      chan struct{}
 	// client is the sign-in provider's client for app hosts.
 	client     *gatewayClient
 	clientURIs []string
@@ -409,6 +417,11 @@ func (rt *remoteRuntime) apply(ctx context.Context, in publish.Inputs, st *netbi
 		network = "100.64.0.0/10" // NetBird's default range
 	}
 	rt.network, _ = netip.ParsePrefix(network)
+	rt.connected = st != nil && st.Connected
+	rt.peers = netip.Prefix{}
+	if rt.connected {
+		rt.peers, _ = netip.ParsePrefix(st.Network)
+	}
 	want := ""
 	if len(routes) > 0 && listenHost != "" {
 		want = net.JoinHostPort(listenHost, strconv.Itoa(opts.Port))
@@ -490,7 +503,13 @@ func (rt *remoteRuntime) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"This port only takes requests from NetBird's reverse proxy.")
 		return
 	}
+	if a, err := netip.ParseAddr(clientip.Peer(r)); err == nil {
+		// NetBird's reverse proxy peer: whatever it carries is outside, so
+		// its own address never counts as home (review M3).
+		rt.s.notePeerProxy(a)
+	}
 	client := forwardedClient(r)
+
 	h := r.Header
 	h.Del(publish.GatewayHeader)
 	h.Del("X-Netbird-User")

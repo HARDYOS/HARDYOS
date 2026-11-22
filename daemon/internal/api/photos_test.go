@@ -93,6 +93,19 @@ func TestPhotosSync(t *testing.T) {
 		APIURL: e.api.URL, DefaultMode: publish.ModePublic, Token: &tok}); j["state"] != "succeeded" {
 		t.Fatalf("publishing = %v", j)
 	}
+	// Its own sign-in only is refused until a sync saw, from Immich
+	// itself, sign-in with HardyOS working and Immich's passwords off
+	// (re-review M5).
+	var er ErrorResponse
+	if code := e.admin.do("PUT", "/api/v1/apps/immich/publish", PublishRequest{Mode: publish.ModePublic, Auth: publish.AuthNone, ConfirmOpen: true}, &er); code != 400 || er.Code != "signin_required" {
+		t.Fatalf("publish before a sync saw sign-in with HardyOS = %d %+v", code, er)
+	}
+	if j, _ := e.submit(t, "POST", "/api/v1/photos/sync", nil); j["state"] != "succeeded" {
+		t.Fatalf("sync = %v", j)
+	}
+	if !e.server.signsInWithHardyOS(ctx, photos.AppID) {
+		t.Fatal("Immich's sign-in as the sync saw it isn't HardyOS's")
+	}
 	// Published for the phone app: public, its own sign-in only.
 	if j, _ := e.submit(t, "PUT", "/api/v1/apps/immich/publish", PublishRequest{Mode: publish.ModePublic, Auth: publish.AuthNone, ConfirmOpen: true}); j["state"] != "succeeded" {
 		t.Fatalf("publish immich = %v", j)

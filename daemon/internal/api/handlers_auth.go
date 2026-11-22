@@ -90,7 +90,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// of signing in at home or over NetBird.
 	var lim limiter = s.cfg.Limiter
 	prefix := ""
-	if publicOrigin(r) {
+	if s.notHome(r) { // the gateway, the router or an address that isn't inside (review L8)
 		lim, prefix = s.pubLimiter, "pub-"
 	}
 	ipKey, userKey := prefix+"ip:"+ip, prefix+userKey

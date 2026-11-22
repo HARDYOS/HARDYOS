@@ -82,16 +82,38 @@ A code works once, and only within about a minute and a half of your phone's
 clock.
 
 **What counts as outside**: anything through Remote Access, and any address
-that isn't this server's own network or NetBird. That includes apps' Docker
-networks. The router's own address counts as home, since it's on your network
-(and a server in a VM behind NAT sees everyone that way). But a request from
-the router also shows up when a phone at home uses the public address (hairpin
-NAT), or when the router forwards a port and hides who's visiting, which would
-let the internet look like home. So Control Panel › Security shows a warning
-then. Don't forward ports to HardyOS (Remote Access publishes through NetBird
-instead), and at home use the server's local address. A home network with global
-IPv6 addresses still counts as home, as long as the server's own interface is
-on it.
+that isn't this server's own private network (10.x, 172.16-31.x, 192.168.x,
+IPv6 unique-local, or a global IPv6 prefix on an interface that isn't the way
+to the internet) or NetBird while it's connected. That includes apps' Docker
+networks, apps running with the host's network (their connections to the
+server's own addresses count as home only when they're HardyOS's own, so an
+SSH tunnel to the server counts as outside too), and a server whose own
+network is public (a VPS).
+
+**The router's own address counts as outside.** Hairpin NAT (a phone at home
+using the public address), a port forward the router masquerades, a VPN or
+tunnel on the router, and a server running in a VM behind NAT all make
+visitors look like the router, and HardyOS can't tell those apart from the
+internet. Control Panel › Security warns when it sees such a request, and
+administrators get a notification once. At home, use the server's local
+address, and don't forward ports to HardyOS (Remote Access publishes through
+NetBird instead).
+
+If the server really is behind NAT and the people at home reach it through
+the router (for example from a separate network behind it), an administrator
+can turn on *This server is behind NAT: trust the router's address* in Control
+Panel › Security (from the server's own network, not through the router), or
+as root with `hardyctl trust-router on`. It's off by default, audited, applies
+only to that router (its address and hardware address: it lapses if the
+router changes), and administrators see a banner while it's on. Even then,
+codes from the router have their own limit and count toward the outside
+budget, and WebDAV, mail and calendars still need app passwords from it.
+
+**A new server behind NAT**: its first boot shows a one-time setup code for
+the administrator on the console login screen. Sign in with the password,
+then enter that code to set up your authenticator. Later, root can make a new
+one with `hardyctl setup-code <username>`.
+
 
 **Lost your phone?** Use a recovery code, then *New phone* in the account
 menu. No codes left: another administrator uses *Reset two-factor sign-in*
@@ -124,10 +146,15 @@ LDAP check the domain password in Samba itself, and keep doing so. HardyOS
 doesn't publish them outside.
 
 **Published apps**: an app with its own sign-in is published only with HardyOS
-sign-in in front, which asks for the code from outside. Photos is the exception,
-because Immich signs in through HardyOS when "Sign in with HardyOS" is on. An
-app published without it before two-factor sign-in isn't served from outside
+sign-in in front, which asks for the code from outside. That includes apps
+published **NetBird-only**: being a NetBird device used to be enough, and now
+HardyOS sign-in is in front of them too (a change in this release). Photos is
+the exception, because Immich signs in through HardyOS: only once a Photos sync
+has seen, from Immich itself, that sign-in with HardyOS works and Immich's own
+passwords are off (Control Panel › Photos, *Sync now*). An app published
+without HardyOS sign-in before two-factor sign-in isn't served from outside
 until you turn it on in Remote Access.
+
 
 An app's own session (its cookie, a phone app's token) is the app's. Once
 someone signed in through HardyOS, HardyOS can end it only by ending the app

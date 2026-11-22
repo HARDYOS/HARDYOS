@@ -14,22 +14,63 @@ code leaves a clean place for them (below).
 
 A request is from outside when it came in through the app gateway (any
 published service, public or NetBird-only: NetBird's proxy terminates it), or
-when its client address isn't inside. Inside is only:
+when its client address isn't home (`inside.go`, re-review HIGH 1, M2-M4).
+Home is only:
 
-- hardyd's own loopback;
-- the networks of this server's LAN interfaces (IPv6 global prefixes on them
-  included, so a home with global IPv6 still counts as home);
-- NetBird peers (100.64.0.0/10, or NetBird's own network).
+- this server itself (loopback or one of its own addresses), only when the
+  other end of the connection is hardyd itself: the socket is looked up in
+  `/proc/net/tcp`/`tcp6` (TCP has no `SO_PEERCRED`; the socket table gives
+  its owner and inode, read in the machine's own byte order), and it must
+  be hardyd's uid and a socket in `/proc/self/fd`. Not root, as the review
+  suggested: a container on the host's network connects from the same
+  addresses and often runs as root, or as a uid that happens to be
+  hardyd's; and nothing HardyOS needs at home signs in over loopback as
+  root (`hardyctl` writes the database). A proxy's claim
+  (`X-Forwarded-For`) of a local client is never believed. This was chosen
+  over marking host-network apps: it covers anything on the host, not only
+  apps HardyOS installed. An SSH tunnel to the server's loopback counts as
+  outside;
+- the private IPv4 networks (10/8, 172.16/12, 192.168/16) of this server's
+  LAN interfaces, their IPv6 unique-local networks, and IPv6 global prefixes
+  only of interfaces that don't carry the default route (on that one a
+  global prefix, like a public IPv4 network, is the internet's: a VPS);
+- the NetBird network, only while NetBird says it's connected, minus peers
+  seen as its reverse proxy at the gateway.
 
 Docker's networks (the default bridge, compose bridges, the app and webmail
-networks), libvirt's and the domain controller's shim are outside.
+networks), libvirt's, the domain controller's shim and CGNAT space are
+outside.
 
-**The router's own address** is on the LAN, so it counts as inside: a server
-running in a VM behind NAT sees every client that way. But it is also how
-hairpin NAT (a device at home using the public address) and a port forward the
-router masquerades show up, and those could let the internet look like home.
-So Control Panel › Security warns when a request came from the router, and the
-docs say not to forward ports to HardyOS.
+**The router's own address is outside.** Hairpin NAT, masqueraded port
+forwards, VPNs/tunnels/reverse proxies on the router, subnet routers and
+QEMU/libvirt NAT all make the internet arrive with it. A request from it is
+remembered in the settings (`auth.mfa.router_seen`, written at most once a
+minute) and administrators are notified the first time; Control Panel ›
+Security warns.
+
+**Behind NAT for real**: the optional "This server is behind NAT: trust the
+router's address" (`auth.mfa.trust_router` = the router's IP and MAC, who,
+when; package `router`, shared with hardyctl). Off by default; changed only
+from home itself (not the router, not outside: 403 `not_from_home`) or with
+`hardyctl trust-router on|off|status`; audited (`auth.2fa.trust_router`);
+administrators are notified once per turning on and see a desktop banner
+while it's on. It lapses when the default gateway's IP or MAC changes. A
+trusted router is a third place, `placeRouter`: home for what sign-in asks
+(`Server.outside`), but not home for limits and own passwords
+(`Server.notHome`): its codes get a bucket of their own (per address) and
+count toward the 60-day budget, its desktop/provider password sign-ins use
+the outside limiter, and WebDAV, mail and calendars refuse own passwords
+from it.
+
+**A new server behind NAT** (the QEMU smoke test is one: its client is the
+guest's router): `hardyos-setup-code.service` runs `hardyctl first-boot-code`
+as the hardyd user after hardyd starts. On the first boot with exactly one
+administrator and no authenticator it issues the same 80-bit, 24-hour
+single-use setup code an administrator would (audited) and writes it to
+`/run/hardyos-setup-code/code.issue` (0600), which `hardyos-issue` (root, as
+before) adds to the console login screen; it's never logged. It runs once
+(`auth.mfa.first_boot_code`). `hardyctl setup-code <user>` makes one any
+time (root, audited).
 
 ## 2. Factors and storage
 
@@ -55,7 +96,7 @@ docs say not to forward ports to HardyOS.
 | Desktop (`POST /auth/login`) | Password, then (when needed) `POST /auth/login/2fa` with a challenge token, or forced enrollment (`/auth/login/enroll`, `/auth/login/enroll/confirm`). Sessions record `mfa`. |
 | Desktop session use | A session without `mfa` is refused from outside; an administrator past the grace period gets only the 2FA endpoints until enrolled. App windows and VM consoles use the same gate. |
 | Sign-in provider (`sso.<base>`, `/oidc`) | Same rules on server-rendered, script-free pages: a code page, and an enrollment page whose QR code is inline SVG. Its browser sessions record `mfa`; an existing sign-in (its own or the desktop's) is reused only if it meets the rule for where the browser is now. `amr` gets `otp`/`mfa`. Grants record whether the browser was outside. A grant without a second factor doesn't refresh if its browser was outside, if it is a public client (an app on the person's device) refreshing from outside, or while the person must enroll; a confidential client's server isn't judged by its own address. |
-| Published apps (gateway) | Only with HardyOS sign-in in front (which goes through the provider); an app can't be published without it (`signin_required`), and one published that way before is refused at the gateway. The exception is Photos, whose sign-in is HardyOS's own (Sign in with HardyOS on, Immich passwords off). Sessions an app keeps on its own after that are the app's. |
+| Published apps (gateway) | Only with HardyOS sign-in in front (which goes through the provider); an app can't be published without it (`signin_required`), and one published that way before is refused at the gateway. The exception is Photos, whose sign-in is HardyOS's own: the settings ask for sign-in with HardyOS without Immich's passwords, and the last successful sync saw, from Immich's own server features, OAuth on and password sign-in off (`auth.photos_signin`; a failed sync keeps the last; nothing seen fails closed, re-review M5). This applies to NetBird-only apps too (a release note: being a NetBird device used to be enough). Sessions an app keeps on its own after that are the app's. |
 | Per-app hosts (`<app>.<base>`, decisions 450-459) | The bind flow on the desktop host refuses a desktop session that fails the session gate; host sessions (`__Host-hardyos_host`) are rechecked against the desktop session and the gate on every request and end with it. |
 | WebDAV (`/dav/`) | An app password (scope `files`) always works. The account's own password works only from inside, only without 2FA, and not while an admin must enroll; this is checked again after Kerberos succeeds. |
 | Mail (IMAP/SMTP via Dovecot), calendars (`/dav-mail/`) | Same rule (scopes `mail`, `calendars`), with the source classified as in section 1. Webmail keeps its `hwm1.` tokens. |
@@ -108,7 +149,8 @@ enroll their own authenticator.
     default) app passwords. An admin must re-enroll at the next sign-in.
   - **Setup code:** issues the one-time code from section 4.
 - **Security** in Control Panel holds the administrators' grace period (0-30
-  days, default 7) and the router warning.
+  days, default 7), the router warning and the "trust the router" switch.
+
 - **Lost authenticator:**
   - a recovery code;
   - another administrator's reset;

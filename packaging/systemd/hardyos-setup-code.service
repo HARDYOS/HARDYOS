@@ -1,0 +1,41 @@
+[Unit]
+Description=Show a two-factor setup code for a new server's administrator on the console
+Documentation=https://github.com/HARDYOS/HARDYOS
+# On a new server's first boot, with exactly one administrator and no
+# authenticator yet, the login screen shows a one-time setup code (decision
+# 443): with it the owner can set up two-factor sign-in from anywhere, even
+# when the router hides where they are. Later boots show nothing.
+After=hardyd.service zfs-mount.service
+Wants=hardyd.service
+
+[Service]
+Type=oneshot
+User=hardyd
+Group=hardyd
+# The code for the login screen (agetty runs as root; the file is 0600).
+RuntimeDirectory=hardyos-setup-code
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+ExecStart=/usr/bin/hardyctl -issue /run/hardyos-setup-code/code.issue first-boot-code
+# Redraw the login screen with it (the script runs as root, as in
+# hardyos-issue.service).
+ExecStartPost=+/usr/lib/hardyos/hardyos-issue
+StandardOutput=journal
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/hardyos
+
+[Install]
+WantedBy=multi-user.target

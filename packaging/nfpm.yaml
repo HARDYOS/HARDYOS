@@ -56,6 +56,8 @@ contents:
     dst: /lib/systemd/system/hardyd-mail-auth.socket
   - src: ./systemd/hardyos-issue.service
     dst: /lib/systemd/system/hardyos-issue.service
+  - src: ./systemd/hardyos-setup-code.service
+    dst: /lib/systemd/system/hardyos-setup-code.service
   - src: ./systemd/hardyos-dc.service
     dst: /lib/systemd/system/hardyos-dc.service
   # Domain controller directory helper (Samba's Python API), run by hardyd-priv.

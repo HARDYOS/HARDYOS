@@ -1,4 +1,16 @@
-import type { AppPasswordScope, LoginChallenge, TwoFactorStatus, User } from "@hardy/api-client";
+import type { AppPasswordScope, LoginChallenge, RouterTrust, TwoFactorStatus, User } from "@hardy/api-client";
+
+/** The "trust the router's address" switch's line: on, lapsed or off. */
+export function routerTrustText(t: RouterTrust, when: (iso: string) => string): string {
+  if (t.on) {
+    return `On since ${t.since ? when(t.since) : "?"} for ${t.ip ?? "the router"}. Whatever the router forwards (port forwards, NAT reflection, tunnels) isn't asked for a code.`;
+  }
+  if (t.lapsed) {
+    return `Lapsed: it was turned on for ${t.ip ?? "another router"}, and the router changed. Requests from the router count as outside.`;
+  }
+  return "Off: requests from the router's own address count as outside. Turn on only if devices at home reach HardyOS through the router (for example a separate network behind it) and nothing from the internet does.";
+}
+
 
 /** What POST /auth/login answered: signed in, or a second step. */
 export function isChallenge(x: User | LoginChallenge | undefined | null): x is LoginChallenge {

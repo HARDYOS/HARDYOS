@@ -95,8 +95,10 @@ func (l *LoginLimiter) failLocked(key string) {
 	}
 	// Bound memory: drop entries that are idle and unlocked.
 	if len(l.entries) > 10000 {
+		// Drop entries that are unlocked and have nothing recent: no
+		// failures, or only ones older than the window.
 		for k, v := range l.entries {
-			if len(v.failures) == 0 && now.After(v.lockedUntil) {
+			if now.After(v.lockedUntil) && (len(v.failures) == 0 || !v.failures[len(v.failures)-1].After(cutoff)) {
 				delete(l.entries, k)
 			}
 		}

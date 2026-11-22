@@ -182,6 +182,12 @@ func (r *Reconciler) Run(ctx context.Context, p Plan, st *Status) error {
 			st.SSO.Why = "Immich sends people to " + host(u) + " to sign in, not to HardyOS"
 		default:
 			st.SSO.Active = true
+			// What Immich's sign-in page offers now, as Immich says
+			// (HardyOS trusts its publishing without a gateway sign-in
+			// only while its own passwords are off: decision 441).
+			if f, ferr := admin.Features(ctx); ferr == nil {
+				st.SSO.PasswordLoginOff = f.OAuth && !f.PasswordLogin
+			}
 		}
 	}
 

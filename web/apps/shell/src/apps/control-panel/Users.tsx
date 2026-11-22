@@ -4,7 +4,8 @@ import { useState } from "react";
 import { api, errorMessage, unwrap } from "../../api";
 import { dateTime, initials, relativeTime } from "../../format";
 import { EditIcon, KeyIcon, PlusIcon, ShieldIcon, TrashIcon } from "../../icons";
-import { twoFactorLabel } from "../../auth/twoFactorRules";
+import { routerTrustText, twoFactorLabel } from "../../auth/twoFactorRules";
+
 import { useShell } from "../../shell";
 import { Alert, Badge, Button, Card, ErrorBox, Field, IconButton, Loading, PageHeader, Select, TextInput, Toggle } from "../../ui";
 import { ConfirmDialog, Dialog } from "../../ui/Dialog";
@@ -323,16 +324,19 @@ export function TwoFactorPolicyCard() {
   const policy = useQuery({ queryKey: ["2fa-policy"], queryFn: () => unwrap(api.GET("/auth/2fa/policy")) });
   const [days, setDays] = useState<string | null>(null);
   const save = useMutation({
-    mutationFn: (n: number) => unwrap(api.PUT("/auth/2fa/policy", { body: { adminGraceDays: n } })),
+    mutationFn: (body: { adminGraceDays: number; trustRouter?: boolean }) => unwrap(api.PUT("/auth/2fa/policy", { body })),
     onSuccess: () => {
       setDays(null);
       void qc.invalidateQueries({ queryKey: ["2fa-policy"] });
+      void qc.invalidateQueries({ queryKey: ["me"] });
       toast("success", "Saved");
     },
   });
+  const [confirmTrust, setConfirmTrust] = useState(false);
   if (policy.isPending) return <Loading />;
   if (policy.isError) return <ErrorBox error={policy.error} onRetry={() => policy.refetch()} />;
   const routerSeen = policy.data.routerSeenAt;
+  const trust = policy.data.trustRouter;
   const value = days ?? String(policy.data.adminGraceDays);
   const n = Number(value);
   const valid = Number.isInteger(n) && n >= 0 && n <= 30;
@@ -347,7 +351,7 @@ export function TwoFactorPolicyCard() {
         className="row"
         onSubmit={(e) => {
           e.preventDefault();
-          if (valid) save.mutate(n);
+          if (valid) save.mutate({ adminGraceDays: n });
         }}
       >
         <Field label="Administrators may sign in without it for" hint="Days after the first sign-in that asks (0-30). Users and Groups shows each deadline.">
@@ -357,18 +361,46 @@ export function TwoFactorPolicyCard() {
           Save
         </Button>
       </form>
-      {routerSeen && (
-        <Alert tone="warn" title="Sign-ins through the router's own address">
+      {routerSeen && !trust.on && (
+        <Alert tone="warn" title="Requests through the router's own address">
           On {dateTime(routerSeen)} a request reached HardyOS from your router&apos;s address. That happens with hairpin NAT (a device at home using
-          the public address) or a port forward that hides where visitors come from, and HardyOS can&apos;t tell those from someone at home: they
-          don&apos;t get asked for two-factor sign-in. Don&apos;t forward ports to HardyOS (Remote Access publishes through NetBird instead), and use the
-          server&apos;s local address at home.
+          the public address), a port forward that hides where visitors come from, or a VPN or tunnel on the router, and HardyOS can&apos;t tell those
+          from the internet: they count as outside and need two-factor sign-in. Use the server&apos;s local address at home, and don&apos;t forward ports
+          to HardyOS (Remote Access publishes through NetBird instead).
         </Alert>
       )}
+      <Toggle
+        label="This server is behind NAT: trust the router's address"
+        description={routerTrustText(trust, dateTime)}
+        checked={trust.on}
+        disabled={!policy.data.canChangeTrustRouter || save.isPending}
+        onChange={(on) => (on ? setConfirmTrust(true) : save.mutate({ adminGraceDays: policy.data.adminGraceDays, trustRouter: false }))}
+      />
+      {!policy.data.canChangeTrustRouter && (
+        <p className="small muted" style={{ margin: 0 }}>
+          Changed only from this server&apos;s own network (not through the router or from outside), or with <span className="mono">hardyctl trust-router</span>.
+        </p>
+      )}
       {save.error && <Alert tone="bad">{errorMessage(save.error)}</Alert>}
+      {confirmTrust && (
+        <ConfirmDialog
+          title="Trust the router's address?"
+          confirmLabel="Trust the router"
+          onClose={() => setConfirmTrust(false)}
+          onConfirm={async () => {
+            await save.mutateAsync({ adminGraceDays: policy.data.adminGraceDays, trustRouter: true });
+          }}
+        >
+          Requests from your router&apos;s address will count as home for two-factor sign-in. If the router forwards anything from the internet to this
+          server (a port forward, NAT reflection, a VPN or tunnel on the router), those visitors won&apos;t be asked for a code. It applies only to this
+          router (its address and hardware address), lapses if the router changes, and administrators see a banner while it&apos;s on. WebDAV, mail and
+          calendars still need app passwords from it.
+        </ConfirmDialog>
+      )}
     </Card>
   );
 }
+
 
 function ResetPasswordDialog({ user, onClose }: { user: User; onClose: () => void }) {
   const [password, setPassword] = useState("");

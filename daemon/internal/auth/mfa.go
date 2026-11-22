@@ -156,6 +156,10 @@ type MFA struct {
 	// recovery and enroll are the limits for recovery codes and for
 	// enrollment and setup codes (their own buckets: decision 444).
 	recovery, enroll *LoginLimiter
+	// caps bounds recovery and enrollment/setup codes from outside per
+	// account across all addresses (many addresses can't buy unlimited
+	// tries; home has its own bucket and is never capped by these).
+	caps *LoginLimiter
 }
 
 func (m *MFA) now() time.Time {
@@ -172,6 +176,7 @@ func (m *MFA) init() {
 		}
 		m.recovery = &LoginLimiter{MaxFailures: 10, Window: 15 * time.Minute, Lockout: 15 * time.Minute}
 		m.enroll = NewLoginLimiter()
+		m.caps = &LoginLimiter{MaxFailures: 30, Window: 15 * time.Minute, Lockout: 15 * time.Minute}
 	})
 }
 
@@ -462,6 +467,25 @@ func (m *MFA) try(lim *LoginLimiter, key string) error {
 	return nil
 }
 
+// capOutside reserves a try in the per-account cap for kind from outside
+// (nothing at home) and returns its key for uncap.
+func (m *MFA) capOutside(kind string, uid int64, o Origin) (string, error) {
+	if !o.Outside {
+		return "", nil
+	}
+	k := kind + ":" + strconv.FormatInt(uid, 10) + ":out-all"
+	if ok, wait := m.caps.Try(k); !ok {
+		return "", &CodeRateLimited{Wait: wait}
+	}
+	return k, nil
+}
+
+func (m *MFA) uncap(k string) {
+	if k != "" {
+		m.caps.Succeed(k)
+	}
+}
+
 // tripped tells Notify when a failure just paused code entry.
 func (m *MFA) tripped(ctx context.Context, lim *LoginLimiter, key string, uid int64, o Origin) {
 	if ok, _ := lim.Allowed(key); !ok {
@@ -522,6 +546,10 @@ func (m *MFA) Verify(ctx context.Context, u *User, code string, o Origin) (Facto
 		return "", ErrBadCode
 	}
 	key := o.bucket("mfa-rc", u.ID)
+	capKey, err := m.capOutside("mfa-rc", u.ID, o)
+	if err != nil {
+		return "", err
+	}
 	if err := m.try(m.recovery, key); err != nil {
 		return "", err
 	}
@@ -529,6 +557,7 @@ func (m *MFA) Verify(ctx context.Context, u *User, code string, o Origin) (Facto
 		return "", err
 	} else if ok {
 		m.recovery.Succeed(key)
+		m.uncap(capKey)
 		// The owner proved themselves: the budget starts again, unless it
 		// already ran out (then only a new password or a reset lifts it).
 		_, _ = m.DB.ExecContext(ctx, `DELETE FROM user_totp_failures WHERE user_id = ? AND NOT EXISTS (
@@ -658,6 +687,10 @@ func (m *MFA) BeginEnroll(ctx context.Context, u *User, issuer, bind string) (*E
 func (m *MFA) ConfirmEnroll(ctx context.Context, u *User, code, bind string, o Origin) ([]string, error) {
 	m.init()
 	key := o.bucket("mfa-enroll", u.ID)
+	capKey, err := m.capOutside("mfa-enroll", u.ID, o)
+	if err != nil {
+		return nil, err
+	}
 	if err := m.try(m.enroll, key); err != nil {
 		return nil, err
 	}
@@ -709,6 +742,7 @@ func (m *MFA) ConfirmEnroll(ctx context.Context, u *User, code, bind string, o O
 		return nil, err
 	}
 	m.enroll.Succeed(key)
+	m.uncap(capKey)
 	return codes, nil
 }
 
@@ -819,6 +853,10 @@ func (m *MFA) IssueSetupCode(ctx context.Context, uid int64) (string, time.Time,
 func (m *MFA) ConsumeSetupCode(ctx context.Context, uid int64, code string, o Origin) error {
 	m.init()
 	key := o.bucket("mfa-enroll", uid)
+	capKey, err := m.capOutside("mfa-enroll", uid, o)
+	if err != nil {
+		return err
+	}
 	if err := m.try(m.enroll, key); err != nil {
 		return err
 	}
@@ -831,6 +869,7 @@ func (m *MFA) ConsumeSetupCode(ctx context.Context, uid int64, code string, o Or
 		}
 		if n, _ := res.RowsAffected(); n == 1 {
 			m.enroll.Succeed(key)
+			m.uncap(capKey)
 			return nil
 		}
 	}

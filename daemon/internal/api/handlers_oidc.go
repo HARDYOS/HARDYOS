@@ -53,6 +53,7 @@ func (s *Server) newOIDC() *oidc.Provider {
 		},
 		MFA:             s.mfa,
 		Outside:         s.outside,
+		NotHome:         s.notHome,
 		TOTPIssuer:      s.totpIssuer,
 		Challenges:      s.challenges,
 		SecondFactorSet: s.secondFactorSet,

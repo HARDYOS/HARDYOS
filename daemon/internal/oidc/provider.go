@@ -137,6 +137,12 @@ type Config struct {
 	// Outside reports whether a request is from outside (two-factor sign-in
 	// required there); nil: PublicOrigin.
 	Outside func(r *http.Request) bool
+	// NotHome reports whether a request isn't from home itself (a trusted
+	// router counts as home for Outside, not here): codes and passwords
+	// from it get buckets of their own and count in the outside budget;
+	// nil: Outside.
+	NotHome func(r *http.Request) bool
+
 	// TOTPIssuer names this server in authenticator apps (default
 	// "HardyOS").
 	TOTPIssuer func() string

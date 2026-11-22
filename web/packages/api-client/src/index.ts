@@ -14,6 +14,8 @@ export type Enrollment = S["Enrollment"];
 export type QRCode = S["QRCode"];
 export type EnrollResult = S["EnrollResult"];
 export type TwoFactorPolicy = S["TwoFactorPolicy"];
+export type RouterTrust = S["RouterTrust"];
+
 export type TwoFactorSetupCode = S["TwoFactorSetupCode"];
 export type AppPassword = S["AppPassword"];
 export type AppPasswordScope = S["AppPasswordScope"];

@@ -15,17 +15,20 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/ports"
 )
 
-// Inside is the server's loopback, LAN and NetBird; Docker's networks
-// (webmail's included) and the router's own address are outside
-// (review M3, L7).
+// Home is the LAN and NetBird while it's connected; Docker's networks
+// (webmail's included), NetBird when not connected, local addresses (for
+// services that only know the address) and the router's own address are
+// outside (re-review HIGH 1, M3).
 func TestInsideAddresses(t *testing.T) {
 	e := newMFAEnv(t)
 	s := e.server
 	for addr, want := range map[string]bool{
-		"127.0.0.1": true, "::1": true, "192.168.1.20": true, "100.64.3.4": true,
+		"192.168.1.20": true, "100.64.3.4": false,
+		"127.0.0.1": false, "::1": false, // whose? (requests check the peer)
 		"172.17.0.5": false, ports.WebmailAddr.String(): false, "10.9.0.1": false, "203.0.113.5": false,
-		"192.168.1.1": true, // the router: on the LAN, but noted for the warning
+		"192.168.1.1": false, // the router: whatever it forwards arrives with its address
 	} {
+
 		if got := s.insideAddr(netip.MustParseAddr(addr)); got != want {
 			t.Errorf("%s inside = %v, want %v", addr, got, want)
 		}

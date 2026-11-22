@@ -381,7 +381,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
     put:
       operationId: setTwoFactorPolicy
-      summary: Change the administrators' grace period (admin, audited)
+      summary: Change the administrators' grace period or trusting the router's address (admin, audited)
       tags: [auth]
       requestBody:
         required: true
@@ -396,6 +396,7 @@ paths:
               schema: { $ref: "#/components/schemas/TwoFactorPolicy" }
         "400": { $ref: "#/components/responses/Invalid" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /auth/app-passwords:
     get:
       operationId: listAppPasswords
@@ -6623,20 +6624,35 @@ components:
         code: { type: string, description: A current authenticator or recovery code (when one is set up) }
     TwoFactorPolicy:
       type: object
-      required: [adminGraceDays, outsideRequired]
+      required: [adminGraceDays, outsideRequired, trustRouter, canChangeTrustRouter]
       properties:
         adminGraceDays: { type: integer, minimum: 0, maximum: 30 }
         outsideRequired: { type: boolean, description: Always true — everyone needs a second factor from outside }
         routerSeenAt:
           type: [string, "null"]
           format: date-time
-          description: "When a request last came from the router's own address (hairpin NAT or a masqueraded port forward look like this): such requests count as inside, so this is a warning"
+          description: "When a request last came from the router's own address (hairpin NAT, a port forward or a tunnel on the router look like this; kept across restarts): such requests count as outside unless trustRouter is on"
+        trustRouter: { $ref: "#/components/schemas/RouterTrust" }
+        canChangeTrustRouter: { type: boolean, description: "This request is from this server's own network (not the router's address, not outside), where trustRouter may be changed" }
+    RouterTrust:
+      type: object
+      required: [on, lapsed]
+      description: "\"This server is behind NAT: trust the router's address\" (off by default). Bound to the router's IP and MAC when turned on; lapses if the gateway changes. Even on, codes from the router have their own limit and count toward the 60-day outside budget, and own passwords stay refused for WebDAV, mail and calendars from it."
+      properties:
+        on: { type: boolean }
+        lapsed: { type: boolean, description: It was turned on for another router (IP or MAC changed) and doesn't apply }
+        ip: { type: string, description: The router it was turned on for }
+        since: { type: string, format: date-time }
     TwoFactorPolicyRequest:
       type: object
       required: [adminGraceDays]
       additionalProperties: false
       properties:
         adminGraceDays: { type: integer, minimum: 0, maximum: 30 }
+        trustRouter:
+          type: boolean
+          description: "Turn \"this server is behind NAT: trust the router's address\" on (for the router as it is now) or off. Only from this server's own network (403 not_from_home otherwise; hardyctl trust-router works too). Audited, and administrators are notified."
+
     TwoFactorSetupCode:
       type: object
       required: [code, expiresAt]
@@ -8373,6 +8389,9 @@ components:
         clientId: { type: string }
         redirectUris: { type: array, items: { type: string } }
         why: { type: string, description: Why it's off while the settings ask for it }
+        passwordLoginOff:
+          type: boolean
+          description: "Immich itself said (its server features, at the last sync) that it offers sign-in with HardyOS and not its own passwords. Immich may be published without HardyOS sign-in in front only after a successful sync saw this (decision 441)."
     PhotosML:
       type: object
       required: [mode, reason, lent]

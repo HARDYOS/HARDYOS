@@ -579,7 +579,7 @@ func (s *Server) davSignIn(w http.ResponseWriter, r *http.Request) (*auth.User, 
 	}
 	ctx := r.Context()
 	userKey := s.signin.LimitKey(ctx, name)
-	outside := s.outside(r)
+	outside := s.notHome(r) // a trusted router is not home for own passwords
 	// A password that worked at home is never remembered for outside.
 	cachePrefix := "in:"
 	if outside {

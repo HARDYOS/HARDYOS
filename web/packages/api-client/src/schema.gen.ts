@@ -351,7 +351,7 @@ export interface paths {
         };
         /** Two-factor settings (admin) */
         get: operations["getTwoFactorPolicy"];
-        /** Change the administrators' grace period (admin, audited) */
+        /** Change the administrators' grace period or trusting the router's address (admin, audited) */
         put: operations["setTwoFactorPolicy"];
         post?: never;
         delete?: never;
@@ -5952,12 +5952,27 @@ export interface components {
             outsideRequired: boolean;
             /**
              * Format: date-time
-             * @description When a request last came from the router's own address (hairpin NAT or a masqueraded port forward look like this): such requests count as inside, so this is a warning
+             * @description When a request last came from the router's own address (hairpin NAT, a port forward or a tunnel on the router look like this; kept across restarts): such requests count as outside unless trustRouter is on
              */
             routerSeenAt?: string | null;
+            trustRouter: components["schemas"]["RouterTrust"];
+            /** @description This request is from this server's own network (not the router's address, not outside), where trustRouter may be changed */
+            canChangeTrustRouter: boolean;
+        };
+        /** @description "This server is behind NAT: trust the router's address" (off by default). Bound to the router's IP and MAC when turned on; lapses if the gateway changes. Even on, codes from the router have their own limit and count toward the 60-day outside budget, and own passwords stay refused for WebDAV, mail and calendars from it. */
+        RouterTrust: {
+            on: boolean;
+            /** @description It was turned on for another router (IP or MAC changed) and doesn't apply */
+            lapsed: boolean;
+            /** @description The router it was turned on for */
+            ip?: string;
+            /** Format: date-time */
+            since?: string;
         };
         TwoFactorPolicyRequest: {
             adminGraceDays: number;
+            /** @description Turn "this server is behind NAT: trust the router's address" on (for the router as it is now) or off. Only from this server's own network (403 not_from_home otherwise; hardyctl trust-router works too). Audited, and administrators are notified. */
+            trustRouter?: boolean;
         };
         TwoFactorSetupCode: {
             code: string;
@@ -7672,6 +7687,8 @@ export interface components {
             redirectUris: string[];
             /** @description Why it's off while the settings ask for it */
             why?: string;
+            /** @description Immich itself said (its server features, at the last sync) that it offers sign-in with HardyOS and not its own passwords. Immich may be published without HardyOS sign-in in front only after a successful sync saw this (decision 441). */
+            passwordLoginOff?: boolean;
         };
         PhotosML: {
             /** @enum {string} */
@@ -10517,6 +10534,7 @@ export interface operations {
             };
             400: components["responses"]["Invalid"];
             403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
         };
     };
     listAppPasswords: {

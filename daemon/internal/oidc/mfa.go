@@ -39,7 +39,15 @@ func (p *Provider) chal() *auth.Challenges {
 
 // origin is where r's codes count (decision 444).
 func (p *Provider) origin(r *http.Request) auth.Origin {
-	return auth.Origin{Outside: p.outside(r), IP: p.cfg.ClientIP(r)}
+	return auth.Origin{Outside: p.notHome(r), IP: p.cfg.ClientIP(r)}
+}
+
+// notHome: not from home itself (see Config.NotHome).
+func (p *Provider) notHome(r *http.Request) bool {
+	if p.cfg.NotHome != nil {
+		return p.cfg.NotHome(r)
+	}
+	return p.outside(r)
 }
 
 type outsideKey struct{}
@@ -209,7 +217,7 @@ func (p *Provider) secondFactorPost(w http.ResponseWriter, r *http.Request, base
 		}
 		now := p.now()
 		p.startSessionMFA(w, r, u, now, true)
-		p.proceed(w, r, base, a, c, u, now, how, true)
+		p.proceed(w, r, base, a, c, u, now, how, true, true)
 	case "setup":
 		if ch.Need != auth.NeedEnroll && ch.Need != auth.NeedSetupCode {
 			expired()

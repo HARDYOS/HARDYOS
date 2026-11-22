@@ -67,9 +67,16 @@ undo only writes the network files).
   nothing, a code (`totp`), enrollment (`enroll`, an administrator past the
   grace period) or a setup code (`setup_code`, from outside without 2FA).
   `api.Server.outside` (`inside.go`) decides "outside": the app gateway, or
-  an address that isn't hardyd's loopback, a LAN interface's network or
-  NetBird's (Docker, libvirt and the DC shim are outside; the router's own
-  address is inside but noted for a warning). Wrong codes count per account and `auth.Origin` (home, or the
+  an address that isn't home: this server itself only for hardyd's own
+  connections (socket owner and inode from `/proc/net/tcp`), a LAN
+  interface's private IPv4 / unique-local IPv6 network (global IPv6 only off
+  the default-route interface), or NetBird's network while it's connected
+  (minus its proxy peers). Docker, libvirt, the DC shim and the router's own
+  address are outside; an administrator may trust the router (bound to its
+  IP and MAC, package `router`), which `Server.notHome` still treats as not
+  home for code buckets, the outside budget and own service passwords.
+  `hardyctl setup-code` and `first-boot-code` (`hardyos-setup-code.service`)
+  issue setup codes from the console. Wrong codes count per account and `auth.Origin` (home, or the
   outside address / IPv6 /64), with a rolling 60-day budget from outside
   (`user_totp_failures`) that stops codes from outside at 20 until a new
   password or a reset; `MFA.Notify` reaches administrators and the person.

@@ -1,12 +1,21 @@
 import type { TwoFactorStatus } from "@hardy/api-client";
 import { describe, expect, it } from "vitest";
-import { cleanCode, codeReady, graceText, isChallenge, recoveryCodesText, setupCodeReady, totpReady, twoFactorLabel } from "./twoFactorRules";
+import { cleanCode, codeReady, graceText, isChallenge, recoveryCodesText, routerTrustText, setupCodeReady, totpReady, twoFactorLabel } from "./twoFactorRules";
 
 const off: TwoFactorStatus = {
   enabled: false, enabledAt: null, recoveryCodesLeft: 0, required: false, graceUntil: null, locked: false, outsideFailures: 0, setupCodeExpires: null, mustEnroll: false,
 };
 
 describe("two-factor rules", () => {
+  it("describes trusting the router", () => {
+    const when = () => "today";
+    expect(routerTrustText({ on: false, lapsed: false }, when)).toMatch(/^Off: .*count as outside/);
+    expect(routerTrustText({ on: true, lapsed: false, ip: "192.168.1.1", since: "2026-11-21T00:00:00Z" }, when)).toBe(
+      "On since today for 192.168.1.1. Whatever the router forwards (port forwards, NAT reflection, tunnels) isn't asked for a code.",
+    );
+    expect(routerTrustText({ on: false, lapsed: true, ip: "192.168.1.1" }, when)).toMatch(/^Lapsed: .*192\.168\.1\.1.*count as outside/);
+  });
+
   it("tells a challenge from a user", () => {
     expect(isChallenge({ challenge: "abc", step: "totp", expiresAt: "2026-11-21T00:00:00Z" })).toBe(true);
     expect(isChallenge({ id: 1, username: "cade" } as never)).toBe(false);
