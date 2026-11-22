@@ -24,10 +24,16 @@ const (
 	KindShare = "share"
 	KindApp   = "app"
 	KindVM    = "vm"
+	// KindMail is the mail server's dataset <pool>/mail (decision 460);
+	// its one item id is MailItem.
+	KindMail = "mail"
 )
 
+// MailItem is the mail item's id.
+const MailItem = "mail"
+
 // Kinds lists the item kinds in a fixed order.
-var Kinds = []string{KindShare, KindApp, KindVM}
+var Kinds = []string{KindShare, KindApp, KindVM, KindMail}
 
 // SnapPrefix starts every replication snapshot's label:
 // hardyos-repl-<task>-<YYYYMMDD>T<HHMMSS>Z (UTC). Only labels that parse
@@ -83,10 +89,10 @@ func ValidSource(id string) error {
 // ValidKind checks an item kind.
 func ValidKind(k string) error {
 	switch k {
-	case KindShare, KindApp, KindVM:
+	case KindShare, KindApp, KindVM, KindMail:
 		return nil
 	}
-	return invalid("kind %q: share, app or vm", k)
+	return invalid("kind %q: share, app, vm or mail", k)
 }
 
 // ValidItem checks an item id (a shared folder, app or VM id; each
@@ -178,6 +184,9 @@ func (t Target) Validate() error {
 			return err
 		}
 	}
+	if t.Kind == KindMail && (t.Item != MailItem || t.Child != "") {
+		return invalid("the mail item is %s, one dataset", MailItem)
+	}
 	return zfs.ValidDatasetName(t.Dataset())
 }
 
@@ -230,6 +239,9 @@ type Item struct {
 func (i Item) Validate() error {
 	if err := ValidKind(i.Kind); err != nil {
 		return err
+	}
+	if i.Kind == KindMail && i.ID != MailItem {
+		return invalid("the mail item's id is %s", MailItem)
 	}
 	return ValidItem(i.ID)
 }

@@ -4444,6 +4444,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/backup/targets/{id}/mail": {
+        parameters: {
+            query: {
+                snapshot: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** The domains and mailboxes in a version of the mail */
+        get: operations["backupMailContents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/backup/tasks": {
         parameters: {
             query?: never;
@@ -4974,6 +4995,23 @@ export interface paths {
          *     person's mail address and password, then Radicale).
          */
         get: operations["getMail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mail/restore-targets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** This server's mailboxes by storage key, for restoring mail from a backup or replica (admin) */
+        get: operations["getMailRestoreTargets"];
         put?: never;
         post?: never;
         delete?: never;
@@ -8750,8 +8788,8 @@ export interface components {
         };
         BackupItem: {
             /** @enum {string} */
-            kind: "share" | "app" | "vm" | "system";
-            /** @description The shared folder's */
+            kind: "share" | "app" | "vm" | "system" | "mail";
+            /** @description The shared folder's, app's or VM's id (none for system and mail) */
             id?: string;
         };
         BackupSchedule: {
@@ -8889,13 +8927,15 @@ export interface components {
             text: string;
         };
         BackupVersionItem: {
-            /** @description share:<id>, app:<id>, vm:<id> or system */
+            /** @description share:<id>, app:<id>, vm:<id>, system or mail */
             item: string;
             /** @description The snapshot to browse and restore */
             snapshot: string;
             disks?: {
                 [key: string]: string;
             };
+            /** @description mail: the webmail part (Roundcube's data), restored with everything */
+            webmail?: string;
             /** Format: date-time */
             time: string;
             /** Format: int64 */
@@ -8934,11 +8974,12 @@ export interface components {
             /** @description Inside the item; none = all */
             paths?: string[];
             /** @enum {string} */
-            mode: "copy" | "in_place" | "rollback";
+            mode: "copy" | "in_place" | "rollback" | "mail";
             /** @description copy: the new folder's name */
             folder?: string;
             /** @description rollback: the shared folder's, app's or VM's name (settings: "settings") */
             confirm?: string;
+            mail?: components["schemas"]["MailRestoreArgs"];
         };
         BackupRebuildRequest: {
             target: string;
@@ -8980,8 +9021,56 @@ export interface components {
             items: string[];
             target: string;
         };
+        /** @description What of the mail item to restore (mode mail; replication: kind mail). Mailboxes are matched by storage key: key is the version's mailbox, into the one it goes into here (default the same; another needs that mailbox's address typed in confirm). */
+        MailRestoreArgs: {
+            /** @enum {string} */
+            scope: "mailbox" | "domain" | "calendars" | "all";
+            /** @description mailbox, calendars: the version's mailbox key */
+            key?: string;
+            /** @description mailbox, calendars: the mailbox key here */
+            into?: string;
+            /** @description domain: the domain */
+            domain?: string;
+            /**
+             * @description copy: a new folder "Restored <date>" (calendars: new collections); overwrite: replaces what's there (all: always)
+             * @enum {string}
+             */
+            mode?: "copy" | "overwrite";
+            /** @description overwrite: the mailbox's address (domain: the domain); all: "mail" */
+            confirm?: string;
+        };
+        MailRestoreResult: {
+            scope: string;
+            mailboxes: number;
+            messages: number;
+            collections: number;
+            /** Format: int64 */
+            bytes: number;
+            /** @description The new folder (copy) */
+            folder?: string;
+            /** @description The snapshot of <pool>/mail taken first */
+            safety?: string;
+            dkim: string[];
+            bayes: boolean;
+            notes: string[];
+        };
+        BackupMailContents: {
+            hostname: string;
+            domains: string[];
+            mailboxes: {
+                key: string;
+                address: string;
+            }[];
+            /** @description The version has Roundcube's data */
+            webmail: boolean;
+            /**
+             * Format: int64
+             * @description Free space on the mail storage now (a restore needs about the version's size; it's refused when clearly too little)
+             */
+            freeBytes?: number;
+        };
         /** @enum {string} */
-        ReplicationKind: "share" | "app" | "vm";
+        ReplicationKind: "share" | "app" | "vm" | "mail";
         ReplicationItem: {
             kind: components["schemas"]["ReplicationKind"];
             id: string;
@@ -9013,6 +9102,11 @@ export interface components {
             name: string;
             targetId: string;
             items: components["schemas"]["ReplicationItem"][];
+            /**
+             * @description pending: Mail is added once the other server accepts mail replicas; added: it was (shown until the task is changed)
+             * @enum {string}
+             */
+            mailAuto?: "" | "pending" | "added";
             intervalMinutes: number;
             /** @description KiB per second; 0 for no limit */
             bandwidthKBps: number;
@@ -9113,6 +9207,7 @@ export interface components {
             /** @description Shared folders: the new folder's name */
             name?: string;
             confirm: boolean;
+            mail?: components["schemas"]["MailRestoreArgs"];
         };
         ReplicationRun: {
             /** Format: int64 */
@@ -16326,6 +16421,33 @@ export interface operations {
             403: components["responses"]["Forbidden"];
         };
     };
+    backupMailContents: {
+        parameters: {
+            query: {
+                snapshot: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Contents */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupMailContents"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
     listBackupTasks: {
         parameters: {
             query?: never;
@@ -17175,6 +17297,28 @@ export interface operations {
                     "application/json": components["schemas"]["MailOverview"];
                 };
             };
+        };
+    };
+    getMailRestoreTargets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Domains and mailboxes (webmail is always false here) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupMailContents"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     saveMailSettings: {

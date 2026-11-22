@@ -18,6 +18,7 @@ import (
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/mail"
 	"github.com/hardyos/hardyos/daemon/internal/ports"
 	"github.com/hardyos/hardyos/daemon/internal/replica"
 	"github.com/hardyos/hardyos/daemon/internal/store"
@@ -58,6 +59,8 @@ const (
 	EventStale     = "replication.stale"
 	EventRecovered = "replication.recovered"
 	EventRestored  = "replication.restored"
+	// EventMailAdded: an existing task now replicates the mail too.
+	EventMailAdded = "replication.mail.added"
 )
 
 // DefaultPort is where a receiving server listens for other HardyOS
@@ -90,6 +93,9 @@ type Service struct {
 	ListenAddr string
 	// Secrets hands a job a pairing code kept out of its parameters.
 	Secrets func(ref string) (string, bool)
+	// acceptKinds replaces the kinds this server says it accepts (tests
+	// of an older receiving server).
+	acceptKinds []string
 	// Poll is how often streams are checked on (default 250ms).
 	Poll time.Duration
 
@@ -365,6 +371,8 @@ type RestoreParams struct {
 	Pool     string `json:"pool,omitempty"`
 	NewID    string `json:"newId,omitempty"`
 	Name     string `json:"name,omitempty"`
+	// Mail says what of the mail item goes back (kind mail only).
+	Mail *mail.RestoreArgs `json:"mail,omitempty"`
 }
 
 // PairingParams opens a pairing code (the code waits in Secrets).

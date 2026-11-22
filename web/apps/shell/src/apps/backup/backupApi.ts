@@ -37,16 +37,30 @@ export const useBrowse = (target: string, snapshot: string | null, path: string)
     staleTime: 60_000,
   });
 
-/** What can be backed up: shared folders, apps and VMs on this server. */
+/** This server's mailboxes by storage key (what mail restores go into). */
+export const useMailHere = (enabled = true) =>
+  useQuery({ queryKey: ["mail", "restore-targets"], queryFn: () => unwrap(api.GET("/mail/restore-targets")), enabled, staleTime: 30_000 });
+
+/** The domains and mailboxes a version of the mail holds. */
+export const useMailContents = (target: string, snapshot: string) =>
+  useQuery({
+    queryKey: ["backup", "mail", target, snapshot],
+    queryFn: () => unwrap(api.GET("/backup/targets/{id}/mail", { params: { path: { id: target }, query: { snapshot } } })),
+    staleTime: 60_000,
+  });
+
+/** What can be backed up: shared folders, apps and VMs on this server, and whether it has a mail server. */
 export function useSources() {
   const shares = useQuery({ queryKey: ["shares"], queryFn: () => unwrap(api.GET("/shares")) });
   const apps = useQuery({ queryKey: ["apps"], queryFn: () => unwrap(api.GET("/apps")) });
   const vms = useQuery({ queryKey: ["vms"], queryFn: () => unwrap(api.GET("/vms")) });
+  const mail = useMailHere();
   return {
-    pending: shares.isPending,
+    pending: shares.isPending || mail.isPending,
     shares: (shares.data?.shares ?? []).map((s) => ({ id: s.id, name: s.name })),
     apps: (apps.data?.apps ?? []).map((a) => ({ id: a.id, name: a.name })),
     vms: (vms.data?.vms ?? []).map((v) => ({ id: v.id, name: v.name })),
+    mail: (mail.data?.mailboxes ?? []).length > 0,
   };
 }
 
@@ -79,11 +93,11 @@ export function saveText(fileName: string, text: string) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-/** "share:media" etc. */
-export const itemKey = (it: BackupItem) => (it.kind === "system" ? "system" : `${it.kind}:${it.id}`);
+/** "share:media" etc.; "system" and "mail" have no id. */
+export const itemKey = (it: BackupItem) => (it.kind === "system" || it.kind === "mail" ? it.kind : `${it.kind}:${it.id}`);
 
 export function parseItemKey(key: string): BackupItem {
-  if (key === "system") return { kind: "system" };
+  if (key === "system" || key === "mail") return { kind: key };
   const i = key.indexOf(":");
   return { kind: key.slice(0, i) as BackupItem["kind"], id: key.slice(i + 1) };
 }
@@ -91,10 +105,11 @@ export function parseItemKey(key: string): BackupItem {
 /** A person's name for an item, from what's on the server now. */
 export function itemLabel(key: string, names: Record<string, string>): string {
   if (key === "system") return "Settings and domain";
+  if (key === "mail") return "Mail";
   return names[key] ?? key.slice(key.indexOf(":") + 1);
 }
 
-export const kindLabel: Record<string, string> = { share: "Shared folder", app: "App", vm: "Virtual machine", system: "Settings" };
+export const kindLabel: Record<string, string> = { share: "Shared folder", app: "App", vm: "Virtual machine", system: "Settings", mail: "Mail" };
 
 export function targetWhere(t: BackupTarget): string {
   if (t.kind === "b2") return `Backblaze B2 · ${t.bucket}${t.prefix ? "/" + t.prefix : ""}`;

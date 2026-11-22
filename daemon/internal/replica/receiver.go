@@ -22,6 +22,7 @@ var serviceProps = []string{
 	"org.hardyos:apps", "org.hardyos:recycle", "org.hardyos:guest", "org.hardyos:services",
 	"org.hardyos:nfs-uid", "org.hardyos:vm", "org.hardyos:kept", "org.hardyos:role",
 	"org.hardyos:snapshot", "org.hardyos:label", "org.hardyos:consistent", "org.hardyos:version",
+	"org.hardyos:mail",
 	PropRestored, PropRestoring,
 }
 

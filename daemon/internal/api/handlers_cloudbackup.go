@@ -19,6 +19,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/files"
 	"github.com/hardyos/hardyos/daemon/internal/fileworker"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/mail"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 )
 
@@ -45,6 +46,7 @@ func (s *Server) cloudBackupRoutes() {
 	m.Handle("POST /api/v1/backup/targets/{id}/check", s.admin(s.handleCloudUpkeep(cloudbackups.JobCheck, "Check backups")))
 	m.Handle("GET /api/v1/backup/targets/{id}/versions", s.admin(s.handleCloudVersions))
 	m.Handle("GET /api/v1/backup/targets/{id}/browse", s.admin(s.handleCloudBrowse))
+	m.Handle("GET /api/v1/backup/targets/{id}/mail", s.admin(s.handleCloudMailContents))
 	m.Handle("GET /api/v1/backup/tasks", s.admin(s.handleCloudTasks))
 	m.Handle("POST /api/v1/backup/tasks", s.admin(s.handleCloudTaskCreate))
 	m.Handle("PUT /api/v1/backup/tasks/{id}", s.admin(s.handleCloudTaskUpdate))
@@ -488,6 +490,8 @@ type cloudRestoreRequest struct {
 	Mode     string   `json:"mode"`
 	Folder   string   `json:"folder,omitempty"`
 	Confirm  string   `json:"confirm,omitempty"`
+	// Mail: what of the mail item to restore (mode mail).
+	Mail *mail.RestoreArgs `json:"mail,omitempty"`
 }
 
 func (s *Server) handleCloudRestore(w http.ResponseWriter, r *http.Request, u *auth.User) {
@@ -501,13 +505,19 @@ func (s *Server) handleCloudRestore(w http.ResponseWriter, r *http.Request, u *a
 	}
 	switch req.Mode {
 	case cloudbackup.ModeCopy, cloudbackup.ModeInPlace, cloudbackup.ModeRollback:
+		req.Mail = nil
+	case cloudbackup.ModeMail:
+		if !checkMailRestore(w, req.Mail) {
+			return
+		}
+		req.Paths, req.Folder, req.Confirm = nil, "", ""
 	default:
 		writeError(w, http.StatusBadRequest, "invalid", "choose how to restore")
 		return
 	}
 	p := cloudbackups.RestoreParams{RestoreArgs: cloudbackup.RestoreArgs{Target: req.Target, Snapshot: req.Snapshot, Paths: req.Paths,
-		Mode: req.Mode, Folder: req.Folder, Confirm: req.Confirm}}
-	s.submit(w, r, u, cloudbackups.JobRestore, "Restore from backup", p, "backup.restore."+req.Mode, req.Target+"/"+req.Snapshot, nil)
+		Mode: req.Mode, Folder: req.Folder, Confirm: req.Confirm, Mail: req.Mail}}
+	s.submit(w, r, u, cloudbackups.JobRestore, "Restore from backup", p, "backup.restore."+req.Mode, req.Target+"/"+req.Snapshot+describeMailRestore(req.Mail), nil)
 }
 
 func (s *Server) handleCloudOffer(w http.ResponseWriter, r *http.Request, _ *auth.User) {
