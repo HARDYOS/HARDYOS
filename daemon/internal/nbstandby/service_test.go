@@ -90,6 +90,12 @@ func (f *fakeBackend) Handback(_ context.Context, c string) (*HandbackResult, er
 	}
 	return &HandbackResult{Message: "restored", Bytes: 10}, nil
 }
+func (f *fakeBackend) Fence(_ context.Context, on bool) error {
+	if on {
+		return f.step("fence")
+	}
+	return f.step("unfence")
+}
 func (f *fakeBackend) AppUp(context.Context) error   { return f.step("up") }
 func (f *fakeBackend) AppStop(context.Context) error { return f.step("stop") }
 func (f *fakeBackend) DNSStandby(context.Context) (string, bool, error) {
@@ -113,7 +119,7 @@ func (f *fakeBackend) Peers(context.Context) (int, int, error) {
 }
 
 func configured() Status {
-	return Status{Configured: true, Hostname: testHost, Mode: ModeStandby, KeyCreated: time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC),
+	return Status{Configured: true, Hostname: testHost, Mode: ModeStandby, PublicIPv4: "93.184.215.14", KeyCreated: time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC),
 		Snapshots: []SnapshotRecord{{ID: "old", At: time.Date(2026, 11, 21, 11, 45, 0, 0, time.UTC), Info: Info{Version: "0.83.1"}}}}
 }
 
@@ -124,16 +130,16 @@ func TestSettingsValidate(t *testing.T) {
 		t.Fatalf("%+v", set)
 	}
 	for _, bad := range []Settings{{IntervalMinutes: 1}, {IntervalMinutes: 2000}, {PublicIPv4: "192.168.1.2"}, {PublicIPv4: "100.70.0.1"},
-		{PublicIPv4: "2001:db8::1"}, {PublicIPv6: "203.0.113.5"}, {PublicIPv6: "fd00::1"}, {ConnectFrom: []string{"x"}}} {
+		{PublicIPv4: "2001:db8::1"}, {PublicIPv6: "93.184.215.14"}, {PublicIPv6: "fd00::1"}, {ConnectFrom: []string{"x"}}} {
 		if _, err := s.SaveSettings(t.Context(), bad); err == nil {
 			t.Errorf("accepted %+v", bad)
 		}
 	}
-	good := Settings{IntervalMinutes: 30, AutoSync: true, PublicIPv4: "203.0.113.5", PublicIPv6: "2001:db8:1::5", ConnectFrom: []string{"100.64.0.5"}}
+	good := Settings{IntervalMinutes: 30, AutoSync: true, PublicIPv4: "93.184.215.14", PublicIPv6: "2606:4700:4700::1111", ConnectFrom: []string{"100.64.0.5"}}
 	if _, err := s.SaveSettings(t.Context(), good); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := s.Settings(t.Context()); got.IntervalMinutes != 30 || got.PublicIPv4 != "203.0.113.5" {
+	if got, _ := s.Settings(t.Context()); got.IntervalMinutes != 30 || got.PublicIPv4 != "93.184.215.14" {
 		t.Fatalf("%+v", got)
 	}
 }
@@ -212,15 +218,24 @@ func TestVersions(t *testing.T) {
 	}
 }
 
+func stepNames(b *fakeBackend) string {
+	var got []string
+	for _, st := range b.steps {
+		got = append(got, strings.Fields(st)[0])
+	}
+	return strings.Join(got, ",")
+}
+
 func TestTakeOverOrderAndChecks(t *testing.T) {
 	s, _, _ := testService(t)
 	b := &fakeBackend{st: configured(), dnsName: testHost, peers: [][2]int{{5, 2}, {5, 5}}}
 	args := TakeOverArgs{Confirm: testHost, By: "admin"}
-	// No public address yet; wrong confirmation; DNS not adopted.
+	// The public address is root's: without one, no take-over.
+	b.st.PublicIPv4 = ""
 	if _, err := s.TakeOver(t.Context(), b, args, nil); err == nil || !strings.Contains(err.Error(), "public IPv4") {
 		t.Fatalf("%v", err)
 	}
-	s.SaveSettings(t.Context(), Settings{IntervalMinutes: 15, AutoSync: true, PublicIPv4: "203.0.113.5"})
+	b.st.PublicIPv4 = "93.184.215.14"
 	if _, err := s.TakeOver(t.Context(), b, TakeOverArgs{Confirm: "vpn"}, nil); err == nil {
 		t.Fatal("no confirmation")
 	}
@@ -233,7 +248,6 @@ func TestTakeOverOrderAndChecks(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 	b.aaaa = false
-	// A VPS on a newer NetBird needs the acknowledgement.
 	b.st.Snapshots[0].Info.Version = "0.90.0"
 	if _, err := s.TakeOver(t.Context(), b, TakeOverArgs{Confirm: testHost, SkipFinalSync: true}, nil); !errors.Is(err, ErrVersion) {
 		t.Fatalf("%v", err)
@@ -242,17 +256,46 @@ func TestTakeOverOrderAndChecks(t *testing.T) {
 	if len(b.steps) != 0 {
 		t.Fatalf("steps ran before the checks passed: %v", b.steps)
 	}
-	// The VPS is down: the last copy fails, the saved one is used.
-	b.fail = map[string]error{"sync": errors.New("can't reach the VPS")}
-	rec, err := s.TakeOver(t.Context(), b, args, nil)
+	// The VPS still answers: no take-over without the acknowledgement,
+	// and nothing changed.
+	if _, err := s.TakeOver(t.Context(), b, args, nil); !errors.Is(err, ErrVPSAlive) {
+		t.Fatalf("%v", err)
+	}
+	if stepNames(b) != "sync" {
+		t.Fatalf("%v", b.steps)
+	}
+	// Acknowledged: fenced first; a VPS that can't be fenced stops it.
+	b.steps = nil
+	b.fail = map[string]error{"fence": errors.New("refused")}
+	if _, err := s.TakeOver(t.Context(), b, TakeOverArgs{Confirm: testHost, AcceptVPSAlive: true}, nil); err == nil || !strings.Contains(err.Error(), "fenced") {
+		t.Fatalf("%v", err)
+	}
+	if stepNames(b) != "sync,fence" {
+		t.Fatalf("%v", b.steps)
+	}
+	b.steps, b.fail = nil, nil
+	rec, err := s.TakeOver(t.Context(), b, TakeOverArgs{Confirm: testHost, AcceptVPSAlive: true}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"sync", "stage " + testHost, "up", "network open", "dns-A 203.0.113.5"}
-	if strings.Join(b.steps, ",") != strings.Join(want, ",") {
+	if want := "sync,fence,stage,up,network,dns-A"; stepNames(b) != want {
 		t.Fatalf("%v", b.steps)
 	}
-	if rec.FinalSync || rec.FinalSyncError == "" || !rec.DNSChanged || rec.PeersConnected != 5 || rec.PeersTotal != 5 || rec.By != "admin" {
+	if !rec.Fenced || !rec.FinalSync {
+		t.Fatalf("%+v", rec)
+	}
+	// The VPS is down: the last copy fails, fencing is a best effort.
+	b2 := &fakeBackend{st: configured(), dnsName: testHost, peers: [][2]int{{5, 5}},
+		fail: map[string]error{"sync": errors.New("can't reach the VPS"), "fence": errors.New("can't reach the VPS")}}
+	b2.st.PublicIPv6 = "2606:4700:4700::1111"
+	rec, err = s.TakeOver(t.Context(), b2, args, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"sync", "fence", "stage " + testHost, "up", "network open", "dns-A 93.184.215.14", "dns-AAAA 2606:4700:4700::1111"}; strings.Join(b2.steps, ",") != strings.Join(want, ",") {
+		t.Fatalf("%v", b2.steps)
+	}
+	if rec.FinalSync || rec.Fenced || !rec.DNSChanged || rec.PeersConnected != 5 || rec.By != "admin" || rec.IPv4 != "93.184.215.14" {
 		t.Fatalf("%+v", rec)
 	}
 	if got, _ := s.Takeover(t.Context()); got == nil || !got.DNSChanged {
@@ -262,22 +305,18 @@ func TestTakeOverOrderAndChecks(t *testing.T) {
 
 func TestTakeOverUndoesLocalSteps(t *testing.T) {
 	s, _, _ := testService(t)
-	s.SaveSettings(t.Context(), Settings{IntervalMinutes: 15, AutoSync: true, PublicIPv4: "203.0.113.5"})
 	for failing, wantSteps := range map[string]string{
-		"up":      "stage,up,stop,unstage",
-		"network": "stage,up,network,stop,unstage",
-		"dns-A":   "stage,up,network,dns-A,network,stop,unstage",
+		"up":      "fence,stage,up,stop,unstage,unfence",
+		"network": "fence,stage,up,network,stop,unstage,unfence",
+		"dns-A":   "fence,stage,up,network,dns-A,network,stop,unstage,unfence",
+		"stage":   "fence,stage,unfence",
 	} {
 		b := &fakeBackend{st: configured(), dnsName: testHost, fail: map[string]error{failing: errors.New("boom")}}
 		_, err := s.TakeOver(t.Context(), b, TakeOverArgs{Confirm: testHost, SkipFinalSync: true}, nil)
 		if err == nil {
 			t.Fatalf("%s: no error", failing)
 		}
-		var got []string
-		for _, st := range b.steps {
-			got = append(got, strings.Fields(st)[0])
-		}
-		if strings.Join(got, ",") != wantSteps {
+		if got := stepNames(b); got != wantSteps {
 			t.Errorf("%s failing: %v", failing, got)
 		}
 		if b.st.Mode != ModeStandby {
@@ -288,7 +327,9 @@ func TestTakeOverUndoesLocalSteps(t *testing.T) {
 
 func TestHandBack(t *testing.T) {
 	s, _, _ := testService(t)
-	b := &fakeBackend{st: configured(), vps: VPSStatus{Running: true, RestoreAllowed: true, Hostname: testHost, Version: "0.83.1"}}
+	s.RetryDelay = time.Millisecond
+	vpsOK := VPSStatus{Running: true, RestoreAllowed: true, HandbackInstalled: true, Hostname: testHost, Version: "0.83.1"}
+	b := &fakeBackend{st: configured(), vps: vpsOK}
 	if _, err := s.HandBack(t.Context(), b, HandBackArgs{Confirm: testHost, AcceptSplitBrain: true}, nil); err == nil {
 		t.Fatal("handed back without a take-over")
 	}
@@ -297,42 +338,66 @@ func TestHandBack(t *testing.T) {
 	if _, err := s.HandBack(t.Context(), b, HandBackArgs{Confirm: testHost}, nil); err == nil {
 		t.Fatal("no split-brain acknowledgement")
 	}
-	b.vps.RestoreAllowed = false
-	if _, err := s.HandBack(t.Context(), b, HandBackArgs{Confirm: testHost, AcceptSplitBrain: true}, nil); err == nil || !strings.Contains(err.Error(), "allow-handback") {
-		t.Fatalf("%v", err)
+	for _, c := range []struct {
+		vps  VPSStatus
+		want string
+	}{
+		{VPSStatus{HandbackInstalled: false, RestoreAllowed: false, Version: "0.83.1"}, "allow-handback"},
+		{VPSStatus{HandbackInstalled: true, RestoreAllowed: false, Version: "0.83.1"}, "arm-restore"},
+		{VPSStatus{HandbackInstalled: true, RestoreAllowed: true, Version: "0.82.0"}, "older"},
+	} {
+		b.vps, b.steps = c.vps, nil
+		if _, err := s.HandBack(t.Context(), b, HandBackArgs{Confirm: testHost, AcceptSplitBrain: true}, nil); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("%+v: %v", c.vps, err)
+		}
+		if stepNames(b) != "vps" {
+			t.Fatalf("changed something before checking the VPS: %v", b.steps)
+		}
 	}
-	if strings.Join(b.steps, ",") != "vps" {
-		t.Fatalf("changed something before checking the VPS: %v", b.steps)
-	}
-	b.vps.RestoreAllowed, b.steps = true, nil
-	// The VPS refuses the upload: the standby runs again, DNS untouched.
+	b.vps, b.steps = vpsOK, nil
+	// The VPS refuses the upload (it rolled back and started its own copy):
+	// fenced again, the standby runs again, DNS untouched.
 	b.fail = map[string]error{"handback": errors.New("integrity check failed")}
 	if _, err := s.HandBack(t.Context(), b, HandBackArgs{Confirm: testHost, AcceptSplitBrain: true}, nil); err == nil {
 		t.Fatal("no error")
 	}
-	if strings.Join(b.steps, ",") != "vps,stop,handback "+testHost+",up" {
+	if stepNames(b) != "vps,stop,handback,fence,up" {
+		t.Fatalf("%v", b.steps)
+	}
+	// ...and if fencing fails too, it says two servers may run.
+	b.fail, b.steps = map[string]error{"handback": errors.New("x"), "fence": errors.New("y")}, nil
+	if _, err := s.HandBack(t.Context(), b, HandBackArgs{Confirm: testHost, AcceptSplitBrain: true}, nil); err == nil || !strings.Contains(err.Error(), "TWO NETBIRD SERVERS") {
+		t.Fatalf("%v", err)
+	}
+	// DNS can't be put back: the standby stays stopped; a second Hand back
+	// only finishes (no second upload).
+	b.fail, b.steps = map[string]error{"dns-restore": errors.New("cloudflare down")}, nil
+	if _, err := s.HandBack(t.Context(), b, HandBackArgs{Confirm: testHost, AcceptSplitBrain: true}, nil); err == nil || !strings.Contains(err.Error(), "standby is stopped") {
+		t.Fatalf("%v", err)
+	}
+	if stepNames(b) != "vps,stop,handback,dns-restore,dns-restore,dns-restore" {
 		t.Fatalf("%v", b.steps)
 	}
 	b.fail, b.steps = nil, nil
 	res, err := s.HandBack(t.Context(), b, HandBackArgs{Confirm: testHost, AcceptSplitBrain: true}, nil)
-	if err != nil || res.VPSMessage != "restored" {
+	if err != nil || len(res.Notes) == 0 {
 		t.Fatalf("%+v %v", res, err)
 	}
-	want := "vps,stop,handback " + testHost + ",dns-restore,network close,unstage " + testHost
-	if strings.Join(b.steps, ",") != want {
+	if want := "stop,dns-restore,network,unstage"; stepNames(b) != want {
 		t.Fatalf("%v", b.steps)
 	}
 	if got, _ := s.Takeover(t.Context()); got != nil {
 		t.Fatal("record kept")
 	}
-	// Discarding the standby's changes doesn't need the VPS.
+	// Discarding the standby's changes doesn't need the VPS but starts its
+	// server again.
 	b.st.Mode, b.steps = ModeTakenOver, nil
 	s.saveTakeover(t.Context(), &TakeoverRecord{DNSChanged: true})
 	b.fail = map[string]error{"vps": errors.New("down")}
 	if _, err := s.HandBack(t.Context(), b, HandBackArgs{Confirm: testHost, AcceptSplitBrain: true, Discard: true}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(b.steps, ",") != "stop,dns-restore,network close,unstage "+testHost {
+	if stepNames(b) != "stop,unfence,dns-restore,network,unstage" {
 		t.Fatalf("%v", b.steps)
 	}
 }

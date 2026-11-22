@@ -53,8 +53,8 @@ function formOf(st: NBStandbyStatus): StandbyForm {
     vpsPort: String(c?.vpsPort || 22),
     vpsUser: c?.vpsUser || "hardyos-standby",
     hostKey: c?.hostKey ?? "",
-    publicIPv4: st.settings.publicIPv4,
-    publicIPv6: st.settings.publicIPv6,
+    publicIPv4: c?.publicIPv4 ?? st.settings.publicIPv4,
+    publicIPv6: c?.publicIPv6 ?? st.settings.publicIPv6,
     intervalMinutes: String(st.settings.intervalMinutes || 15),
     connectFrom: (st.settings.connectFrom.length ? st.settings.connectFrom : st.clientIp ? [st.clientIp] : []).join(", "),
   };
@@ -64,7 +64,12 @@ function ConnectionCard({ st }: { st: NBStandbyStatus }) {
   const qc = useQueryClient();
   const [f, setF] = useState<StandbyForm>(() => formOf(st));
   const [autoSync, setAutoSync] = useState(st.settings.autoSync);
+  const [addressConfirm, setAddressConfirm] = useState("");
+  const addressChanged = (c0: typeof st.connection) =>
+    !!c0 && (f.publicIPv4.trim() !== (c0.publicIPv4 ?? "") || f.publicIPv6.trim() !== (c0.publicIPv6 ?? ""));
+  const needsConfirm = addressChanged(st.connection);
   const problems = formProblems(f);
+  const confirmOK = !needsConfirm || addressConfirm.trim().toLowerCase() === f.hostname.trim().toLowerCase();
   const taken = st.connection?.mode === "takenover";
   const save = useMutation({
     mutationFn: (newKey: boolean) =>
@@ -78,6 +83,7 @@ function ConnectionCard({ st }: { st: NBStandbyStatus }) {
               vpsUser: f.vpsUser.trim(),
               hostKey: f.hostKey.trim(),
               newKey,
+              addressConfirm: addressConfirm.trim(),
               settings: {
                 intervalMinutes: Number(f.intervalMinutes || "15"),
                 autoSync,
@@ -133,6 +139,14 @@ function ConnectionCard({ st }: { st: NBStandbyStatus }) {
         </Field>
       </div>
       <Toggle label="Copy automatically" description="Off: only when you press Copy now." checked={autoSync} onChange={setAutoSync} />
+      {needsConfirm && (
+        <Field
+          label={`Type ${f.hostname || "the NetBird name"} to change the public address`}
+          hint="On a take-over DNS can point the NetBird name only at this address, so changing it needs the name typed."
+        >
+          {(id) => <TextInput id={id} value={addressConfirm} autoComplete="off" onChange={(e) => setAddressConfirm(e.target.value)} />}
+        </Field>
+      )}
       {problems.length > 0 && f.hostname && <Alert tone="warn">{problems[0]}</Alert>}
       {c?.publicKey && (
         <div className="grid-2">
@@ -141,11 +155,11 @@ function ConnectionCard({ st }: { st: NBStandbyStatus }) {
         </div>
       )}
       <div className="row">
-        <Button variant="primary" busy={save.isPending} disabled={problems.length > 0} onClick={() => save.mutate(false)}>
+        <Button variant="primary" busy={save.isPending} disabled={problems.length > 0 || !confirmOK} onClick={() => save.mutate(false)}>
           Save
         </Button>
         {c?.publicKey && !taken && (
-          <Button variant="ghost" busy={save.isPending} disabled={problems.length > 0} onClick={() => save.mutate(true)}>
+          <Button variant="ghost" busy={save.isPending} disabled={problems.length > 0 || !confirmOK} onClick={() => save.mutate(true)}>
             Make a new key
           </Button>
         )}
@@ -156,10 +170,14 @@ function ConnectionCard({ st }: { st: NBStandbyStatus }) {
 
 function ScriptCard() {
   const [script, setScript] = useState("");
+  const [fingerprint, setFingerprint] = useState("");
   const [vps, setVPS] = useState<NBStandbyVPSStatus | null>(null);
   const load = useMutation({
     mutationFn: () => unwrap(api.GET("/netbird-standby/script")),
-    onSuccess: (r) => setScript(r.script),
+    onSuccess: (r) => {
+      setScript(r.script);
+      setFingerprint(r.fingerprint);
+    },
     onError: (e) => toast("error", "No script", errorMessage(e)),
   });
   const check = useMutation({
@@ -181,8 +199,17 @@ function ScriptCard() {
   return (
     <Card title="2. Set up the VPS">
       <p className="small muted">
-        Run this script on the VPS as root, once (and again after a new key). Add <span className="mono">--allow-handback</span> to let Hand back send the
-        standby&apos;s state to the VPS; without it HardyOS can only read. Paste the host key it prints above.
+        Run this script on the VPS as root, once (and again after a new key). Add <span className="mono">--allow-handback</span> to let HardyOS stop the
+        VPS&apos;s server on a take-over and hand state back; without it HardyOS can only read. Paste the host key it prints above.
+      </p>
+      <p className="small muted">
+        The script prints the fingerprint of the key it installed. Compare it with{" "}
+        <span className="mono">sudo hardyctl netbird-standby fingerprint</span> on this server&apos;s console (not only with this page){fingerprint ? (
+          <>
+            : <span className="mono">{fingerprint}</span>
+          </>
+        ) : null}
+        .
       </p>
       <div className="row">
         <Button busy={load.isPending} onClick={() => load.mutate()}>
@@ -197,7 +224,12 @@ function ScriptCard() {
       {vps && (
         <div className="grid-3">
           <Stat label="NetBird on the VPS" value={vps.running ? "Running" : "Stopped"} tone={vps.running ? "good" : "bad"} sub={vps.version ? <span className="mono">{vps.version}</span> : undefined} />
-          <Stat label="Hand back" value={vps.restoreAllowed ? "Allowed" : "Not allowed"} tone={vps.restoreAllowed ? "good" : "warn"} />
+          <Stat
+            label="Hand back"
+            value={!vps.handbackInstalled ? "Not installed" : vps.restoreAllowed ? "Armed" : "Not armed"}
+            tone={vps.restoreAllowed ? "good" : "warn"}
+            sub={vps.restoreAllowed ? `until ${dateTime(vps.restoreArmedUntil)}` : vps.fenced ? "fenced (stopped by HardyOS)" : undefined}
+          />
           <Stat label="Name" value={<span className="mono">{vps.hostname || "—"}</span>} />
         </div>
       )}
@@ -242,6 +274,7 @@ function DNSCard({ st }: { st: NBStandbyStatus }) {
   const host = st.connection?.hostname ?? "";
   const [preview, setPreview] = useState<NBStandbyDNSPreview | null>(null);
   const [confirm, setConfirm] = useState(false);
+  const [token, setToken] = useState("");
   const look = useMutation({
     mutationFn: () => unwrap(api.GET("/netbird-standby/dns", { params: { query: { name: host } } })),
     onSuccess: setPreview,
@@ -289,15 +322,25 @@ function DNSCard({ st }: { st: NBStandbyStatus }) {
           confirmLabel="Allow"
           danger={false}
           typeToConfirm={host}
-          onClose={() => setConfirm(false)}
+          canConfirm={token.trim().length >= 20}
+          onClose={() => {
+            setConfirm(false);
+            setToken("");
+          }}
           onConfirm={async () => {
-            await jobDone(unwrap(api.POST("/netbird-standby/dns", { body: { name: host, confirm: host, ids: preview.records.map((r) => r.id) } })));
+            await jobDone(
+              unwrap(api.POST("/netbird-standby/dns", { body: { name: host, confirm: host, ids: preview.records.map((r) => r.id), token: token.trim() } })),
+            );
+            setToken("");
             toast("success", `HardyOS manages ${host}`);
             void qc.invalidateQueries({ queryKey: KEY });
           }}
         >
           On a take-over HardyOS points these records at this server ({st.settings.publicIPv4 || "its public address"}) with a 60-second TTL, and on hand-back
           sets them back to what they are now. No other record in {st.dns.zone} can be changed.
+          <Field label="Cloudflare token, pasted again" hint="The one saved in Control Panel › Hostnames: this step needs the person who holds it.">
+            {(id) => <TextInput id={id} type="password" autoComplete="off" value={token} onChange={(e) => setToken(e.target.value)} />}
+          </Field>
         </ConfirmDialog>
       )}
     </Card>
@@ -435,13 +478,15 @@ function TakeoverCard({ st }: { st: NBStandbyStatus }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [acceptVersion, setAcceptVersion] = useState(false);
+  const [acceptAlive, setAcceptAlive] = useState(false);
   const host = st.connection?.hostname ?? "";
   const blockers = takeoverBlockers(st);
   return (
     <Card title="Take over">
       <p className="small muted">
         Only when the VPS is down (or you&apos;re moving NetBird here). HardyOS stops copying, starts the standby with the newest copy ({copyAge(st) || "none"}),
-        opens its ports and points {host} at {st.settings.publicIPv4 || "this server"}. Peers reconnect within a minute or two.
+        opens its ports and points {host} at {st.connection?.publicIPv4 || "this server"}. If the VPS still answers, HardyOS stops its NetBird server first
+        (fence), so peers drop their old connections and come here.
       </p>
       {blockers.map((b) => (
         <Alert key={b} tone="warn">
@@ -459,7 +504,7 @@ function TakeoverCard({ st }: { st: NBStandbyStatus }) {
           canConfirm={!st.versionNewer || acceptVersion}
           onClose={() => setOpen(false)}
           onConfirm={async () => {
-            await jobDone(unwrap(api.POST("/netbird-standby/takeover", { body: { confirm: host, acceptVersion } })));
+            await jobDone(unwrap(api.POST("/netbird-standby/takeover", { body: { confirm: host, acceptVersion, acceptVpsAlive: acceptAlive } })));
             toast("success", "HardyOS has taken over", `${host} points at this server now.`);
             void qc.invalidateQueries({ queryKey: KEY });
           }}
@@ -474,6 +519,10 @@ function TakeoverCard({ st }: { st: NBStandbyStatus }) {
               The VPS runs a newer NetBird than the standby; take over anyway.
             </label>
           )}
+          <label className="row small">
+            <input type="checkbox" checked={acceptAlive} onChange={(e) => setAcceptAlive(e.target.checked)} />
+            If the VPS still works, stop its NetBird server and take over anyway (otherwise HardyOS stops when the VPS answers).
+          </label>
         </ConfirmDialog>
       )}
     </Card>
@@ -501,6 +550,7 @@ function TakenOverCard({ st }: { st: NBStandbyStatus }) {
       <div className="grid-3">
         <Stat label="This server's NetBird" value={st.clientConnected ? "Connected" : "Not connected"} tone={st.clientConnected ? "good" : "warn"} sub="through the local standby" />
         <Stat label="DNS" value={t?.dnsChanged ? "Points here" : "Unchanged"} tone={t?.dnsChanged ? "accent" : "warn"} sub={<span className="mono">{t?.ipv4}</span>} />
+        <Stat label="VPS" value={t?.fenced ? "Fenced" : "Not fenced"} tone={t?.fenced ? "good" : "warn"} sub={t?.handedBack ? "state handed back; finish with Hand back" : undefined} />
         <Stat label="Standby" value={st.app.state || "—"} tone={st.app.state === "running" ? "good" : "bad"} />
       </div>
       {t?.notes.map((n) => (
@@ -525,8 +575,10 @@ function TakenOverCard({ st }: { st: NBStandbyStatus }) {
           }}
         >
           <p>
-            The standby stops (peers drop for a minute), its state goes to the VPS (which keeps a backup of its own first), {host} points back at the VPS and
-            HardyOS starts copying again. Check that the VPS is healthy first (step 2, Check the VPS).
+            First arm the hand-back on the VPS, as root: <span className="mono">hardyos-netbird-standby-root arm-restore 2h</span>. Then the standby stops
+            (peers drop for a minute), its state goes to the VPS (which checks it, keeps a backup of its own and rolls back by itself if its server doesn&apos;t
+            come up), {host} points back at the VPS and HardyOS starts copying again. The VPS refuses new owners, admins or access tokens unless armed with{" "}
+            <span className="mono">--allow-new-admins</span>.
           </p>
           <label className="row small">
             <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />

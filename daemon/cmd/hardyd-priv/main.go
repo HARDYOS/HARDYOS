@@ -34,6 +34,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/netbird"
 	"github.com/hardyos/hardyos/daemon/internal/network"
 	"github.com/hardyos/hardyos/daemon/internal/nfs"
+	"github.com/hardyos/hardyos/daemon/internal/ports"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/replica"
 	"github.com/hardyos/hardyos/daemon/internal/sftp"
@@ -165,7 +166,7 @@ func main() {
 		// The Cloudflare token for hostnames (decision 451): root's alone,
 		// used only for named DNS operations.
 		nbsDir := filepath.Join(zfs.KeyDir, "netbird-standby")
-		priv.RegisterDNS(s, priv.DNSEnv{KeyDir: zfs.KeyDir, StandbyTakenOver: func() (string, bool) { return nbstandby.TakenOver(nbsDir) }})
+		priv.RegisterDNS(s, priv.DNSEnv{KeyDir: zfs.KeyDir, StandbyTakenOver: func() (nbstandby.TakeOverInfo, bool) { return nbstandby.TakenOver(nbsDir) }})
 		// Kept attached to the LAN and running through network changes and
 		// crashes.
 		priv.RegisterDomain(s, dc)
@@ -211,6 +212,17 @@ func main() {
 			Dir:  filepath.Join(zfs.KeyDir, "netbird-standby"),
 			Key:  func() ([]byte, error) { return priv.RootKeyFor(zfs.KeyDir, "netbird-standby") },
 			Apps: priv.StandbyApps(am), Net: &nbstandby.System{Runner: sysexec.Exec{}, Root: "/"}, Log: log,
+			DNSName: func() string { return priv.StandbyDNSName(zfs.KeyDir) },
+		}
+		// The standby's app can't change under a take-over (decision 425).
+		am.Guard = func(id string) error {
+			if id != ports.NetBirdStandbyApp {
+				return nil
+			}
+			if _, on := nbstandby.TakenOver(nbsDir); on {
+				return errors.New("the NetBird standby has taken over: hand back before changing its app")
+			}
+			return nil
 		}
 		priv.RegisterNetBirdStandby(s, nbs)
 		go nbs.OnStart(ctx)

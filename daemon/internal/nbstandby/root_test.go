@@ -486,3 +486,136 @@ func keys(m map[string][]byte) []string {
 	}
 	return out
 }
+
+// Security review fixes (H1, L1, L4, M1, M2): what root refuses and keeps.
+func TestRootGuards(t *testing.T) {
+	f := newRoot(t)
+	adopted := ""
+	f.root.DNSName = func() string { return adopted }
+	_, hk, _ := NewKey()
+	// The VPS can't be reached by the NetBird name (it points here when taken over).
+	if _, err := f.root.Configure(t.Context(), ConfigureArgs{VPSHost: testHost, HostKey: hk, Hostname: testHost}); err == nil {
+		t.Fatal("VPS host = NetBird name accepted")
+	}
+	if _, err := f.root.Configure(t.Context(), ConfigureArgs{VPSHost: "vps.example.net", HostKey: hk, Hostname: testHost, From: []string{"x"}}); err == nil {
+		t.Fatal("bad from= accepted")
+	}
+	st, err := f.root.Configure(t.Context(), ConfigureArgs{VPSHost: "vps.example.net", HostKey: hk, Hostname: testHost, From: []string{"100.64.0.5"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.From) != 1 {
+		t.Fatalf("%+v", st.From)
+	}
+	// The script comes from root's own state.
+	sc, err := f.root.Script(t.Context())
+	if err != nil || !strings.Contains(sc.Script, `from="100.64.0.5"`) || !strings.Contains(sc.Script, st.PublicKey) || !strings.HasPrefix(sc.Fingerprint, "SHA256:") {
+		t.Fatalf("%v %+v", err, sc.Fingerprint)
+	}
+	// Public addresses: the name typed, internet addresses only.
+	for _, bad := range []AddressArgs{{IPv4: "93.184.215.14", Confirm: "x"}, {IPv4: "192.168.1.2", Confirm: testHost},
+		{IPv4: "203.0.113.5", Confirm: testHost}, {IPv6: "2001:db8::1", Confirm: testHost}} {
+		if _, err := f.root.Address(t.Context(), bad); err == nil {
+			t.Errorf("accepted %+v", bad)
+		}
+	}
+	if st, err = f.root.Address(t.Context(), AddressArgs{IPv4: "93.184.215.14", IPv6: "2606:4700:4700:0::1111", Confirm: testHost}); err != nil || st.PublicIPv6 != "2606:4700:4700::1111" {
+		t.Fatalf("%+v %v", st, err)
+	}
+	if _, ok := TakenOver(f.root.Dir); ok {
+		t.Fatal("taken over before staging")
+	}
+	if _, err := f.root.Sync(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	// While a name is adopted, the hostname can't move.
+	adopted = testHost
+	if _, err := f.root.Configure(t.Context(), ConfigureArgs{VPSHost: "vps.example.net", HostKey: hk, Hostname: "nb.example.net"}); err == nil {
+		t.Fatal("hostname moved away from the adopted name")
+	}
+	// Another host key (or VPS) drops the copies: they came from elsewhere.
+	_, hk2, _ := NewKey()
+	if st, err = f.root.Configure(t.Context(), ConfigureArgs{VPSHost: "vps.example.net", HostKey: hk2, Hostname: testHost}); err != nil || len(st.Snapshots) != 0 {
+		t.Fatalf("%v %d", err, len(st.Snapshots))
+	}
+	if _, err := f.root.Sync(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	// A fenced VPS's snapshot isn't kept.
+	f.vps.snapshot = makeSnapshot(t, defaultFiles(t), func(m *Manifest) { m.Fenced = true })
+	if _, err := f.root.Sync(t.Context()); err == nil || !strings.Contains(err.Error(), "fenced") {
+		t.Fatalf("%v", err)
+	}
+	f.vps.snapshot = makeSnapshot(t, defaultFiles(t), nil)
+	if _, err := f.root.Stage(t.Context(), ConfirmArgs{Confirm: testHost}); err != nil {
+		t.Fatal(err)
+	}
+	info, ok := TakenOver(f.root.Dir)
+	if !ok || info.Host != testHost || info.IPv4 != "93.184.215.14" || info.IPv6 != "2606:4700:4700::1111" {
+		t.Fatalf("%+v %v", info, ok)
+	}
+	// Nothing about the addresses changes while taken over.
+	if _, err := f.root.Address(t.Context(), AddressArgs{IPv4: "8.8.8.8", Confirm: testHost}); err == nil {
+		t.Fatal("address changed while taken over")
+	}
+	// Only the hostname's certificate was staged, without the ACME account.
+	b, _ := os.ReadFile(filepath.Join(f.apps.dir, "letsencrypt", "acme.json"))
+	if bytes.Contains(b, []byte("Account")) || !bytes.Contains(b, []byte("Certificates")) {
+		t.Fatalf("%s", b)
+	}
+	// Hand-back names the generation and the standby's version, and a
+	// sealed copy stays here until the next good sync.
+	if _, err := f.root.Handback(t.Context(), ConfirmArgs{Confirm: testHost}); err != nil {
+		t.Fatal(err)
+	}
+	sent := readTar(t, f.vps.restored)
+	if string(sent["GENERATION"]) != testGeneration+"\n" || string(sent["VERSION"]) != StandbyVersion+"\n" {
+		t.Fatalf("%q %q", sent["GENERATION"], sent["VERSION"])
+	}
+	st, _ = f.root.Status(t.Context())
+	if !st.HandbackCopy {
+		t.Fatal("no hand-back copy")
+	}
+	if _, err := f.root.Unstage(t.Context(), ConfirmArgs{Confirm: testHost}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.root.Sync(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	st, _ = f.root.Status(t.Context())
+	entries, _ := os.ReadDir(f.root.Dir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "handback-") {
+			t.Fatal("hand-back copy kept after a good sync")
+		}
+	}
+	if st.HandbackCopy {
+		t.Fatal("status still says there's a hand-back copy")
+	}
+	// Fence and unfence go to the VPS's verbs.
+	if err := f.root.Fence(t.Context(), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.root.Fence(t.Context(), false); err != nil {
+		t.Fatal(err)
+	}
+	calls := f.vps.calls()
+	if calls[len(calls)-2] != VerbFence || calls[len(calls)-1] != VerbUnfence {
+		t.Fatalf("%v", calls)
+	}
+}
+
+func TestStageWithoutGenerationRefusesHandback(t *testing.T) {
+	f := newRoot(t)
+	f.configure(t)
+	f.vps.snapshot = makeSnapshot(t, defaultFiles(t), func(m *Manifest) { m.Generation = "" })
+	if _, err := f.root.Sync(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.root.Stage(t.Context(), ConfirmArgs{Confirm: testHost}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.root.Handback(t.Context(), ConfirmArgs{Confirm: testHost}); err == nil || !strings.Contains(err.Error(), "generation") {
+		t.Fatalf("%v", err)
+	}
+}

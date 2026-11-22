@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	portreg "github.com/hardyos/hardyos/daemon/internal/ports"
 )
 
 // DataFolder returns an installed app's data folder (what its compose file
@@ -33,6 +35,25 @@ func (m *Manager) DataFolder(ctx context.Context, id string) (dir string, runnin
 		return "", false, false, fmt.Errorf("%s isn't a folder", dir)
 	}
 	return dir, running, ia.state.Source == SourceCatalog && ia.state.CatalogSHA256 != "", nil
+}
+
+// Excluded reports whether an app's dataset stays out of cloud backups,
+// replication and snapshots: the NetBird standby holds the VPS's secrets
+// only while it has taken over, and its copies live sealed elsewhere
+// (decision 425).
+func Excluded(id string) bool { return id == portreg.NetBirdStandbyApp }
+
+// guard asks Guard whether an app may be changed now (the NetBird standby
+// can't be updated, reconfigured, rolled back, restored or removed while it
+// has taken over).
+func (m *Manager) guard(id string) error {
+	if m.Guard == nil {
+		return nil
+	}
+	if err := m.Guard(id); err != nil {
+		return Problems{err.Error()}
+	}
+	return nil
 }
 
 // IsNotInstalled reports whether err means the app (or the apps engine) isn't there.

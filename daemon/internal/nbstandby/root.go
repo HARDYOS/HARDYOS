@@ -13,6 +13,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/rootfile"
+	"golang.org/x/crypto/ssh"
 )
 
 // Root is hardyd-priv's side of the standby (decisions 421-427): the VPS
@@ -44,6 +46,9 @@ type Root struct {
 	// Now is the clock (tests).
 	Now func() time.Time
 	Log *slog.Logger
+	// DNSName is the NetBird standby name adopted in root's DNS state ("" when
+	// none): the hostname can't move away from it (decision 424).
+	DNSName func() string
 
 	mu     sync.Mutex // state file
 	syncMu sync.Mutex // one transfer at a time
@@ -103,6 +108,15 @@ type state struct {
 	Staged     string           `json:"staged,omitempty"`
 	TakenOver  time.Time        `json:"takenOver,omitzero"`
 	NetOpen    bool             `json:"netOpen,omitempty"`
+	// PublicIPv4/IPv6 are the only addresses DNS may point the standby name
+	// at (set with the hostname typed, never while taken over).
+	PublicIPv4 string `json:"publicIPv4,omitempty"`
+	PublicIPv6 string `json:"publicIPv6,omitempty"`
+	// From are the addresses HardyOS connects from (the key's from=).
+	From []string `json:"from,omitempty"`
+	// Handback is the sealed copy of what the last hand-back sent, kept
+	// until the next good sync.
+	Handback string `json:"handback,omitempty"`
 }
 
 // SnapshotRecord is one sealed snapshot.
@@ -132,6 +146,11 @@ type Status struct {
 	Staged      string           `json:"staged,omitempty"`
 	TakenOverAt time.Time        `json:"takenOverAt,omitzero"`
 	NetworkOpen bool             `json:"networkOpen"`
+	PublicIPv4  string           `json:"publicIPv4"`
+	PublicIPv6  string           `json:"publicIPv6"`
+	From        []string         `json:"from"`
+	// HandbackCopy: a sealed copy of the last hand-back is kept.
+	HandbackCopy bool `json:"handbackCopy"`
 }
 
 // ConfigureArgs sets the VPS connection.
@@ -141,8 +160,23 @@ type ConfigureArgs struct {
 	VPSUser  string `json:"vpsUser"`
 	HostKey  string `json:"hostKey"`
 	Hostname string `json:"hostname"`
+	// From are the addresses HardyOS connects from (at most 8).
+	From []string `json:"from"`
 	// NewKey makes a new SSH key (the VPS script must be run again).
 	NewKey bool `json:"newKey"`
+}
+
+// AddressArgs sets this server's public addresses; Confirm is the hostname.
+type AddressArgs struct {
+	IPv4    string `json:"ipv4"`
+	IPv6    string `json:"ipv6"`
+	Confirm string `json:"confirm"`
+}
+
+// ScriptResult is the VPS script root made.
+type ScriptResult struct {
+	Script      string `json:"script"`
+	Fingerprint string `json:"fingerprint"`
 }
 
 // ConfirmArgs carries a typed confirmation (the NetBird hostname).
@@ -163,7 +197,14 @@ type VPSStatus struct {
 	Image          string `json:"image"`
 	Hostname       string `json:"hostname"`
 	RestoreAllowed bool   `json:"restoreAllowed"`
-	Time           string `json:"time"`
+	// RestoreArmedUntil: hand-back was armed on the VPS until then (one
+	// use; "" when not armed).
+	RestoreArmedUntil string `json:"restoreArmedUntil"`
+	// HandbackInstalled: the script was installed with --allow-handback.
+	HandbackInstalled bool `json:"handbackInstalled"`
+	// Fenced: HardyOS stopped the VPS's server for a take-over.
+	Fenced bool   `json:"fenced"`
+	Time   string `json:"time"`
 }
 
 // StageResult says what was staged.
@@ -226,7 +267,8 @@ func (st *state) status() *Status {
 		VPSHost: st.VPSHost, VPSPort: st.VPSPort, VPSUser: st.VPSUser, HostKey: st.HostKey, Hostname: st.Hostname,
 		PublicKey: st.PublicKey, KeyCreated: st.KeyCreated, Snapshots: append([]SnapshotRecord{}, st.Snapshots...),
 		LastTry: st.LastTry, LastOK: st.LastOK, LastError: st.LastError, Mode: st.Mode, Staged: st.Staged,
-		TakenOverAt: st.TakenOver, NetworkOpen: st.NetOpen}
+		TakenOverAt: st.TakenOver, NetworkOpen: st.NetOpen, PublicIPv4: st.PublicIPv4, PublicIPv6: st.PublicIPv6,
+		From: append([]string{}, st.From...), HandbackCopy: st.Handback != ""}
 	if pk, err := ParseHostKey(st.HostKey); err == nil {
 		out.HostKeyFP = Fingerprint(pk)
 	}
@@ -268,6 +310,20 @@ func (r *Root) Configure(ctx context.Context, a ConfigureArgs) (*Status, error) 
 		return nil, problemf("%q isn't a user name", clip(a.VPSUser, 40))
 	case !ValidHostname(name):
 		return nil, problemf("%q isn't a host name like vpn.example.net", clip(a.Hostname, 80))
+	case host == name:
+		// During a take-over the name leads here, never to the VPS.
+		return nil, problemf("the VPS's SSH address can't be the NetBird name itself (it points here during a take-over): use the VPS's own name or address")
+	}
+	if a.From == nil {
+		a.From = []string{}
+	}
+	if err := (ScriptSetup{From: a.From}).validateFrom(); err != nil {
+		return nil, &Problem{Msg: err.Error()}
+	}
+	if r.DNSName != nil {
+		if adopted := r.DNSName(); adopted != "" && adopted != name {
+			return nil, problemf("HardyOS manages %s in Cloudflare: stop managing it first (step 4) to use another name", adopted)
+		}
 	}
 	hk, err := ParseHostKey(a.HostKey)
 	if err != nil {
@@ -299,17 +355,106 @@ func (r *Root) Configure(ctx context.Context, a ConfigureArgs) (*Status, error) 
 		}
 		st.KeySealed, st.PublicKey, st.KeyCreated = sealed, pub, r.now()
 	}
-	if st.Hostname != "" && st.Hostname != name {
+	newHostKey := strings.TrimSpace(string(marshalKey(hk)))
+	if (st.Hostname != "" && st.Hostname != name) || (st.VPSHost != "" && (st.VPSHost != host || st.VPSPort != port)) ||
+		(st.HostKey != "" && st.HostKey != newHostKey) {
+		// Copies of another name, or from another server (or one whose
+		// key changed), are never staged.
 		r.dropSnapshots(st, nil)
 		st.LastOK, st.LastError = time.Time{}, ""
 	}
 	st.VPSHost, st.VPSPort, st.VPSUser, st.Hostname = host, port, user, name
-	st.HostKey = strings.TrimSpace(string(marshalKey(hk)))
+	st.HostKey = newHostKey
+	st.From = a.From
 	if err := r.save(st); err != nil {
 		return nil, err
 	}
 	r.applyNet(ctx, st)
 	return st.status(), nil
+}
+
+// Address sets the public addresses DNS may point the standby name at
+// (decision 424): the hostname typed, never while taken over.
+func (r *Root) Address(ctx context.Context, a AddressArgs) (*Status, error) {
+	v4, v6 := strings.TrimSpace(a.IPv4), strings.TrimSpace(a.IPv6)
+	if v4 != "" && !PublicAddr(v4, true) {
+		return nil, problemf("%q isn't a public IPv4 address", clip(v4, 60))
+	}
+	if v6 != "" && !PublicAddr(v6, false) {
+		return nil, problemf("%q isn't a public IPv6 address", clip(v6, 60))
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	st, err := r.load()
+	if err != nil {
+		return nil, err
+	}
+	if st.Mode == ModeTakenOver {
+		return nil, problemf("HardyOS has taken over: hand back first")
+	}
+	if st.Hostname == "" || strings.ToLower(strings.TrimSpace(a.Confirm)) != st.Hostname {
+		return nil, problemf("type the NetBird server's name (%s) to change this server's public address", st.Hostname)
+	}
+	if v4 != "" {
+		v4 = netip.MustParseAddr(v4).String()
+	}
+	if v6 != "" {
+		v6 = netip.MustParseAddr(v6).String()
+	}
+	st.PublicIPv4, st.PublicIPv6 = v4, v6
+	if err := r.save(st); err != nil {
+		return nil, err
+	}
+	return st.status(), nil
+}
+
+// Script is the VPS script for root's own key, name and from= addresses.
+func (r *Root) Script(ctx context.Context) (*ScriptResult, error) {
+	r.mu.Lock()
+	st, err := r.load()
+	r.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	sc, err := Script(ScriptSetup{Hostname: st.Hostname, PublicKey: st.PublicKey, From: st.From})
+	if err != nil {
+		return nil, &Problem{Msg: err.Error()}
+	}
+	return &ScriptResult{Script: sc, Fingerprint: KeyFingerprint(st.PublicKey)}, nil
+}
+
+// KeyFingerprint is an authorized_keys line's SHA-256 fingerprint ("" if
+// it isn't one).
+func KeyFingerprint(line string) string {
+	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(line))
+	if err != nil {
+		return ""
+	}
+	return Fingerprint(pk)
+}
+
+// Fence stops the VPS's NetBird server (take-over); Unfence starts it again
+// (hand-back without sending state).
+func (r *Root) Fence(ctx context.Context, on bool) error {
+	r.mu.Lock()
+	st, err := r.load()
+	r.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	remote, err := r.target(st)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	verb := VerbFence
+	if !on {
+		verb = VerbUnfence
+	}
+	var out limitedBuffer
+	out.n = 1 << 10
+	return remote.Run(ctx, verb, nil, &out)
 }
 
 func (r *Root) target(st *state) (Remote, error) {
@@ -388,6 +533,11 @@ func (r *Root) Sync(ctx context.Context) (*SnapshotRecord, error) {
 		cur.LastError = syncErr.Error()
 	} else {
 		cur.LastOK, cur.LastError = cur.LastTry, ""
+		if cur.Handback != "" {
+			// The VPS has a good copy again: the hand-back copy can go.
+			_ = os.Remove(filepath.Join(r.Dir, cur.Handback))
+			cur.Handback = ""
+		}
 		cur.Snapshots = append(cur.Snapshots, *rec)
 		sort.Slice(cur.Snapshots, func(i, j int) bool { return cur.Snapshots[i].At.After(cur.Snapshots[j].At) })
 		keep := map[string]bool{}
@@ -651,30 +801,42 @@ func (r *Root) Stage(ctx context.Context, a ConfirmArgs) (*StageResult, error) {
 		return nil, err
 	}
 	routes := TraefikRoutes(st.Hostname, listenPort(cfg))
-	// Everything checked: replace what the app has.
+	if tmp, ok := sink.tmps["letsencrypt/acme.json"]; ok {
+		// Only the hostname's own certificate, without the ACME account's
+		// key (Traefik registers a fresh account when it renews).
+		if err := filterACMEFile(root, tmp, st.Hostname); err != nil {
+			sink.abort()
+			return nil, err
+		}
+	}
+	// Everything checked: replace what the app has. Any failure from here
+	// removes whatever was already put in place.
+	fail := func(err error) (*StageResult, error) {
+		sink.abort()
+		removeStaged(root)
+		return nil, err
+	}
 	for _, base := range []string{"data/store.db", "data/idp.db", "data/events.db"} {
 		for _, sfx := range []string{"", "-wal", "-shm", "-journal"} {
 			if err := root.Remove(base + sfx); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				sink.abort()
-				return nil, err
+				return fail(err)
 			}
 		}
 	}
 	for target, tmp := range sink.tmps {
 		if err := root.Rename(tmp, target); err != nil {
-			sink.abort()
-			return nil, err
+			return fail(err)
 		}
 	}
 	if err := writeIn(root, "config/config.yaml", cfg); err != nil {
-		return nil, err
+		return fail(err)
 	}
 	if err := writeIn(root, "traefik/dynamic.yaml", []byte(routes)); err != nil {
-		return nil, err
+		return fail(err)
 	}
 	st.Mode, st.Staged, st.TakenOver = ModeTakenOver, snap.ID, r.now()
 	if err := r.save(st); err != nil {
-		return nil, err
+		return fail(err)
 	}
 	r.log().Info("netbird standby: staged for take-over", "snapshot", snap.ID)
 	return &StageResult{Snapshot: snap}, nil
@@ -806,15 +968,8 @@ func (r *Root) Unstage(ctx context.Context, a ConfirmArgs) (*Status, error) {
 	}
 	if root != nil {
 		defer root.Close()
-		for _, f := range stagedFiles {
-			for _, sfx := range []string{"", "-wal", "-shm", "-journal"} {
-				if sfx != "" && !strings.HasSuffix(f, ".db") {
-					continue
-				}
-				if err := root.Remove(f + sfx); err != nil && !errors.Is(err, fs.ErrNotExist) {
-					return nil, err
-				}
-			}
+		if err := removeStaged(root); err != nil {
+			return nil, err
 		}
 	}
 	if r.Net != nil {
@@ -827,6 +982,54 @@ func (r *Root) Unstage(ctx context.Context, a ConfirmArgs) (*Status, error) {
 		return nil, err
 	}
 	return st.status(), nil
+}
+
+// removeStaged removes a take-over's files from the app's data folder.
+func removeStaged(root *os.Root) error {
+	var first error
+	for _, f := range stagedFiles {
+		for _, sfx := range []string{"", "-wal", "-shm", "-journal"} {
+			if sfx != "" && !strings.HasSuffix(f, ".db") {
+				continue
+			}
+			if err := root.Remove(f + sfx); err != nil && !errors.Is(err, fs.ErrNotExist) && first == nil {
+				first = err
+			}
+		}
+	}
+	return first
+}
+
+func filterACMEFile(root *os.Root, name, host string) error {
+	f, err := root.Open(name)
+	if err != nil {
+		return err
+	}
+	b, err := io.ReadAll(io.LimitReader(f, entryLimits[EntryACME]+1))
+	f.Close()
+	if err != nil {
+		return err
+	}
+	out, err := FilterACME(b, host)
+	if err != nil {
+		return err
+	}
+	if err := root.Remove(name); err != nil {
+		return err
+	}
+	w, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(out); err != nil {
+		w.Close()
+		return err
+	}
+	if err := w.Sync(); err != nil {
+		w.Close()
+		return err
+	}
+	return w.Close()
 }
 
 // Handback sends the stopped standby's databases to the VPS (restore verb),
@@ -855,24 +1058,74 @@ func (r *Root) Handback(ctx context.Context, a ConfirmArgs) (*HandbackResult, er
 	if err != nil {
 		return nil, err
 	}
+	gen := ""
+	for _, sn := range st.Snapshots {
+		if sn.ID == st.Staged {
+			gen = sn.Info.Generation
+		}
+	}
+	if !generationRE.MatchString(gen) {
+		return nil, problemf("the copy the standby started from has no generation id (made by an older VPS script): run the VPS script again, then hand back")
+	}
 	sums, err := restoreSums(root)
 	if err != nil {
 		return nil, err
 	}
+	// A sealed copy of exactly what goes to the VPS stays here until the
+	// next good sync, in case the VPS loses it.
+	key, err := r.Key()
+	if err != nil {
+		return nil, err
+	}
+	copyName := "handback-" + strings.ReplaceAll(r.now().Format(snapIDTime), ".", "") + ".sealed"
+	cf, err := os.OpenFile(filepath.Join(r.Dir, copyName), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	keep := false
+	defer func() {
+		cf.Close()
+		if !keep {
+			_ = os.Remove(filepath.Join(r.Dir, copyName))
+		}
+	}()
+	sealed, err := NewSealWriter(cf, key)
+	if err != nil {
+		return nil, err
+	}
 	pr, pw := io.Pipe()
-	counted := &countWriter{w: pw}
-	go func() { pw.CloseWithError(writeRestoreTar(counted, root, sums)) }()
+	counted := &countWriter{w: io.MultiWriter(pw, sealed)}
+	go func() {
+		pw.CloseWithError(writeRestoreTar(counted, root, sums, map[string]string{"GENERATION": gen + "\n", "VERSION": StandbyVersion + "\n"}))
+	}()
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
 	var out limitedBuffer
-	out.n = 4 << 10
+	out.n = 8 << 10
 	err = remote.Run(ctx, VerbRestore, pr, &out)
 	pr.Close()
 	if err != nil {
 		return nil, err
 	}
+	if err := sealed.Close(); err != nil {
+		return nil, err
+	}
+	if err := cf.Sync(); err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	if cur, err := r.load(); err == nil {
+		if cur.Handback != "" && cur.Handback != copyName {
+			_ = os.Remove(filepath.Join(r.Dir, cur.Handback))
+		}
+		cur.Handback = copyName
+		if r.save(cur) == nil {
+			keep = true
+		}
+	}
+	r.mu.Unlock()
 	r.log().Info("netbird standby: handed back", "bytes", counted.n)
-	return &HandbackResult{Message: clip(strings.TrimSpace(out.b.String()), 300), Bytes: counted.n}, nil
+	return &HandbackResult{Message: clip(strings.TrimSpace(out.b.String()), 1500), Bytes: counted.n}, nil
 }
 
 // restoreFiles are what hand-back sends, when present.
@@ -907,8 +1160,21 @@ func restoreSums(root *os.Root) (map[string]string, error) {
 	return sums, nil
 }
 
-func writeRestoreTar(w io.Writer, root *os.Root, sums map[string]string) error {
+func writeRestoreTar(w io.Writer, root *os.Root, sums map[string]string, extra map[string]string) error {
 	tw := tar.NewWriter(w)
+	var extraNames []string
+	for n := range extra {
+		extraNames = append(extraNames, n)
+	}
+	sort.Strings(extraNames)
+	for _, n := range extraNames {
+		if err := tw.WriteHeader(&tar.Header{Name: n, Mode: 0o600, Size: int64(len(extra[n])), Typeflag: tar.TypeReg}); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(tw, extra[n]); err != nil {
+			return err
+		}
+	}
 	var names []string
 	for n := range sums {
 		names = append(names, n)
@@ -1023,18 +1289,23 @@ func (r *Root) OnStart(ctx context.Context) {
 	r.applyNet(ctx, st)
 }
 
-// TakenOver reads root's state in dir and returns the hostname when the
-// standby has taken over (hardyd-priv's DNS operations allow the standby
-// name to point here only then).
-func TakenOver(dir string) (string, bool) {
+// TakeOverInfo is what root's DNS operations need from the standby's state.
+type TakeOverInfo struct {
+	Host, IPv4, IPv6 string
+}
+
+// TakenOver reads root's state in dir and, when the standby has taken
+// over, returns its hostname and the public addresses set in root: the
+// standby name may point here, at exactly those, only then.
+func TakenOver(dir string) (TakeOverInfo, bool) {
 	r := &Root{Dir: dir}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	st, err := r.load()
 	if err != nil || st.Mode != ModeTakenOver || st.Hostname == "" {
-		return "", false
+		return TakeOverInfo{}, false
 	}
-	return st.Hostname, true
+	return TakeOverInfo{Host: st.Hostname, IPv4: st.PublicIPv4, IPv6: st.PublicIPv6}, true
 }
 
 // SyncApp re-applies the firewall after the app was installed or removed.

@@ -3,6 +3,7 @@ package nbstandby
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -43,6 +44,12 @@ func NFTRules(open bool) string {
 		fmt.Fprintf(&b, "    iifname \"lo\" accept\n")
 		fmt.Fprintf(&b, "    tcp dport { %d, %d } drop\n", ports.NetBirdStandbyHTTP, ports.NetBirdStandbyHTTPS)
 		fmt.Fprintf(&b, "    udp dport %d drop\n  }\n", ports.NetBirdStandbySTUN)
+		// The containers themselves, on their bridge (from the host, other
+		// containers or anything routed), except each other.
+		fmt.Fprintf(&b, "  chain forward {\n    type filter hook forward priority -150; policy accept;\n")
+		fmt.Fprintf(&b, "    ip saddr != %s ip daddr %s drop\n  }\n", ports.NetBirdStandbySubnet, ports.NetBirdStandbySubnet)
+		fmt.Fprintf(&b, "  chain output {\n    type filter hook output priority -150; policy accept;\n")
+		fmt.Fprintf(&b, "    ip daddr %s drop\n  }\n", ports.NetBirdStandbySubnet)
 	} else {
 		fmt.Fprintf(&b, "  chain output {\n    type nat hook output priority -110; policy accept;\n")
 		fmt.Fprintf(&b, "    ip daddr %s tcp dport %d dnat ip to 127.0.0.1:%d\n", LocalAddr, ports.HTTP, ports.NetBirdStandbyHTTP)
@@ -100,6 +107,11 @@ func (s *System) Apply(ctx context.Context, open bool, host string) error {
 	if open && !ValidHostname(host) {
 		return errors.New("bad hostname")
 	}
+	if open {
+		if err := s.UserlandProxy(); err != nil {
+			return err
+		}
+	}
 	if err := s.nft(ctx, NFTRules(open)); err != nil {
 		return err
 	}
@@ -115,6 +127,34 @@ func (s *System) Remove(ctx context.Context) error {
 		return err
 	}
 	return s.hosts("")
+}
+
+// UserlandProxy checks Docker's userland proxy is on (Docker's default):
+// this server reaches the standby at 127.0.0.1:<published port>, which only
+// the userland proxy answers (decision 426).
+func (s *System) UserlandProxy() error {
+	b, err := os.ReadFile(filepath.Join(s.root(), "etc", "docker", "daemon.json"))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var cfg map[string]any
+	if json.Unmarshal(b, &cfg) != nil {
+		return nil
+	}
+	if v, ok := cfg["userland-proxy"].(bool); ok && !v {
+		return errors.New("Docker's userland proxy is off (/etc/docker/daemon.json): this server couldn't reach its own standby during a take-over")
+	}
+	return nil
+}
+
+func (s *System) root() string {
+	if s.Root == "" {
+		return "/"
+	}
+	return s.Root
 }
 
 func (s *System) nft(ctx context.Context, rules string) error {

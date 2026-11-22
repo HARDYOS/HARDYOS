@@ -40,8 +40,9 @@ combined one).
    HardyOS generates creates user `hardyos-standby` whose only key has
    `restrict,command="…",from="…"`: the forced command accepts exactly the
    verbs `status`, `snapshot` and (only when installed with
-   `--allow-handback`) `restore`, each run through sudo with that exact
-   argument. `snapshot` writes a tar: `manifest.json`, `config/config.yaml`,
+   `--allow-handback`) `fence`, `unfence` and `restore`, each run through
+   sudo with that exact argument; a hand-back also needs a one-shot arm made
+   on the VPS by a person. `snapshot` writes a tar: `manifest.json`, `config/config.yaml`,
    `config/dashboard.env`, `config/server.env` (only the three NetBird
    secret variables if they're set in the container's environment),
    `data/{store,idp,events}.db` (`sqlite3 .backup`, consistent while it
@@ -111,6 +112,25 @@ with the PR #37 Cloudflare fake, the hardyd service with a fake priv (sync
 schedule, stale alert, take-over/hand-back order and rollback), API authz and
 confirmations. Web: rules and the page with vitest. No real network, disks
 or containers.
+
+## Security review changes (PR #44)
+
+- H1: the public address is root's (`netbird.standby.address`, name typed,
+  never while taken over); the standby name moves only during a take-over,
+  only to that address; adopting/forgetting needs the Cloudflare token
+  pasted again and isn't possible while taken over; the hostname can't move
+  off an adopted name; a new VPS address or host key drops the copies.
+- H2: hand-back needs a one-shot arm by a person on the VPS, a generation
+  id the VPS served, the standby's version not newer than the VPS's,
+  SQLite checks as nobody on copies, the same accounts and no new
+  owners/admins/tokens unless allowed, and rolls back by itself.
+- M1-M6, L1-L10: version gate, sealed hand-back copy, fence/unfence,
+  every-record DNS updates without deletes, exclusions and app guard,
+  acme.json filtering and Traefik by compose project, restore only of what
+  HardyOS set; root-made script and console fingerprint, staged-file
+  cleanup, DNS retry with the standby kept stopped, VPS ≠ NetBird name,
+  userland-proxy check, a pinned subnet dropped outside a take-over,
+  upload cap and backup rotation, stricter public addresses.
 
 ## Not covered
 

@@ -38,6 +38,7 @@ type nbsVPS struct {
 	snap     []byte
 	restored []byte
 	down     bool
+	fences   []string
 }
 
 func (v *nbsVPS) Run(_ context.Context, verb string, stdin io.Reader, stdout io.Writer) error {
@@ -48,8 +49,11 @@ func (v *nbsVPS) Run(_ context.Context, verb string, stdin io.Reader, stdout io.
 	}
 	switch verb {
 	case nbstandby.VerbStatus:
-		_, err := io.WriteString(stdout, `{"running":true,"version":"0.83.1","hostname":"`+nbsHost+`","restoreAllowed":true}`)
+		_, err := io.WriteString(stdout, `{"running":true,"version":"0.83.1","hostname":"`+nbsHost+`","restoreAllowed":true,"handbackInstalled":true}`)
 		return err
+	case nbstandby.VerbFence, nbstandby.VerbUnfence:
+		v.fences = append(v.fences, verb)
+		return nil
 	case nbstandby.VerbSnapshot:
 		_, err := stdout.Write(v.snap)
 		return err
@@ -104,7 +108,7 @@ func nbsSnapshot(t *testing.T) []byte {
 		s := sha256.Sum256(b)
 		sums[n] = hex.EncodeToString(s[:])
 	}
-	man, _ := json.Marshal(nbstandby.Manifest{Format: 1, Hostname: nbsHost, Engine: "sqlite", Version: "0.83.1", Peers: 3, Files: sums})
+	man, _ := json.Marshal(nbstandby.Manifest{Format: 1, Hostname: nbsHost, Engine: "sqlite", Version: "0.83.1", Peers: 3, Generation: "00112233445566778899aabbccddeeff", Files: sums})
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	for _, e := range []struct {
@@ -148,7 +152,7 @@ func newNBSEnv(t *testing.T) *nbsEnv {
 	keys := filepath.Join(t.TempDir(), "keys")
 	ps := &priv.Server{AllowedUIDs: []uint32{uint32(os.Getuid())}}
 	nbsDir := filepath.Join(keys, "netbird-standby")
-	priv.RegisterDNS(ps, priv.DNSEnv{KeyDir: keys, Client: e.cf.Client, StandbyTakenOver: func() (string, bool) { return nbstandby.TakenOver(nbsDir) }})
+	priv.RegisterDNS(ps, priv.DNSEnv{KeyDir: keys, Client: e.cf.Client, StandbyTakenOver: func() (nbstandby.TakeOverInfo, bool) { return nbstandby.TakenOver(nbsDir) }})
 	key := bytes.Repeat([]byte{9}, 32)
 	priv.RegisterNetBirdStandby(ps, &nbstandby.Root{Dir: nbsDir, Key: func() ([]byte, error) { return key, nil },
 		Remote: func(nbstandby.SSHTarget) nbstandby.Remote { return e.vps }, Apps: e.apps, Net: e.net})
@@ -234,7 +238,7 @@ func TestNBStandbyAPI(t *testing.T) {
 	// Settings: checked here (and again by root).
 	_, hostKey, _ := nbstandby.NewKey()
 	good := NBStandbySettingsRequest{VPSHost: "vps.example.net", HostKey: hostKey, Hostname: nbsHost,
-		Settings: nbstandby.Settings{IntervalMinutes: 15, AutoSync: true, PublicIPv4: "203.0.113.5", ConnectFrom: []string{"100.64.0.5"}}}
+		Settings: nbstandby.Settings{IntervalMinutes: 15, AutoSync: true, PublicIPv4: "93.184.215.14", ConnectFrom: []string{"100.64.0.5"}}}
 	for _, mut := range []func(*NBStandbySettingsRequest){
 		func(r *NBStandbySettingsRequest) { r.Hostname = "nope" },
 		func(r *NBStandbySettingsRequest) { r.VPSHost = "vps; rm -rf /" },
@@ -249,13 +253,25 @@ func TestNBStandbyAPI(t *testing.T) {
 		}
 	}
 	var acc map[string]any
+	// A new public address needs the name typed.
+	if code := admin.do("PUT", "/api/v1/netbird-standby/settings", good, nil); code != 400 {
+		t.Fatalf("address without confirmation = %d", code)
+	}
+	vpsIsName := good
+	vpsIsName.VPSHost = nbsHost
+	vpsIsName.AddressConfirm = nbsHost
+	if code := admin.do("PUT", "/api/v1/netbird-standby/settings", vpsIsName, nil); code != 400 {
+		t.Fatalf("VPS = NetBird name = %d", code)
+	}
+	good.AddressConfirm = nbsHost
 	jobOK(t, admin, admin.do("PUT", "/api/v1/netbird-standby/settings", good, &acc), acc, "settings")
 	admin.do("GET", "/api/v1/netbird-standby", nil, &st)
-	if st.Connection == nil || !st.Connection.Configured || !strings.HasPrefix(st.Connection.PublicKey, "ssh-ed25519 ") {
+	if st.Connection == nil || !st.Connection.Configured || !strings.HasPrefix(st.Connection.PublicKey, "ssh-ed25519 ") ||
+		st.Connection.PublicIPv4 != "93.184.215.14" || st.Settings.PublicIPv4 != "93.184.215.14" {
 		t.Fatalf("%+v", st.Connection)
 	}
 	var script NBStandbyScript
-	if code := admin.do("GET", "/api/v1/netbird-standby/script", nil, &script); code != 200 ||
+	if code := admin.do("GET", "/api/v1/netbird-standby/script", nil, &script); code != 200 || !strings.HasPrefix(script.Fingerprint, "SHA256:") ||
 		!strings.Contains(script.Script, `restrict,command="/usr/local/sbin/hardyos-netbird-standby",from="100.64.0.5" `+st.Connection.PublicKey) {
 		t.Fatalf("%d %s", code, script.Script)
 	}
@@ -276,13 +292,25 @@ func TestNBStandbyAPI(t *testing.T) {
 	if code := admin.do("GET", "/api/v1/netbird-standby/dns?name="+nbsHost, nil, &pv); code != 200 || len(pv.Records) != 1 || !pv.Adoptable {
 		t.Fatalf("%d %+v", code, pv)
 	}
-	if code := admin.do("POST", "/api/v1/netbird-standby/dns", NBStandbyDNSRequest{Name: nbsHost, Confirm: "vpn", IDs: []string{pv.Records[0].ID}}, nil); code != 400 {
+	cfTok := "abcdefghijklmnopqrstuvwxyz0123456789ABCD"
+	if code := admin.do("POST", "/api/v1/netbird-standby/dns", NBStandbyDNSRequest{Name: nbsHost, Confirm: nbsHost, IDs: []string{pv.Records[0].ID}}, nil); code != 400 {
+		t.Fatalf("adopt without the token = %d", code)
+	}
+	var accWrong map[string]any
+	j0 := waitJobDone(t, admin, func() string {
+		admin.do("POST", "/api/v1/netbird-standby/dns", NBStandbyDNSRequest{Name: nbsHost, Confirm: nbsHost, IDs: []string{pv.Records[0].ID}, Token: strings.Repeat("y", 40)}, &accWrong)
+		return accWrong["job"].(map[string]any)["id"].(string)
+	}())
+	if j0["state"] != "failed" {
+		t.Fatalf("adopt with another token: %+v", j0)
+	}
+	if code := admin.do("POST", "/api/v1/netbird-standby/dns", NBStandbyDNSRequest{Name: nbsHost, Confirm: "vpn", IDs: []string{pv.Records[0].ID}, Token: cfTok}, nil); code != 400 {
 		t.Fatalf("adopt without the typed name = %d", code)
 	}
-	if code := admin.do("POST", "/api/v1/netbird-standby/dns", NBStandbyDNSRequest{Name: "other.example.net", Confirm: "other.example.net", IDs: []string{pv.Records[0].ID}}, nil); code != 400 {
+	if code := admin.do("POST", "/api/v1/netbird-standby/dns", NBStandbyDNSRequest{Name: "other.example.net", Confirm: "other.example.net", IDs: []string{pv.Records[0].ID}, Token: cfTok}, nil); code != 400 {
 		t.Fatalf("adopt another name = %d", code)
 	}
-	jobOK(t, admin, admin.do("POST", "/api/v1/netbird-standby/dns", NBStandbyDNSRequest{Name: nbsHost, Confirm: nbsHost, IDs: []string{pv.Records[0].ID}}, &acc), acc, "adopt")
+	jobOK(t, admin, admin.do("POST", "/api/v1/netbird-standby/dns", NBStandbyDNSRequest{Name: nbsHost, Confirm: nbsHost, IDs: []string{pv.Records[0].ID}, Token: cfTok}, &acc), acc, "adopt")
 
 	// Take over: typed name, the app installed.
 	if code := admin.do("POST", "/api/v1/netbird-standby/takeover", nbstandby.TakeOverArgs{Confirm: "vpn.example"}, nil); code != 400 {
@@ -301,10 +329,10 @@ func TestNBStandbyAPI(t *testing.T) {
 	res, _ := json.Marshal(j["result"])
 	var rec nbstandby.TakeoverRecord
 	json.Unmarshal(res, &rec)
-	if !rec.DNSChanged || rec.FinalSync || rec.By != "cade" {
+	if !rec.DNSChanged || rec.FinalSync || rec.Fenced || rec.By != "cade" {
 		t.Fatalf("%+v", rec)
 	}
-	if got := e.cf.Find(nbsHost, "A"); len(got) != 1 || got[0].Content != "203.0.113.5" || got[0].TTL != 60 {
+	if got := e.cf.Find(nbsHost, "A"); len(got) != 1 || got[0].Content != "93.184.215.14" || got[0].TTL != 60 {
 		t.Fatalf("DNS: %+v", got)
 	}
 	if !e.net.open || !e.apps.running {

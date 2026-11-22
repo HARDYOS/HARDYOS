@@ -27,6 +27,10 @@ const (
 	OpNBStandbyUnstage   = "netbird.standby.unstage"
 	OpNBStandbyForget    = "netbird.standby.forget"
 	OpNBStandbyRefresh   = "netbird.standby.refresh"
+	OpNBStandbyAddress   = "netbird.standby.address"
+	OpNBStandbyScript    = "netbird.standby.script"
+	OpNBStandbyFence     = "netbird.standby.fence"
+	OpNBStandbyUnfence   = "netbird.standby.unfence"
 )
 
 // StandbyApps finds the netbird-standby app for the standby's root side.
@@ -80,6 +84,20 @@ func RegisterNetBirdStandby(s *Server, r *nbstandby.Root) {
 		st, err := r.Forget(ctx, a)
 		return st, standbyErr(err)
 	}))
+	s.Handle(OpNBStandbyAddress, typed(func(ctx context.Context, a nbstandby.AddressArgs) (any, error) {
+		st, err := r.Address(ctx, a)
+		return st, standbyErr(err)
+	}))
+	s.Handle(OpNBStandbyScript, func(ctx context.Context, _ json.RawMessage) (any, error) {
+		sc, err := r.Script(ctx)
+		return sc, standbyErr(err)
+	})
+	s.Handle(OpNBStandbyFence, func(ctx context.Context, _ json.RawMessage) (any, error) {
+		return struct{}{}, standbyErr(r.Fence(ctx, true))
+	})
+	s.Handle(OpNBStandbyUnfence, func(ctx context.Context, _ json.RawMessage) (any, error) {
+		return struct{}{}, standbyErr(r.Fence(ctx, false))
+	})
 	s.Handle(OpNBStandbyRefresh, func(ctx context.Context, _ json.RawMessage) (any, error) {
 		r.SyncApp(ctx)
 		st, err := r.Status(ctx)

@@ -194,6 +194,11 @@ func (s *Server) handleNBStandby(w http.ResponseWriter, r *http.Request, _ *auth
 		out.Problem = "hardyd-priv didn't answer: " + err.Error()
 	} else {
 		out.Connection = st
+		// The addresses DNS may point at are root's, not hardyd's.
+		out.Settings.PublicIPv4, out.Settings.PublicIPv6 = st.PublicIPv4, st.PublicIPv6
+		if st.From != nil {
+			out.Settings.ConnectFrom = st.From
+		}
 		if len(st.Snapshots) > 0 {
 			out.VersionNote, out.VersionNewer = nbstandby.VersionNote(st.Snapshots[0].Info.Version)
 		}
@@ -229,6 +234,9 @@ type NBStandbySettingsRequest struct {
 	Hostname string             `json:"hostname"`
 	NewKey   bool               `json:"newKey"`
 	Settings nbstandby.Settings `json:"settings"`
+	// AddressConfirm is the NetBird name, typed, when the public address
+	// changes (root refuses the change otherwise).
+	AddressConfirm string `json:"addressConfirm"`
 }
 
 func (s *Server) handleNBStandbySettings(w http.ResponseWriter, r *http.Request, u *auth.User) {
@@ -261,6 +269,15 @@ func (s *Server) handleNBStandbySettings(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
+	if req.VPSHost == req.Hostname {
+		writeError(w, http.StatusBadRequest, "invalid", "the VPS's SSH address can't be the NetBird name itself (it points here during a take-over)")
+		return
+	}
+	if st, err := s.nbsRootStatus(r.Context()); err == nil && (st.PublicIPv4 != req.Settings.PublicIPv4 || st.PublicIPv6 != req.Settings.PublicIPv6) &&
+		strings.ToLower(strings.TrimSpace(req.AddressConfirm)) != req.Hostname {
+		writeError(w, http.StatusBadRequest, "confirm_required", "type the NetBird server's name to change this server's public address")
+		return
+	}
 	target := req.Hostname + " vps=" + req.VPSHost
 	if req.NewKey {
 		target += " new key"
@@ -272,24 +289,22 @@ func (s *Server) handleNBStandbySettings(w http.ResponseWriter, r *http.Request,
 type NBStandbyScript struct {
 	Script   string `json:"script"`
 	FileName string `json:"fileName"`
+	// Fingerprint of HardyOS's key, to compare with what the VPS script
+	// prints and with 'hardyctl netbird-standby fingerprint' on the console.
+	Fingerprint string `json:"fingerprint"`
 }
 
 func (s *Server) handleNBStandbyScript(w http.ResponseWriter, r *http.Request, _ *auth.User) {
 	if !s.nbsReady(w) {
 		return
 	}
-	st, err := s.nbsRootStatus(r.Context())
-	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "hardyd-priv didn't answer")
+	// Root makes the script from its own key, name and from= addresses.
+	var sc nbstandby.ScriptResult
+	if err := s.cfg.Priv.Call(r.Context(), priv.OpNBStandbyScript, nil, &sc); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid", privMessage(err))
 		return
 	}
-	set, _ := s.nbs().Settings(r.Context())
-	script, err := nbstandby.Script(nbstandby.ScriptSetup{Hostname: st.Hostname, PublicKey: st.PublicKey, From: set.ConnectFrom})
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, NBStandbyScript{Script: script, FileName: "hardyos-standby.sh"})
+	writeJSON(w, http.StatusOK, NBStandbyScript{Script: sc.Script, FileName: "hardyos-standby.sh", Fingerprint: sc.Fingerprint})
 }
 
 func (s *Server) handleNBStandbyVPS(w http.ResponseWriter, r *http.Request, _ *auth.User) {
@@ -380,17 +395,31 @@ func (s *Server) handleNBStandbyDNSPreview(w http.ResponseWriter, r *http.Reques
 }
 
 type nbsDNSParams struct {
-	Action  string   `json:"action"` // adopt, forget
-	Name    string   `json:"name"`
-	Confirm string   `json:"confirm"`
-	IDs     []string `json:"ids,omitempty"`
+	Action   string   `json:"action"` // adopt, forget
+	Name     string   `json:"name"`
+	Confirm  string   `json:"confirm"`
+	IDs      []string `json:"ids,omitempty"`
+	TokenRef string   `json:"tokenRef,omitempty"`
 }
 
-// NBStandbyDNSRequest adopts the name's records (confirm = the name).
+// NBStandbyDNSRequest adopts the name's records (confirm = the name, token
+// = the Cloudflare token pasted again).
 type NBStandbyDNSRequest struct {
 	Name    string   `json:"name"`
 	Confirm string   `json:"confirm"`
 	IDs     []string `json:"ids"`
+	Token   string   `json:"token"`
+}
+
+// NBStandbyDNSForgetRequest stops managing the name.
+type NBStandbyDNSForgetRequest struct {
+	Confirm string `json:"confirm"`
+	Token   string `json:"token"`
+}
+
+func validTokenShape(tok string) bool {
+	t := strings.TrimSpace(tok)
+	return len(t) >= 20 && len(t) <= 200 && !strings.ContainsAny(t, " \r\n\t\"'")
 }
 
 func (s *Server) handleNBStandbyDNSAdopt(w http.ResponseWriter, r *http.Request, u *auth.User) {
@@ -421,7 +450,12 @@ func (s *Server) handleNBStandbyDNSAdopt(w http.ResponseWriter, r *http.Request,
 			return
 		}
 	}
-	s.submit(w, r, u, JobKindNBStandbyDNS, "Let HardyOS manage "+name+" in Cloudflare", nbsDNSParams{Action: "adopt", Name: name, Confirm: name, IDs: req.IDs},
+	if !validTokenShape(req.Token) {
+		writeError(w, http.StatusBadRequest, "token_required", "paste the Cloudflare token again (the one saved in Control Panel › Hostnames)")
+		return
+	}
+	s.submit(w, r, u, JobKindNBStandbyDNS, "Let HardyOS manage "+name+" in Cloudflare",
+		nbsDNSParams{Action: "adopt", Name: name, Confirm: name, IDs: req.IDs, TokenRef: jobSecrets.put(strings.TrimSpace(req.Token))},
 		"netbird.standby.dns.adopt", name, nil)
 }
 
@@ -434,7 +468,7 @@ func (s *Server) handleNBStandbyDNSForget(w http.ResponseWriter, r *http.Request
 	if !s.nbsReady(w) {
 		return
 	}
-	var req NBStandbyConfirm
+	var req NBStandbyDNSForgetRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
@@ -447,7 +481,12 @@ func (s *Server) handleNBStandbyDNSForget(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "confirm_required", "type the name to stop HardyOS managing it")
 		return
 	}
-	s.submit(w, r, u, JobKindNBStandbyDNS, "Stop managing "+d.Name+" in Cloudflare", nbsDNSParams{Action: "forget", Name: d.Name, Confirm: d.Name},
+	if !validTokenShape(req.Token) {
+		writeError(w, http.StatusBadRequest, "token_required", "paste the Cloudflare token again (the one saved in Control Panel › Hostnames)")
+		return
+	}
+	s.submit(w, r, u, JobKindNBStandbyDNS, "Stop managing "+d.Name+" in Cloudflare",
+		nbsDNSParams{Action: "forget", Name: d.Name, Confirm: d.Name, TokenRef: jobSecrets.put(strings.TrimSpace(req.Token))},
 		"netbird.standby.dns.forget", d.Name, nil)
 }
 
@@ -578,8 +617,15 @@ func (s *Server) runNBStandbySettings(jc *jobs.Context) (any, error) {
 	jc.Progress(20, "Saving the VPS connection")
 	var st nbstandby.Status
 	if err := s.cfg.Priv.Call(jc, priv.OpNBStandbyConfigure, nbstandby.ConfigureArgs{VPSHost: req.VPSHost, VPSPort: req.VPSPort, VPSUser: req.VPSUser,
-		HostKey: req.HostKey, Hostname: req.Hostname, NewKey: req.NewKey}, &st); err != nil {
+		HostKey: req.HostKey, Hostname: req.Hostname, From: req.Settings.ConnectFrom, NewKey: req.NewKey}, &st); err != nil {
 		return nil, err
+	}
+	if st.PublicIPv4 != req.Settings.PublicIPv4 || st.PublicIPv6 != req.Settings.PublicIPv6 {
+		jc.Progress(60, "Saving this server's public address")
+		if err := s.cfg.Priv.Call(jc, priv.OpNBStandbyAddress, nbstandby.AddressArgs{IPv4: req.Settings.PublicIPv4, IPv6: req.Settings.PublicIPv6,
+			Confirm: req.AddressConfirm}, &st); err != nil {
+			return nil, err
+		}
 	}
 	if _, err := s.nbs().SaveSettings(jc, req.Settings); err != nil {
 		return nil, err
@@ -693,17 +739,18 @@ func (s *Server) runNBStandbyDNS(jc *jobs.Context) (any, error) {
 	if err := jc.Params(&p); err != nil {
 		return nil, err
 	}
+	tok, ok := jobSecrets.take(p.TokenRef)
+	if !ok {
+		return nil, errors.New("the token was lost (hardyd restarted?): paste it again")
+	}
 	var st priv.DNSStatus
 	switch p.Action {
 	case "adopt":
-		if err := s.cfg.Priv.Call(jc, priv.OpDNSStandbyAdopt, priv.DNSStandbyAdoptArgs{Name: p.Name, Confirm: p.Confirm, IDs: p.IDs}, &st); err != nil {
+		if err := s.cfg.Priv.Call(jc, priv.OpDNSStandbyAdopt, priv.DNSStandbyAdoptArgs{Name: p.Name, Confirm: p.Confirm, IDs: p.IDs, Token: tok}, &st); err != nil {
 			return nil, err
 		}
 	case "forget":
-		if rst, err := s.nbsRootStatus(jc); err == nil && rst.Mode == nbstandby.ModeTakenOver {
-			return nil, errors.New("HardyOS has taken over: hand back first")
-		}
-		if err := s.cfg.Priv.Call(jc, priv.OpDNSStandbyForget, priv.DNSTokenClearArgs{Confirm: p.Confirm}, &st); err != nil {
+		if err := s.cfg.Priv.Call(jc, priv.OpDNSStandbyForget, priv.DNSStandbyForgetArgs{Confirm: p.Confirm, Token: tok}, &st); err != nil {
 			return nil, err
 		}
 	default:
@@ -783,6 +830,14 @@ func (b *privStandby) Sync(ctx context.Context) (*nbstandby.SnapshotRecord, erro
 func (b *privStandby) VPS(ctx context.Context) (*nbstandby.VPSStatus, error) {
 	var vs nbstandby.VPSStatus
 	return &vs, b.call(ctx, priv.OpNBStandbyVPS, nil, &vs)
+}
+
+func (b *privStandby) Fence(ctx context.Context, on bool) error {
+	op := priv.OpNBStandbyFence
+	if !on {
+		op = priv.OpNBStandbyUnfence
+	}
+	return b.call(ctx, op, nil, nil)
 }
 
 func (b *privStandby) Stage(ctx context.Context, confirm string) (*nbstandby.StageResult, error) {

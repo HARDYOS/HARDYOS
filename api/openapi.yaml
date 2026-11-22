@@ -3721,7 +3721,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/NBStandbyConfirm" }
+            schema: { $ref: "#/components/schemas/NBStandbyDNSForgetRequest" }
       responses:
         "202": { $ref: "#/components/responses/JobAccepted" }
         "400": { $ref: "#/components/responses/Invalid" }
@@ -6368,7 +6368,7 @@ components:
     NBStandbyConnection:
       type: object
       description: hardyd-priv's side; never the private key or a copy's contents
-      required: [configured, vpsHost, vpsPort, vpsUser, hostKey, hostKeyFingerprint, hostname, publicKey, snapshots, mode, networkOpen]
+      required: [configured, vpsHost, vpsPort, vpsUser, hostKey, hostKeyFingerprint, hostname, publicKey, snapshots, mode, networkOpen, publicIPv4, publicIPv6, from, handbackCopy]
       properties:
         configured: { type: boolean }
         vpsHost: { type: string }
@@ -6387,6 +6387,10 @@ components:
         staged: { type: string }
         takenOverAt: { type: string, format: date-time }
         networkOpen: { type: boolean }
+        publicIPv4: { type: string, description: The only IPv4 address DNS may point the name at (root's) }
+        publicIPv6: { type: string }
+        from: { type: array, items: { type: string } }
+        handbackCopy: { type: boolean, description: A sealed copy of the last hand-back is kept until the next good sync }
     NBStandbySnapshot:
       type: object
       required: [id, at, sealedBytes, info]
@@ -6397,7 +6401,7 @@ components:
         info: { $ref: "#/components/schemas/NBStandbySnapshotInfo" }
     NBStandbySnapshotInfo:
       type: object
-      required: [created, hostname, image, digest, version, peers, setupKeys, files, bytes, sha256, warnings]
+      required: [created, hostname, image, digest, version, peers, setupKeys, files, bytes, sha256, warnings, generation]
       properties:
         created: { type: string, format: date-time }
         hostname: { type: string }
@@ -6407,6 +6411,7 @@ components:
         peers: { type: integer }
         setupKeys: { type: integer }
         files: { type: array, items: { type: string } }
+        generation: { type: string, description: The VPS's id for this snapshot; a hand-back must name it }
         bytes: { type: integer }
         sha256: { type: string }
         certNotAfter: { type: string, format: date-time }
@@ -6481,14 +6486,15 @@ components:
         problem: { type: string }
     NBStandbyDNSRequest:
       type: object
-      required: [name, confirm, ids]
+      required: [name, confirm, ids, token]
       properties:
         name: { type: string }
         confirm: { type: string, description: The name, typed }
         ids: { type: array, items: { type: string }, description: Exactly the record ids the preview showed }
+        token: { type: string, writeOnly: true, description: "The Cloudflare token pasted again (compared by hardyd-priv with the saved one)" }
     NBStandbyTakeover:
       type: object
-      required: [at, by, snapshotAt, finalSync, dnsChanged, ipv4, peersTotal, peersConnected, notes]
+      required: [at, by, snapshotAt, finalSync, dnsChanged, fenced, ipv4, peersTotal, peersConnected, notes]
       properties:
         at: { type: string, format: date-time }
         by: { type: string }
@@ -6496,6 +6502,9 @@ components:
         finalSync: { type: boolean }
         finalSyncError: { type: string }
         dnsChanged: { type: boolean }
+        fenced: { type: boolean, description: The VPS's server was stopped for the take-over }
+        handedBack: { type: boolean }
+        discarded: { type: boolean }
         ipv4: { type: string }
         ipv6: { type: string }
         peersTotal: { type: integer }
@@ -6522,27 +6531,38 @@ components:
         hostname: { type: string, description: The NetBird server's name }
         newKey: { type: boolean, description: Make a new SSH key (run the VPS script again) }
         settings: { $ref: "#/components/schemas/NBStandbySettings" }
+        addressConfirm: { type: string, description: "The NetBird name, typed, when the public address changes (400 confirm_required otherwise)" }
     NBStandbyScript:
       type: object
-      required: [script, fileName]
+      required: [script, fileName, fingerprint]
       properties:
         script: { type: string }
         fileName: { type: string }
+        fingerprint: { type: string, description: "HardyOS's key fingerprint, to compare with the VPS script's output and hardyctl netbird-standby fingerprint" }
     NBStandbyVPSStatus:
       type: object
-      required: [running, version, digest, image, hostname, restoreAllowed, time]
+      required: [running, version, digest, image, hostname, restoreAllowed, restoreArmedUntil, handbackInstalled, fenced, time]
       properties:
         running: { type: boolean }
         version: { type: string }
         digest: { type: string }
         image: { type: string }
         hostname: { type: string }
-        restoreAllowed: { type: boolean }
+        restoreAllowed: { type: boolean, description: Hand-back installed and armed on the VPS now }
+        restoreArmedUntil: { type: string }
+        handbackInstalled: { type: boolean }
+        fenced: { type: boolean }
         time: { type: string }
     NBStandbyInstallRequest:
       type: object
       properties:
         pool: { type: string, description: The pool apps go on, when no app is installed yet }
+    NBStandbyDNSForgetRequest:
+      type: object
+      required: [confirm, token]
+      properties:
+        confirm: { type: string, description: The adopted name, typed }
+        token: { type: string, writeOnly: true, description: The Cloudflare token pasted again }
     NBStandbyConfirm:
       type: object
       required: [confirm]
@@ -6555,6 +6575,7 @@ components:
         confirm: { type: string, description: The NetBird server's name, typed }
         acceptVersion: { type: boolean, description: Go on although the VPS runs a newer NetBird }
         skipFinalSync: { type: boolean, description: "Don't try a last copy first" }
+        acceptVpsAlive: { type: boolean, description: "Take over although the VPS still answers (its server is stopped first)" }
     NBStandbyHandbackRequest:
       type: object
       required: [confirm, acceptSplitBrain]

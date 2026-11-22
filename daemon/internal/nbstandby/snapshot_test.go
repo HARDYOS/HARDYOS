@@ -5,12 +5,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 )
@@ -137,6 +139,29 @@ func TestCheckSnapshot(t *testing.T) {
 	}
 }
 
+func TestFilterACME(t *testing.T) {
+	b := testACME(t, testHost, time.Date(2027, 2, 1, 0, 0, 0, 0, time.UTC))
+	var store map[string]map[string]any
+	json.Unmarshal(b, &store)
+	first := store["letsencrypt"]["Certificates"].([]any)[0].(map[string]any)
+	other := map[string]any{"domain": map[string]any{"main": "other.example.net"}, "certificate": first["certificate"], "key": "OTHERKEY"}
+	store["letsencrypt"]["Certificates"] = append(store["letsencrypt"]["Certificates"].([]any), other)
+	b, _ = json.Marshal(store)
+	out, err := FilterACME(b, testHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(out, []byte("Account")) || bytes.Contains(out, []byte("OTHERKEY")) {
+		t.Fatalf("%s", out)
+	}
+	if _, ok := acmeNotAfter(out, testHost); !ok {
+		t.Fatal("certificate lost")
+	}
+	if _, err := FilterACME([]byte("nope"), testHost); err == nil {
+		t.Fatal("garbage accepted")
+	}
+}
+
 func TestCheckConfigAndFold(t *testing.T) {
 	host, warn, err := CheckConfig([]byte(testConfig))
 	if err != nil || host != testHost || len(warn) != 0 {
@@ -198,17 +223,22 @@ func TestScript(t *testing.T) {
 	// The forced command takes exactly three verbs; restore needs the
 	// opt-in twice (sudoers and the root script).
 	for _, want := range []string{
-		`status|snapshot|restore) exec sudo -n /usr/local/sbin/hardyos-netbird-standby-root "$SSH_ORIGINAL_COMMAND" ;;`,
-		`[ -e /etc/hardyos-standby/allow-restore ] || fail`,
-		`if [ "$ALLOW_HANDBACK" = 1 ]; then rule="$rule, /usr/local/sbin/hardyos-netbird-standby-root restore"; fi`,
+		`status|snapshot|restore|fence|unfence) exec sudo -n /usr/local/sbin/hardyos-netbird-standby-root "$SSH_ORIGINAL_COMMAND" ;;`,
+		`[ -f "$ARM" ] || fail "hand-back isn't armed`,
+		`rm -f "$ARM" # one use`,
+		`[ "${SUDO_USER:-}" != hardyos-standby ] || fail "refused"`,
+		`rule="$rule, /usr/local/sbin/hardyos-netbird-standby-root restore, /usr/local/sbin/hardyos-netbird-standby-root fence, /usr/local/sbin/hardyos-netbird-standby-root unfence"`,
+		`runuser -u nobody -- sqlite3 -safe -batch -noheader "$1" "PRAGMA trusted_schema=OFF; $2"`,
+		`trap cleanup EXIT`,
 		`visudo -cf "$tmp_sudo"`,
+		`ssh-keygen -lf /var/lib/hardyos-standby/.ssh/authorized_keys`,
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("script lacks %q", want)
 		}
 	}
-	if strings.Contains(s, "%!") {
-		t.Fatal("formatting error in the script")
+	if strings.Contains(s, "@@") || strings.Contains(s, "allow-restore ]") {
+		t.Fatal("unfilled placeholder or the old marker in the script")
 	}
 	dir := t.TempDir()
 	p := filepath.Join(dir, "s.sh")
@@ -273,13 +303,13 @@ func TestForcedCommand(t *testing.T) {
 		out, err := c.CombinedOutput()
 		return string(out), err
 	}
-	for _, v := range []string{"status", "snapshot", "restore"} {
+	for _, v := range []string{"status", "snapshot", "restore", "fence", "unfence"} {
 		out, err := run(v)
 		if err != nil || strings.TrimSpace(out) != "sudo:3:-n /usr/local/sbin/hardyos-netbird-standby-root "+v {
 			t.Fatalf("%s: %q %v", v, out, err)
 		}
 	}
-	for _, bad := range []string{"", "bash", "status; id", "snapshot x", "status\nid", "$(id)", "restore --all"} {
+	for _, bad := range []string{"", "bash", "status; id", "snapshot x", "status\nid", "$(id)", "restore --all", "arm-restore 24h", "arm-restore"} {
 		out, err := run(bad)
 		if err == nil || strings.Contains(out, "sudo:") {
 			t.Errorf("%q ran: %q", bad, out)
@@ -290,7 +320,8 @@ func TestForcedCommand(t *testing.T) {
 func TestNetRules(t *testing.T) {
 	closed := NFTRules(false)
 	if !strings.Contains(closed, "tcp dport { 44620, 44621 } drop") || !strings.Contains(closed, "udp dport 44622 drop") ||
-		!strings.Contains(closed, `iifname "lo" accept`) || strings.Contains(closed, "dnat") {
+		!strings.Contains(closed, `iifname "lo" accept`) || strings.Contains(closed, "dnat") ||
+		!strings.Contains(closed, "ip saddr != 172.16.253.16/28 ip daddr 172.16.253.16/28 drop") || !strings.Contains(closed, "ip daddr 172.16.253.16/28 drop") {
 		t.Fatal(closed)
 	}
 	open := NFTRules(true)
@@ -332,6 +363,14 @@ func TestNetRules(t *testing.T) {
 	}
 	if _, err := UpdateHosts(old, "evil host\n1.2.3.4 bank.com"); err == nil {
 		t.Fatal("bad hostname accepted")
+	}
+	// The take-over needs Docker's userland proxy.
+	dockerDir := t.TempDir()
+	os.MkdirAll(filepath.Join(dockerDir, "etc", "docker"), 0o755)
+	os.WriteFile(filepath.Join(dockerDir, "etc", "hosts"), old, 0o644)
+	os.WriteFile(filepath.Join(dockerDir, "etc", "docker", "daemon.json"), []byte(`{"userland-proxy": false}`), 0o644)
+	if err := (&System{Runner: okRunner{}, Root: dockerDir}).Apply(t.Context(), true, testHost); err == nil || !strings.Contains(err.Error(), "userland") {
+		t.Fatalf("userland proxy off: %v", err)
 	}
 	// The System applier writes /etc/hosts under its root.
 	root := t.TempDir()

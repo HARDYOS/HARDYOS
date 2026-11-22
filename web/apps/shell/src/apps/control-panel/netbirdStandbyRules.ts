@@ -34,6 +34,10 @@ export function isPublicIPv4(s: string): boolean {
   const a = p[0] ?? 0;
   const b = p[1] ?? 0;
   if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
+  // Documentation, benchmarking and IETF ranges are never a server's address.
+  const c = p[2] ?? 0;
+  if ((a === 192 && b === 0 && (c === 0 || c === 2)) || (a === 198 && b === 51 && c === 100) || (a === 203 && b === 0 && c === 113)) return false;
+  if (a === 198 && (b === 18 || b === 19)) return false;
   if (a === 172 && b >= 16 && b <= 31) return false;
   if (a === 192 && b === 168) return false;
   if (a === 169 && b === 254) return false;
@@ -45,6 +49,7 @@ export function isPublicIPv4(s: string): boolean {
 export function isPublicIPv6(s: string): boolean {
   const t = s.trim().toLowerCase();
   if (!/^[0-9a-f:]+$/.test(t) || !t.includes(":") || t.split("::").length > 2) return false;
+  if (t.startsWith("2001:db8:") || t.startsWith("2001:0db8:") || t.startsWith("2002:")) return false;
   return /^[23]/.test(t);
 }
 
@@ -102,10 +107,10 @@ export function takeoverBlockers(st: NBStandbyStatus): string[] {
   if (c.mode === "takenover") return ["HardyOS has already taken over."];
   if (!st.app.installed) out.push("Install the standby (step 3).");
   if (c.snapshots.length === 0) out.push("There is no copy of the VPS yet.");
-  if (!isPublicIPv4(st.settings.publicIPv4)) out.push("Enter this server's public IPv4 address.");
+  if (!isPublicIPv4(c.publicIPv4)) out.push("Enter this server's public IPv4 address (step 1).");
   if (!st.dns.tokenSet) out.push("Save a Cloudflare token in Control Panel › Hostnames.");
   else if (st.dns.name !== c.hostname) out.push(`Let HardyOS manage ${c.hostname} in Cloudflare (step 4).`);
-  else if (st.dns.adopted.some((r) => r.type === "AAAA") && !st.settings.publicIPv6) out.push(`${c.hostname} has an AAAA record: enter this server's public IPv6 address.`);
+  else if (st.dns.adopted.some((r) => r.type === "AAAA") && !c.publicIPv6) out.push(`${c.hostname} has an AAAA record: enter this server's public IPv6 address.`);
   return out;
 }
 

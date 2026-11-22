@@ -29,6 +29,9 @@ type BackupSource struct {
 
 // BackupSource names an installed app's dataset.
 func (m *Manager) BackupSource(ctx context.Context, id string) (*BackupSource, error) {
+	if Excluded(id) {
+		return nil, ErrNotInstalled
+	}
 	ia, c, err := m.app(ctx, id)
 	if err != nil {
 		return nil, err
@@ -101,7 +104,7 @@ func (m *Manager) BackupSources(ctx context.Context) ([]BackupSource, error) {
 	}
 	out := []BackupSource{}
 	for _, ia := range l {
-		if !ia.state.Removed {
+		if !ia.state.Removed && !Excluded(ia.state.ID) {
 			out = append(out, BackupSource{ID: ia.state.ID, Name: ia.manifest.Name, Version: ia.manifest.Version, Pool: c.Pool, Dataset: ia.dataset})
 		}
 	}
@@ -119,6 +122,9 @@ type Fill func(ctx context.Context, dir, dataset string) error
 // rollback: the package and settings the version holds, but never
 // permissions the admin has taken away since (decision 77).
 func (m *Manager) RestoreData(ctx context.Context, id, confirm string, fill Fill) error {
+	if err := m.guard(id); err != nil {
+		return err
+	}
 	ia, c, err := m.app(ctx, id)
 	if err != nil {
 		return err
@@ -176,6 +182,9 @@ func (m *Manager) RestoreData(ctx context.Context, id, confirm string, fill Fill
 func (m *Manager) RestoreNew(ctx context.Context, id, pool string, fill Fill) error {
 	if err := ValidID(id); err != nil {
 		return Problems{err.Error()}
+	}
+	if err := m.guard(id); err != nil {
+		return err
 	}
 	if !m.Available() {
 		return errors.New("this HardyOS build doesn't include Docker")

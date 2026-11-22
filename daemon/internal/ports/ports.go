@@ -49,7 +49,6 @@ const (
 	// forwards to (public TCP 80, TCP 443 and UDP 3478). Only that app may
 	// publish them (OwnedBy) and nothing reaches them from outside unless
 	// HardyOS has taken over (hardyd-priv's hardyos_nbstandby table).
-	// 44623-44629 are kept for it.
 	NetBirdStandbyHTTP  = 44620
 	NetBirdStandbyHTTPS = 44621
 	NetBirdStandbySTUN  = 44622 // UDP
@@ -119,6 +118,12 @@ func OwnedBy(p int) string { return owned[p] }
 // accepts webmail tokens from it alone and never a password from it
 // (decision 305). Outside Docker's default pools (172.17-31.0.0/16).
 var WebmailSubnet = netip.MustParsePrefix("172.16.253.0/28")
+
+// NetBirdStandbySubnet is the netbird-standby app's Docker network (its
+// compose file asks for exactly this subnet; no other app may use it), so
+// hardyd-priv's table can also drop traffic to its containers outside a
+// take-over (decision 426).
+var NetBirdStandbySubnet = netip.MustParsePrefix("172.16.253.16/28")
 
 // WebmailAddr is the webmail container's own address in WebmailSubnet
 // (its compose file pins it; decision 317).

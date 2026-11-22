@@ -48,18 +48,6 @@ func DefaultSettings() Settings {
 	return Settings{IntervalMinutes: 15, AutoSync: true, ConnectFrom: []string{}}
 }
 
-// PublicAddr reports whether s is an internet address of family v4 (or v6).
-func PublicAddr(s string, v4 bool) bool {
-	a, err := netip.ParseAddr(s)
-	if err != nil || a.Zone() != "" || a.Is4In6() || a.Is4() != v4 {
-		return false
-	}
-	if !a.IsGlobalUnicast() || a.IsPrivate() || a.IsLinkLocalUnicast() {
-		return false
-	}
-	return !netip.MustParsePrefix("100.64.0.0/10").Contains(a)
-}
-
 // Validate checks settings.
 func (s *Settings) Validate() error {
 	if s.IntervalMinutes == 0 {
@@ -74,6 +62,12 @@ func (s *Settings) Validate() error {
 	}
 	if s.PublicIPv6 != "" && !PublicAddr(s.PublicIPv6, false) {
 		return fmt.Errorf("%q isn't a public IPv6 address", clip(s.PublicIPv6, 60))
+	}
+	if s.PublicIPv4 != "" {
+		s.PublicIPv4 = netip.MustParseAddr(s.PublicIPv4).String()
+	}
+	if s.PublicIPv6 != "" {
+		s.PublicIPv6 = netip.MustParseAddr(s.PublicIPv6).String()
 	}
 	if s.ConnectFrom == nil {
 		s.ConnectFrom = []string{}
@@ -116,9 +110,15 @@ type TakeoverRecord struct {
 	SnapshotAt time.Time `json:"snapshotAt"`
 	// FinalSync: a last copy was pulled right before (else the VPS didn't
 	// answer and the newest saved one was used).
-	FinalSync      bool      `json:"finalSync"`
-	FinalSyncError string    `json:"finalSyncError,omitempty"`
-	DNSChanged     bool      `json:"dnsChanged"`
+	FinalSync      bool   `json:"finalSync"`
+	FinalSyncError string `json:"finalSyncError,omitempty"`
+	DNSChanged     bool   `json:"dnsChanged"`
+	// Fenced: the VPS's server was stopped for the take-over.
+	Fenced bool `json:"fenced"`
+	// HandedBack / Discarded: the hand-back's VPS step is done (a retry
+	// only finishes DNS and the local steps).
+	HandedBack     bool      `json:"handedBack,omitempty"`
+	Discarded      bool      `json:"discarded,omitempty"`
 	IPv4           string    `json:"ipv4"`
 	IPv6           string    `json:"ipv6,omitempty"`
 	PeersTotal     int       `json:"peersTotal"`
@@ -137,6 +137,8 @@ type Service struct {
 	// PeerWait is how long a take-over watches peers reconnect (default
 	// 3 minutes); PeerPoll how often (default 10 s).
 	PeerWait, PeerPoll time.Duration
+	// RetryDelay is the wait between DNS retries on hand-back (default 10 s).
+	RetryDelay time.Duration
 }
 
 func (s *Service) now() time.Time {
@@ -419,6 +421,8 @@ type Backend interface {
 	Status(ctx context.Context) (*Status, error)
 	Sync(ctx context.Context) (*SnapshotRecord, error)
 	VPS(ctx context.Context) (*VPSStatus, error)
+	// Fence stops (on) or starts again (off) the VPS's netbird-server.
+	Fence(ctx context.Context, on bool) error
 	Stage(ctx context.Context, confirm string) (*StageResult, error)
 	Unstage(ctx context.Context, confirm string) error
 	Network(ctx context.Context, open bool) error
@@ -445,13 +449,21 @@ type TakeOverArgs struct {
 	Confirm       string `json:"confirm"`
 	AcceptVersion bool   `json:"acceptVersion"`
 	SkipFinalSync bool   `json:"skipFinalSync"`
-	By            string `json:"-"`
+	// AcceptVPSAlive: take over although the VPS still answers (HardyOS
+	// then stops its server first, "fence").
+	AcceptVPSAlive bool   `json:"acceptVpsAlive"`
+	By             string `json:"-"`
 }
 
 // ErrVersion means the VPS runs a newer NetBird than the standby.
 var ErrVersion = errors.New("version")
 
-// CheckTakeOver says why a take-over can't start (nil when it can).
+// ErrVPSAlive means the VPS answered the last sync: a take-over needs
+// AcceptVPSAlive.
+var ErrVPSAlive = errors.New("vps_alive")
+
+// CheckTakeOver says why a take-over can't start (nil when it can). The
+// public addresses are root's (st), never hardyd's settings.
 func (s *Service) CheckTakeOver(st *Status, set Settings, dnsName string, hasAAAA bool, a TakeOverArgs) error {
 	switch {
 	case st == nil || !st.Configured:
@@ -462,11 +474,11 @@ func (s *Service) CheckTakeOver(st *Status, set Settings, dnsName string, hasAAA
 		return &Problem{Msg: "type the NetBird server's name (" + st.Hostname + ") to take over"}
 	case len(st.Snapshots) == 0 && a.SkipFinalSync:
 		return &Problem{Msg: "there is no copy of the VPS yet"}
-	case !PublicAddr(set.PublicIPv4, true):
+	case !PublicAddr(st.PublicIPv4, true):
 		return &Problem{Msg: "enter this server's public IPv4 address first (where the router forwards the NetBird ports)"}
 	case dnsName != st.Hostname:
 		return &Problem{Msg: "let HardyOS manage " + st.Hostname + "'s DNS records first (DNS step)"}
-	case hasAAAA && set.PublicIPv6 == "":
+	case hasAAAA && st.PublicIPv6 == "":
 		return &Problem{Msg: st.Hostname + " has an AAAA record: enter this server's public IPv6 address, or remove the AAAA record in Cloudflare and adopt the name again"}
 	}
 	if len(st.Snapshots) > 0 {
@@ -478,10 +490,11 @@ func (s *Service) CheckTakeOver(st *Status, set Settings, dnsName string, hasAAA
 }
 
 // TakeOver runs the take-over (decision 425): a last copy if the VPS still
-// answers, stage it, start the standby, open its ports and point HardyOS at
-// it, point DNS here, then watch peers come back. A failure before DNS
-// changed undoes the local steps; after, the standby keeps running and the
-// error says what's left.
+// answers (then only with AcceptVPSAlive, and its server is fenced first),
+// stage it, start the standby, open its ports and point HardyOS at it, point
+// DNS here, then watch peers come back. A failure before DNS changed undoes
+// the local steps; after, the standby keeps running and the error says
+// what's left.
 func (s *Service) TakeOver(ctx context.Context, b Backend, a TakeOverArgs, p Progress) (*TakeoverRecord, error) {
 	if p == nil {
 		p = func(float64, string) {}
@@ -501,7 +514,8 @@ func (s *Service) TakeOver(ctx context.Context, b Backend, a TakeOverArgs, p Pro
 	if err := s.CheckTakeOver(st, set, name, hasAAAA, a); err != nil {
 		return nil, err
 	}
-	rec := &TakeoverRecord{At: s.now(), By: a.By, IPv4: set.PublicIPv4, IPv6: set.PublicIPv6, Notes: []string{}}
+	rec := &TakeoverRecord{At: s.now(), By: a.By, IPv4: st.PublicIPv4, IPv6: st.PublicIPv6, Notes: []string{}}
+	alive := false
 	if !a.SkipFinalSync {
 		p(5, "Getting a last copy from the VPS (if it still answers)")
 		sctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
@@ -511,7 +525,7 @@ func (s *Service) TakeOver(ctx context.Context, b Backend, a TakeOverArgs, p Pro
 			rec.FinalSyncError = clip(err.Error(), 300)
 			rec.Notes = append(rec.Notes, "The VPS didn't give a last copy ("+rec.FinalSyncError+"); the newest saved copy is used.")
 		} else {
-			rec.FinalSync = true
+			rec.FinalSync, alive = true, true
 		}
 		if st, err = b.Status(ctx); err != nil {
 			return nil, err
@@ -523,9 +537,36 @@ func (s *Service) TakeOver(ctx context.Context, b Backend, a TakeOverArgs, p Pro
 			return nil, fmt.Errorf("%w: the VPS runs NetBird %s, newer than the standby's %s", ErrVersion, st.Snapshots[0].Info.Version, StandbyVersion)
 		}
 	}
+	if alive && !a.AcceptVPSAlive {
+		return nil, fmt.Errorf("%w: the VPS still answers and its NetBird server runs. Take over only if you mean to: tick that the VPS is up, and HardyOS stops its server first", ErrVPSAlive)
+	}
+	// Fence the VPS: one server at a time. It must work when the VPS is
+	// up; when it's down this is a best effort.
+	p(12, "Stopping the VPS's NetBird server (fence)")
+	fenced := false
+	fctx, fcancel := context.WithTimeout(ctx, 2*time.Minute)
+	ferr := b.Fence(fctx, true)
+	fcancel()
+	switch {
+	case ferr == nil:
+		fenced, rec.Fenced = true, true
+	case alive:
+		return nil, fmt.Errorf("the VPS still runs NetBird and couldn't be fenced (install its script with --allow-handback): %w", ferr)
+	default:
+		rec.Notes = append(rec.Notes, "The VPS couldn't be fenced ("+clip(ferr.Error(), 200)+"): if it comes back on its own, two servers run until you hand back.")
+	}
+	unfence := func() error {
+		if !fenced {
+			return nil
+		}
+		return b.Fence(context.WithoutCancel(ctx), false)
+	}
 	p(20, "Putting the copy into the standby")
 	staged, err := b.Stage(ctx, st.Hostname)
 	if err != nil {
+		if uerr := unfence(); uerr != nil {
+			return nil, fmt.Errorf("%w (and the VPS's server couldn't be started again: %v)", err, uerr)
+		}
 		return nil, err
 	}
 	rec.SnapshotAt = staged.Snapshot.At
@@ -541,22 +582,22 @@ func (s *Service) TakeOver(ctx context.Context, b Backend, a TakeOverArgs, p Pro
 	closeNet := func() error { return b.Network(context.WithoutCancel(ctx), false) }
 	p(35, "Starting the standby NetBird server")
 	if err := b.AppUp(ctx); err != nil {
-		undo(stop, unstage)
+		undo(stop, unstage, unfence)
 		return nil, fmt.Errorf("the standby didn't start: %w", err)
 	}
 	p(50, "Opening the NetBird ports and pointing this server at its own standby")
 	if err := b.Network(ctx, true); err != nil {
-		undo(stop, unstage)
+		undo(stop, unstage, unfence)
 		return nil, fmt.Errorf("the firewall couldn't be opened: %w", err)
 	}
 	p(60, "Pointing "+st.Hostname+" at this server in Cloudflare")
-	if err := b.DNSSet(ctx, "A", set.PublicIPv4); err != nil {
-		undo(closeNet, stop, unstage)
+	if err := b.DNSSet(ctx, "A", st.PublicIPv4); err != nil {
+		undo(closeNet, stop, unstage, unfence)
 		return nil, fmt.Errorf("DNS wasn't changed: %w", err)
 	}
 	rec.DNSChanged = true
-	if set.PublicIPv6 != "" {
-		if err := b.DNSSet(ctx, "AAAA", set.PublicIPv6); err != nil {
+	if st.PublicIPv6 != "" {
+		if err := b.DNSSet(ctx, "AAAA", st.PublicIPv6); err != nil {
 			// The A record already points here: keep the standby running.
 			rec.Notes = append(rec.Notes, "The AAAA record couldn't be set ("+clip(err.Error(), 200)+"); IPv6 clients may still go to the VPS.")
 		}
@@ -564,8 +605,11 @@ func (s *Service) TakeOver(ctx context.Context, b Backend, a TakeOverArgs, p Pro
 	if err := s.saveTakeover(ctx, rec); err != nil {
 		return rec, err
 	}
-	p(75, "Waiting for peers to reconnect (DNS TTL is 60 s)")
+	p(75, "Waiting for peers to reconnect")
 	s.watchPeers(ctx, b, rec, p)
+	if rec.PeersTotal > rec.PeersConnected {
+		rec.Notes = append(rec.Notes, "Peers keep their gRPC connection to the old address until it drops; with the VPS fenced that is at once, otherwise it can take until they restart.")
+	}
 	p(100, "HardyOS has taken over")
 	return rec, s.saveTakeover(context.WithoutCancel(ctx), rec)
 }
@@ -624,10 +668,12 @@ type HandBackResult struct {
 }
 
 // HandBack gives the NetBird server back to the VPS (decision 427): the VPS
-// must answer and allow restore; the standby stops, its databases go to the
-// VPS (which keeps its own copy first), DNS goes back, the ports close and
-// the staged state is removed. A failure before DNS changed starts the
-// standby again.
+// must answer, be armed for hand-back by a person there, and run at least
+// the standby's NetBird version; the standby stops, its databases go to the
+// VPS (which checks them, keeps its own copy and rolls back by itself on
+// failure), DNS goes back, the ports close and the staged state is removed.
+// Once the VPS has the state, a later failure keeps the standby stopped and
+// a second Hand back only retries what's left.
 func (s *Service) HandBack(ctx context.Context, b Backend, a HandBackArgs, p Progress) (*HandBackResult, error) {
 	if p == nil {
 		p = func(float64, string) {}
@@ -646,20 +692,27 @@ func (s *Service) HandBack(ctx context.Context, b Backend, a HandBackArgs, p Pro
 	}
 	out := &HandBackResult{Notes: []string{}}
 	rec, _ := s.Takeover(ctx)
-	if !a.Discard {
+	if rec == nil {
+		rec = &TakeoverRecord{DNSChanged: true, Notes: []string{}}
+	}
+	done := rec.HandedBack || rec.Discarded
+	if !done && !a.Discard {
 		p(5, "Asking the VPS how it is")
 		vs, err := b.VPS(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("the VPS doesn't answer, so it can't take NetBird back yet: %w", err)
 		}
-		if !vs.RestoreAllowed {
+		if !vs.HandbackInstalled {
 			return nil, &Problem{Msg: "the VPS doesn't allow hand-back: run HardyOS's VPS script there again with --allow-handback"}
+		}
+		if !vs.RestoreAllowed {
+			return nil, &Problem{Msg: "arm the hand-back on the VPS first: run 'hardyos-netbird-standby-root arm-restore 2h' there as root"}
 		}
 		if vs.Hostname != "" && vs.Hostname != st.Hostname {
 			return nil, &Problem{Msg: "the VPS is set up for " + vs.Hostname + ", not " + st.Hostname}
 		}
-		if note, _ := VersionNote(vs.Version); note != "" {
-			out.Notes = append(out.Notes, note)
+		if c, ok := CompareVersions(vs.Version, StandbyVersion); ok && c < 0 {
+			return nil, &Problem{Msg: "the VPS runs NetBird " + vs.Version + ", older than the standby's " + StandbyVersion + " (which may have moved the database forward): update netbird-server on the VPS first"}
 		}
 	}
 	p(15, "Stopping the standby")
@@ -671,20 +724,49 @@ func (s *Service) HandBack(ctx context.Context, b Backend, a HandBackArgs, p Pro
 			out.Notes = append(out.Notes, "The standby didn't start again: "+clip(err.Error(), 200))
 		}
 	}
-	if !a.Discard {
-		p(30, "Sending the standby's NetBird state to the VPS (it keeps a copy of its own first)")
+	switch {
+	case done:
+		out.Notes = append(out.Notes, "The VPS already has the state from the earlier hand-back; finishing the remaining steps.")
+	case a.Discard:
+		p(30, "Starting the VPS's NetBird server again (unfence)")
+		if err := b.Fence(ctx, false); err != nil {
+			out.Notes = append(out.Notes, "The VPS's netbird-server couldn't be started from here ("+clip(err.Error(), 200)+"): start it on the VPS (docker start netbird-server).")
+		}
+		rec.Discarded = true
+		_ = s.saveTakeover(context.WithoutCancel(ctx), rec)
+	default:
+		p(30, "Sending the standby's NetBird state to the VPS (it checks it and keeps a copy of its own first)")
 		res, err := b.Handback(ctx, st.Hostname)
 		if err != nil {
+			// The VPS rolled back to its own copy and started it: stop it
+			// again, so only one server runs, then bring the standby back.
+			msg := "the VPS didn't take the state back"
+			if ferr := b.Fence(context.WithoutCancel(ctx), true); ferr != nil {
+				msg += "; TWO NETBIRD SERVERS MAY BE RUNNING (the VPS on its old copy, and this standby): the VPS couldn't be fenced again (" + clip(ferr.Error(), 120) + ")"
+			}
 			restart()
-			return nil, fmt.Errorf("the VPS didn't take the state back (the standby is running again): %w", err)
+			return out, fmt.Errorf("%s. The standby is running again: %w", msg, err)
 		}
 		out.VPSMessage, out.Bytes = res.Message, res.Bytes
+		rec.HandedBack = true
+		_ = s.saveTakeover(context.WithoutCancel(ctx), rec)
 	}
-	if rec == nil || rec.DNSChanged {
+	if rec.DNSChanged {
 		p(70, "Pointing "+st.Hostname+" back at the VPS")
-		if err := b.DNSRestore(ctx); err != nil {
-			restart()
-			return nil, fmt.Errorf("DNS couldn't be put back (the standby is running again; the VPS has the state too, so set the record in Cloudflare by hand or try again): %w", err)
+		var derr error
+		for i := 0; i < 3; i++ {
+			if derr = b.DNSRestore(ctx); derr == nil {
+				break
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(s.retryDelay()):
+			}
+		}
+		if derr != nil {
+			// The VPS has the state and runs: keep the standby stopped, so
+			// there is never a second server; Hand back again retries DNS.
+			return out, fmt.Errorf("the VPS runs NetBird again, but %s still points at this server and the standby is stopped, so peers can't connect until DNS is fixed: press Hand back again or set the record in Cloudflare: %w", st.Hostname, derr)
 		}
 	}
 	p(85, "Closing the standby's ports")
@@ -698,4 +780,11 @@ func (s *Service) HandBack(ctx context.Context, b Backend, a HandBackArgs, p Pro
 	_ = s.saveTakeover(context.WithoutCancel(ctx), nil)
 	p(100, "The VPS runs NetBird again")
 	return out, nil
+}
+
+func (s *Service) retryDelay() time.Duration {
+	if s.RetryDelay > 0 {
+		return s.RetryDelay
+	}
+	return 10 * time.Second
 }

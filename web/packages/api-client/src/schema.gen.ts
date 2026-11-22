@@ -5710,6 +5710,12 @@ export interface components {
             /** Format: date-time */
             takenOverAt?: string;
             networkOpen: boolean;
+            /** @description The only IPv4 address DNS may point the name at (root's) */
+            publicIPv4: string;
+            publicIPv6: string;
+            from: string[];
+            /** @description A sealed copy of the last hand-back is kept until the next good sync */
+            handbackCopy: boolean;
         };
         NBStandbySnapshot: {
             id: string;
@@ -5728,6 +5734,8 @@ export interface components {
             peers: number;
             setupKeys: number;
             files: string[];
+            /** @description The VPS's id for this snapshot; a hand-back must name it */
+            generation: string;
             bytes: number;
             sha256: string;
             /** Format: date-time */
@@ -5801,6 +5809,8 @@ export interface components {
             confirm: string;
             /** @description Exactly the record ids the preview showed */
             ids: string[];
+            /** @description The Cloudflare token pasted again (compared by hardyd-priv with the saved one) */
+            token: string;
         };
         NBStandbyTakeover: {
             /** Format: date-time */
@@ -5811,6 +5821,10 @@ export interface components {
             finalSync: boolean;
             finalSyncError?: string;
             dnsChanged: boolean;
+            /** @description The VPS's server was stopped for the take-over */
+            fenced: boolean;
+            handedBack?: boolean;
+            discarded?: boolean;
             ipv4: string;
             ipv6?: string;
             peersTotal: number;
@@ -5840,10 +5854,14 @@ export interface components {
             /** @description Make a new SSH key (run the VPS script again) */
             newKey?: boolean;
             settings: components["schemas"]["NBStandbySettings"];
+            /** @description The NetBird name, typed, when the public address changes (400 confirm_required otherwise) */
+            addressConfirm?: string;
         };
         NBStandbyScript: {
             script: string;
             fileName: string;
+            /** @description HardyOS's key fingerprint, to compare with the VPS script's output and hardyctl netbird-standby fingerprint */
+            fingerprint: string;
         };
         NBStandbyVPSStatus: {
             running: boolean;
@@ -5851,12 +5869,22 @@ export interface components {
             digest: string;
             image: string;
             hostname: string;
+            /** @description Hand-back installed and armed on the VPS now */
             restoreAllowed: boolean;
+            restoreArmedUntil: string;
+            handbackInstalled: boolean;
+            fenced: boolean;
             time: string;
         };
         NBStandbyInstallRequest: {
             /** @description The pool apps go on */
             pool?: string;
+        };
+        NBStandbyDNSForgetRequest: {
+            /** @description The adopted name */
+            confirm: string;
+            /** @description The Cloudflare token pasted again */
+            token: string;
         };
         NBStandbyConfirm: {
             /** @description The NetBird server's name (or the adopted name) */
@@ -5869,6 +5897,8 @@ export interface components {
             acceptVersion?: boolean;
             /** @description Don't try a last copy first */
             skipFinalSync?: boolean;
+            /** @description Take over although the VPS still answers (its server is stopped first) */
+            acceptVpsAlive?: boolean;
         };
         NBStandbyHandbackRequest: {
             /** @description The NetBird server's name */
@@ -15085,7 +15115,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["NBStandbyConfirm"];
+                "application/json": components["schemas"]["NBStandbyDNSForgetRequest"];
             };
         };
         responses: {

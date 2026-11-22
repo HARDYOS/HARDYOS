@@ -77,7 +77,14 @@ type Manifest struct {
 	Peers     int               `json:"peers"`
 	SetupKeys int               `json:"setupKeys"`
 	Files     map[string]string `json:"files"` // entry -> SHA-256 (hex)
+	// Generation is a random id the VPS records for every snapshot it
+	// serves; a hand-back must name a recent one (decision 427).
+	Generation string `json:"generation"`
+	// Fenced: the VPS's server was stopped for a take-over.
+	Fenced bool `json:"fenced"`
 }
+
+var generationRE = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 // Info is what a checked snapshot tells (no secrets).
 type Info struct {
@@ -90,6 +97,8 @@ type Info struct {
 	Peers     int      `json:"peers"`
 	SetupKeys int      `json:"setupKeys"`
 	Files     []string `json:"files"`
+	// Generation is the VPS's id for this snapshot ("" from an older script).
+	Generation string `json:"generation"`
 	// Bytes is the tar's size; SHA256 its hash.
 	Bytes  int64  `json:"bytes"`
 	SHA256 string `json:"sha256"`
@@ -282,6 +291,12 @@ func (c *checked) finish(man *Manifest, wantHost string) error {
 	if strings.ToLower(man.Hostname) != wantHost {
 		return fmt.Errorf("the snapshot is of %q, not %s", clip(man.Hostname, 80), wantHost)
 	}
+	if man.Fenced {
+		return errors.New("the VPS's NetBird server is fenced (stopped for a take-over): hand back first")
+	}
+	if man.Generation != "" && !generationRE.MatchString(man.Generation) {
+		return errors.New("the snapshot's generation id isn't valid")
+	}
 	if man.Engine != "sqlite" {
 		return fmt.Errorf("the VPS's NetBird store is %q: only SQLite is supported", clip(man.Engine, 20))
 	}
@@ -306,7 +321,8 @@ func (c *checked) finish(man *Manifest, wantHost string) error {
 		return fmt.Errorf("config.yaml is for %q, not %s", clip(host, 80), wantHost)
 	}
 	c.info = Info{Created: man.Created.UTC(), Hostname: wantHost, Image: clip(man.Image, 200), Digest: clip(man.Digest, 100),
-		Version: clip(man.Version, 40), Peers: max(man.Peers, 0), SetupKeys: max(man.SetupKeys, 0), Warnings: warnings}
+		Version: clip(man.Version, 40), Peers: max(man.Peers, 0), SetupKeys: max(man.SetupKeys, 0), Warnings: warnings,
+		Generation: man.Generation}
 	for name := range c.files {
 		c.info.Files = append(c.info.Files, name)
 	}
@@ -567,6 +583,45 @@ func acmeNotAfter(b []byte, host string) (time.Time, bool) {
 		}
 	}
 	return best, !best.IsZero()
+}
+
+// FilterACME keeps only host's certificates in a Traefik acme.json and
+// drops every ACME account (its private key): the standby needs the
+// certificate, never the VPS's Let's Encrypt account (decision 422).
+func FilterACME(b []byte, host string) ([]byte, error) {
+	var store map[string]map[string]json.RawMessage
+	if err := json.Unmarshal(b, &store); err != nil {
+		return nil, errors.New("acme.json isn't Traefik's certificate store")
+	}
+	out := map[string]map[string]any{}
+	for name, res := range store {
+		var certs []struct {
+			Domain struct {
+				Main string   `json:"main"`
+				SANs []string `json:"sans,omitempty"`
+			} `json:"domain"`
+			Certificate string `json:"certificate"`
+			Key         string `json:"key"`
+			Store       string `json:"Store,omitempty"`
+		}
+		if raw, ok := res["Certificates"]; ok && string(raw) != "null" {
+			if err := json.Unmarshal(raw, &certs); err != nil {
+				return nil, errors.New("acme.json's certificates aren't readable")
+			}
+		}
+		kept := []any{}
+		for _, c := range certs {
+			match := strings.EqualFold(c.Domain.Main, host)
+			for _, n := range c.Domain.SANs {
+				match = match || strings.EqualFold(n, host)
+			}
+			if match {
+				kept = append(kept, c)
+			}
+		}
+		out[name] = map[string]any{"Certificates": kept}
+	}
+	return json.Marshal(out)
 }
 
 // ---- helpers --------------------------------------------------------------------

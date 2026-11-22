@@ -91,3 +91,11 @@ services:
       options:
         max-size: "50m"
         max-file: "2"
+
+# A fixed subnet (kept for this app by the compose policy): hardyd-priv's
+# firewall drops traffic to it except during a take-over.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.16.253.16/28

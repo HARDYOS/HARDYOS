@@ -120,7 +120,7 @@ func (l *limitedBuffer) Write(p []byte) (int, error) {
 // checks again.
 func (t SSHTarget) Run(ctx context.Context, verb string, stdin io.Reader, stdout io.Writer) error {
 	switch verb {
-	case VerbStatus, VerbSnapshot, VerbRestore:
+	case VerbStatus, VerbSnapshot, VerbRestore, VerbFence, VerbUnfence:
 	default:
 		return fmt.Errorf("unknown verb %q", verb)
 	}

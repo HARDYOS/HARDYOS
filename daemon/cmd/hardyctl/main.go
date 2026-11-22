@@ -48,6 +48,10 @@ Boot (run as root):
   boot-sync [--reinstall]    copy kernels to the boot disks and rewrite the boot menu
                              (runs automatically after kernel and initramfs updates)
 
+NetBird standby (run as root):
+  netbird-standby fingerprint  show HardyOS's VPS key and the VPS host key it trusts,
+                               to compare with what the VPS script prints
+
 Apps:
   app-pack [-o file] <folder>  build a .hardyapp package from a folder (hardyapp.json,
                                compose.yaml, icon); see docs/apps.md
@@ -91,6 +95,8 @@ func main() {
 		err = bootList()
 	case "boot-sync":
 		err = bootSync(args)
+	case "netbird-standby":
+		err = standbyCmd(args)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		flag.Usage()

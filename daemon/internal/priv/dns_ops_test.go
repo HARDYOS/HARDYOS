@@ -13,6 +13,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/cfdns"
 	"github.com/hardyos/hardyos/daemon/internal/cfdns/cftest"
 	"github.com/hardyos/hardyos/daemon/internal/domain"
+	"github.com/hardyos/hardyos/daemon/internal/nbstandby"
 )
 
 const testCFToken = "abcdefghijklmnopqrstuvwxyz0123456789ABCD"
@@ -23,7 +24,7 @@ func dnsServer(t *testing.T) (*Server, *cftest.Server, string, *time.Time) {
 }
 
 // dnsServerWith is dnsServer with the standby's take-over state.
-func dnsServerWith(t *testing.T, takenOver func() (string, bool)) (*Server, *cftest.Server, string, *time.Time) {
+func dnsServerWith(t *testing.T, takenOver func() (nbstandby.TakeOverInfo, bool)) (*Server, *cftest.Server, string, *time.Time) {
 	t.Helper()
 	cf := cftest.New(testCFToken, "example.net")
 	t.Cleanup(cf.Close)

@@ -27,6 +27,8 @@ import (
 
 const testHost = "vpn.example.net"
 
+const testGeneration = "0123456789abcdef0123456789abcdef"
+
 var testConfig = `server:
   listenAddress: ":80"
   exposedAddress: "https://vpn.example.net:443"
@@ -88,7 +90,7 @@ func makeSnapshot(t *testing.T, files snapFiles, edit func(*Manifest)) []byte {
 	t.Helper()
 	m := Manifest{Format: 1, Created: time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC), Hostname: testHost,
 		Image: "netbirdio/netbird-server:0.83.1", Digest: "sha256:f6acc1a6", Version: "0.83.1", Engine: "sqlite", Peers: 7, SetupKeys: 2,
-		Files: map[string]string{}}
+		Generation: testGeneration, Files: map[string]string{}}
 	var names []string
 	for n, b := range files {
 		s := sha256.Sum256(b)
@@ -161,6 +163,9 @@ func (f *fakeVPS) Run(ctx context.Context, verb string, stdin io.Reader, stdout 
 			return ctx.Err()
 		}
 		_, err := stdout.Write(snap)
+		return err
+	case VerbFence, VerbUnfence:
+		_, err := io.WriteString(stdout, verb+"d")
 		return err
 	case VerbRestore:
 		b, err := io.ReadAll(stdin)

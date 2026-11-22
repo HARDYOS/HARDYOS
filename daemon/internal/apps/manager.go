@@ -82,6 +82,9 @@ type Manager struct {
 	// Root prefixes system paths (/etc, /var/lib/hardyos); "/" in
 	// production. App folders come from ZFS mountpoints and are used as-is.
 	Root string
+	// Guard, if set, may refuse changing an app (the NetBird standby while
+	// it has taken over).
+	Guard func(id string) error
 	// StateDir overrides DefaultStateDir (tests).
 	StateDir string
 	// MemTotal reports the server's memory in bytes (tests can fake it).
@@ -757,6 +760,9 @@ func (m *Manager) Prepare(ctx context.Context, a PrepareArgs) (*PrepareResult, e
 	}
 	pkg, err := ReadPackage(a.Package)
 	if err != nil {
+		return nil, err
+	}
+	if err := m.guard(pkg.Manifest.ID); err != nil {
 		return nil, err
 	}
 	m.mu.Lock()
@@ -1544,6 +1550,9 @@ type RemoveArgs struct {
 func (m *Manager) Remove(ctx context.Context, a RemoveArgs) error {
 	if err := ValidID(a.ID); err != nil {
 		return Problems{err.Error()}
+	}
+	if err := m.guard(a.ID); err != nil {
+		return err
 	}
 	c, err := m.engine()
 	if err != nil {

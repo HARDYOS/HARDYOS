@@ -2217,7 +2217,7 @@ User guide: [netbird-standby.md](netbird-standby.md); plan
 ```
  VPS (vpn.<domain>)                          HardyOS
  netbird-server + dashboard + traefik        hardyd-priv ── ssh (pinned host key, root's ed25519 key)
-   ▲ forced command, user hardyos-standby  ◄──┘  verbs: status | snapshot | restore (opt-in)
+   ▲ forced command, user hardyos-standby  ◄──┘  verbs: status | snapshot | fence | unfence | restore (opt-in; restore armed on the VPS)
    │ sudo <root script> <verb> only               ▼
    │                                        keys/netbird-standby/snap-*.sealed (AES-256-GCM chunks)
    │                                              │ take-over: stage into the stopped app
@@ -2239,8 +2239,9 @@ User guide: [netbird-standby.md](netbird-standby.md); plan
   opens the ports only while taken over.
 - **DNS** (`priv/dns_ops.go`): `dns.record.set` registered; one adopted
   standby name (`dns.standby.preview|adopt|restore|forget`) inside the
-  token's zone, A/AAAA to public addresses only, originals restored on
-  hand-back.
+  token's zone (adopted with the token pasted again), A/AAAA only during a
+  take-over and only to the public address root keeps, originals restored
+  on hand-back.
 - **hardyd** (`internal/nbstandby/service.go`, `api/handlers_nbstandby.go`):
   settings and history (`nbstandby_syncs`, migration 0130), the schedule
   and stale alerts (`RunNetBirdStandby`), take-over and hand-back as jobs

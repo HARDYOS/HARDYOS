@@ -5,12 +5,12 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"net/netip"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -20,6 +20,7 @@ import (
 
 	"github.com/hardyos/hardyos/daemon/internal/cfdns"
 	"github.com/hardyos/hardyos/daemon/internal/domain"
+	"github.com/hardyos/hardyos/daemon/internal/nbstandby"
 	"github.com/hardyos/hardyos/daemon/internal/rootfile"
 )
 
@@ -125,6 +126,21 @@ type DNSStandbyAdoptArgs struct {
 	Name    string   `json:"name"`
 	Confirm string   `json:"confirm"`
 	IDs     []string `json:"ids"`
+	// Token is the Cloudflare token pasted again: adopting or forgetting a
+	// name needs the person who holds it, not only hardyd.
+	Token string `json:"token"`
+}
+
+// DNSStandbyForgetArgs stops managing the standby name.
+type DNSStandbyForgetArgs struct {
+	Confirm string `json:"confirm"`
+	Token   string `json:"token"`
+}
+
+// DNSStandbyRestoreResult says what restore did.
+type DNSStandbyRestoreResult struct {
+	Restored int      `json:"restored"`
+	Skipped  []string `json:"skipped"`
 }
 
 // DNSRecordState is a record dns.record.set made.
@@ -188,9 +204,11 @@ type DNSEnv struct {
 	// Now is the clock (tests).
 	Now func() time.Time
 	// StandbyTakenOver reports whether the NetBird standby has taken over,
-	// and for which name (nbstandby.TakenOver); the standby name can be
-	// pointed at this server only then. nil: never.
-	StandbyTakenOver func() (string, bool)
+	// for which name and with which public addresses (nbstandby.TakenOver,
+	// root's own state): the standby name can be pointed at exactly those
+	// addresses only then, and adopted or forgotten only otherwise. nil:
+	// never taken over.
+	StandbyTakenOver func() (nbstandby.TakeOverInfo, bool)
 }
 
 type dnsState struct {
@@ -683,34 +701,15 @@ func (d *dnsOps) setRecord(ctx context.Context, a DNSRecordSetArgs) (any, error)
 	if err != nil {
 		return nil, Errorf(CodeBadArgs, "%v", err)
 	}
-	adopted := map[string]bool{}
-	if standby {
-		// The standby's name is the NetBird server's: only this server's
-		// public address, never a CNAME or an address on a private network.
-		if typ == "CNAME" {
-			return nil, Errorf(CodeBadArgs, "the NetBird standby's name takes A and AAAA records only")
-		}
-		if !publicAddress(content) {
-			return nil, Errorf(CodeBadArgs, "%s isn't a public address", content)
-		}
-		// Only during a take-over root itself staged, for that name: a
-		// request at any other time (hardyd compromised) is refused.
-		if d.env.StandbyTakenOver == nil {
-			return nil, Errorf(CodeForbidden, "the NetBird standby hasn't taken over")
-		}
-		if host, ok := d.env.StandbyTakenOver(); !ok || host != name {
-			return nil, Errorf(CodeForbidden, "the NetBird standby hasn't taken over %s", name)
-		}
-		for _, r := range st.Standby.Adopted {
-			adopted[r.ID] = true
-		}
-	}
 	ttl := a.TTL
 	if ttl == 0 {
 		ttl = 1
 	}
 	if ttl != 1 && (ttl < 60 || ttl > 86400) {
 		return nil, Errorf(CodeBadArgs, "ttl must be 1 (automatic) or 60-86400 seconds")
+	}
+	if standby {
+		return d.setStandbyRecord(ctx, st, name, typ, content, ttl)
 	}
 	cl, err := d.client(st)
 	if err != nil {
@@ -731,7 +730,7 @@ func (d *dnsOps) setRecord(ctx context.Context, a DNSRecordSetArgs) (any, error)
 		if !strings.EqualFold(cfdns.Normalize(e.Name), name) {
 			continue
 		}
-		mine := (e.Comment == cfdns.Comment && ours[e.ID]) || adopted[e.ID]
+		mine := e.Comment == cfdns.Comment && ours[e.ID]
 		if !mine {
 			// Someone else's record (or one only claiming to be HardyOS's)
 			// holds the name: never changed or deleted by HardyOS.
@@ -798,31 +797,8 @@ func dropRecord(rs []DNSRecordState, id string) []DNSRecordState {
 	return out
 }
 
-// publicAddress reports whether an A/AAAA content is an internet address
-// (not private, CGNAT, link-local or another special range).
-func publicAddress(s string) bool {
-	a, err := netip.ParseAddr(s)
-	if err != nil {
-		return false
-	}
-	a = a.Unmap()
-	if !a.IsGlobalUnicast() || a.IsPrivate() || a.IsLinkLocalUnicast() {
-		return false
-	}
-	for _, p := range nonPublic {
-		if p.Contains(a) {
-			return false
-		}
-	}
-	return true
-}
-
-var nonPublic = []netip.Prefix{
-	netip.MustParsePrefix("100.64.0.0/10"), // CGNAT (and NetBird's own network)
-	netip.MustParsePrefix("192.0.0.0/24"),
-	netip.MustParsePrefix("198.18.0.0/15"),
-	netip.MustParsePrefix("64:ff9b:1::/48"),
-}
+// publicAddress reports whether an A/AAAA content is an internet address.
+func publicAddress(s string) bool { return nbstandby.PublicAddrAny(s) }
 
 // standbyName checks a name for the NetBird standby: in the token's zone
 // (strictly under its apex: never the zone itself), ordinary labels only,
@@ -878,7 +854,7 @@ func registerStandbyDNS(s *Server, d *dnsOps) {
 	s.Handle(OpDNSStandbyRestore, func(ctx context.Context, _ json.RawMessage) (any, error) {
 		return d.restoreStandby(ctx)
 	})
-	s.Handle(OpDNSStandbyForget, typed(func(ctx context.Context, a DNSTokenClearArgs) (any, error) {
+	s.Handle(OpDNSStandbyForget, typed(func(ctx context.Context, a DNSStandbyForgetArgs) (any, error) {
 		d.mu.Lock()
 		defer d.mu.Unlock()
 		st, err := d.load()
@@ -888,8 +864,14 @@ func registerStandbyDNS(s *Server, d *dnsOps) {
 		if st.Standby == nil {
 			return st.status(), nil
 		}
+		if d.takenOver() {
+			return nil, Errorf(CodeForbidden, "the NetBird standby has taken over: hand back first")
+		}
 		if cfdns.Normalize(a.Confirm) != st.Standby.Name {
 			return nil, Errorf(CodeBadArgs, "type the name (%s) to forget it", st.Standby.Name)
+		}
+		if err := d.sameToken(st, a.Token); err != nil {
+			return nil, err
 		}
 		var keep []DNSRecordState
 		for _, r := range st.Records {
@@ -953,6 +935,12 @@ func (d *dnsOps) adoptStandby(ctx context.Context, a DNSStandbyAdoptArgs) (any, 
 	if cfdns.Normalize(a.Confirm) != name {
 		return nil, Errorf(CodeBadArgs, "type the name (%s) to let HardyOS change its records", name)
 	}
+	if d.takenOver() {
+		return nil, Errorf(CodeForbidden, "the NetBird standby has taken over: hand back first")
+	}
+	if err := d.sameToken(st, a.Token); err != nil {
+		return nil, err
+	}
 	if st.Standby != nil {
 		// Adopting again could record HardyOS's own address as the
 		// "original": forget the old adoption first (after a hand-back).
@@ -994,8 +982,10 @@ func (d *dnsOps) adoptStandby(ctx context.Context, a DNSStandbyAdoptArgs) (any, 
 	return st.status(), nil
 }
 
-// restoreStandby puts the adopted records back as they were and deletes
-// records HardyOS added at the name.
+// restoreStandby puts the adopted records back as they were, and deletes
+// records HardyOS added at the name, but only while the standby has taken
+// over (the hand-back's step) and only records that still hold the address
+// HardyOS set: anything someone changed by hand since is left alone.
 func (d *dnsOps) restoreStandby(ctx context.Context) (any, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -1006,22 +996,39 @@ func (d *dnsOps) restoreStandby(ctx context.Context) (any, error) {
 	if st.Standby == nil {
 		return nil, Errorf(CodeBadArgs, "there is no standby name")
 	}
+	sb := st.Standby
+	info, ok := d.takeOverInfo()
+	if !ok || info.Host != sb.Name {
+		return nil, Errorf(CodeForbidden, "the NetBird standby hasn't taken over %s", sb.Name)
+	}
+	ours := func(typ, content string) bool {
+		c := cfdns.Normalize(content)
+		return (typ == "A" && info.IPv4 != "" && c == info.IPv4) || (typ == "AAAA" && info.IPv6 != "" && c == strings.ToLower(info.IPv6))
+	}
 	cl, err := d.client(st)
 	if err != nil {
 		return nil, err
 	}
-	sb := st.Standby
+	current, err := cl.Records(ctx, st.ZoneID, "", sb.Name)
+	if err != nil {
+		return nil, cfFailed(err)
+	}
+	byID := map[string]cfdns.Record{}
+	for _, r := range current {
+		if strings.EqualFold(cfdns.Normalize(r.Name), sb.Name) {
+			byID[r.ID] = r
+		}
+	}
+	res := DNSStandbyRestoreResult{Skipped: []string{}}
 	adopted := map[string]bool{}
 	for i, r := range sb.Adopted {
 		adopted[r.ID] = true
 		proxied := r.Proxied
 		rec := cfdns.Record{Type: r.Type, Name: sb.Name, Content: r.Content, TTL: r.TTL, Proxied: &proxied, Comment: r.Comment}
-		if err := cl.Update(ctx, st.ZoneID, r.ID, rec); err != nil {
-			if !isNotFound(err) {
-				return nil, cfFailed(err)
-			}
-			// Gone (HardyOS changed the name's type, or someone deleted
-			// it): make it again.
+		cur, exists := byID[r.ID]
+		switch {
+		case !exists:
+			// Gone (someone deleted it): make the VPS's record again.
 			made, err := cl.Create(ctx, st.ZoneID, rec)
 			if err != nil {
 				return nil, cfFailed(err)
@@ -1029,6 +1036,14 @@ func (d *dnsOps) restoreStandby(ctx context.Context) (any, error) {
 			delete(adopted, r.ID)
 			sb.Adopted[i].ID = made.ID
 			adopted[made.ID] = true
+			res.Restored++
+		case cur.Type != r.Type || !ours(cur.Type, cur.Content):
+			res.Skipped = append(res.Skipped, fmt.Sprintf("%s %s now points at %s, not the address HardyOS set: left as it is", sb.Name, clipType(cur.Type), clipName(cur.Content)))
+		default:
+			if err := cl.Update(ctx, st.ZoneID, r.ID, rec); err != nil {
+				return nil, cfFailed(err)
+			}
+			res.Restored++
 		}
 	}
 	var keep []DNSRecordState
@@ -1040,14 +1055,136 @@ func (d *dnsOps) restoreStandby(ctx context.Context) (any, error) {
 		if adopted[r.ID] {
 			continue
 		}
-		if err := cl.Delete(ctx, st.ZoneID, r.ID); err != nil && !isNotFound(err) {
-			return nil, cfFailed(err)
+		if cur, exists := byID[r.ID]; exists {
+			if !ours(cur.Type, cur.Content) {
+				res.Skipped = append(res.Skipped, fmt.Sprintf("a record HardyOS added for %s was changed by hand: left as it is", sb.Name))
+				continue
+			}
+			if err := cl.Delete(ctx, st.ZoneID, r.ID); err != nil && !isNotFound(err) {
+				return nil, cfFailed(err)
+			}
 		}
 	}
 	st.Records = keep
 	if err := d.save(st); err != nil {
 		return nil, Errorf(CodeFailed, "dns state: %v", err)
 	}
-	slog.Info("dns standby name restored", "name", sb.Name)
-	return st.status(), nil
+	slog.Info("dns standby name restored", "name", sb.Name, "restored", res.Restored, "skipped", len(res.Skipped))
+	return res, nil
+}
+
+func (d *dnsOps) takeOverInfo() (nbstandby.TakeOverInfo, bool) {
+	if d.env.StandbyTakenOver == nil {
+		return nbstandby.TakeOverInfo{}, false
+	}
+	return d.env.StandbyTakenOver()
+}
+
+func (d *dnsOps) takenOver() bool {
+	_, ok := d.takeOverInfo()
+	return ok
+}
+
+// sameToken checks a token pasted again against the sealed one.
+func (d *dnsOps) sameToken(st *dnsState, pasted string) error {
+	tok, err := d.open(st)
+	if err != nil {
+		return Errorf(CodeUnavailable, "%v", err)
+	}
+	if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(pasted)), []byte(tok)) != 1 {
+		return Errorf(CodeBadArgs, "that isn't the Cloudflare token saved in Control Panel › Hostnames: paste the same token")
+	}
+	return nil
+}
+
+// setStandbyRecord points the standby name at this server during a take-over
+// (decision 424): only while root's standby has taken over that name, only to
+// the public address root keeps for it, A or AAAA. Every adopted (or
+// HardyOS-made) record of that type is changed; records of the other type
+// are never deleted, and a name with someone else's record is refused.
+func (d *dnsOps) setStandbyRecord(ctx context.Context, st *dnsState, name, typ, content string, ttl int) (any, error) {
+	if typ != "A" && typ != "AAAA" {
+		return nil, Errorf(CodeBadArgs, "the NetBird standby's name takes A and AAAA records only")
+	}
+	info, ok := d.takeOverInfo()
+	if !ok || info.Host != name {
+		return nil, Errorf(CodeForbidden, "the NetBird standby hasn't taken over %s", name)
+	}
+	want := info.IPv4
+	if typ == "AAAA" {
+		want = strings.ToLower(info.IPv6)
+	}
+	if want == "" || content != want || !publicAddress(content) {
+		return nil, Errorf(CodeForbidden, "%s may only point at this server's public address set in the standby (%s)", name, want)
+	}
+	cl, err := d.client(st)
+	if err != nil {
+		return nil, err
+	}
+	existing, err := cl.Records(ctx, st.ZoneID, "", name)
+	if err != nil {
+		return nil, cfFailed(err)
+	}
+	mine := map[string]bool{}
+	for _, r := range st.Standby.Adopted {
+		mine[r.ID] = true
+	}
+	for _, r := range st.Records {
+		if r.Name == name {
+			mine[r.ID] = true
+		}
+	}
+	var same []cfdns.Record
+	for _, e := range existing {
+		if !strings.EqualFold(cfdns.Normalize(e.Name), name) {
+			continue
+		}
+		if !mine[e.ID] {
+			return nil, Errorf(CodeFailed, "another record (%s) uses %s in Cloudflare; HardyOS leaves it alone", clipType(e.Type), name)
+		}
+		if e.Type == typ {
+			same = append(same, e)
+		}
+	}
+	no := false
+	rec := cfdns.Record{Type: typ, Name: name, Content: content, TTL: ttl, Proxied: &no, Comment: cfdns.Comment}
+	res := DNSRecordSetResult{Action: "unchanged"}
+	if len(same) == 0 {
+		made, err := cl.Create(ctx, st.ZoneID, rec)
+		if err != nil {
+			return nil, cfFailed(err)
+		}
+		res.ID, res.Action = made.ID, "created"
+		st.Records = append(dropRecord(st.Records, made.ID), DNSRecordState{ID: made.ID, Name: name, Type: typ, Content: content, SetAt: d.env.Now().UTC()})
+	}
+	for _, e := range same {
+		if res.ID == "" {
+			res.ID = e.ID
+		}
+		if cfdns.Normalize(e.Content) == content && e.TTL == ttl && e.Proxied != nil && !*e.Proxied {
+			continue
+		}
+		if err := cl.Update(ctx, st.ZoneID, e.ID, rec); err != nil {
+			return nil, cfFailed(err)
+		}
+		res.Action = "updated"
+	}
+	if err := d.save(st); err != nil {
+		return nil, Errorf(CodeFailed, "dns state: %v", err)
+	}
+	slog.Info("dns standby name set", "name", name, "type", typ, "content", content, "action", res.Action)
+	return res, nil
+}
+
+// StandbyDNSName is the adopted NetBird standby name in root's DNS state
+// ("" when none): the standby's hostname can't move away from it.
+func StandbyDNSName(keyDir string) string {
+	d := &dnsOps{env: DNSEnv{KeyDir: keyDir}}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	st, err := d.load()
+	if err != nil || st.Standby == nil {
+		return ""
+	}
+	return st.Standby.Name
 }

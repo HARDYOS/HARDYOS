@@ -35,13 +35,18 @@ function status(over: Partial<NBStandbyStatus> = {}): NBStandbyStatus {
             bytes: 1024,
             sha256: "x",
             warnings: [],
+            generation: "00112233445566778899aabbccddeeff",
           },
         },
       ],
       mode: "standby",
       networkOpen: false,
+      publicIPv4: "93.184.215.14",
+      publicIPv6: "",
+      from: ["100.64.0.5"],
+      handbackCopy: false,
     },
-    settings: { intervalMinutes: 15, autoSync: true, publicIPv4: "203.0.113.5", publicIPv6: "", connectFrom: ["100.64.0.5"] },
+    settings: { intervalMinutes: 15, autoSync: true, publicIPv4: "93.184.215.14", publicIPv6: "", connectFrom: ["100.64.0.5"] },
     health: { state: "ok", stale: false, staleAfterMinutes: 75 },
     history: [],
     app: { installed: true, state: "stopped", version: "0.83.1" },
@@ -71,9 +76,10 @@ function status(over: Partial<NBStandbyStatus> = {}): NBStandbyStatus {
 
 describe("NetBird standby rules", () => {
   it("checks addresses and keys", () => {
-    expect(isPublicIPv4("203.0.113.5")).toBe(true);
-    for (const a of ["192.168.1.2", "10.1.1.1", "172.20.0.1", "100.100.0.1", "127.0.0.1", "300.1.1.1", "1.2.3"]) expect(isPublicIPv4(a)).toBe(false);
-    expect(isPublicIPv6("2001:db8::1")).toBe(true);
+    expect(isPublicIPv4("93.184.215.14")).toBe(true);
+    for (const a of ["203.0.113.5", "198.51.100.7", "192.0.2.1", "192.168.1.2", "10.1.1.1", "172.20.0.1", "100.100.0.1", "127.0.0.1", "300.1.1.1", "1.2.3"]) expect(isPublicIPv4(a)).toBe(false);
+    expect(isPublicIPv6("2606:4700:4700::1111")).toBe(true);
+    expect(isPublicIPv6("2001:db8::1")).toBe(false);
     expect(isPublicIPv6("fd00::1")).toBe(false);
     expect(looksLikeHostKey(HOSTKEY)).toBe(true);
     expect(looksLikeHostKey("vps.example.net " + HOSTKEY)).toBe(true);
@@ -82,7 +88,7 @@ describe("NetBird standby rules", () => {
   });
 
   it("checks the form", () => {
-    const f = { hostname: "vpn.example.net", vpsHost: "vps.example.net", vpsPort: "22", vpsUser: "hardyos-standby", hostKey: HOSTKEY, publicIPv4: "203.0.113.5", publicIPv6: "", intervalMinutes: "15", connectFrom: "100.64.0.5" };
+    const f = { hostname: "vpn.example.net", vpsHost: "vps.example.net", vpsPort: "22", vpsUser: "hardyos-standby", hostKey: HOSTKEY, publicIPv4: "93.184.215.14", publicIPv6: "", intervalMinutes: "15", connectFrom: "100.64.0.5" };
     expect(formProblems(f)).toEqual([]);
     expect(formProblems({ ...f, hostname: "vpn" })).toHaveLength(1);
     expect(formProblems({ ...f, publicIPv4: "192.168.1.5" })).toHaveLength(1);
@@ -151,7 +157,7 @@ describe("NetBirdStandby", () => {
     fireEvent.click(submit);
     await waitFor(() => expect(calls.some((c) => c.path === "/netbird-standby/takeover")).toBe(true));
     const sent = calls.find((c) => c.path === "/netbird-standby/takeover")!;
-    expect(sent.body).toEqual({ confirm: "vpn.example.net", acceptVersion: false });
+    expect(sent.body).toEqual({ confirm: "vpn.example.net", acceptVersion: false, acceptVpsAlive: false });
   });
 
   it("hands back only with the split-brain warning ticked", async () => {
@@ -160,7 +166,7 @@ describe("NetBirdStandby", () => {
       health: { state: "takenover", stale: false, staleAfterMinutes: 75 },
       connection: { ...status().connection!, mode: "takenover", networkOpen: true },
       app: { installed: true, state: "running", version: "0.83.1" },
-      takeover: { at: "2026-11-21T12:00:00Z", by: "cade", snapshotAt: "2026-11-21T11:50:00Z", finalSync: false, dnsChanged: true, ipv4: "203.0.113.5", peersTotal: 7, peersConnected: 6, notes: [] },
+      takeover: { at: "2026-11-21T12:00:00Z", by: "cade", snapshotAt: "2026-11-21T11:50:00Z", finalSync: false, dnsChanged: true, fenced: true, ipv4: "93.184.215.14", peersTotal: 7, peersConnected: 6, notes: [] },
     });
     serve(st, calls);
     renderPage();
