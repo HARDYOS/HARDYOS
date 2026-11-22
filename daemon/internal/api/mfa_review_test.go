@@ -40,11 +40,11 @@ func TestInsideAddresses(t *testing.T) {
 	// From a container (or the router) a domain password doesn't work for
 	// mail even without two-factor sign-in.
 	mp := mailPasswords{s: s}
-	docker := mail.WithSignIn(context.Background(), mail.From(netip.MustParseAddr("172.17.0.5"), false), mail.ScopeMail)
+	docker := mail.WithSignIn(context.Background(), mail.From(netip.MustParseAddr("172.17.0.5"), false), mail.SignInMail)
 	if _, err := mp.CheckDomainPassword(docker, "alice", alicePW); err == nil {
 		t.Fatal("mail password accepted from a Docker network")
 	}
-	lan := mail.WithSignIn(context.Background(), mail.From(netip.MustParseAddr("192.168.1.20"), false), mail.ScopeMail)
+	lan := mail.WithSignIn(context.Background(), mail.From(netip.MustParseAddr("192.168.1.20"), false), mail.SignInMail)
 	if _, err := mp.CheckDomainPassword(lan, "alice", alicePW); err != nil {
 		t.Fatalf("mail password at home without 2FA: %v", err)
 	}

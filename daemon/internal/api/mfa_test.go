@@ -443,9 +443,9 @@ func TestAppPasswordsForServices(t *testing.T) {
 	// Mail: the same rule through the password check behind Dovecot.
 	mp := mailPasswords{s: e.server}
 	alice.do("POST", "/api/v1/auth/app-passwords", map[string]any{"name": "Phone mail", "scopes": []string{"mail"}, "password": alicePW}, &made)
-	inside := mail.WithSignIn(context.Background(), mail.From(netip.MustParseAddr("192.168.1.20"), false), mail.ScopeMail)
-	internet := mail.WithSignIn(context.Background(), mail.From(netip.MustParseAddr("192.168.1.20"), true), mail.ScopeMail)
-	calendars := mail.WithSignIn(context.Background(), mail.From(netip.MustParseAddr("192.168.1.20"), false), mail.ScopeCalendars)
+	inside := mail.WithSignIn(context.Background(), mail.From(netip.MustParseAddr("192.168.1.20"), false), mail.SignInMail)
+	internet := mail.WithSignIn(context.Background(), mail.From(netip.MustParseAddr("192.168.1.20"), true), mail.SignInMail)
+	calendars := mail.WithSignIn(context.Background(), mail.From(netip.MustParseAddr("192.168.1.20"), false), mail.SignInCalendars)
 	if _, err := mp.CheckDomainPassword(inside, "alice", alicePW); err == nil {
 		t.Fatal("mail password with 2FA accepted")
 	}

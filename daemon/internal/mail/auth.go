@@ -72,8 +72,8 @@ func From(a netip.Addr, forced bool) Source {
 // Scopes of a sign-in, for app passwords (auth.ScopeMail and
 // auth.ScopeCalendars).
 const (
-	ScopeMail      = "mail"
-	ScopeCalendars = "calendars"
+	SignInMail      = "mail"
+	SignInCalendars = "calendars"
 )
 
 type signInKey struct{}
@@ -575,7 +575,7 @@ func (s *AuthServer) token(w http.ResponseWriter, r *http.Request) {
 		bad()
 		return
 	}
-	ctx, cancel := context.WithTimeout(WithSignIn(r.Context(), From(remote, forced), ScopeMail), 20*time.Second)
+	ctx, cancel := context.WithTimeout(WithSignIn(r.Context(), From(remote, forced), SignInMail), 20*time.Second)
 	defer cancel()
 	if err := s.Checker.CheckLogin(ctx, login, pw); err != nil {
 		if !errors.Is(err, ErrBadLogin) {

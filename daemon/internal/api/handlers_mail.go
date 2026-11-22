@@ -1075,7 +1075,7 @@ func (s *Server) handleMailDAV(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	ctx, cancel := context.WithTimeout(mail.WithSignIn(r.Context(), src, mail.ScopeCalendars), 20*time.Second)
+	ctx, cancel := context.WithTimeout(mail.WithSignIn(r.Context(), src, mail.SignInCalendars), 20*time.Second)
 	err := svc.CheckLogin(ctx, login, pw)
 	cancel()
 	if svc.Throttle.ResultDAV(login, src, err == nil) {
@@ -1178,8 +1178,8 @@ func (m mailPasswords) CheckDomainPassword(ctx context.Context, account, passwor
 	// always works; the account's own password only from inside and only
 	// without two-factor sign-in. Without a recorded source, outside.
 	src, scope, known := mail.SignInFrom(ctx)
-	if !known || (scope != mail.ScopeMail && scope != mail.ScopeCalendars) {
-		scope = mail.ScopeMail
+	if !known || (scope != mail.SignInMail && scope != mail.SignInCalendars) {
+		scope = mail.SignInMail
 	}
 	// Inside only from this server's own loopback, LAN and NetBird peers:
 	// Docker's networks (the webmail app's included) are outside here,
