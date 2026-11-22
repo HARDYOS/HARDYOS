@@ -859,11 +859,17 @@ func (m *Manager) checkMedia(ctx context.Context, s *Spec) error {
 	if f.NFS && (len(s.Files()) > 0 || s.NeedsVirtio()) {
 		return Problems{nfsDiscs}
 	}
+	discs := s.Files()
 	for _, name := range files {
 		file, err := openFile(f, name)
 		if err != nil {
 			p = append(p, err.Error())
 			continue
+		}
+		// A disc from the library can't pose as the game streaming disc
+		// (whose setup step finds it by its label; decision 402).
+		if slices.Contains(discs, name) && isoHasLabel(file, StreamingLabel) {
+			p = append(p, fmt.Sprintf("%s is labelled %s, the name of HardyOS's game streaming disc; it can't be attached to a VM", name, StreamingLabel))
 		}
 		file.Close()
 	}

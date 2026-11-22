@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -27,10 +28,11 @@ import (
 
 // apiSunshine is a fake Sunshine for the API tests.
 type apiSunshine struct {
-	mu     sync.Mutex
-	pass   string // learned from the create call
-	pins   []string
-	unpair []string
+	mu      sync.Mutex
+	pass    string // learned from the create call
+	pins    []string
+	unpair  []string
+	waiting string // GET /api/pin's pairings ("" one from the home network)
 }
 
 func (f *apiSunshine) serve(t *testing.T) (*httptest.Server, string, int) {
@@ -51,6 +53,10 @@ func (f *apiSunshine) serve(t *testing.T) (*httptest.Server, string, int) {
 		_, _ = w.Write([]byte(`{"named_certs":[{"name":"TV","uuid":"0123ABCD-0000-1111-2222-333344445555"}],"status":true}`))
 	}))
 	mux.HandleFunc("GET /api/pin", auth(func(w http.ResponseWriter, _ *http.Request) {
+		if f.waiting != "" {
+			_, _ = w.Write([]byte(f.waiting))
+			return
+		}
 		_, _ = w.Write([]byte(`{"pairings":[{"id":"` + strings.Repeat("cd", 16) + `","name":"Deck","address":"192.168.1.30"}]}`))
 	}))
 	mux.HandleFunc("POST /api/pin", auth(func(w http.ResponseWriter, r *http.Request) {
@@ -73,7 +79,7 @@ func (f *apiSunshine) serve(t *testing.T) (*httptest.Server, string, int) {
 	return srv, hex.EncodeToString(sum[:]), p
 }
 
-func newStreamEnv(t *testing.T) (*testEnv, *stubVMs, *apiSunshine) {
+func newStreamEnv(t *testing.T) (*testEnv, *stubVMs, *apiSunshine, *Server) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "t.db"))
@@ -92,7 +98,8 @@ func newStreamEnv(t *testing.T) (*testEnv, *stubVMs, *apiSunshine) {
 	stub.register(ps)
 	ps.Handle(priv.OpVMsStreamingInfo, func(_ context.Context, raw json.RawMessage) (any, error) {
 		stub.rec(priv.OpVMsStreamingInfo, raw)
-		return vms.StreamingInfo{Address: "127.0.0.1", User: vms.SunshineUser, CertSHA256: pin, NetBirdAddress: "100.92.1.2"}, nil
+		return vms.StreamingInfo{Address: "127.0.0.1", User: vms.SunshineUser, CertSHA256: pin, NetBirdAddress: "100.92.1.2", BridgeAddress: "192.168.1.10",
+			Peers: []string{}, NetBirdPeers: []vms.NetBirdPeer{{IP: "100.92.0.5", Name: "deck", Connected: true}, {IP: "100.92.0.9", Name: "proxy"}}, NetBirdKernel: true}, nil
 	})
 	ps.Handle(priv.OpVMsStreamingPublish, func(_ context.Context, raw json.RawMessage) (any, error) {
 		stub.rec(priv.OpVMsStreamingPublish, raw)
@@ -114,15 +121,16 @@ func newStreamEnv(t *testing.T) (*testEnv, *stubVMs, *apiSunshine) {
 		t.Fatal(err)
 	}
 	upd := &updates.Service{Priv: pc, Jobs: m, DB: db, Dir: t.TempDir(), Notify: &notify.Center{DB: db, Events: broker}}
-	srv := httptest.NewServer(New(Config{DB: db, Jobs: m, Events: broker, Priv: pc, Insecure: true, Updates: upd,
-		StreamingClient: &streaming.Client{AllowLoopback: true, Port: port}}))
+	api := New(Config{DB: db, Jobs: m, Events: broker, Priv: pc, Insecure: true, Updates: upd,
+		StreamingClient: &streaming.Client{AllowLoopback: true, Port: port}})
+	srv := httptest.NewServer(api)
 	t.Cleanup(func() {
 		srv.Close()
 		cancel()
 		m.Wait()
 		db.Close()
 	})
-	return &testEnv{srv: srv, db: db, broker: broker}, stub, sun
+	return &testEnv{srv: srv, db: db, broker: broker}, stub, sun, api
 }
 
 func gamingRequest() VMCreateRequest {
@@ -143,7 +151,7 @@ type jobAccepted struct {
 }
 
 func TestVMStreamingAPI(t *testing.T) {
-	env, stub, sun := newStreamEnv(t)
+	env, stub, sun, srv := newStreamEnv(t)
 	admin := env.client(t)
 	admin.do("POST", "/api/v1/setup/admin", map[string]string{"username": "cade", "password": "supersecret1"}, nil)
 	admin.do("POST", "/api/v1/users", map[string]string{"username": "kid", "password": "kidpassword1"}, nil)
@@ -257,6 +265,36 @@ func TestVMStreamingAPI(t *testing.T) {
 		t.Fatal("pairing isn't audited")
 	}
 
+	// Two devices waiting: refused (the PIN could go to the wrong one).
+	sun.mu.Lock()
+	sun.waiting = `{"pairings":[{"id":"` + strings.Repeat("cd", 16) + `","name":"Deck","address":"192.168.1.30"},{"id":"` + strings.Repeat("ef", 16) + `","name":"X","address":"192.168.1.31"}]}`
+	sun.mu.Unlock()
+	if code := admin.do("POST", "/api/v1/vms/game/streaming/pair", VMStreamingPairRequest{PairingID: strings.Repeat("cd", 16), PIN: "4821", Name: "Steam Deck"}, &acc); code != 202 {
+		t.Fatalf("pair = %d", code)
+	}
+	if j := waitJobDone(t, admin, acc.Job.ID); j["state"] != "failed" || !strings.Contains(j["error"].(string), "one at a time") {
+		t.Fatalf("two waiting: %v", j)
+	}
+	// Through NetBird (Sunshine sees the server's address): flagged, and
+	// pairing needs a confirmation.
+	sun.mu.Lock()
+	sun.waiting = `{"pairings":[{"id":"` + strings.Repeat("cd", 16) + `","name":"Deck","address":"192.168.1.10"}]}`
+	sun.mu.Unlock()
+	if code := admin.do("GET", "/api/v1/vms/game/streaming", nil, &st); code != 200 || len(st.Waiting) != 1 || !st.Waiting[0].ViaNetBird {
+		t.Fatalf("via netbird: %+v", st.Waiting)
+	}
+	admin.do("POST", "/api/v1/vms/game/streaming/pair", VMStreamingPairRequest{PairingID: strings.Repeat("cd", 16), PIN: "4821", Name: "Steam Deck"}, &acc)
+	if j := waitJobDone(t, admin, acc.Job.ID); j["state"] != "failed" || !strings.Contains(j["error"].(string), "came through NetBird") {
+		t.Fatalf("netbird without confirm: %v", j)
+	}
+	admin.do("POST", "/api/v1/vms/game/streaming/pair", VMStreamingPairRequest{PairingID: strings.Repeat("cd", 16), PIN: "4821", Name: "Steam Deck", ConfirmRemote: true}, &acc)
+	if j := waitJobDone(t, admin, acc.Job.ID); j["state"] != "succeeded" {
+		t.Fatalf("netbird confirmed: %v", j)
+	}
+	sun.mu.Lock()
+	sun.waiting = ""
+	sun.mu.Unlock()
+
 	// Unpair.
 	if code := admin.do("POST", "/api/v1/vms/game/streaming/unpair", VMStreamingUnpairRequest{UUID: "../x"}, nil); code != 400 {
 		t.Fatalf("bad uuid = %d", code)
@@ -271,12 +309,25 @@ func TestVMStreamingAPI(t *testing.T) {
 	}
 	sun.mu.Unlock()
 
-	// NetBird publishing goes to root's op.
-	if code := admin.do("PUT", "/api/v1/vms/game/streaming/remote", VMStreamingRemoteRequest{Enabled: true}, &acc); code != 202 {
+	// NetBird publishing: chosen devices only, never NetBird's proxy.
+	if code := admin.do("PUT", "/api/v1/vms/game/streaming/remote", VMStreamingRemoteRequest{Enabled: true}, nil); code != 400 {
+		t.Fatalf("remote without devices = %d", code)
+	}
+	if code := admin.do("PUT", "/api/v1/vms/game/streaming/remote", VMStreamingRemoteRequest{Enabled: true, Peers: []string{"100.92.0.0/16"}}, nil); code != 400 {
+		t.Fatalf("remote to a network = %d", code)
+	}
+	srv.remote.sawProxy(netip.MustParseAddr("100.92.0.9"))
+	if code := admin.do("PUT", "/api/v1/vms/game/streaming/remote", VMStreamingRemoteRequest{Enabled: true, Peers: []string{"100.92.0.9"}}, nil); code != 400 {
+		t.Fatalf("remote to the proxy = %d", code)
+	}
+	if code := admin.do("GET", "/api/v1/vms/game/streaming", nil, &st); code != 200 || len(st.NetBirdPeers) != 2 || !st.NetBirdPeers[1].Proxy || st.NetBirdPeers[0].Proxy || !st.NetBirdKernel {
+		t.Fatalf("peers: %+v", st.NetBirdPeers)
+	}
+	if code := admin.do("PUT", "/api/v1/vms/game/streaming/remote", VMStreamingRemoteRequest{Enabled: true, Peers: []string{"100.92.0.5"}}, &acc); code != 202 {
 		t.Fatalf("remote = %d", code)
 	}
 	waitJobDone(t, admin, acc.Job.ID)
-	if c := stub.called(priv.OpVMsStreamingPublish); len(c) != 1 || !strings.Contains(c[0], `"enabled":true`) {
+	if c := stub.called(priv.OpVMsStreamingPublish); len(c) != 1 || !strings.Contains(c[0], `"enabled":true`) || !strings.Contains(c[0], `"peers":["100.92.0.5"]`) {
 		t.Fatalf("publish calls %v", c)
 	}
 

@@ -253,8 +253,11 @@ func (c *Client) do(ctx context.Context, t Target, method, path string, body, ou
 			Error string `json:"error"`
 		}
 		_ = json.Unmarshal(b, &e)
-		if e.Error != "" && len(e.Error) < 200 {
-			return fmt.Errorf("Sunshine said: %s", e.Error)
+		if msg := clip(e.Error); msg != "" {
+			if r := []rune(msg); len(r) > 200 {
+				msg = string(r[:200])
+			}
+			return fmt.Errorf("Sunshine said: %s", msg)
 		}
 		return fmt.Errorf("Sunshine answered %d", res.StatusCode)
 	}

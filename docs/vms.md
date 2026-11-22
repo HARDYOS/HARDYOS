@@ -293,7 +293,8 @@ off). While Windows installs, HardyOS also installs, at the first sign-in:
 
 Both are downloaded by HardyOS (not inside Windows), checked against the
 checksums HardyOS ships, and handed to Windows on a small read-only disc that
-is deleted when the install is done. The log of the setup is in
+is deleted when the install is done; Windows only runs HardyOS's setup
+script from it after checking the script's checksum. The log of the setup is in
 `C:\ProgramData\HardyOS\streaming-setup.log` in the VM.
 
 Then, in Windows, **install your graphics card's driver** (NVIDIA, AMD or
@@ -306,23 +307,35 @@ installed so the card joins (see *Windows* above).
 Open the VM's **Overview**: the **Game streaming** card says whether Sunshine
 answers. In Moonlight, pick the VM (it finds it on the home network) or add
 it by the address shown. Moonlight shows a 4-digit PIN; the device appears
-under **Pair a device**: click **Enter its PIN**, type it, done. Paired
-devices are listed with an **unpair** button. Only administrators can pair or
-unpair, and every pairing is logged.
+under **Pair a device**: click **Enter its PIN**, type it, done. Pair one
+device at a time: if two are waiting, HardyOS refuses (the PIN could go to
+the wrong one). Pair at home: a device that comes in through NetBird looks
+to Sunshine like the server itself, so it's marked *Through NetBird* and
+you have to confirm it's yours. Paired devices are listed with an
+**unpair** button. Only administrators can pair or unpair, and every
+pairing is logged.
 
-Sunshine's own page (`https://localhost:47990` in the VM, or
-`https://<the VM's address>:47990` at home) uses the account HardyOS made;
-**Show the password** asks for your HardyOS password first (and is logged).
+Sunshine's own page answers only inside the VM (`https://localhost:47990`)
+and HardyOS (a Windows Firewall rule lets in only the server's home network
+address). It uses the account HardyOS made; **Show the password** asks for
+your HardyOS password first (and is logged). If the server's address on the
+home network changes later, the card says so: HardyOS can't reach Sunshine
+until the rule `HardyOS-Sunshine-WebUI` in the VM's Windows Firewall names
+the new address (or the VM is made again).
 
 ### Away from home
 
-Turn on **Play away from home over NetBird** (remote access must be set up).
-HardyOS then forwards Sunshine's streaming ports (TCP 47984, 47989, 48010; UDP
-47998-48000, 48002, 48010) from the server's NetBird address to the VM, for
-your NetBird devices only and never from the internet; Sunshine's web page is
-never forwarded. In Moonlight away from home, add the NetBird address the card
-shows. The forwarding is there only while the VM runs and NetBird is
-connected, and only one VM can be published at a time (Moonlight uses fixed
+Turn on **Play away from home over NetBird** (remote access must be set up)
+and tick the NetBird devices that may play (your phone, your laptop; none
+are ticked until you choose, and NetBird's reverse proxy can't be chosen).
+HardyOS then forwards Sunshine's streaming ports (TCP 47984, 47989, 48010;
+UDP 47998-48000, 48002, 48010) from the server's NetBird address to the VM,
+for those devices only and never from the internet; Sunshine's web page is
+never forwarded. NetBird's own access policies don't limit these forwarded
+ports, so the ticked list is what decides. In Moonlight away from home, add
+the NetBird address the card shows. The forwarding is there only while the
+VM runs and NetBird is connected, goes away when HardyOS's root helper
+stops, and only one VM can be published at a time (Moonlight uses fixed
 ports).
 
 ### A VM HardyOS didn't set up

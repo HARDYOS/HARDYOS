@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -90,11 +91,36 @@ type VMStreamingStatus struct {
 	AccountKept bool                 `json:"accountKept"`
 	RevealedAt  string               `json:"revealedAt,omitempty"`
 	Devices     []streaming.Device   `json:"devices"`
-	Waiting     []streaming.Pending  `json:"waiting"`
+	Waiting     []VMStreamingWaiting `json:"waiting"`
 	Remote      bool                 `json:"remote"`
 	Forwarding  bool                 `json:"forwarding"`
 	NetBird     string               `json:"netbirdAddress,omitempty"`
 	Ports       VMStreamingPortsInfo `json:"ports"`
+	// Peers are the NetBird devices streaming is forwarded from (none
+	// until chosen); NetBirdPeers what this server sees, to choose from.
+	Peers         []string            `json:"peers"`
+	NetBirdPeers  []VMStreamingNBPeer `json:"netbirdPeers"`
+	NetBirdKernel bool                `json:"netbirdKernel"`
+	// BridgeAddress is this server's home network address: what Sunshine
+	// sees as the client for every device forwarded from NetBird.
+	BridgeAddress string `json:"bridgeAddress,omitempty"`
+}
+
+// VMStreamingWaiting is a Moonlight device waiting for its PIN.
+type VMStreamingWaiting struct {
+	streaming.Pending
+	// ViaNetBird: it reached Sunshine through the NetBird forwarding
+	// (Sunshine sees this server's address), so HardyOS can't tell which
+	// device it is; pair at home instead, or confirm.
+	ViaNetBird bool `json:"viaNetBird"`
+}
+
+// VMStreamingNBPeer is a NetBird device streaming can be published to.
+type VMStreamingNBPeer struct {
+	vms.NetBirdPeer
+	// Proxy: NetBird's reverse proxy came from this address; it can't be
+	// chosen.
+	Proxy bool `json:"proxy"`
 }
 
 // VMStreamingPortsInfo lists what's forwarded over NetBird.
@@ -136,7 +162,7 @@ func (s *Server) handleVMStreaming(w http.ResponseWriter, r *http.Request, _ *au
 	}
 	st := VMStreamingStatus{
 		SetUp: v.StreamingSetUp(), InstallPending: v.InstallPending(), Running: v.State == "running", HasGPU: v.HasGPU(),
-		Devices: []streaming.Device{}, Waiting: []streaming.Pending{},
+		Devices: []streaming.Device{}, Waiting: []VMStreamingWaiting{}, Peers: []string{}, NetBirdPeers: []VMStreamingNBPeer{},
 		Ports: VMStreamingPortsInfo{TCP: vmsPortsTCP(), UDP: vmsPortsUDP()},
 	}
 	if !st.SetUp {
@@ -149,6 +175,11 @@ func (s *Server) handleVMStreaming(w http.ResponseWriter, r *http.Request, _ *au
 	t, info, err := s.streamTarget(r.Context(), v.ID)
 	if info != nil {
 		st.Address, st.Forwarding, st.NetBird = info.Address, info.Forwarding, info.NetBirdAddress
+		st.Peers, st.NetBirdKernel, st.BridgeAddress = append(st.Peers, info.Peers...), info.NetBirdKernel, info.BridgeAddress
+		proxies := s.remote.knownProxies()
+		for _, p := range info.NetBirdPeers {
+			st.NetBirdPeers = append(st.NetBirdPeers, VMStreamingNBPeer{NetBirdPeer: p, Proxy: proxies[p.IP]})
+		}
 	}
 	if err != nil {
 		st.Problem = err.Error()
@@ -166,7 +197,9 @@ func (s *Server) handleVMStreaming(w http.ResponseWriter, r *http.Request, _ *au
 	}
 	st.Reachable, st.Devices = true, devs
 	if waiting, err := s.stream.client.Waiting(r.Context(), *t); err == nil {
-		st.Waiting = waiting
+		for _, w := range waiting {
+			st.Waiting = append(st.Waiting, VMStreamingWaiting{Pending: w, ViaNetBird: info != nil && viaNetBird(w, info.BridgeAddress)})
+		}
 	}
 	if info != nil && info.Problem != "" {
 		st.Problem = info.Problem
@@ -243,17 +276,27 @@ func (s *Server) handleVMStreamingReveal(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusOK, VMStreamingAccount{User: acct.User, Password: acct.Password})
 }
 
+// viaNetBird: Sunshine saw the pairing come from this server's own home
+// network address, which is what the NetBird forwarding's masquerade looks
+// like (decision 406).
+func viaNetBird(p streaming.Pending, bridge string) bool {
+	return bridge != "" && strings.TrimPrefix(p.Address, "::ffff:") == bridge
+}
+
 // VMStreamingPairRequest gives Sunshine a waiting Moonlight device's PIN.
+// ConfirmRemote is needed for a device that came through NetBird.
 type VMStreamingPairRequest struct {
-	PairingID string `json:"pairingId"`
-	PIN       string `json:"pin"`
-	Name      string `json:"name"`
+	PairingID     string `json:"pairingId"`
+	PIN           string `json:"pin"`
+	Name          string `json:"name"`
+	ConfirmRemote bool   `json:"confirmRemote,omitempty"`
 }
 
 type vmStreamPairParams struct {
-	ID        string `json:"id"`
-	PairingID string `json:"pairingId"`
-	Name      string `json:"name"`
+	ID            string `json:"id"`
+	PairingID     string `json:"pairingId"`
+	Name          string `json:"name"`
+	ConfirmRemote bool   `json:"confirmRemote,omitempty"`
 	// PINRef: the PIN waits in jobSecrets (job parameters are history).
 	PINRef string `json:"pinRef"`
 }
@@ -284,7 +327,7 @@ func (s *Server) handleVMStreamingPair(w http.ResponseWriter, r *http.Request, u
 	if !ok {
 		return
 	}
-	p := vmStreamPairParams{ID: v.ID, PairingID: req.PairingID, Name: req.Name, PINRef: jobSecrets.put(req.PIN)}
+	p := vmStreamPairParams{ID: v.ID, PairingID: req.PairingID, Name: req.Name, ConfirmRemote: req.ConfirmRemote, PINRef: jobSecrets.put(req.PIN)}
 	s.submit(w, r, u, JobKindVMStreamPair, "Pair "+req.Name+" with "+v.Name, p, "vms.streaming.pair", v.ID+" device="+req.Name, nil)
 }
 
@@ -315,9 +358,10 @@ func (s *Server) handleVMStreamingUnpair(w http.ResponseWriter, r *http.Request,
 }
 
 // VMStreamingRemoteRequest publishes (or stops publishing) the streaming
-// ports to NetBird peers.
+// ports to the chosen NetBird devices (their addresses).
 type VMStreamingRemoteRequest struct {
-	Enabled bool `json:"enabled"`
+	Enabled bool     `json:"enabled"`
+	Peers   []string `json:"peers,omitempty"`
 }
 
 func (s *Server) handleVMStreamingRemote(w http.ResponseWriter, r *http.Request, u *auth.User) {
@@ -330,10 +374,29 @@ func (s *Server) handleVMStreamingRemote(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	title := "Stop streaming " + v.Name + " to NetBird devices"
+	peers := []string{}
 	if req.Enabled {
 		title = "Stream " + v.Name + " to NetBird devices"
+		if len(req.Peers) == 0 || len(req.Peers) > vms.MaxStreamPeers {
+			writeError(w, http.StatusBadRequest, "invalid", fmt.Sprintf("choose 1 to %d NetBird devices to stream to", vms.MaxStreamPeers))
+			return
+		}
+		proxies := s.remote.knownProxies()
+		for _, p := range req.Peers {
+			a, err := netip.ParseAddr(p)
+			if err != nil || !a.Is4() || a.String() != p {
+				writeError(w, http.StatusBadRequest, "invalid", fmt.Sprintf("%q isn't a NetBird device's address", p))
+				return
+			}
+			if proxies[p] {
+				writeError(w, http.StatusBadRequest, "invalid", p+" is NetBird's reverse proxy; game streaming is never forwarded to it")
+				return
+			}
+		}
+		peers = req.Peers
 	}
-	s.submit(w, r, u, JobKindVMStreamRemote, title, vms.StreamingPublishArgs{ID: v.ID, Enabled: req.Enabled}, "vms.streaming.publish", fmt.Sprintf("%s enabled=%t", v.ID, req.Enabled), nil)
+	s.submit(w, r, u, JobKindVMStreamRemote, title, vms.StreamingPublishArgs{ID: v.ID, Enabled: req.Enabled, Peers: peers}, "vms.streaming.publish",
+		fmt.Sprintf("%s enabled=%t devices=%s", v.ID, req.Enabled, strings.Join(peers, ",")), nil)
 }
 
 func (s *Server) registerVMStreamingJobs(m *jobs.Manager, pc *priv.Client) {
@@ -356,9 +419,22 @@ func (s *Server) registerVMStreamingJobs(m *jobs.Manager, pc *priv.Client) {
 			return nil, errors.New("the PIN was lost (HardyOS restarted); enter it again")
 		}
 		jc.Progress(20, "Reaching Sunshine in the VM")
-		t, err := target(jc, p.ID)
+		t, info, err := s.streamTarget(jc, p.ID)
 		if err != nil {
 			return nil, err
+		}
+		// Exactly one device may be waiting, and it must be the one the
+		// administrator saw (decision 406): a second device knocking at
+		// the same moment could otherwise take the PIN.
+		waiting, err := s.stream.client.Waiting(jc, *t)
+		if err != nil {
+			return nil, err
+		}
+		if len(waiting) != 1 || waiting[0].ID != p.PairingID {
+			return nil, fmt.Errorf("%d devices are waiting to pair; pair one at a time (cancel the others in Moonlight and try again)", len(waiting))
+		}
+		if info != nil && viaNetBird(waiting[0], info.BridgeAddress) && !p.ConfirmRemote {
+			return nil, errors.New("this device came through NetBird, so HardyOS can't tell which device it is; pair it at home, or confirm that it's yours")
 		}
 		jc.Progress(60, "Giving Sunshine the PIN")
 		if err := s.stream.client.Pair(jc, *t, p.PairingID, pin, p.Name); err != nil {

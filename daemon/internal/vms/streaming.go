@@ -14,15 +14,19 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"math/big"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strings"
 	"syscall"
 	"text/template"
 	"time"
+	"unicode/utf16"
 
 	"github.com/hardyos/hardyos/daemon/internal/rootfile"
 )
@@ -54,6 +58,12 @@ type Streaming struct {
 	// sealed); CertSHA256 the SHA-256 of Sunshine's certificate (DER).
 	User       string `json:"user,omitempty"`
 	CertSHA256 string `json:"certSHA256,omitempty"`
+	// Peers are the NetBird devices (addresses) the streaming ports are
+	// forwarded from; none until the administrator chooses (decision 404).
+	Peers []string `json:"peers,omitempty"`
+	// WebUIFrom is the server's home network address the VM's firewall
+	// lets reach Sunshine's web page and API (decision 401).
+	WebUIFrom string `json:"webUIFrom,omitempty"`
 }
 
 // Pinned streaming downloads (decision 402). A new version is a change to
@@ -69,6 +79,10 @@ const (
 	sunshineARM64SHA256 = "1e211404b924fcf421657c71e1aaa95cf1f76e172cacf8ff8430beacc0e30e4a"
 	vddX64SHA256        = "e24210692b442b39af763536330ce78b423f19342b7a7792c26de3944e418b3a"
 	vddARM64SHA256      = "dcd487161469c726bab60f174a7e7f70ee02afd437cad0d5c0e6755953de5a25"
+	// VDDSignerSHA1 is the Windows thumbprint (SHA-1 of the certificate)
+	// of the driver catalogs' signer; the setup script trusts only it,
+	// and CI checks it against the downloaded catalogs.
+	VDDSignerSHA1 = "0000000000000000000000000000000000000000"
 
 	// MediaStreaming is the per-VM streaming disc.
 	MediaStreaming = "streaming"
@@ -121,13 +135,30 @@ var streamingCatalog = []CatalogImage{
 	},
 }
 
-// StreamingCommand runs the setup script from the drive labelled
-// HARDYOS_STREAM (and from nowhere else).
-const StreamingCommand = `powershell -NoProfile -ExecutionPolicy Bypass -Command "$v = Get-Volume | Where-Object { $_.DriveType -eq 'CD-ROM' -and $_.FileSystemLabel -eq '` + StreamingLabel + `' } | Select-Object -First 1; if ($v) { & ($v.DriveLetter + ':\setup.ps1') }"`
+// StreamingCommand runs the setup script from the one drive labelled
+// HARDYOS_STREAM (none or two: nothing runs), only if the script's SHA-256
+// is the one HardyOS made for this architecture.
+func StreamingCommand(scriptSHA256 string) string {
+	return `powershell -NoProfile -ExecutionPolicy Bypass -Command "$v = @(Get-Volume | Where-Object { $_.DriveType -eq 'CD-ROM' -and $_.FileSystemLabel -eq '` + StreamingLabel +
+		`' }); if ($v.Count -eq 1) { $f = $v[0].DriveLetter + ':\setup.ps1'; if ((Get-FileHash -Algorithm SHA256 -LiteralPath $f).Hash -eq '` + scriptSHA256 + `') { & $f } }"`
+}
+
+// catalogArch is the catalog's name for a Windows architecture.
+func catalogArch(winArch string) string {
+	if winArch == "arm64" {
+		return "aarch64"
+	}
+	return "x86_64"
+}
 
 func init() {
-	RegisterFirstLogonHook(StreamingHook, func(HookVM) []LogonCommand {
-		return []LogonCommand{{Description: "Game streaming: Sunshine and a virtual display (HardyOS)", CommandLine: StreamingCommand}}
+	RegisterFirstLogonHook(StreamingHook, func(vm HookVM) []LogonCommand {
+		script, err := setupScriptFor(catalogArch(vm.Arch))
+		if err != nil {
+			return nil
+		}
+		sum := sha256.Sum256(script)
+		return []LogonCommand{{Description: "Game streaming: Sunshine and a virtual display (HardyOS)", CommandLine: StreamingCommand(hex.EncodeToString(sum[:]))}}
 	})
 }
 
@@ -155,6 +186,19 @@ func (st *Streaming) problems(s *Spec) []string {
 	}
 	if st.Sunshine && s.OS != "windows" {
 		p = append(p, "HardyOS sets Sunshine up in Windows VMs only")
+	}
+	if len(st.Peers) > MaxStreamPeers {
+		p = append(p, fmt.Sprintf("game streaming goes to at most %d NetBird devices", MaxStreamPeers))
+	}
+	for _, a := range st.Peers {
+		if ip, err := netip.ParseAddr(a); err != nil || !ip.Is4() || ip.String() != a {
+			p = append(p, fmt.Sprintf("%q isn't a NetBird device's address", a))
+		}
+	}
+	if st.WebUIFrom != "" {
+		if ip, err := netip.ParseAddr(st.WebUIFrom); err != nil || !ip.Is4() || !ip.IsPrivate() || ip.String() != st.WebUIFrom {
+			p = append(p, "the server's home network address for Sunshine isn't a private IPv4 address")
+		}
 	}
 	return p
 }
@@ -242,11 +286,20 @@ func (m *Manager) prepareStreaming(ctx context.Context, s *Spec, password string
 			return nil, err
 		}
 	}
+	// The server's own address on the home network: the only one (with the
+	// VM itself) Sunshine's web page and API answer (decision 401).
+	if m.Network == nil || m.Network.BridgeName() == "" {
+		return nil, Problems{"the home network's bridge isn't set up yet"}
+	}
+	brAddr, err := m.bridgeIPv4(ctx, m.Network.BridgeName())
+	if err != nil || !brAddr.Addr().IsPrivate() {
+		return nil, Problems{"game streaming needs this server to have a private IPv4 address on the home network's bridge"}
+	}
 	certPEM, keyPEM, fp, err := newSunshineCert(m.now())
 	if err != nil {
 		return nil, err
 	}
-	s.Streaming = &Streaming{Sunshine: true, User: SunshineUser, CertSHA256: fp}
+	s.Streaming = &Streaming{Sunshine: true, User: SunshineUser, CertSHA256: fp, WebUIFrom: brAddr.Addr().String()}
 	return &streamKit{certPEM: certPEM, keyPEM: keyPEM, password: password}, nil
 }
 
@@ -311,18 +364,25 @@ func (m *Manager) catalogFilePath(ctx context.Context, pool, id string) (string,
 	return filepath.Join(c.dir, cf.File), nil
 }
 
-// SetupScriptVars are what the setup script is made from: constants and
-// values that passed their patterns.
+// SetupScriptVars are what the setup script is made from: constants only
+// (per-VM values are in hardyos-streaming.json on the disc, checked by the
+// script), so its SHA-256 per architecture is known to the first-logon
+// command.
 type SetupScriptVars struct {
-	Label, Name                                   string
+	Label, VDDSigner                              string
 	SunshineVersion, SunshineFile, SunshineSHA256 string
 	VDDVersion, VDDFile, VDDSHA256                string
 }
 
+var (
+	scriptFileRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
+	sha1HexRE    = regexp.MustCompile(`^[0-9A-F]{40}$`)
+)
+
 // SetupScript is the PowerShell script on the streaming disc.
 func SetupScript(v SetupScriptVars) ([]byte, error) {
-	for _, s := range []string{v.Name, v.SunshineFile, v.VDDFile} {
-		if !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`).MatchString(s) {
+	for _, s := range []string{v.Label, v.SunshineFile, v.VDDFile, v.SunshineVersion, v.VDDVersion} {
+		if !scriptFileRE.MatchString(s) {
 			return nil, fmt.Errorf("%q can't go into the setup script", s)
 		}
 	}
@@ -330,6 +390,9 @@ func SetupScript(v SetupScriptVars) ([]byte, error) {
 		if !hex64RE.MatchString(s) {
 			return nil, errors.New("the setup script needs SHA-256 checksums")
 		}
+	}
+	if !sha1HexRE.MatchString(v.VDDSigner) {
+		return nil, errors.New("the setup script needs the driver signer's thumbprint")
 	}
 	var b bytes.Buffer
 	if err := setupScript.Execute(&b, v); err != nil {
@@ -340,31 +403,48 @@ func SetupScript(v SetupScriptVars) ([]byte, error) {
 	return bytes.ReplaceAll(b.Bytes(), []byte("\n"), []byte("\r\n")), nil
 }
 
-// streamingFiles are the streaming disc's own files (besides the two
-// downloads), for writeStreaming and tests.
-func (m *Manager) streamingFiles(s *Spec, kit *streamKit) (map[string][]byte, error) {
-	_, sf, err := m.catalogFile(CatalogSunshine)
-	if err != nil {
-		return nil, err
+// setupScriptFor is the setup script for an architecture (catalog name),
+// from the pinned streaming catalog: the same bytes for the disc and for
+// the first-logon command's checksum.
+func setupScriptFor(arch string) ([]byte, error) {
+	var sf, vf CatalogFile
+	for _, c := range streamingCatalog {
+		f, ok := c.Files[arch]
+		if !ok {
+			return nil, fmt.Errorf("game streaming isn't available for %s", arch)
+		}
+		switch c.ID {
+		case CatalogSunshine:
+			sf = f
+		case CatalogVDD:
+			vf = f
+		}
 	}
-	_, vf, err := m.catalogFile(CatalogVDD)
-	if err != nil {
-		return nil, err
-	}
-	script, err := SetupScript(SetupScriptVars{
-		Label: StreamingLabel, Name: s.ID,
+	return SetupScript(SetupScriptVars{
+		Label: StreamingLabel, VDDSigner: VDDSignerSHA1,
 		SunshineVersion: SunshineVersion, SunshineFile: sf.File, SunshineSHA256: sf.SHA256,
 		VDDVersion: VDDVersion, VDDFile: vf.File, VDDSHA256: vf.SHA256,
 	})
+}
+
+// streamingFiles are the streaming disc's own files (besides the two
+// downloads), for writeStreaming and tests.
+func (m *Manager) streamingFiles(s *Spec, kit *streamKit) (map[string][]byte, error) {
+	script, err := setupScriptFor(m.arch().Arch)
 	if err != nil {
 		return nil, err
 	}
+	if ValidID(s.ID) != nil || s.Streaming == nil || s.Streaming.WebUIFrom == "" {
+		return nil, errors.New("the VM's streaming settings aren't complete")
+	}
 	acct, _ := json.Marshal(map[string]string{"user": s.Streaming.User, "password": kit.password})
+	vm, _ := json.Marshal(map[string]string{"name": s.ID, "server": s.Streaming.WebUIFrom})
 	return map[string][]byte{
-		"setup.ps1":             script,
-		"sunshine-cert.pem":     kit.certPEM,
-		"sunshine-key.pem":      kit.keyPEM,
-		"sunshine-account.json": acct,
+		"setup.ps1":              script,
+		"hardyos-streaming.json": vm,
+		"sunshine-cert.pem":      kit.certPEM,
+		"sunshine-key.pem":       kit.keyPEM,
+		"sunshine-account.json":  acct,
 	}, nil
 }
 
@@ -455,4 +535,38 @@ func (m *Manager) checkStreamingDisc(s *Spec) error {
 		return errors.New("the game streaming disc isn't QEMU's own file")
 	}
 	return m.ownSeed(p)
+}
+
+// isoHasLabel reports whether an ISO 9660 image's primary or any
+// supplementary (Joliet) volume descriptor names label (case and padding
+// ignored), the way Windows shows a disc's label.
+func isoHasLabel(f io.ReaderAt, label string) bool {
+	want := strings.ToUpper(label)
+	buf := make([]byte, 2048)
+	for i := 16; i < 16+32; i++ {
+		if _, err := f.ReadAt(buf, int64(i)*2048); err != nil {
+			return false
+		}
+		if string(buf[1:6]) != "CD001" {
+			return false
+		}
+		switch buf[0] {
+		case 255: // terminator
+			return false
+		case 1: // primary: d-characters
+			if strings.ToUpper(strings.TrimRight(string(buf[40:72]), " \x00")) == want {
+				return true
+			}
+		case 2: // supplementary: Joliet is UCS-2 big endian
+			raw := buf[40:72]
+			u := make([]uint16, 0, 16)
+			for j := 0; j+1 < len(raw); j += 2 {
+				u = append(u, uint16(raw[j])<<8|uint16(raw[j+1]))
+			}
+			if strings.ToUpper(strings.TrimRight(string(utf16.Decode(u)), " \x00")) == want {
+				return true
+			}
+		}
+	}
+	return false
 }

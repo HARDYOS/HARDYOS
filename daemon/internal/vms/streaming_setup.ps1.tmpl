@@ -1,8 +1,10 @@
-# HardyOS game streaming setup (decisions 400-403). Made by HardyOS and run
-# once, at Windows' first sign-in, from the read-only HARDYOS_STREAM disc.
-# Everything it installs is on that disc and checked by SHA-256 here again
-# (root checked it when it downloaded it); nothing is downloaded in Windows.
-# The Sunshine password is read from the disc and never written to the log.
+# HardyOS game streaming setup (decisions 400-403). Made by
+# HardyOS and run once, at Windows' first sign-in, from the read-only
+# HARDYOS_STREAM disc; the first-logon command checked this script's SHA-256
+# before running it. Everything it installs is on that disc and checked by
+# SHA-256 here again (root checked it when it downloaded it); nothing is
+# downloaded in Windows. The Sunshine password is read from the disc and
+# never written to the log.
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
@@ -11,9 +13,23 @@ New-Item -ItemType Directory -Force -Path $state | Out-Null
 $log = Join-Path $state 'streaming-setup.log'
 function Say([string]$msg) { Add-Content -LiteralPath $log -Value ((Get-Date -Format s) + ' ' + $msg) }
 
-$vol = Get-Volume | Where-Object { $_.DriveType -eq 'CD-ROM' -and $_.FileSystemLabel -eq '{{.Label}}' } | Select-Object -First 1
-if (-not $vol) { Say 'the HardyOS streaming disc is not in a drive'; exit 1 }
-$disc = $vol.DriveLetter + ':\'
+# The Virtual Display Driver's signer (SignPath Foundation), pinned.
+$vddSigner = '{{.VDDSigner}}'
+$untrustMarker = Join-Path $state 'vdd-trusted-publisher'
+$untrustTask = 'HardyOS-VDD-Untrust'
+function Untrust {
+  $s = New-Object System.Security.Cryptography.X509Certificates.X509Store('TrustedPublisher', 'LocalMachine')
+  $s.Open('ReadWrite')
+  try { @($s.Certificates | Where-Object { $_.Thumbprint -eq $vddSigner }) | ForEach-Object { $s.Remove($_) } } finally { $s.Close() }
+  Remove-Item -LiteralPath $untrustMarker -Force -ErrorAction SilentlyContinue
+  & schtasks.exe /Delete /TN $untrustTask /F 2>$null | Out-Null
+}
+# A run that stopped half-way left the signer trusted: take it out first.
+if (Test-Path -LiteralPath $untrustMarker) { Untrust; Say 'removed the driver signer a stopped run had trusted' }
+
+$vols = @(Get-Volume | Where-Object { $_.DriveType -eq 'CD-ROM' -and $_.FileSystemLabel -eq '{{.Label}}' })
+if ($vols.Count -ne 1) { Say "expected one HardyOS streaming disc, found $($vols.Count)"; exit 1 }
+$disc = $vols[0].DriveLetter + ':\'
 
 function Checked([string]$name, [string]$sha) {
   $p = Join-Path $disc $name
@@ -23,6 +39,12 @@ function Checked([string]$name, [string]$sha) {
 }
 
 try {
+  # Per-VM values, checked before use.
+  $vm = Get-Content -Raw -LiteralPath (Join-Path $disc 'hardyos-streaming.json') | ConvertFrom-Json
+  if ($vm.name -notmatch '^[a-z][a-z0-9-]{0,31}$') { throw 'bad VM name on the disc' }
+  $server = $null
+  if (-not [System.Net.IPAddress]::TryParse([string]$vm.server, [ref]$server) -or $server.AddressFamily -ne 'InterNetwork' -or $server.ToString() -ne [string]$vm.server) { throw 'bad server address on the disc' }
+
   # 1. Sunshine {{.SunshineVersion}} (LizardByte's own Windows installer).
   Say 'installing Sunshine {{.SunshineVersion}}'
   $msi = Checked '{{.SunshineFile}}' '{{.SunshineSHA256}}'
@@ -36,31 +58,47 @@ try {
   Get-Service -Name 'Sunshine*' -ErrorAction SilentlyContinue | Stop-Service -Force -ErrorAction SilentlyContinue
 
   # HardyOS's key and certificate, so HardyOS knows it talks to this
-  # Sunshine (it pins the certificate). Only Administrators and SYSTEM may
-  # read the key.
+  # Sunshine (it pins the certificate). The key file is made empty, limited
+  # to Administrators and SYSTEM, and only then written.
   Copy-Item -LiteralPath (Join-Path $disc 'sunshine-cert.pem') -Destination (Join-Path $cfg 'hardyos-cert.pem') -Force
-  Copy-Item -LiteralPath (Join-Path $disc 'sunshine-key.pem') -Destination (Join-Path $cfg 'hardyos-key.pem') -Force
-  & icacls.exe (Join-Path $cfg 'hardyos-key.pem') /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null
+  $key = Join-Path $cfg 'hardyos-key.pem'
+  if (Test-Path -LiteralPath $key) { Remove-Item -LiteralPath $key -Force }
+  New-Item -ItemType File -Path $key | Out-Null
+  & icacls.exe $key /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "limiting the key file failed (icacls $LASTEXITCODE)" }
+  [System.IO.File]::WriteAllBytes($key, [System.IO.File]::ReadAllBytes((Join-Path $disc 'sunshine-key.pem')))
 
   # The configuration HardyOS sets: the web UI answers the local network
-  # only, no UPnP (nothing is opened on the router), IPv4.
+  # only, no UPnP (nothing is opened on the router), IPv4, the standard
+  # ports (HardyOS forwards those). Lines that would change any of it go.
   $conf = Join-Path $cfg 'sunshine.conf'
   $keep = @()
   if (Test-Path -LiteralPath $conf) {
-    $keep = Get-Content -LiteralPath $conf | Where-Object { $_ -notmatch '^\s*(sunshine_name|origin_web_ui_allowed|upnp|address_family|pkey|cert)\s*=' }
+    $keep = Get-Content -LiteralPath $conf | Where-Object { $_ -notmatch '^\s*(sunshine_name|origin_web_ui_allowed|origin_pin_allowed|upnp|address_family|pkey|cert|port|credentials_file|csrf_allowed_origins|external_ip)\s*=' -and $_ -notmatch '^# Set by HardyOS' }
   }
   $lines = $keep + @(
     '# Set by HardyOS (decision 401); change them here only if you know why.',
-    'sunshine_name = {{.Name}}',
+    ('sunshine_name = ' + $vm.name),
     'origin_web_ui_allowed = lan',
     'upnp = disabled',
     'address_family = ipv4',
-    ('pkey = ' + (Join-Path $cfg 'hardyos-key.pem').Replace('\', '/')),
+    ('pkey = ' + $key.Replace('\', '/')),
     ('cert = ' + (Join-Path $cfg 'hardyos-cert.pem').Replace('\', '/'))
   )
   Set-Content -LiteralPath $conf -Value $lines -Encoding ASCII
 
-  # The web UI's account (random, kept sealed by HardyOS).
+  # Sunshine's web page and API (47990) only for this PC and the HardyOS
+  # server: a block rule wins over the installer's allow rules.
+  $s = $server.GetAddressBytes(); [Array]::Reverse($s); $n = [BitConverter]::ToUInt32($s, 0)
+  function Ip([uint32]$v) { $b = [BitConverter]::GetBytes($v); [Array]::Reverse($b); return ([System.Net.IPAddress]$b).ToString() }
+  $ranges = @()
+  if ($n -gt 0) { $ranges += ('0.0.0.0-' + (Ip ($n - 1))) }
+  if ($n -lt [uint32]::MaxValue) { $ranges += ((Ip ($n + 1)) + '-255.255.255.255') }
+  Get-NetFirewallRule -Name 'HardyOS-Sunshine-WebUI' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+  New-NetFirewallRule -Name 'HardyOS-Sunshine-WebUI' -DisplayName 'Sunshine web UI: HardyOS server only (HardyOS)' -Direction Inbound -Protocol TCP -LocalPort 47990 -RemoteAddress $ranges -Action Block -Profile Any | Out-Null
+
+  # The web UI's account (random, kept sealed by HardyOS), set before the
+  # service runs, so nobody on the network can take Sunshine's first-run page.
   $creds = Get-Content -Raw -LiteralPath (Join-Path $disc 'sunshine-account.json') | ConvertFrom-Json
   $c = Start-Process -FilePath $exe -ArgumentList @('--creds', $creds.user, $creds.password) -WorkingDirectory $sun -Wait -PassThru -WindowStyle Hidden
   $creds = $null
@@ -82,16 +120,22 @@ try {
 
   # The driver is signed (SignPath Foundation), not by Microsoft: Windows
   # installs it without a question only while its signer is a trusted
-  # publisher. HardyOS trusts exactly that signing certificate for the
-  # install and takes it out of the store again afterwards.
+  # publisher. HardyOS trusts exactly the pinned signer for the install and
+  # takes it out again afterwards (a marker and a task at the next start
+  # make sure, even if this run stops half-way).
   $sig = Get-AuthenticodeSignature -LiteralPath $cat.FullName
   if ($sig.Status -ne 'Valid') { throw "the driver's catalog signature is $($sig.Status)" }
   $signer = $sig.SignerCertificate
-  if (-not $signer) { throw 'the driver catalog has no signer' }
+  if (-not $signer -or $signer.Thumbprint -ne $vddSigner) { throw "the driver catalog isn't signed by the pinned signer" }
   $store = New-Object System.Security.Cryptography.X509Certificates.X509Store('TrustedPublisher', 'LocalMachine')
   $store.Open('ReadWrite')
-  $had = @($store.Certificates | Where-Object { $_.Thumbprint -eq $signer.Thumbprint }).Count -gt 0
-  if (-not $had) { $store.Add($signer) }
+  $had = @($store.Certificates | Where-Object { $_.Thumbprint -eq $vddSigner }).Count -gt 0
+  if (-not $had) {
+    Set-Content -LiteralPath $untrustMarker -Value $vddSigner -Encoding ASCII
+    & schtasks.exe /Create /TN $untrustTask /SC ONSTART /RU SYSTEM /RL HIGHEST /F /TR ("powershell -NoProfile -Command `"`$s = New-Object System.Security.Cryptography.X509Certificates.X509Store('TrustedPublisher','LocalMachine'); `$s.Open('ReadWrite'); @(`$s.Certificates | Where-Object { `$_.Thumbprint -eq '" + $vddSigner + "' }) | ForEach-Object { `$s.Remove(`$_) }; `$s.Close(); Remove-Item -LiteralPath '" + $untrustMarker + "' -Force -ErrorAction SilentlyContinue; schtasks /Delete /TN " + $untrustTask + " /F`"") | Out-Null
+    $store.Add($signer)
+  }
+  $store.Close()
   try {
     Add-Type -TypeDefinition @'
 using System;
@@ -137,8 +181,7 @@ public static class HardyVdd {
     $exists = @(Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.HardwareID -contains 'Root\MttVDD' }).Count -gt 0
     [HardyVdd]::Install($inf.FullName, 'Root\MttVDD', -not $exists)
   } finally {
-    if (-not $had) { $store.Remove($signer) }
-    $store.Close()
+    if (-not $had) { Untrust }
   }
   Say 'the Virtual Display Driver is installed'
   Set-Content -LiteralPath (Join-Path $state 'streaming-ready') -Value '{{.SunshineVersion}} {{.VDDVersion}}' -Encoding ASCII

@@ -19,29 +19,35 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/rootfile"
 )
 
-// Streaming over NetBird (decisions 404-405). Moonlight reaches a VM's
-// Sunshine on fixed ports, so root forwards those ports (and only those)
-// from this server's NetBird interface, for NetBird addresses only, to the
-// one VM whose streaming is published:
+// Streaming over NetBird (decisions 404-405). Moonlight
+// reaches a VM's Sunshine on fixed ports, so root forwards those ports (and
+// only those) from this server's NetBird interface, for the NetBird devices
+// the administrator chose (none until they choose), to the one VM whose
+// streaming is published:
 //
 //   - nftables (table ip hardyos_streaming): DNAT of the TCP and UDP
-//     streaming ports arriving on the NetBird interface from the NetBird
-//     network for the server's NetBird address, to the VM's address on the
-//     home network, and masquerade so the VM's answers come back through
-//     the server. Sunshine's web UI and API port (47990) is never
-//     forwarded.
+//     streaming ports arriving on the NetBird interface from the chosen
+//     peers' addresses for the server's NetBird address, to the VM's
+//     address on the home network, and masquerade so the VM's answers come
+//     back through the server. Sunshine's web UI and API port (47990) is
+//     never forwarded.
 //   - iptables (chain HARDYOS-STREAM, first in FORWARD): the same
 //     packets accepted, because Docker sets FORWARD's policy to drop.
 //
-// The VM's address is never what the guest says: it's the address the
-// server's own ARP table has for the VM's MAC on the bridge, on the
-// bridge's subnet. The VM's card has the anti-spoofing filter on, so it
-// can't claim another computer's address. The rules follow the VM: set
-// while it runs and its streaming is published and NetBird is connected,
-// gone when it stops, is deleted or the publishing is turned off. Nothing
-// is ever forwarded from any other interface, so the internet never
-// reaches Sunshine through HardyOS. On the home network Moonlight talks to
-// the VM directly (it's bridged).
+// NetBird's own access policies don't apply to these packets in kernel
+// mode (its policy rules sit on the input hook; DNAT happens before, at
+// prerouting, so the packets are forwarded, not delivered): the chosen
+// peer list is the only access control, which is why it's explicit.
+//
+// The VM's address is never what the guest says alone: it's the one
+// address that the server's neighbour table has as REACHABLE for the VM's
+// MAC on the bridge, inside the bridge's subnet, that the guest also
+// reports (when the guest agent runs), and whose MAC the bridge learned on
+// the VM's own tap port. The card has the anti-spoofing filter on.
+// The rules follow the VM: set while it runs, its streaming is published
+// to at least one device and NetBird is connected; gone when it stops, is
+// deleted, publishing is turned off or hardyd-priv stops. Each resync also
+// checks the live ruleset and puts it back if something removed it.
 
 // NetBirdInfo is this server's NetBird state as root sees it.
 type NetBirdInfo struct {
@@ -49,16 +55,31 @@ type NetBirdInfo struct {
 	Interface string // wt0
 	IP        string // this server's NetBird address
 	Network   string // the NetBird network (100.64.0.0/10 or narrower)
+	// Kernel: NetBird uses kernel WireGuard (its policies don't see
+	// forwarded traffic; see above).
+	Kernel bool
+	Peers  []NetBirdPeer
 }
+
+// NetBirdPeer is a NetBird device this server sees.
+type NetBirdPeer struct {
+	IP        string `json:"ip"`
+	Name      string `json:"name"`
+	Connected bool   `json:"connected"`
+}
+
+// MaxStreamPeers bounds the devices one VM is published to.
+const MaxStreamPeers = 32
 
 // StreamForward is one VM's forwarding.
 type StreamForward struct {
 	VM      string
-	Iface   string // NetBird interface
-	PeerNet string // NetBird network
-	HostIP  string // this server's NetBird address
-	Bridge  string // the home network's bridge
-	VMIP    string // the VM's verified address
+	Iface   string   // NetBird interface
+	PeerNet string   // NetBird network (the peers must be in it)
+	Peers   []string // the chosen NetBird devices' addresses
+	HostIP  string   // this server's NetBird address
+	Bridge  string   // the home network's bridge
+	VMIP    string   // the VM's verified address
 }
 
 const (
@@ -86,6 +107,22 @@ func within(p netip.Prefix, outer []netip.Prefix) bool {
 	return false
 }
 
+// checkPeers validates a peer list against the NetBird network.
+func checkPeers(peers []string, network netip.Prefix, host netip.Addr) error {
+	if len(peers) == 0 || len(peers) > MaxStreamPeers {
+		return Problems{fmt.Sprintf("choose 1 to %d NetBird devices to stream to", MaxStreamPeers)}
+	}
+	seen := map[string]bool{}
+	for _, p := range peers {
+		a, err := netip.ParseAddr(p)
+		if err != nil || !a.Is4() || a.String() != p || !network.Contains(a) || a == host || seen[p] {
+			return Problems{fmt.Sprintf("%q isn't another NetBird device's address (listed once)", p)}
+		}
+		seen[p] = true
+	}
+	return nil
+}
+
 // check validates every value that goes into a rule.
 func (f StreamForward) check() error {
 	var p Problems
@@ -102,6 +139,11 @@ func (f StreamForward) check() error {
 	h, err := netip.ParseAddr(f.HostIP)
 	if err != nil || !h.Is4() || (pn.IsValid() && !pn.Contains(h)) {
 		p = append(p, "the server's NetBird address must be in the NetBird network")
+	}
+	if pn.IsValid() && h.IsValid() {
+		if err := checkPeers(f.Peers, pn, h); err != nil {
+			p = append(p, err.Error())
+		}
 	}
 	v, err := netip.ParseAddr(f.VMIP)
 	if err != nil || !v.Is4() || !v.IsPrivate() || (pn.IsValid() && pn.Contains(v)) {
@@ -135,6 +177,12 @@ func portList(ps []int, rangeSep string) string {
 	return strings.Join(out, ",")
 }
 
+func sortedPeers(peers []string) []string {
+	s := slices.Clone(peers)
+	slices.SortFunc(s, func(a, b string) int { return netip.MustParseAddr(a).Compare(netip.MustParseAddr(b)) })
+	return s
+}
+
 // RenderStreamingNFT is the nftables ruleset for a forward; nil removes
 // the table. It replaces the whole table atomically (nft -f).
 func RenderStreamingNFT(f *StreamForward) (string, error) {
@@ -146,7 +194,8 @@ func RenderStreamingNFT(f *StreamForward) (string, error) {
 	}
 	tcp := strings.ReplaceAll(portList(ports.SunshineTCP, "-"), ",", ", ")
 	udp := strings.ReplaceAll(portList(ports.SunshineUDP, "-"), ",", ", ")
-	return fmt.Sprintf(`# Made by HardyOS: game streaming for the VM %[1]s, from NetBird peers only (decision 404).
+	peers := "{ " + strings.Join(sortedPeers(f.Peers), ", ") + " }"
+	return fmt.Sprintf(`# Made by HardyOS: game streaming for the VM %[1]s, from the chosen NetBird devices only (decision 404).
 table ip %[2]s
 delete table ip %[2]s
 table ip %[2]s {
@@ -166,7 +215,7 @@ table ip %[2]s {
     iifname %[3]q oifname %[6]q ip saddr %[4]s ip daddr %[7]s ct status dnat masquerade
   }
 }
-`, f.VM, streamTable, f.Iface, f.PeerNet, f.HostIP, f.Bridge, f.VMIP, tcp, udp), nil
+`, f.VM, streamTable, f.Iface, peers, f.HostIP, f.Bridge, f.VMIP, tcp, udp), nil
 }
 
 // StreamingIPTables are the HARDYOS-STREAM chain's rules (Docker's FORWARD
@@ -176,9 +225,14 @@ func StreamingIPTables(f StreamForward) ([][]string, error) {
 		return nil, err
 	}
 	vm := f.VMIP + "/32"
+	src := make([]string, 0, len(f.Peers))
+	for _, p := range sortedPeers(f.Peers) {
+		src = append(src, p+"/32")
+	}
+	srcs := strings.Join(src, ",")
 	return [][]string{
-		{"-i", f.Iface, "-o", f.Bridge, "-s", f.PeerNet, "-d", vm, "-p", "tcp", "-m", "multiport", "--dports", portList(ports.SunshineTCP, ":"), "-m", "conntrack", "--ctstate", "DNAT", "-j", "ACCEPT"},
-		{"-i", f.Iface, "-o", f.Bridge, "-s", f.PeerNet, "-d", vm, "-p", "udp", "-m", "multiport", "--dports", portList(ports.SunshineUDP, ":"), "-m", "conntrack", "--ctstate", "DNAT", "-j", "ACCEPT"},
+		{"-i", f.Iface, "-o", f.Bridge, "-s", srcs, "-d", vm, "-p", "tcp", "-m", "multiport", "--dports", portList(ports.SunshineTCP, ":"), "-m", "conntrack", "--ctstate", "DNAT", "-j", "ACCEPT"},
+		{"-i", f.Iface, "-o", f.Bridge, "-s", srcs, "-d", vm, "-p", "udp", "-m", "multiport", "--dports", portList(ports.SunshineUDP, ":"), "-m", "conntrack", "--ctstate", "DNAT", "-j", "ACCEPT"},
 		{"-i", f.Bridge, "-o", f.Iface, "-s", vm, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"},
 	}, nil
 }
@@ -190,19 +244,35 @@ type StreamingInfo struct {
 	Address    string `json:"address"`
 	User       string `json:"user"`
 	CertSHA256 string `json:"certSHA256"`
-	// Remote: publishing to NetBird peers is on; Forwarding: the rules
-	// are in place now; NetBirdAddress is where Moonlight connects then.
-	Remote         bool   `json:"remote"`
-	Forwarding     bool   `json:"forwarding"`
-	NetBirdAddress string `json:"netbirdAddress,omitempty"`
+	// BridgeAddress is this server's address on the home network: what
+	// Sunshine sees as the client for everything forwarded from NetBird
+	// (masquerade), and the only address Sunshine's web page answers
+	// besides the VM itself. WebUIFrom is the address the VM's firewall
+	// rule was made for.
+	BridgeAddress string `json:"bridgeAddress,omitempty"`
+	WebUIFrom     string `json:"webUIFrom,omitempty"`
+	// Remote: publishing to NetBird devices is on; Peers are the chosen
+	// devices' addresses; Forwarding: the rules are in place now;
+	// NetBirdAddress is where Moonlight connects then.
+	Remote         bool     `json:"remote"`
+	Peers          []string `json:"peers"`
+	Forwarding     bool     `json:"forwarding"`
+	NetBirdAddress string   `json:"netbirdAddress,omitempty"`
+	// NetBirdPeers are the devices this server sees (to choose from);
+	// NetBirdKernel: kernel WireGuard (its policies don't cover the
+	// forwarded ports).
+	NetBirdPeers  []NetBirdPeer `json:"netbirdPeers"`
+	NetBirdKernel bool          `json:"netbirdKernel"`
 	// Problem says why something isn't ready, in a sentence.
 	Problem string `json:"problem,omitempty"`
 }
 
-// StreamingPublishArgs turns publishing to NetBird peers on or off.
+// StreamingPublishArgs turns publishing to NetBird devices on or off and
+// names the devices (their NetBird addresses).
 type StreamingPublishArgs struct {
-	ID      string `json:"id"`
-	Enabled bool   `json:"enabled"`
+	ID      string   `json:"id"`
+	Enabled bool     `json:"enabled"`
+	Peers   []string `json:"peers,omitempty"`
 }
 
 // bridgeIPv4 is the bridge's own IPv4 address and network.
@@ -237,29 +307,62 @@ func (m *Manager) bridgeIPv4(ctx context.Context, bridge string) (netip.Prefix, 
 	return netip.Prefix{}, fmt.Errorf("%s has no IPv4 address", bridge)
 }
 
-// arpAddresses are the IPv4 addresses the server's ARP table has for mac
-// (libvirt reads the table: `virsh domifaddr --source arp`).
-func (m *Manager) arpAddresses(ctx context.Context, id, mac string) []netip.Addr {
-	b, err := m.virsh(ctx, "domifaddr", id, "--source", "arp")
+// neighbours are the bridge's IPv4 neighbour entries for mac, and whether
+// each is REACHABLE now (`ip -j -4 neigh show dev <bridge>`).
+func (m *Manager) neighbours(ctx context.Context, bridge, mac string) (reachable, other []netip.Addr) {
+	out, err := m.run(ctx, "ip", "-j", "-4", "neigh", "show", "dev", bridge)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
-	var out []netip.Addr
-	for _, line := range strings.Split(string(b), "\n") {
-		f := strings.Fields(line)
-		if len(f) < 4 || f[2] != "ipv4" || !strings.EqualFold(f[1], mac) {
+	var entries []struct {
+		Dst    string   `json:"dst"`
+		LLAddr string   `json:"lladdr"`
+		State  []string `json:"state"`
+	}
+	if json.Unmarshal(out, &entries) != nil {
+		return nil, nil
+	}
+	for _, e := range entries {
+		a, err := netip.ParseAddr(e.Dst)
+		if err != nil || !a.Is4() || !strings.EqualFold(e.LLAddr, mac) {
 			continue
 		}
-		p, err := netip.ParsePrefix(f[3])
-		if err != nil {
-			if a, err2 := netip.ParseAddr(f[3]); err2 == nil {
-				out = append(out, a)
-			}
+		if slices.Contains(e.State, "REACHABLE") {
+			reachable = append(reachable, a)
+		} else {
+			other = append(other, a)
+		}
+	}
+	return reachable, other
+}
+
+// macOnPort reports whether the bridge learned mac on port (`bridge -j fdb
+// show br <bridge>`), and on no other port.
+func (m *Manager) macOnPort(ctx context.Context, bridge, mac, port string) bool {
+	out, err := m.run(ctx, "bridge", "-j", "fdb", "show", "br", bridge)
+	if err != nil {
+		return false
+	}
+	var entries []struct {
+		MAC    string   `json:"mac"`
+		IfName string   `json:"ifname"`
+		Flags  []string `json:"flags"`
+		State  string   `json:"state"`
+	}
+	if json.Unmarshal(out, &entries) != nil {
+		return false
+	}
+	found := false
+	for _, e := range entries {
+		if !strings.EqualFold(e.MAC, mac) {
 			continue
 		}
-		out = append(out, p.Addr())
+		if e.IfName != port {
+			return false
+		}
+		found = true
 	}
-	return out
+	return found
 }
 
 func (m *Manager) dialVM(ctx context.Context, addr string) error {
@@ -274,12 +377,14 @@ func (m *Manager) dialVM(ctx context.Context, addr string) error {
 	return err
 }
 
-// vmAddress is a running VM's verified IPv4 address on the home network:
-// one the server's ARP table has for the streaming card's MAC, inside the
-// bridge's subnet, not the server's own, its network or broadcast address.
-// When the table has none yet, root knocks once on the addresses the
-// guest reports (which makes the kernel ask by ARP) and looks again; the
-// guest's word alone never counts.
+// vmAddress is a running VM's verified IPv4 address on the home network
+// (decision 404): exactly one REACHABLE neighbour entry for the streaming
+// card's MAC, inside the bridge's subnet (not the server's own, network or
+// broadcast address), also reported by the guest when it has the agent
+// running, with the MAC learned by the bridge on the VM's own tap port
+// only. When no entry is REACHABLE, root knocks once on the addresses the
+// table or the guest has (the kernel then asks by ARP) and looks again.
+// Anything else is refused.
 func (m *Manager) vmAddress(ctx context.Context, st *stored) (netip.Addr, error) {
 	nic, err := streamingNIC(&st.spec)
 	if err != nil {
@@ -295,36 +400,50 @@ func (m *Manager) vmAddress(ctx context.Context, st *stored) (netip.Addr, error)
 	}
 	network := pfx.Masked()
 	bcast := lastAddr(network)
-	ok := func(a netip.Addr) bool {
+	inNet := func(a netip.Addr) bool {
 		return a.Is4() && network.Contains(a) && a != pfx.Addr() && a != network.Addr() && a != bcast
-	}
-	pick := func() (netip.Addr, bool) {
-		for _, a := range m.arpAddresses(ctx, st.spec.ID, nic.MAC) {
-			if ok(a) {
-				return a, true
-			}
-		}
-		return netip.Addr{}, false
-	}
-	if a, found := pick(); found {
-		return a, nil
 	}
 	m.statsMu.Lock()
 	reported := append([]string(nil), m.addrs[st.spec.ID]...)
 	m.statsMu.Unlock()
-	knocked := false
+	var guest []netip.Addr
 	for _, r := range reported {
-		if a, err := netip.ParseAddr(r); err == nil && ok(a) {
-			_ = m.dialVM(ctx, netip.AddrPortFrom(a, ports.SunshineWebUI).String())
-			knocked = true
+		if a, err := netip.ParseAddr(r); err == nil && inNet(a) {
+			guest = append(guest, a)
 		}
 	}
-	if knocked {
-		if a, found := pick(); found {
-			return a, nil
+	reach, other := m.neighbours(ctx, br, nic.MAC)
+	if len(reach) == 0 {
+		knock := map[netip.Addr]bool{}
+		for _, a := range append(append([]netip.Addr(nil), other...), guest...) {
+			if inNet(a) && !knock[a] && len(knock) < 4 {
+				knock[a] = true
+				_ = m.dialVM(ctx, netip.AddrPortFrom(a, ports.SunshineWebUI).String())
+			}
+		}
+		if len(knock) > 0 {
+			reach, _ = m.neighbours(ctx, br, nic.MAC)
 		}
 	}
-	return netip.Addr{}, Problems{"the server hasn't seen the VM on the home network yet (it gets its address from your router a minute after it starts)"}
+	var cands []netip.Addr
+	for _, a := range reach {
+		if inNet(a) && !slices.Contains(cands, a) {
+			cands = append(cands, a)
+		}
+	}
+	if st.spec.GuestAgent && len(guest) > 0 {
+		cands = slices.DeleteFunc(cands, func(a netip.Addr) bool { return !slices.Contains(guest, a) })
+	}
+	switch {
+	case len(cands) == 0:
+		return netip.Addr{}, Problems{"the server hasn't seen the VM on the home network yet (it gets its address from your router a minute after it starts)"}
+	case len(cands) > 1:
+		return netip.Addr{}, Problems{"the VM answers on more than one address on the home network; give it one (a DHCP reservation) so HardyOS knows which is its"}
+	}
+	if !m.macOnPort(ctx, br, nic.MAC, tapName(st.spec.UUID, 0)) {
+		return netip.Addr{}, Problems{"the bridge doesn't see the VM's network card only on the VM's own port; HardyOS won't guess its address"}
+	}
+	return cands[0], nil
 }
 
 func lastAddr(p netip.Prefix) netip.Addr {
@@ -351,7 +470,14 @@ func (m *Manager) StreamingInfo(ctx context.Context, id string) (*StreamingInfo,
 	if !st.spec.StreamingSetUp() {
 		return nil, Problems{st.spec.Name + " has no game streaming set up by HardyOS"}
 	}
-	info := &StreamingInfo{User: st.spec.Streaming.User, CertSHA256: st.spec.Streaming.CertSHA256, Remote: st.spec.Streaming.Remote}
+	sp := st.spec.Streaming
+	info := &StreamingInfo{User: sp.User, CertSHA256: sp.CertSHA256, Remote: sp.Remote, Peers: append([]string{}, sp.Peers...),
+		WebUIFrom: sp.WebUIFrom, NetBirdPeers: []NetBirdPeer{}}
+	if m.Network != nil && m.Network.BridgeName() != "" {
+		if p, err := m.bridgeIPv4(ctx, m.Network.BridgeName()); err == nil {
+			info.BridgeAddress = p.Addr().String()
+		}
+	}
 	if m.state(ctx, id) != "running" {
 		info.Problem = "the VM is off"
 	} else if a, err := m.vmAddress(ctx, st); err != nil {
@@ -359,11 +485,17 @@ func (m *Manager) StreamingInfo(ctx context.Context, id string) (*StreamingInfo,
 	} else {
 		info.Address = a.String()
 	}
+	if info.Problem == "" && sp.WebUIFrom != "" && info.BridgeAddress != "" && sp.WebUIFrom != info.BridgeAddress {
+		info.Problem = "this server's address on the home network changed since the VM was set up (" + sp.WebUIFrom + " → " + info.BridgeAddress + "); Sunshine's firewall rule in the VM still names the old one, so HardyOS can't reach Sunshine (see Game streaming in the user guide)"
+	}
 	m.streamMu.Lock()
 	info.Forwarding = m.streamActive == id && m.streamApplied != ""
 	m.streamMu.Unlock()
-	if nb := m.netBird(ctx); nb.Connected {
+	nb := m.netBird(ctx)
+	if nb.Connected {
 		info.NetBirdAddress = nb.IP
+		info.NetBirdKernel = nb.Kernel
+		info.NetBirdPeers = append(info.NetBirdPeers, nb.Peers...)
 	} else if info.Remote && info.Problem == "" {
 		info.Problem = "NetBird isn't connected on this server (Control Panel › Remote Access)"
 	}
@@ -371,7 +503,9 @@ func (m *Manager) StreamingInfo(ctx context.Context, id string) (*StreamingInfo,
 }
 
 // SetStreamingRemote turns publishing a VM's streaming ports to NetBird
-// peers on or off. Only one VM at a time: Moonlight uses fixed ports.
+// devices on or off. Only one VM at a time: Moonlight uses fixed ports.
+// The devices must be NetBird peers this server sees now, in its NetBird
+// network (hardyd also leaves out NetBird's reverse proxy peers).
 func (m *Manager) SetStreamingRemote(ctx context.Context, a StreamingPublishArgs) (*VM, error) {
 	unlock, err := m.lockValid(a.ID)
 	if err != nil {
@@ -386,11 +520,30 @@ func (m *Manager) SetStreamingRemote(ctx context.Context, a StreamingPublishArgs
 		unlock()
 		return nil, Problems{st.spec.Name + " has no game streaming set up by HardyOS"}
 	}
+	peers := []string{}
 	if a.Enabled {
 		if _, err := streamingNIC(&st.spec); err != nil {
 			unlock()
 			return nil, err
 		}
+		nb := m.netBird(ctx)
+		pn, perr := netip.ParsePrefix(nb.Network)
+		host, herr := netip.ParseAddr(nb.IP)
+		if !nb.Connected || perr != nil || herr != nil {
+			unlock()
+			return nil, Problems{"NetBird isn't connected on this server, so its devices can't be chosen (Control Panel › Remote Access)"}
+		}
+		if err := checkPeers(a.Peers, pn, host); err != nil {
+			unlock()
+			return nil, err
+		}
+		for _, p := range a.Peers {
+			if !slices.ContainsFunc(nb.Peers, func(x NetBirdPeer) bool { return x.IP == p }) {
+				unlock()
+				return nil, Problems{fmt.Sprintf("%s isn't a NetBird device this server sees", p)}
+			}
+		}
+		peers = sortedPeers(a.Peers)
 		all, err := m.all(ctx)
 		if err != nil {
 			unlock()
@@ -403,15 +556,15 @@ func (m *Manager) SetStreamingRemote(ctx context.Context, a StreamingPublishArgs
 			}
 		}
 	}
-	if st.spec.Streaming.Remote != a.Enabled {
-		s := *st.spec.Streaming
-		s.Remote = a.Enabled
+	s := *st.spec.Streaming
+	if s.Remote != a.Enabled || !slices.Equal(s.Peers, peers) {
+		s.Remote, s.Peers = a.Enabled, peers
 		st.spec.Streaming = &s
 		if err := m.saveSpec(st); err != nil {
 			unlock()
 			return nil, err
 		}
-		m.log().Info("vms: game streaming over NetBird", "id", a.ID, "on", a.Enabled)
+		m.log().Info("vms: game streaming over NetBird", "id", a.ID, "on", a.Enabled, "devices", len(peers))
 	}
 	unlock()
 	if err := m.syncStreaming(ctx); err != nil {
@@ -428,7 +581,7 @@ func (m *Manager) desiredForward(ctx context.Context) (*StreamForward, error) {
 	}
 	var pub []*stored
 	for _, st := range all {
-		if st.spec.StreamingSetUp() && st.spec.Streaming.Remote {
+		if st.spec.StreamingSetUp() && st.spec.Streaming.Remote && len(st.spec.Streaming.Peers) > 0 {
 			pub = append(pub, st)
 		}
 	}
@@ -450,7 +603,7 @@ func (m *Manager) desiredForward(ctx context.Context) (*StreamForward, error) {
 	if err != nil {
 		return nil, nil
 	}
-	f := &StreamForward{VM: st.spec.ID, Iface: nb.Interface, PeerNet: nb.Network, HostIP: nb.IP, Bridge: m.Network.BridgeName(), VMIP: ip.String()}
+	f := &StreamForward{VM: st.spec.ID, Iface: nb.Interface, PeerNet: nb.Network, Peers: st.spec.Streaming.Peers, HostIP: nb.IP, Bridge: m.Network.BridgeName(), VMIP: ip.String()}
 	if err := f.check(); err != nil {
 		return nil, fmt.Errorf("not forwarding game streaming: %w", err)
 	}
@@ -473,8 +626,32 @@ func (m *Manager) kickStreaming() {
 	}
 }
 
+// liveStreamingOK reports whether the kernel still has the forward's rules
+// (nobody flushed the table or the chain since root loaded them).
+func (m *Manager) liveStreamingOK(ctx context.Context, f *StreamForward) bool {
+	out, err := m.run(ctx, "nft", "list", "table", "ip", streamTable)
+	if err != nil || !strings.Contains(string(out), "dnat to "+f.VMIP) || !strings.Contains(string(out), "ip daddr "+f.HostIP) {
+		return false
+	}
+	rules, err := StreamingIPTables(*f)
+	if err != nil {
+		return false
+	}
+	if _, err := m.run(ctx, "iptables", "-w", "-S", "FORWARD"); err != nil {
+		return true // no iptables: nftables alone decides
+	}
+	for _, r := range rules {
+		if _, err := m.run(ctx, "iptables", append([]string{"-w", "-C", streamChain}, r...)...); err != nil {
+			return false
+		}
+	}
+	_, err = m.run(ctx, "iptables", "-w", "-C", "FORWARD", "-j", streamChain)
+	return err == nil
+}
+
 // syncStreaming puts the forwarding rules in line with the VMs: called
-// every 30 seconds by Watch, and after every change.
+// every 30 seconds by Watch, and after every change. When nothing changed
+// it checks the live rules and loads them again if they're gone.
 func (m *Manager) syncStreaming(ctx context.Context) error {
 	m.streamMu.Lock()
 	defer m.streamMu.Unlock()
@@ -485,11 +662,13 @@ func (m *Manager) syncStreaming(ctx context.Context) error {
 		derr = err
 	}
 	if m.streamSynced && text == m.streamApplied {
-		return derr
+		if f == nil || m.liveStreamingOK(ctx, f) {
+			return derr
+		}
+		m.log().Warn("vms: the game streaming rules were changed outside HardyOS; loading them again", "id", f.VM)
 	}
 	if f == nil {
-		_, _ = m.run(ctx, "nft", "delete", "table", "ip", streamTable)
-		m.iptablesStream(ctx, nil)
+		m.clearStreaming(ctx)
 		m.streamSynced, m.streamApplied, m.streamActive = true, "", ""
 		return derr
 	}
@@ -507,8 +686,23 @@ func (m *Manager) syncStreaming(ctx context.Context) error {
 	rules, _ := StreamingIPTables(*f)
 	m.iptablesStream(ctx, rules)
 	m.streamSynced, m.streamApplied, m.streamActive = true, text, f.VM
-	m.log().Info("vms: game streaming forwarded to NetBird peers", "id", f.VM, "address", f.VMIP)
+	m.log().Info("vms: game streaming forwarded to the chosen NetBird devices", "id", f.VM, "address", f.VMIP, "devices", len(f.Peers))
 	return derr
+}
+
+func (m *Manager) clearStreaming(ctx context.Context) {
+	_, _ = m.run(ctx, "nft", "delete", "table", "ip", streamTable)
+	m.iptablesStream(ctx, nil)
+}
+
+// StopStreaming takes the forwarding away (hardyd-priv is stopping: no
+// rule outlives the process that keeps it right).
+func (m *Manager) StopStreaming(ctx context.Context) {
+	m.streamMu.Lock()
+	defer m.streamMu.Unlock()
+	m.clearStreaming(ctx)
+	_, _ = m.run(ctx, "iptables", "-w", "-D", "FORWARD", "-j", streamChain)
+	m.streamSynced, m.streamApplied, m.streamActive = false, "", ""
 }
 
 // iptablesStream fills the HARDYOS-STREAM chain (empty: nothing).

@@ -1,6 +1,7 @@
 package vms
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -43,12 +44,23 @@ func TestStreamingPinsDownload(t *testing.T) {
 					t.Fatalf("%s: %s", f.URL, res.Status)
 				}
 				h := sha256.New()
-				n, err := io.Copy(h, io.LimitReader(res.Body, 512<<20))
+				var body bytes.Buffer
+				n, err := io.Copy(io.MultiWriter(h, &body), io.LimitReader(res.Body, 512<<20))
 				if err != nil {
 					t.Fatal(err)
 				}
 				if got := hex.EncodeToString(h.Sum(nil)); got != f.SHA256 {
 					t.Fatalf("%s: SHA-256 %s (%d bytes), pinned %s", f.URL, got, n, f.SHA256)
+				}
+				if img.ID == CatalogVDD {
+					// The setup script trusts only this signer.
+					got, err := catalogSigner(body.Bytes())
+					if err != nil {
+						t.Fatalf("%s: reading the driver catalog's signer: %v", f.File, err)
+					}
+					if got != VDDSignerSHA1 {
+						t.Fatalf("%s: the driver catalog's signer is %s, pinned %s", f.File, got, VDDSignerSHA1)
+					}
 				}
 				t.Logf("%s: %d bytes, SHA-256 matches", f.File, n)
 			})
@@ -65,7 +77,7 @@ func TestStreamingRulesLoad(t *testing.T) {
 	if os.Getenv("HARDYOS_NFT_TEST") != "1" {
 		t.Skip("set HARDYOS_NFT_TEST=1 (as root) to load the rules in a network namespace")
 	}
-	f := StreamForward{VM: "game", Iface: "wt0", PeerNet: "100.92.0.0/16", HostIP: "100.92.1.2", Bridge: "br0", VMIP: "192.168.1.77"}
+	f := StreamForward{VM: "game", Iface: "wt0", PeerNet: "100.92.0.0/16", Peers: []string{"100.92.1.5"}, HostIP: "100.92.1.2", Bridge: "br0", VMIP: "192.168.1.77"}
 	text, err := RenderStreamingNFT(&f)
 	if err != nil {
 		t.Fatal(err)
@@ -103,7 +115,7 @@ func TestStreamingForwardsInNamespaces(t *testing.T) {
 	if os.Getenv("HARDYOS_NFT_TEST") != "1" {
 		t.Skip("set HARDYOS_NFT_TEST=1 (as root) to run the namespace test")
 	}
-	f := StreamForward{VM: "game", Iface: "wt0", PeerNet: "100.92.0.0/16", HostIP: "100.92.1.2", Bridge: "br0", VMIP: "192.168.1.77"}
+	f := StreamForward{VM: "game", Iface: "wt0", PeerNet: "100.92.0.0/16", Peers: []string{"100.92.1.5"}, HostIP: "100.92.1.2", Bridge: "br0", VMIP: "192.168.1.77"}
 	text, err := RenderStreamingNFT(&f)
 	if err != nil {
 		t.Fatal(err)
@@ -134,6 +146,11 @@ try:
     socket.create_connection(("100.92.1.2", 47990), timeout=2); print("webui reachable")
 except OSError:
     print("webui closed")
+# Another NetBird device, not chosen: not forwarded.
+try:
+    o = socket.socket(); o.settimeout(2); o.bind(("100.92.1.6", 0)); o.connect(("100.92.1.2", 47989)); print("other peer reachable")
+except OSError:
+    print("other peer closed")
 `
 	if err := os.WriteFile(dir+"/vm.py", []byte(vm), 0o644); err != nil {
 		t.Fatal(err)
@@ -151,6 +168,7 @@ ip link add br0 netns $H type veth peer name eth0 netns $V
 ip -n $H addr add 100.92.1.2/16 dev wt0
 ip -n $H addr add 192.168.1.10/24 dev br0
 ip -n $P addr add 100.92.1.5/16 dev nb0
+ip -n $P addr add 100.92.1.6/16 dev nb0
 ip -n $V addr add 192.168.1.77/24 dev eth0
 for n in $P $H $V; do ip -n $n link set lo up; done
 ip -n $H link set wt0 up; ip -n $H link set br0 up; ip -n $P link set nb0 up; ip -n $V link set eth0 up
@@ -165,7 +183,7 @@ ip netns exec $P python3 -I DIR/peer.py
 		t.Fatalf("%v\n%s", err, out)
 	}
 	got := string(out)
-	if !strings.Contains(got, "seen 192.168.1.10") || !strings.Contains(got, "echo ping") || !strings.Contains(got, "webui closed") {
+	if !strings.Contains(got, "seen 192.168.1.10") || !strings.Contains(got, "echo ping") || !strings.Contains(got, "webui closed") || !strings.Contains(got, "other peer closed") {
 		t.Fatalf("namespace test:\n%s", got)
 	}
 }

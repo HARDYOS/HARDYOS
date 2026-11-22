@@ -51,8 +51,10 @@ const game = {
 const status = (o: Record<string, unknown> = {}) => ({
   setUp: true, installPending: false, running: true, hasGPU: true, address: "192.168.1.77", reachable: true, user: "hardyos", accountKept: true,
   devices: [{ name: "Living room TV", uuid: "0123ABCD-0000-1111-2222-333344445555", enabled: true }],
-  waiting: [{ id: "cd".repeat(16), name: "Steam Deck", address: "192.168.1.30" }],
+  waiting: [{ id: "cd".repeat(16), name: "Steam Deck", address: "192.168.1.30", viaNetBird: false }],
   remote: false, forwarding: false, netbirdAddress: "100.92.1.2", ports: { tcp: [47984, 47989, 48010], udp: [47998, 47999, 48000, 48002, 48010] },
+  peers: [], netbirdKernel: true, bridgeAddress: "192.168.1.10",
+  netbirdPeers: [{ ip: "100.92.0.5", name: "deck.netbird.cloud", connected: true, proxy: false }, { ip: "100.92.0.9", name: "proxy-eu", connected: true, proxy: true }],
   ...o,
 });
 
@@ -146,16 +148,54 @@ describe("the Streaming panel", () => {
     expect(calls.filter((c) => c.path === "/vms/game/streaming/reveal").map((c) => c.body)).toEqual([{ password: "wrong" }, { password: "wrong" }]);
   });
 
-  it("publishes to NetBird devices and says where to connect", async () => {
+  it("publishes to chosen NetBird devices only, never the proxy", async () => {
     const calls: Call[] = [];
-    serve({ "/vms/game/streaming": () => status({ remote: true, forwarding: true }), "PUT /vms/game/streaming/remote": () => accepted("j3") }, calls);
+    serve({ "/vms/game/streaming": () => status(), "PUT /vms/game/streaming/remote": () => accepted("j3") }, calls);
+    const onJob = vi.fn();
+    wrap(<StreamingPanel vm={game} onJob={onJob} />);
+    fireEvent.click(await screen.findByRole("switch", { name: /Play away from home/ }));
+    expect(screen.getByText(/access policies don't apply/)).toBeTruthy();
+    const publish = screen.getByRole("button", { name: "Publish to these devices" }) as HTMLButtonElement;
+    expect(publish.disabled).toBe(true);
+    expect((screen.getByRole("checkbox", { name: "proxy-eu" }) as HTMLInputElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: "deck.netbird.cloud" }));
+    fireEvent.click(publish);
+    await waitFor(() => expect(onJob).toHaveBeenCalled());
+    expect(calls.find((c) => c.method === "PUT")?.body).toEqual({ enabled: true, peers: ["100.92.0.5"] });
+  });
+
+  it("turns NetBird off and says where to connect", async () => {
+    const calls: Call[] = [];
+    serve({ "/vms/game/streaming": () => status({ remote: true, forwarding: true, peers: ["100.92.0.5"] }), "PUT /vms/game/streaming/remote": () => accepted("j4") }, calls);
     const onJob = vi.fn();
     wrap(<StreamingPanel vm={game} onJob={onJob} />);
     expect(await screen.findByText("Forwarding now, to your NetBird devices only.")).toBeTruthy();
-    expect(screen.getAllByText("100.92.1.2").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("switch", { name: /Play away from home/ }));
     await waitFor(() => expect(onJob).toHaveBeenCalled());
     expect(calls.find((c) => c.method === "PUT")?.body).toEqual({ enabled: false });
+  });
+
+  it("asks before pairing a device that came through NetBird", async () => {
+    const calls: Call[] = [];
+    serve(
+      {
+        "/vms/game/streaming": () => status({ waiting: [{ id: "cd".repeat(16), name: "Deck", address: "192.168.1.10", viaNetBird: true }] }),
+        "POST /vms/game/streaming/pair": () => accepted("j5"),
+      },
+      calls,
+    );
+    const onJob = vi.fn();
+    wrap(<StreamingPanel vm={game} onJob={onJob} />);
+    expect(await screen.findByText("Through NetBird")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Enter its PIN" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("PIN"), { target: { value: "1234" } });
+    const pair = within(dialog).getByRole("button", { name: "Pair" }) as HTMLButtonElement;
+    expect(pair.disabled).toBe(true);
+    fireEvent.click(within(dialog).getByRole("switch", { name: /pair it anyway/ }));
+    fireEvent.click(pair);
+    await waitFor(() => expect(onJob).toHaveBeenCalled());
+    expect(calls.find((c) => c.path === "/vms/game/streaming/pair")?.body).toEqual({ pairingId: "cd".repeat(16), pin: "1234", name: "Deck", confirmRemote: true });
   });
 
   it("gives the steps by hand for a GPU VM HardyOS didn't set up", async () => {

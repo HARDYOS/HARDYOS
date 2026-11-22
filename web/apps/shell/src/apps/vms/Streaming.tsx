@@ -100,25 +100,59 @@ export function StreamingPanel({ vm, onJob }: { vm: VM; onJob: (j: Job) => void 
 
 function RemoteToggle({ vm, st, onJob }: { vm: VM; st: VMStreamingStatus; onJob: (j: Job) => void }) {
   const [busy, setBusy] = useState(false);
-  const set = async (enabled: boolean) => {
+  const [chosen, setChosen] = useState<string[]>(st.peers);
+  const [open, setOpen] = useState(false);
+  const put = async (enabled: boolean, peers: string[]) => {
     setBusy(true);
     try {
-      const r = await unwrap(api.PUT("/vms/{id}/streaming/remote", { params: { path: { id: vm.id } }, body: { enabled } }));
+      const r = await unwrap(api.PUT("/vms/{id}/streaming/remote", { params: { path: { id: vm.id } }, body: enabled ? { enabled, peers } : { enabled } }));
       onJob(r.job);
+      setOpen(false);
     } catch (e) {
       toast("error", "Not changed", errorMessage(e));
     } finally {
       setBusy(false);
     }
   };
+  const toggle = (ip: string) => setChosen((c) => (c.includes(ip) ? c.filter((x) => x !== ip) : [...c, ip]));
   return (
-    <Toggle
-      label="Play away from home over NetBird"
-      description={`Forwards only Sunshine's streaming ports (TCP ${portSummary(st.ports.tcp)}, UDP ${portSummary(st.ports.udp)}) from this server's NetBird address to this VM, for your NetBird devices only; never from the internet. Sunshine's web page stays on the home network. One VM at a time.`}
-      checked={st.remote}
-      disabled={busy}
-      onChange={(v) => void set(v)}
-    />
+    <div className="stack" style={{ gap: 8 }}>
+      <Toggle
+        label="Play away from home over NetBird"
+        description={`Forwards only Sunshine's streaming ports (TCP ${portSummary(st.ports.tcp)}, UDP ${portSummary(st.ports.udp)}) from this server's NetBird address to this VM, for the NetBird devices you choose; never from the internet. Sunshine's web page stays in the VM. One VM at a time.`}
+        checked={st.remote || open}
+        disabled={busy}
+        onChange={(v) => (v ? setOpen(true) : void put(false, []))}
+      />
+      {(open || st.remote) && (
+        <div className="stack" style={{ gap: 6 }}>
+          <span className="small muted">
+            Which devices may stream{st.netbirdKernel ? " (NetBird's access policies don't apply to these forwarded ports: only the devices ticked here get through)" : ""}:
+          </span>
+          {st.netbirdPeers.length === 0 ? (
+            <span className="small muted">This server sees no NetBird devices right now.</span>
+          ) : (
+            <ul className="list" aria-label="NetBird devices">
+              {st.netbirdPeers.map((p) => (
+                <li key={p.ip}>
+                  <label className="row" style={{ gap: 8 }}>
+                    <input type="checkbox" disabled={p.proxy || busy} checked={chosen.includes(p.ip)} onChange={() => toggle(p.ip)} aria-label={p.name || p.ip} />
+                    <span>
+                      {p.name || p.ip} <span className="small muted mono">{p.ip}</span> {p.proxy && <Badge tone="neutral">NetBird's reverse proxy</Badge>}
+                    </span>
+                  </label>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div>
+            <Button variant="primary" disabled={busy || chosen.length === 0} onClick={() => void put(true, chosen)}>
+              {st.remote ? "Save devices" : "Publish to these devices"}
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -143,7 +177,8 @@ function PairDevice({ vm, st, onJob }: { vm: VM; st: VMStreamingStatus; onJob: (
           {st.waiting.map((p) => (
             <li key={p.id} className="row row--between">
               <span>
-                {p.name || "A Moonlight device"} <span className="small muted mono">{p.address}</span>
+                {p.name || "A Moonlight device"} <span className="small muted mono">{p.address}</span>{" "}
+                {p.viaNetBird && <Badge tone="warn">Through NetBird</Badge>}
               </span>
               <Button variant="primary" onClick={() => setPairing(p)}>
                 Enter its PIN
@@ -161,12 +196,13 @@ function PairDialog({ vm, pending, onClose, onJob }: { vm: VM; pending: VMStream
   const [pin, setPin] = useState("");
   const [name, setName] = useState(pending.name || "");
   const [busy, setBusy] = useState(false);
-  const ok = pinOK(pin) && deviceNameOK(name);
+  const [confirmRemote, setConfirmRemote] = useState(false);
+  const ok = pinOK(pin) && deviceNameOK(name) && (!pending.viaNetBird || confirmRemote);
   const submit = async () => {
     if (!ok) return;
     setBusy(true);
     try {
-      const r = await unwrap(api.POST("/vms/{id}/streaming/pair", { params: { path: { id: vm.id } }, body: { pairingId: pending.id, pin, name: name.trim() } }));
+      const r = await unwrap(api.POST("/vms/{id}/streaming/pair", { params: { path: { id: vm.id } }, body: { pairingId: pending.id, pin, name: name.trim(), ...(pending.viaNetBird ? { confirmRemote: true } : {}) } }));
       onJob(r.job);
       onClose();
     } catch (e) {
@@ -207,6 +243,14 @@ function PairDialog({ vm, pending, onClose, onJob }: { vm: VM; pending: VMStream
         <Field label="Device name" hint="How it's listed here and in Sunshine.">
           {(id) => <TextInput id={id} maxLength={64} value={name} onChange={(e) => setName(e.target.value)} />}
         </Field>
+        {pending.viaNetBird && (
+          <>
+            <Alert tone="warn">
+              This device reached Sunshine through NetBird, so HardyOS can't tell it apart from your other NetBird devices. Pairing at home is safer.
+            </Alert>
+            <Toggle label="It's my device: pair it anyway" checked={confirmRemote} onChange={setConfirmRemote} />
+          </>
+        )}
       </div>
     </Dialog>
   );
@@ -269,7 +313,7 @@ function SunshineAccount({ vm, st }: { vm: VM; st: VMStreamingStatus }) {
         <span>
           <strong>Sunshine's own page</strong>{" "}
           <span className="small muted">
-            (https://localhost:47990 in the VM, or <span className="mono">https://{st.address || "<its address>"}:47990</span> at home) · account{" "}
+            (https://localhost:47990 inside the VM; it answers nowhere else but HardyOS) · account{" "}
             <span className="mono">{st.user}</span>
           </span>
         </span>

@@ -26,7 +26,10 @@ func VMNetBird(m *netbird.Manager) func(context.Context) vms.NetBirdInfo {
 		st, err := m.Status(ctx)
 		info := vms.NetBirdInfo{}
 		if err == nil && st != nil && st.Connected {
-			info = vms.NetBirdInfo{Connected: true, Interface: st.Interface, IP: st.IP, Network: st.Network}
+			info = vms.NetBirdInfo{Connected: true, Interface: st.Interface, IP: st.IP, Network: st.Network, Kernel: st.KernelInterface}
+			for _, p := range st.PeerList {
+				info.Peers = append(info.Peers, vms.NetBirdPeer{IP: p.IP, Name: p.FQDN, Connected: p.Connected})
+			}
 			if info.Interface == "" {
 				info.Interface = "wt0"
 			}

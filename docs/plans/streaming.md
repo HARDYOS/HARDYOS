@@ -81,6 +81,28 @@ unpair, the Sunshine account with Reveal, and driver guidance (NVIDIA/AMD
 drivers are the person's; no vGPU unlock, no licence workarounds). GPU VMs
 HardyOS didn't set up keep the by-hand steps.
 
+## Review fixes (first security review)
+
+- NetBird forwarding only from devices the admin chooses (none by default,
+  never NetBird's proxy, which the app gateway recognises by its valid
+  service value); NetBird's policies don't cover DNATed traffic in kernel
+  mode (decision 404, 149 amended, remote-access.md). A real NetBird client
+  in CI isn't feasible (it needs a management server with signal, relay and
+  an identity provider); namespaces test the rules, including a second,
+  unchosen peer.
+- Pairing: only with exactly one waiting device, the one shown; devices that
+  came through NetBird (Sunshine sees the server's bridge address because of
+  masquerade) need a confirmation. Sunshine's error text is clipped.
+- VM address: exactly one REACHABLE neighbour, agreeing with the guest, MAC
+  only on the VM's tap port (bridge fdb).
+- Setup: script hash in the first-logon command, exactly one labelled
+  volume, labelled library ISOs refused; VDD signer thumbprint pinned (CI
+  checks it) with marker and next-boot task to drop the trust; key ACL
+  before writing; Windows Firewall rule for 47990 (server only);
+  `origin_pin_allowed` not used (unverified in the pinned version).
+- Rules removed when hardyd-priv stops and restored if removed while
+  running.
+
 ## Tests
 
 Go: catalog pins, setup script content (no downloads, hashes, labels), disc

@@ -8853,6 +8853,10 @@ export interface components {
             user?: string;
             /** @description SHA-256 of the certificate HardyOS made for the VM's Sunshine (pinned) */
             certSHA256?: string;
+            /** @description NetBird devices (addresses) the streaming ports are forwarded from; none until chosen */
+            peers?: string[];
+            /** @description The server's home network address the VM's firewall lets reach Sunshine's web UI */
+            webUIFrom?: string;
         };
         VMStreamingStatus: {
             /** @description HardyOS set Sunshine up in this VM */
@@ -8871,6 +8875,14 @@ export interface components {
             revealedAt?: string;
             devices: components["schemas"]["VMStreamingDevice"][];
             waiting: components["schemas"]["VMStreamingPending"][];
+            /** @description The NetBird devices streaming is forwarded from */
+            peers: string[];
+            /** @description NetBird devices this server sees, to choose from */
+            netbirdPeers: components["schemas"]["VMStreamingNetBirdPeer"][];
+            /** @description NetBird runs on kernel WireGuard: its access policies don't cover the forwarded ports */
+            netbirdKernel: boolean;
+            /** @description This server's home network address (what Sunshine sees for devices forwarded from NetBird) */
+            bridgeAddress?: string;
             remote: boolean;
             /** @description The NetBird forwarding rules are in place now */
             forwarding: boolean;
@@ -8891,6 +8903,15 @@ export interface components {
             id: string;
             name: string;
             address: string;
+            /** @description It came through the NetBird forwarding, so HardyOS can't tell which device it is; pairing needs confirmRemote */
+            viaNetBird: boolean;
+        };
+        VMStreamingNetBirdPeer: {
+            ip: string;
+            name: string;
+            connected: boolean;
+            /** @description NetBird's reverse proxy came from this address; it can't be chosen */
+            proxy: boolean;
         };
         VMStreamingRevealRequest: {
             /** @description Your own HardyOS password, asked again */
@@ -8905,12 +8926,16 @@ export interface components {
             /** @description The 4 digits Moonlight shows (kept out of the job's parameters) */
             pin: string;
             name: string;
+            /** @description Pair a device that came through NetBird (HardyOS can't tell it apart) */
+            confirmRemote?: boolean;
         };
         VMStreamingUnpairRequest: {
             uuid: string;
         };
         VMStreamingRemoteRequest: {
             enabled: boolean;
+            /** @description The NetBird devices (addresses) to forward from; at least one when enabled */
+            peers?: string[];
         };
         VMUSBRequest: {
             /** @description vendor:product, like 046d:c52b */

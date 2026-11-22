@@ -215,6 +215,9 @@ func TestParseStatus(t *testing.T) {
 		st.PeersTotal != 4 || st.PeersConnected != 3 || st.ManagementURL != "https://vpn.hardynetworks.net" || st.Version != "0.81.5" || st.Problem != "" {
 		t.Fatalf("connected = %+v", st)
 	}
+	if !st.KernelInterface || len(st.PeerList) != 1 || st.PeerList[0] != (PeerState{IP: "100.83.12.7", FQDN: "proxy-eu.netbird.selfhosted", Connected: true}) {
+		t.Fatalf("peers = %+v kernel %v", st.PeerList, st.KernelInterface)
+	}
 	st = ClientStatus{}
 	if err := ParseStatus(fixture(t, "status-needslogin.json"), &st); err != nil {
 		t.Fatal(err)

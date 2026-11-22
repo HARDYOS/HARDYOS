@@ -270,6 +270,7 @@ export type VMStreamingStatus = S["VMStreamingStatus"];
 export type VMStreamingDevice = S["VMStreamingDevice"];
 export type VMStreamingPending = S["VMStreamingPending"];
 export type VMStreamingAccount = S["VMStreamingAccount"];
+export type VMStreamingNetBirdPeer = S["VMStreamingNetBirdPeer"];
 
 // Versioned cloud backups (phase 6 part A).
 export type BackupItem = S["BackupItem"];

@@ -1482,7 +1482,13 @@ Phase 5 part C (decisions 120-125; user guide `docs/vms.md`; plan
   (`desiredForward`: published, running, NetBird connected via
   `Manager.NetBird` = `priv.VMNetBird`, address from `vmAddress`), renders
   `RenderStreamingNFT` and `StreamingIPTables` (every value checked by
-  `StreamForward.check`) and loads them only when they change. Ops
+  `StreamForward.check`, sources = the chosen `streaming.peers`) and loads
+  them only when they change, else checks the live table and chain
+  (`liveStreamingOK`); `StopStreaming` runs when hardyd-priv exits.
+  `vmAddress` uses `ip -j neigh` (one REACHABLE entry), the guest's
+  addresses and `bridge -j fdb` (the MAC on the VM's tap only). The app
+  gateway records the addresses NetBird's proxy came from
+  (`remoteRuntime.sawProxy`) so they can't be chosen. Ops
   `vms.streaming.info` (address, pin, forwarding, NetBird address) and
   `vms.streaming.publish`.
 - **hardyd** (`internal/streaming`, `api/handlers_vms_streaming.go`): the
