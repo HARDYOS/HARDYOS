@@ -115,8 +115,31 @@ func (d *stubVMs) register(ps *priv.Server) {
 	h(priv.OpVMsTask, func(raw json.RawMessage) (any, error) {
 		var a vms.TaskArgs
 		_ = json.Unmarshal(raw, &a)
-		return priv.VMTaskResult{Task: &vms.Task{ID: a.ID, Done: true, Progress: 100, Message: "Done"}}, nil
+		t := &vms.Task{ID: a.ID, Done: true, Progress: 100, Message: "Done"}
+		if a.ID == "t-cat" {
+			t.File, t.Digest = "debian-13-genericcloud-amd64.qcow2", "sha512:"+strings.Repeat("a", 128)
+		}
+		return priv.VMTaskResult{Task: t}, nil
 	})
+	h(priv.OpVMsCatalogFetch, func(json.RawMessage) (any, error) {
+		return priv.VMTaskResult{Task: &vms.Task{ID: "t-cat", File: "debian-13-genericcloud-amd64.qcow2"}}, nil
+	})
+	h(priv.OpVMsCatalogList, func(json.RawMessage) (any, error) {
+		return priv.VMCatalogResult{Images: []vms.CatalogView{{ID: "debian-13", Name: "Debian 13", Kind: "disk"}}}, nil
+	})
+	h(priv.OpVMsClone, func(json.RawMessage) (any, error) {
+		return priv.VMTaskResult{Task: &vms.Task{ID: "t-clone"}}, nil
+	})
+	h(priv.OpVMsUserTemplates, func(json.RawMessage) (any, error) {
+		return priv.VMUserTemplatesResult{Templates: []vms.UserTemplate{}}, nil
+	})
+	h(priv.OpVMsUserTemplateCreate, func(json.RawMessage) (any, error) {
+		return priv.VMTaskResult{Task: &vms.Task{ID: "t-tpl"}}, nil
+	})
+	h(priv.OpVMsUserTemplateDelete, func(json.RawMessage) (any, error) { return map[string]bool{"ok": true}, nil })
+	h(priv.OpVMsScheduleSet, func(raw json.RawMessage) (any, error) { return ref(raw) })
+	h(priv.OpVMsUSBAttach, func(raw json.RawMessage) (any, error) { return ref(raw) })
+	h(priv.OpVMsUSBDetach, func(raw json.RawMessage) (any, error) { return ref(raw) })
 	h(priv.OpVMsCreate, func(raw json.RawMessage) (any, error) {
 		var a vms.CreateArgs
 		_ = json.Unmarshal(raw, &a)

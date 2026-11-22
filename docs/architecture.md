@@ -1460,6 +1460,47 @@ Phase 5 part C (decisions 120-125; user guide `docs/vms.md`; plan
   `TestLibvirtIntegration` (real ZFS, libvirt and KVM; CI job "Virtual
   machines (KVM)").
 
+### VM polish (phase 9, decisions 410-419; plan `docs/plans/vm-polish.md`)
+
+- **Verified catalog** (`vms/catalog.go`): `vms.catalog.fetch {image}`
+  takes a name only. Each image lists its URLs and hosts; the client's
+  redirects must stay on them. Checksums: Ubuntu `SHA256SUMS` + detached
+  signature against the pinned key (`ubuntu-cloud-images.asc`,
+  `golang.org/x/crypto/openpgp` detached checks only), Debian
+  `SHA512SUMS` over TLS, HAOS and virtio-win pinned. Files go to the pool's
+  root-only `<pool>/vm-catalog` (`vms/catalogstore.go`: `os.Root`, files
+  0444, a `.verified` record per file checked at every use), never the ISOs
+  share; the VirtIO disc is attached from there. The task's `digest`
+  goes into `Disk.Import.Digest`; `stageImport` hashes what it copies and
+  refuses a mismatch. The create job's order: catalog fetch, bridge,
+  VirtIO disc, `vms.create`, import or `vms.clone`, start.
+- **Unattended Windows** (`vms/unattend.go`): `AnswerFile` renders
+  autounattend.xml with `xml.EscapeText` on every value (all of them are
+  pattern-checked too); `writeUnattend` makes the answer disc with xorriso
+  in `/run/hardyos-unattend/<uuid>.iso` (QEMU-owned 0600, made in a 0700
+  staging folder). `RegisterFirstLogonHook(name, fn)` is how other features
+  add first-logon commands (Go only, given `HookVM`). `Start` answers the
+  boot prompt once and leaves devices out while `Unattend.Pending`; the
+  watcher's `checkInstalled` ends the install when `guest-ping` answers.
+- **Saved templates** (`vms/usertemplates.go`): `MakeTemplate` holds the
+  VM's lock while a background task snapshots it, `zfs send | zfs receive`s
+  each disk to `<pool>/vm-templates/<id>/diskN@template` and writes
+  `template.json` with `Generalize(spec)`; `StartClone` copies a template
+  disk into a new VM's disk after `vms.create` (which skips creating
+  `Clone` disks).
+- **Schedules** (`vms/schedule.go`): `RunSchedules` (hardyd-priv, every
+  minute, `TryLock` per VM) takes `vm-auto-<kind>-<slot>` snapshots with `takeSnapshot`
+  (freeze/thaw as for manual ones) and prunes each kind; `Update` keeps
+  `Schedule`, `vms.schedule.set` changes it.
+- **USB hot-plug** (`vms/usb.go`, `devices/hotplug.go`): `devices.HotPlugger`
+  checks and records the device as the running VM's; the fragment is
+  re-checked by `checkFragment` and attached with `virsh attach-device
+  --live` from a private file in the VM's folder.
+- **Console**: `qemu-vdagent` channel (clipboard), `ich9` sound card with a
+  `none` audiodev wired to the VNC display; the web client wraps noVNC's
+  RFB (`apps/vms/qemuAudio.ts`) to add pseudo-encoding -259 and parse
+  QEMU audio messages, played with Web Audio.
+
 ## Devices and GPUs
 
 Phase 5 part D (decisions 126-130; user guide `docs/gpus.md`). Two packages

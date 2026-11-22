@@ -38,6 +38,16 @@ type Template struct {
 	Images []Image `json:"images"`
 	// Notes are tips shown in the wizard.
 	Notes []string `json:"notes"`
+	// Catalog is the verified image (catalog.go) the template starts
+	// from: one click, no link to paste.
+	Catalog string `json:"catalog,omitempty"`
+	// Unattend: Windows can install by itself (unattend.go); Editions
+	// are the usual edition names, the first being the default.
+	Unattend bool     `json:"unattend,omitempty"`
+	Editions []string `json:"editions,omitempty"`
+	// Sound and Clipboard are on for new VMs of the template (console).
+	Sound     bool `json:"sound,omitempty"`
+	Clipboard bool `json:"clipboard,omitempty"`
 }
 
 // Preset is a named size.
@@ -70,9 +80,30 @@ func presets(light, standard, power Preset) []Preset {
 }
 
 var windowsNotes = []string{
-	"Get the Windows installer (.iso) from Microsoft and put it in the ISOs shared folder, or paste a download link.",
-	"When Windows Setup asks where to install and shows no disk, choose Load driver and open the VirtIO drivers disc (vioscsi folder). After Windows starts, run virtio-win-guest-tools.exe from the same disc.",
+	"Get the Windows installer (.iso) from Microsoft and put it in the ISOs shared folder, or paste a download link. HardyOS doesn't handle licences: activate Windows with your own.",
+	"With Install by itself on, Windows sets itself up with your account, the VirtIO drivers and guest tools; follow along on the VM's screen. Otherwise, when Windows Setup asks where to install and shows no disk, choose Load driver and open the VirtIO drivers disc (vioscsi folder), and after Windows starts run virtio-win-guest-tools.exe from the same disc.",
 }
+
+// Windows editions as their installers name them.
+var (
+	win11Editions  = []string{"Windows 11 Pro", "Windows 11 Home", "Windows 11 Education", "Windows 11 Enterprise", "Windows 11 Enterprise Evaluation"}
+	win10Editions  = []string{"Windows 10 Pro", "Windows 10 Home", "Windows 10 Education", "Windows 10 Enterprise"}
+	server2025Edns = []string{
+		"Windows Server 2025 Standard (Desktop Experience)", "Windows Server 2025 Datacenter (Desktop Experience)",
+		"Windows Server 2025 Standard Evaluation (Desktop Experience)", "Windows Server 2025 Datacenter Evaluation (Desktop Experience)",
+		"Windows Server 2025 Standard", "Windows Server 2025 Datacenter",
+	}
+)
+
+func linuxCloudPresets() []Preset {
+	return presets(
+		Preset{Summary: "Small services, a DNS server", Cores: 1, Threads: 1, MemoryMB: 1024, DiskGB: 16},
+		Preset{Summary: "Web apps and databases", Cores: 2, Threads: 1, MemoryMB: 4096, DiskGB: 32},
+		Preset{Summary: "Build servers, big databases", Cores: 8, Threads: 1, MemoryMB: 16384, DiskGB: 128},
+	)
+}
+
+var cloudNotes = []string{"Starts set up in about a minute: sign in over SSH as your user with your key (or the password). The image is checked against its publisher's checksums before it's used."}
 
 // Templates is the list the wizard shows, in order.
 var Templates = []Template{
@@ -87,8 +118,24 @@ var Templates = []Template{
 			Preset{Summary: "Heavy apps", Cores: 8, Threads: 1, MemoryMB: 16384, DiskGB: 160},
 		),
 		DefaultPreset: "standard", MinMemoryMB: 4096, MinDiskGB: 64,
-		Images: []Image{{Name: "Windows 11", Kind: "iso", Page: "https://www.microsoft.com/software-download/windows11"}},
-		Notes:  windowsNotes,
+		Images:   []Image{{Name: "Windows 11", Kind: "iso", Page: "https://www.microsoft.com/software-download/windows11"}},
+		Notes:    windowsNotes,
+		Unattend: true, Editions: win11Editions, Sound: true, Clipboard: true,
+	},
+	{
+		ID: "windows-server-2025", Name: "Windows Server 2025", Summary: "With Secure Boot, a TPM and the VirtIO drivers, installed by itself.",
+		Group: "windows", OS: "windows", Install: "iso",
+		Firmware: Firmware{Type: FirmwareUEFI, SecureBoot: true, TPM: true},
+		DiskBus:  BusVirtioSCSI, NICModel: "virtio", NICs: 1, Video: "vga", Virtio: true, Balloon: true,
+		Presets: presets(
+			Preset{Summary: "A domain controller or file server", Cores: 2, Threads: 1, MemoryMB: 4096, DiskGB: 64},
+			Preset{Summary: "Most server roles", Cores: 4, Threads: 1, MemoryMB: 8192, DiskGB: 96},
+			Preset{Summary: "SQL Server, Exchange, many users", Cores: 8, Threads: 1, MemoryMB: 32768, DiskGB: 256},
+		),
+		DefaultPreset: "standard", MinMemoryMB: 2048, MinDiskGB: 32,
+		Images:   []Image{{Name: "Windows Server 2025 (evaluation)", Kind: "iso", Page: "https://www.microsoft.com/evalcenter/download-windows-server-2025"}},
+		Notes:    windowsNotes,
+		Unattend: true, Editions: server2025Edns,
 	},
 	{
 		ID: "windows10", Name: "Windows 10", Summary: "For older software that needs Windows 10.",
@@ -101,11 +148,28 @@ var Templates = []Template{
 			Preset{Summary: "Heavy apps", Cores: 8, Threads: 1, MemoryMB: 16384, DiskGB: 160},
 		),
 		DefaultPreset: "standard", MinMemoryMB: 2048, MinDiskGB: 32,
-		Images: []Image{{Name: "Windows 10", Kind: "iso", Page: "https://www.microsoft.com/software-download/windows10"}},
-		Notes:  windowsNotes,
+		Images:   []Image{{Name: "Windows 10", Kind: "iso", Page: "https://www.microsoft.com/software-download/windows10"}},
+		Notes:    windowsNotes,
+		Unattend: true, Editions: win10Editions, Sound: true, Clipboard: true,
 	},
 	{
-		ID: "linux", Name: "Linux server", Summary: "Ubuntu or Debian, ready in a minute with your SSH key (cloud-init).",
+		ID: "debian13", Name: "Debian 13", Summary: "Debian's official cloud image, set up with your user and SSH key in a minute.",
+		Group: "linux", OS: "linux", Install: "cloud", Catalog: CatalogDebian13,
+		Firmware: Firmware{Type: FirmwareUEFI},
+		DiskBus:  BusVirtioSCSI, NICModel: "virtio", NICs: 1, Video: "virtio", CloudInit: true, Balloon: true,
+		Presets: linuxCloudPresets(), DefaultPreset: "standard", MinMemoryMB: 512, MinDiskGB: 8,
+		Notes: cloudNotes,
+	},
+	{
+		ID: "ubuntu2404", Name: "Ubuntu Server 24.04", Summary: "Ubuntu's official cloud image (LTS), set up with your user and SSH key in a minute.",
+		Group: "linux", OS: "linux", Install: "cloud", Catalog: CatalogUbuntu,
+		Firmware: Firmware{Type: FirmwareUEFI},
+		DiskBus:  BusVirtioSCSI, NICModel: "virtio", NICs: 1, Video: "virtio", CloudInit: true, Balloon: true,
+		Presets: linuxCloudPresets(), DefaultPreset: "standard", MinMemoryMB: 512, MinDiskGB: 8,
+		Notes: cloudNotes,
+	},
+	{
+		ID: "linux", Name: "Linux server", Summary: "Another distribution's cloud image by link, set up with cloud-init.",
 		Group: "linux", OS: "linux", Install: "cloud",
 		Firmware: Firmware{Type: FirmwareUEFI},
 		DiskBus:  BusVirtioSCSI, NICModel: "virtio", NICs: 1, Video: "virtio", CloudInit: true, Balloon: true,
@@ -142,6 +206,8 @@ var Templates = []Template{
 			{Name: "Ubuntu Desktop 24.04 LTS", Kind: "iso", Page: "https://ubuntu.com/download/desktop"},
 			{Name: "Debian 13", Kind: "iso", Page: "https://www.debian.org/download"},
 		},
+		Sound: true, Clipboard: true,
+		Notes: []string{"For copy and paste with the screen, install spice-vdagent in the VM (most desktop installs have it)."},
 	},
 	{
 		ID: "gaming", Name: "Gaming PC", Summary: "Windows 11 with a graphics card, streamed with Moonlight.",
@@ -154,6 +220,7 @@ var Templates = []Template{
 			Preset{Summary: "New big games", Cores: 8, Threads: 2, MemoryMB: 32768, DiskGB: 512},
 		),
 		DefaultPreset: "standard", MinMemoryMB: 8192, MinDiskGB: 96,
+		Unattend: true, Editions: win11Editions, Sound: true, Clipboard: true,
 		Images: []Image{{Name: "Windows 11", Kind: "iso", Page: "https://www.microsoft.com/software-download/windows11"}},
 		Notes: append([]string{
 			"Add your graphics card in the Devices step. While the VM is off, the card goes back to Docker apps.",
@@ -170,12 +237,9 @@ var Templates = []Template{
 			Preset{Summary: "Most homes", Cores: 2, Threads: 1, MemoryMB: 4096, DiskGB: 64},
 			Preset{Summary: "Many add-ons and cameras", Cores: 4, Threads: 1, MemoryMB: 8192, DiskGB: 128},
 		),
-		DefaultPreset: "standard", MinMemoryMB: 2048, MinDiskGB: 32,
-		Images: []Image{{Name: "Home Assistant OS 16.2", Kind: "disk", Page: "https://www.home-assistant.io/installation/linux", URLs: map[string]string{
-			"x86_64":  "https://github.com/home-assistant/operating-system/releases/download/16.2/haos_ova-16.2.qcow2.xz",
-			"aarch64": "https://github.com/home-assistant/operating-system/releases/download/16.2/haos_generic-aarch64-16.2.qcow2.xz",
-		}}},
-		Notes: []string{"Home Assistant opens at http://<the VM's address>:8123 a few minutes after the first start. Zigbee or Z-Wave sticks can be added in the Devices step."},
+		DefaultPreset: "standard", MinMemoryMB: 2048, MinDiskGB: 32, Catalog: CatalogHAOS,
+		Images: []Image{{Name: "Home Assistant OS 16.2", Kind: "disk", Page: "https://www.home-assistant.io/installation/linux"}},
+		Notes:  []string{"Home Assistant opens at http://<the VM's address>:8123 a few minutes after the first start. Zigbee or Z-Wave sticks can be added in the Devices step."},
 	},
 	{
 		ID: "opnsense", Name: "OPNsense or pfSense", Summary: "A firewall and router, with a WAN and a LAN port.",

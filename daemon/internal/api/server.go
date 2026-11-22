@@ -289,6 +289,7 @@ func (s *Server) routes() {
 			s.fileServiceRoutes()
 			s.snapshotRoutes()
 			s.vmRoutes()
+			s.vmPolishRoutes()
 			s.deviceRoutes()
 			s.replicationRoutes()
 		}
