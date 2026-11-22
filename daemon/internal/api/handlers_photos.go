@@ -248,7 +248,7 @@ func (s *Server) photosSync(jc *jobs.Context) (*photos.Status, error) {
 		s.recordSystem(context.WithoutCancel(jc), "photos.incident", photos.AppID, st.Incident)
 		if s.cfg.Alerts != nil {
 			s.cfg.Alerts.Notify(context.WithoutCancel(jc), notify.Event{Kind: "security.photos", Severity: notify.SeverityCritical,
-				Title: "Photos: Immich has an administrator HardyOS didn't make", Body: st.Incident, Link: "control-panel/photos"})
+				Title: "Photos: Immich has an administrator HardyOS didn't make", Body: st.Incident, Link: "control/photos"})
 		}
 	}
 	if err != nil && !errors.Is(err, photos.ErrNeedsLink) && !errors.Is(err, errPhotosNotInstalled) && !errors.Is(err, errPhotosNotCatalog) {
