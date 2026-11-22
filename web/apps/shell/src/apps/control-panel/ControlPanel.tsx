@@ -13,6 +13,7 @@ import { ReplicationPage } from "../backup/replication";
 import { Hardware } from "./Hardware";
 import { Hostnames } from "./Hostnames";
 import { Mail } from "./Mail";
+import { NetBirdStandby } from "./NetBirdStandby";
 import { Network } from "./Network";
 import { Office } from "./Office";
 import { Notifications } from "./Notifications";
@@ -37,6 +38,7 @@ const SECTIONS = [
   { id: "network", label: "Network", icon: <NetworkIcon size={16} /> },
   { id: "remote", label: "Remote Access", icon: <GlobeIcon size={16} /> },
   { id: "hostnames", label: "Hostnames", icon: <LockIcon size={16} /> },
+  { id: "netbird-standby", label: "NetBird Standby", icon: <LayersIcon size={16} /> },
   { id: "mail", label: "Mail", icon: <MailIcon size={16} /> },
   { id: "photos", label: "Photos", icon: <PhotoIcon size={16} /> },
   { id: "time", label: "Date & Time", icon: <CalendarIcon size={16} /> },
@@ -85,6 +87,7 @@ export default function ControlPanel({ args }: AppProps) {
       {section === "network" && <Network />}
       {section === "remote" && <RemoteAccess />}
       {section === "hostnames" && <Hostnames />}
+      {section === "netbird-standby" && <NetBirdStandby />}
       {section === "mail" && <Mail />}
       {section === "photos" && <Photos />}
       {section === "time" && <DateTime />}

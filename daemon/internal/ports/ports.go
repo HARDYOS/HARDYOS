@@ -43,7 +43,24 @@ const (
 	AppProxyCount = 100
 	// Replication is the receiving side of replication (decision 190).
 	Replication = 44400
+
+	// The NetBird standby server (docs/netbird-standby.md, decisions
+	// 420-429): the netbird-standby app's own host ports, which the router
+	// forwards to (public TCP 80, TCP 443 and UDP 3478). Only that app may
+	// publish them (OwnedBy) and nothing reaches them from outside unless
+	// HardyOS has taken over (hardyd-priv's hardyos_nbstandby table).
+	// 44623-44629 are kept for it.
+	NetBirdStandbyHTTP  = 44620
+	NetBirdStandbyHTTPS = 44621
+	NetBirdStandbySTUN  = 44622 // UDP
+	// NetBirdSTUN is the STUN port NetBird's server advertises and listens
+	// on inside its container (the router's public side of
+	// NetBirdStandbySTUN; not a host port of this server).
+	NetBirdSTUN = 3478
 )
+
+// NetBirdStandbyApp is the app id that owns the NetBird standby ports.
+const NetBirdStandbyApp = "netbird-standby"
 
 // Fixed lists every single fixed port with its owner (the app proxy range
 // is checked separately), including ports services HardyOS runs take that
@@ -63,6 +80,9 @@ var Fixed = map[string]int{
 	"office origin":             Office,
 	"office internal":           OfficeInternal,
 	"replication":               Replication,
+	"netbird standby http":      NetBirdStandbyHTTP,
+	"netbird standby https":     NetBirdStandbyHTTPS,
+	"netbird standby stun":      NetBirdStandbySTUN,
 	"socks (netbird)":           1080,
 	"nfs":                       2049,
 	"iscsi":                     3260,
@@ -82,6 +102,17 @@ func Reserved(p int) bool {
 	}
 	return false
 }
+
+// owned are fixed ports one app may publish (and no other).
+var owned = map[int]string{
+	NetBirdStandbyHTTP:  NetBirdStandbyApp,
+	NetBirdStandbyHTTPS: NetBirdStandbyApp,
+	NetBirdStandbySTUN:  NetBirdStandbyApp,
+}
+
+// OwnedBy names the app allowed to publish the fixed port p ("" for none):
+// the apps engine lets that app, and only that app, use it.
+func OwnedBy(p int) string { return owned[p] }
 
 // WebmailSubnet is the Docker network of the webmail app (Roundcube): its
 // compose file asks for exactly this subnet, and hardyd's mail sign-in

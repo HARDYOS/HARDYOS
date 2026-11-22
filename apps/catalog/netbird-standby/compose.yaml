@@ -1,0 +1,93 @@
+# NetBird standby server for HardyOS (docs/netbird-standby.md, decisions
+# 420-429). Installed and kept stopped by Control Panel > NetBird Standby;
+# started only by a take-over, with the state HardyOS copied from the VPS.
+#
+# - The same layout as NetBird's self-hosted quickstart (combined server,
+#   dashboard, Traefik with Let's Encrypt in /letsencrypt/acme.json), so the
+#   VPS's config.yaml, databases and certificate work unchanged. Images by
+#   digest (multi-arch indexes: amd64 and arm64).
+# - No Docker socket: Traefik reads its routes from a file hardyd-priv
+#   writes into traefik/ when it stages a take-over (the hostname's gRPC,
+#   relay, API and IdP paths to the server, the rest to the dashboard).
+# - config/, data/ and letsencrypt/ hold secrets (the store's encryption
+#   key, the relay secret, the certificate's key): root-owned 0700 folders,
+#   written by hardyd-priv only, removed again on hand-back.
+# - Ports are fixed (the router forwards public TCP 80/443 and UDP 3478 to
+#   44620/44621/44622); hardyd-priv's hardyos_nbstandby table drops them
+#   from outside unless HardyOS has taken over.
+# - The containers run as root inside (the images don't support another
+#   user); no capabilities beyond Docker's defaults.
+services:
+  netbird-server:
+    image: docker.io/netbirdio/netbird-server:0.83.1@sha256:f6acc1a6dcb48d10b867ec7e6916c62ef5c8dc2bb198aec9cc637b2dd26c06c9
+    command: ["--config", "/etc/netbird/config.yaml"]
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "${HARDY_PORT_STUN}:3478/udp"
+    volumes:
+      - ${HARDY_APP_DATA}/data:/var/lib/netbird
+      - ${HARDY_APP_DATA}/config:/etc/netbird:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "2"
+
+  dashboard:
+    image: docker.io/netbirdio/dashboard:v2.97.0@sha256:203b2dc90dc20d3fd45729caac7c922deb399586a68202e0a35be099720bac7d
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      NETBIRD_MGMT_API_ENDPOINT: https://${NB_DOMAIN}
+      NETBIRD_MGMT_GRPC_API_ENDPOINT: https://${NB_DOMAIN}
+      AUTH_AUDIENCE: netbird-dashboard
+      AUTH_CLIENT_ID: netbird-dashboard
+      AUTH_CLIENT_SECRET: ""
+      AUTH_AUTHORITY: https://${NB_DOMAIN}/oauth2
+      USE_AUTH0: "false"
+      AUTH_SUPPORTED_SCOPES: openid profile email groups
+      AUTH_REDIRECT_URI: /nb-auth
+      AUTH_SILENT_REDIRECT_URI: /nb-silent-auth
+      NGINX_SSL_PORT: "443"
+      LETSENCRYPT_DOMAIN: none
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "2"
+
+  traefik:
+    image: docker.io/library/traefik:v3.7.18@sha256:9c437ac4f09ce6f4980a8544902d3475fdf70a1a7c578729581d2535dfa7d635
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - "--log.level=INFO"
+      - "--providers.file.directory=/etc/traefik"
+      - "--providers.file.watch=true"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.websecure.allowACMEByPass=true"
+      - "--entrypoints.websecure.transport.respondingTimeouts.readTimeout=0"
+      - "--entrypoints.websecure.transport.respondingTimeouts.writeTimeout=0"
+      - "--entrypoints.websecure.transport.respondingTimeouts.idleTimeout=0"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      - "--serverstransport.forwardingtimeouts.responseheadertimeout=0s"
+      - "--serverstransport.forwardingtimeouts.idleconntimeout=0s"
+    ports:
+      - "${HARDY_PORT_HTTP}:80"
+      - "${HARDY_PORT_HTTPS}:443"
+    volumes:
+      - ${HARDY_APP_DATA}/traefik:/etc/traefik:ro
+      - ${HARDY_APP_DATA}/letsencrypt:/letsencrypt
+    depends_on:
+      - netbird-server
+      - dashboard
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "2"

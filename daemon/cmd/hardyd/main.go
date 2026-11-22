@@ -294,6 +294,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		}
 		go handler.RunPhotos(ctx, api.PhotosOptions{}) // Photos: keeps the Immich app set up
 		go handler.RunHostnames(ctx)                   // per-app hostnames: state and certificate renewals
+		go handler.RunNetBirdStandby(ctx)              // NetBird standby: sync schedule and stale alerts
 	}
 
 	var servers []*http.Server

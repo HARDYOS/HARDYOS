@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -29,6 +30,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/hw"
 	"github.com/hardyos/hardyos/daemon/internal/install"
 	"github.com/hardyos/hardyos/daemon/internal/mail"
+	"github.com/hardyos/hardyos/daemon/internal/nbstandby"
 	"github.com/hardyos/hardyos/daemon/internal/netbird"
 	"github.com/hardyos/hardyos/daemon/internal/network"
 	"github.com/hardyos/hardyos/daemon/internal/nfs"
@@ -162,7 +164,8 @@ func main() {
 		priv.RegisterSecrets(s, zfs.KeyDir)
 		// The Cloudflare token for hostnames (decision 451): root's alone,
 		// used only for named DNS operations.
-		priv.RegisterDNS(s, priv.DNSEnv{KeyDir: zfs.KeyDir})
+		nbsDir := filepath.Join(zfs.KeyDir, "netbird-standby")
+		priv.RegisterDNS(s, priv.DNSEnv{KeyDir: zfs.KeyDir, StandbyTakenOver: func() (string, bool) { return nbstandby.TakenOver(nbsDir) }})
 		// Kept attached to the LAN and running through network changes and
 		// crashes.
 		priv.RegisterDomain(s, dc)
@@ -201,6 +204,16 @@ func main() {
 			}
 			return ids, nil
 		})
+		// The NetBird standby (decisions 420-429): root's SSH key to the VPS,
+		// the sealed snapshots, staging a take-over into the app and the
+		// firewall table for its ports.
+		nbs := &nbstandby.Root{
+			Dir:  filepath.Join(zfs.KeyDir, "netbird-standby"),
+			Key:  func() ([]byte, error) { return priv.RootKeyFor(zfs.KeyDir, "netbird-standby") },
+			Apps: priv.StandbyApps(am), Net: &nbstandby.System{Runner: sysexec.Exec{}, Root: "/"}, Log: log,
+		}
+		priv.RegisterNetBirdStandby(s, nbs)
+		go nbs.OnStart(ctx)
 		// The office suite's Document Server: its address and firewall rules.
 		priv.RegisterOffice(s, &dsnet.Manager{Runner: sysexec.Exec{}, HardydUID: func() (int, error) {
 			if hardydUID < 0 {

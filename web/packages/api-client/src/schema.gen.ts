@@ -3035,6 +3035,190 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/netbird-standby": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Control Panel › NetBird Standby status
+         * @description The VPS connection hardyd-priv keeps (address, user, pinned host
+         *     key, HardyOS's public key; never the private key), the sealed
+         *     copies of the VPS's NetBird server (time, size, hash, version; never
+         *     their contents), sync health and history, the app, the standby
+         *     name's DNS records, the current take-over, and the router port
+         *     forwards the standby needs. Administrators only.
+         */
+        get: operations["getNetBirdStandby"];
+        put?: never;
+        post?: never;
+        /** Forget the VPS connection, HardyOS's key and every copy (a job; not while taken over) */
+        delete: operations["forgetNetBirdStandby"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/netbird-standby/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Save the VPS connection, the schedule and this server's public address (a job, audited)
+         * @description hardyd-priv checks and keeps the connection and makes HardyOS's own
+         *     ed25519 key the first time (or with newKey); the VPS script then
+         *     installs its public half with a forced command.
+         */
+        put: operations["setNetBirdStandbySettings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/netbird-standby/script": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The script to run once on the VPS as root */
+        get: operations["getNetBirdStandbyScript"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/netbird-standby/vps": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Ask the VPS how its NetBird server is (the status verb; changes nothing) */
+        get: operations["getNetBirdStandbyVPS"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/netbird-standby/install": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Install the standby app, stopped (a job) */
+        post: operations["installNetBirdStandby"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/netbird-standby/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Copy the VPS's NetBird server now (a job; not while taken over) */
+        post: operations["syncNetBirdStandby"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/netbird-standby/dns": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The records that hold the NetBird server's name in Cloudflare now */
+        get: operations["previewNetBirdStandbyDNS"];
+        put?: never;
+        /** Let HardyOS change exactly these records of the name on a take-over (a job; the name typed) */
+        post: operations["adoptNetBirdStandbyDNS"];
+        /** Stop HardyOS managing the name (a job; the name typed; not while taken over) */
+        delete: operations["forgetNetBirdStandbyDNS"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/netbird-standby/takeover": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Take over the NetBird server (a job; the hostname typed)
+         * @description A last copy if the VPS still answers, then the newest copy goes into
+         *     the standby, which starts; its ports open and this server reaches
+         *     it locally; the name's A (and AAAA) record points at this server's
+         *     public address with TTL 60; peers are watched reconnecting. 400
+         *     `version_newer` when the VPS runs a newer NetBird than the standby
+         *     (send acceptVersion to go on anyway), `confirm_required` without
+         *     the typed name.
+         */
+        post: operations["takeOverNetBird"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/netbird-standby/handback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Give the NetBird server back to the VPS (a job; the hostname typed and the split-brain warning acknowledged)
+         * @description The VPS must answer and allow hand-back. The standby stops, its
+         *     databases go to the VPS (which keeps a copy of its own first), the
+         *     name's records go back to what they were, the ports close and the
+         *     staged state is removed. With discard, nothing is sent to the VPS.
+         */
+        post: operations["handBackNetBird"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/remote": {
         parameters: {
             query?: never;
@@ -5441,6 +5625,220 @@ export interface components {
             lastError: components["schemas"]["HostnamesCertAttempt"] | null;
             names: components["schemas"]["HostnameEntry"][];
             lan: components["schemas"]["HostnamesLANState"];
+        };
+        NBStandbyStatus: {
+            connection: components["schemas"]["NBStandbyConnection"] | null;
+            problem?: string;
+            settings: components["schemas"]["NBStandbySettings"];
+            health: components["schemas"]["NBStandbyHealth"];
+            history: components["schemas"]["NBStandbySyncRow"][];
+            app: components["schemas"]["NBStandbyApp"];
+            dns: components["schemas"]["NBStandbyDNS"];
+            takeover: components["schemas"]["NBStandbyTakeover"] | null;
+            /** @description The netbird-server version the standby app pins */
+            standbyVersion: string;
+            versionNote?: string;
+            /** @description The VPS runs a newer NetBird than the standby */
+            versionNewer: boolean;
+            portForwards: components["schemas"]["NBPortForward"][];
+            clientConnected: boolean;
+            clientIp: string;
+            managementUrl: string;
+        };
+        /** @description hardyd-priv's side; never the private key or a copy's contents */
+        NBStandbyConnection: {
+            configured: boolean;
+            vpsHost: string;
+            vpsPort: number;
+            vpsUser: string;
+            /** @description The VPS's pinned SSH host key */
+            hostKey: string;
+            hostKeyFingerprint: string;
+            /** @description The NetBird server's name */
+            hostname: string;
+            /** @description HardyOS's public key for the VPS's authorized_keys */
+            publicKey: string;
+            /** Format: date-time */
+            keyCreated?: string;
+            snapshots: components["schemas"]["NBStandbySnapshot"][];
+            /** Format: date-time */
+            lastTry?: string;
+            /** Format: date-time */
+            lastOk?: string;
+            lastError?: string;
+            /** @enum {string} */
+            mode: "standby" | "takenover";
+            staged?: string;
+            /** Format: date-time */
+            takenOverAt?: string;
+            networkOpen: boolean;
+        };
+        NBStandbySnapshot: {
+            id: string;
+            /** Format: date-time */
+            at: string;
+            sealedBytes: number;
+            info: components["schemas"]["NBStandbySnapshotInfo"];
+        };
+        NBStandbySnapshotInfo: {
+            /** Format: date-time */
+            created: string;
+            hostname: string;
+            image: string;
+            digest: string;
+            version: string;
+            peers: number;
+            setupKeys: number;
+            files: string[];
+            bytes: number;
+            sha256: string;
+            /** Format: date-time */
+            certNotAfter?: string;
+            warnings: string[];
+        };
+        NBStandbySettings: {
+            intervalMinutes: number;
+            autoSync: boolean;
+            /** @description This server's public IPv4 address (where the router forwards the NetBird ports) */
+            publicIPv4: string;
+            publicIPv6: string;
+            /** @description Addresses HardyOS reaches the VPS from (the key's from= restriction) */
+            connectFrom: string[];
+        };
+        NBStandbyHealth: {
+            /** @enum {string} */
+            state: "unconfigured" | "waiting" | "ok" | "failing" | "stale" | "takenover";
+            stale: boolean;
+            staleAfterMinutes: number;
+            /** Format: date-time */
+            nextSync?: string;
+            problem?: string;
+        };
+        NBStandbySyncRow: {
+            /** Format: date-time */
+            startedAt: string;
+            /** Format: date-time */
+            finishedAt: string;
+            ok: boolean;
+            auto: boolean;
+            bytes: number;
+            sha256: string;
+            version: string;
+            peers: number;
+            error: string;
+        };
+        NBStandbyApp: {
+            installed: boolean;
+            state: string;
+            version: string;
+        };
+        NBStandbyDNS: {
+            tokenSet: boolean;
+            base: string;
+            zone: string;
+            /** @description The adopted standby name ("" when none) */
+            name: string;
+            adopted: components["schemas"]["NBStandbyDNSRecord"][];
+            inBase: boolean;
+            inZone: boolean;
+        };
+        NBStandbyDNSRecord: {
+            id: string;
+            type: string;
+            content: string;
+            ttl: number;
+            proxied: boolean;
+            comment?: string;
+        };
+        NBStandbyDNSPreview: {
+            name: string;
+            zone: string;
+            records: components["schemas"]["NBStandbyDNSRecord"][];
+            adoptable: boolean;
+            problem?: string;
+        };
+        NBStandbyDNSRequest: {
+            name: string;
+            /** @description The name */
+            confirm: string;
+            /** @description Exactly the record ids the preview showed */
+            ids: string[];
+        };
+        NBStandbyTakeover: {
+            /** Format: date-time */
+            at: string;
+            by: string;
+            /** Format: date-time */
+            snapshotAt: string;
+            finalSync: boolean;
+            finalSyncError?: string;
+            dnsChanged: boolean;
+            ipv4: string;
+            ipv6?: string;
+            peersTotal: number;
+            peersConnected: number;
+            /** Format: date-time */
+            peersCheckedAt?: string;
+            peersProblem?: string;
+            notes: string[];
+        };
+        NBPortForward: {
+            /** @enum {string} */
+            protocol: "TCP" | "UDP";
+            public: number;
+            internal: number;
+            purpose: string;
+        };
+        NBStandbySettingsRequest: {
+            vpsHost: string;
+            /** @description SSH port (default 22) */
+            vpsPort?: number;
+            /** @description Default hardyos-standby */
+            vpsUser?: string;
+            /** @description The VPS's SSH host key (ssh-ed25519 AAAA…) */
+            hostKey: string;
+            /** @description The NetBird server's name */
+            hostname: string;
+            /** @description Make a new SSH key (run the VPS script again) */
+            newKey?: boolean;
+            settings: components["schemas"]["NBStandbySettings"];
+        };
+        NBStandbyScript: {
+            script: string;
+            fileName: string;
+        };
+        NBStandbyVPSStatus: {
+            running: boolean;
+            version: string;
+            digest: string;
+            image: string;
+            hostname: string;
+            restoreAllowed: boolean;
+            time: string;
+        };
+        NBStandbyInstallRequest: {
+            /** @description The pool apps go on */
+            pool?: string;
+        };
+        NBStandbyConfirm: {
+            /** @description The NetBird server's name (or the adopted name) */
+            confirm: string;
+        };
+        NBStandbyTakeoverRequest: {
+            /** @description The NetBird server's name */
+            confirm: string;
+            /** @description Go on although the VPS runs a newer NetBird */
+            acceptVersion?: boolean;
+            /** @description Don't try a last copy first */
+            skipFinalSync?: boolean;
+        };
+        NBStandbyHandbackRequest: {
+            /** @description The NetBird server's name */
+            confirm: string;
+            /** @description The standby's state replaces whatever the VPS changed since the take-over */
+            acceptSplitBrain: boolean;
+            /** @description Don't send the standby's state; the VPS keeps its own */
+            discard?: boolean;
         };
         HostnamesDesktop: {
             url: string;
@@ -14376,6 +14774,272 @@ export interface operations {
             400: components["responses"]["Invalid"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getNetBirdStandby: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NBStandbyStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    forgetNetBirdStandby: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NBStandbyConfirm"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    setNetBirdStandbySettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NBStandbySettingsRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getNetBirdStandbyScript: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The script */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NBStandbyScript"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getNetBirdStandbyVPS: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description What the VPS said */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NBStandbyVPSStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description The VPS didn't answer */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    installNetBirdStandby: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NBStandbyInstallRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    syncNetBirdStandby: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    previewNetBirdStandbyDNS: {
+        parameters: {
+            query: {
+                name: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The records */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NBStandbyDNSPreview"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    adoptNetBirdStandbyDNS: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NBStandbyDNSRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    forgetNetBirdStandbyDNS: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NBStandbyConfirm"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    takeOverNetBird: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NBStandbyTakeoverRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    handBackNetBird: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NBStandbyHandbackRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
             503: components["responses"]["Unavailable"];
         };
     };

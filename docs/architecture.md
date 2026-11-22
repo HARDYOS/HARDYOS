@@ -2157,8 +2157,7 @@ decisions 450-459.
 - **Token** (`priv/dns_ops.go`, `internal/cfdns`): root's only, sealed in
   `_hardyos-dns.json` in the keys folder with a root-only key; operations
   `dns.status`, `dns.token.set|verify|clear`, `dns.acme.present|cleanup`,
-  `dns.record.set` (for the NetBird take-over; code and tests, not
-  registered yet). Fake Cloudflare
+  `dns.record.set` (registered for the NetBird standby, decision 424). Fake Cloudflare
   for tests: `internal/cfdns/cftest`.
 - **Certificate** (`internal/hostnames`): hardyd makes the key and CSR,
   answers DNS-01 through root, keeps `wildcard.pem` (key and chain, one
@@ -2193,6 +2192,47 @@ decisions 450-459.
   names, checked with the directory helper's `names.taken`), its own list
   of records and zones in `hardyos-hostnames.json` in the DC's data folder.
 
+## NetBird standby server
+
+User guide: [netbird-standby.md](netbird-standby.md); plan
+`docs/plans/netbird-standby.md`; decisions 420-429.
+
+```
+ VPS (vpn.<domain>)                          HardyOS
+ netbird-server + dashboard + traefik        hardyd-priv ── ssh (pinned host key, root's ed25519 key)
+   ▲ forced command, user hardyos-standby  ◄──┘  verbs: status | snapshot | restore (opt-in)
+   │ sudo <root script> <verb> only               ▼
+   │                                        keys/netbird-standby/snap-*.sealed (AES-256-GCM chunks)
+   │                                              │ take-over: stage into the stopped app
+ Cloudflare ◄── dns.record.set / dns.standby.restore (adopted name only)
+                                            netbird-standby app :44620/:44621/:44622udp
+                                            hardyos_nbstandby nft table: closed | open + output DNAT
+                                            /etc/hosts: <name> → 127.0.77.1 while taken over
+```
+
+- **Root** (`internal/nbstandby/root.go`, ops `netbird.standby.*` in
+  `priv/nbstandby_ops.go`): the VPS connection and the SSH key (seed sealed
+  with `RootKeyFor(keys, "netbird-standby")`), up to 3 sealed snapshots,
+  the take-over mode. `sync` pulls the snapshot tar through `Check` (entry
+  allowlist, sizes, SQLite headers, manifest hashes, hostname, SQLite store)
+  while sealing it; `stage` re-checks the sealed copy while writing it into
+  the stopped catalog app's data folder (secrets folded into config.yaml,
+  Traefik routes written for the hostname); `handback` sends the stopped
+  standby's databases with their checksums to the restore verb; `network`
+  opens the ports only while taken over.
+- **DNS** (`priv/dns_ops.go`): `dns.record.set` registered; one adopted
+  standby name (`dns.standby.preview|adopt|restore|forget`) inside the
+  token's zone, A/AAAA to public addresses only, originals restored on
+  hand-back.
+- **hardyd** (`internal/nbstandby/service.go`, `api/handlers_nbstandby.go`):
+  settings and history (`nbstandby_syncs`, migration 0130), the schedule
+  and stale alerts (`RunNetBirdStandby`), take-over and hand-back as jobs
+  over a `Backend` of root operations, undone step by step on failure.
+- **VPS side** (`internal/nbstandby/script.go`): the script the
+  administrator runs once; it never changes NetBird, only adds the user, its
+  one key, the forced command, the root script and a sudo rule naming the
+  exact verbs.
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly
@@ -2207,6 +2247,10 @@ decisions 450-459.
 - Hostnames: the Cloudflare token sealed in
   `/var/lib/hardyos/keys/_hardyos-dns.json` (root's), the wildcard
   certificate in the TLS folder, issuance history in `hostname_certs`.
+- NetBird standby: root's VPS key and sealed copies in
+  `/var/lib/hardyos/keys/netbird-standby/` (not in settings backups), the
+  staged state only in the app's data folder while taken over, sync
+  history in `nbstandby_syncs`.
 - OS: ZFS root with boot environments; each update installs into a new boot
   environment and falls back automatically if the health check fails.
 
