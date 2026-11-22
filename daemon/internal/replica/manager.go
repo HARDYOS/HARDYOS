@@ -48,6 +48,13 @@ type Manager struct {
 	Starter Starter // nil: ExecStarter
 	Items   Items
 	Freeze  Freezer
+	// Prepare readies an item's dataset right before its snapshot (the
+	// mail: its configuration and Rspamd's data); nil: nothing to do.
+	Prepare func(ctx context.Context, kind, id string) error
+	// MailRestoreDir is where a mail copy coming back is mounted while
+	// it's put into the mail server (default /run/hardyos/mail-restore,
+	// root only).
+	MailRestoreDir string
 	// Restore adopts what a restore brings back (nil: restores refused).
 	Restore Restorer
 	Log     *slog.Logger
@@ -218,6 +225,14 @@ func (m *Manager) Snapshot(ctx context.Context, a SnapshotArgs) (*SnapshotResult
 		return err
 	}
 	consistent := true
+	if a.Kind == KindMail && m.Prepare != nil {
+		// The mail's configuration and Rspamd's data into its dataset first
+		// (decision 463); without them the copy still has all the mail.
+		if perr := m.Prepare(ctx, a.Kind, a.ID); perr != nil {
+			m.log().Warn("replication: preparing the mail", "err", perr)
+			consistent = false
+		}
+	}
 	if a.Kind == KindVM && m.Freeze != nil {
 		consistent, err = m.Freeze(ctx, a.ID, take)
 	} else {

@@ -2,13 +2,16 @@ package replication
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/replica"
 )
@@ -17,6 +20,8 @@ import (
 type RunResult struct {
 	Bytes int64    `json:"bytes"`
 	Items []string `json:"items"`
+	// Skipped items, with why (the other server doesn't take mail yet).
+	Skipped []string `json:"skipped,omitempty"`
 }
 
 // progress reports bytes moved to the job.
@@ -181,7 +186,8 @@ func (s *Service) replicate(jc *jobs.Context, t *Task, pr *progress) (*RunResult
 		return nil, err
 	}
 	defer p.close()
-	if h, err := p.hello(jc); err != nil {
+	h, err := p.hello(jc)
+	if err != nil {
 		return nil, err
 	} else if h.SourceID != tgt.SourceID {
 		return nil, fmt.Errorf("%s knows this server under another id: pair again", tgt.Name)
@@ -194,6 +200,7 @@ func (s *Service) replicate(jc *jobs.Context, t *Task, pr *progress) (*RunResult
 	for _, li := range local {
 		byKey[li.Kind+"/"+li.ID] = li
 	}
+	s.maybeAddMail(jc, t, tgt, h, byKey)
 	res := &RunResult{Items: []string{}}
 	var failed []string
 	for i, it := range t.Items {
@@ -201,7 +208,18 @@ func (s *Service) replicate(jc *jobs.Context, t *Task, pr *progress) (*RunResult
 		if jc.Err() != nil {
 			return nil, jc.Err()
 		}
+		if !h.accepts(it.Kind) {
+			// An older receiving server: skipped with a warning, the rest
+			// still runs (decision 469).
+			res.Skipped = append(res.Skipped, it.String()+": "+tgt.Name+" doesn't accept this kind yet (update it)")
+			continue
+		}
 		li, ok := byKey[it.String()]
+		if !ok && it.Kind == replica.KindMail {
+			// On by default (decision 460): no mail server here, nothing
+			// to copy, not a failure.
+			continue
+		}
 		if !ok {
 			failed = append(failed, it.String()+": not on this server any more")
 			continue
@@ -220,8 +238,53 @@ func (s *Service) replicate(jc *jobs.Context, t *Task, pr *progress) (*RunResult
 	if len(failed) > 0 {
 		return res, &jobs.FailedWith{Err: errors.New(strings.Join(failed, "; ")), Result: res}
 	}
-	jc.Progress(100, fmt.Sprintf("Replicated %d items (%s)", len(res.Items), human(res.Bytes)))
+	msg := fmt.Sprintf("Replicated %d items (%s)", len(res.Items), human(res.Bytes))
+	if len(res.Skipped) > 0 {
+		msg += "; skipped " + strings.Join(res.Skipped, "; ")
+	}
+	jc.Progress(100, msg)
 	return res, nil
+}
+
+// maybeAddMail adds Mail to a task migration 0110 marked, once the other
+// server accepts mail replicas and this one has a mail server, and tells
+// the administrators: from now on the mail and its DKIM keys go there.
+func (s *Service) maybeAddMail(ctx context.Context, t *Task, tgt *Target, h *helloResponse, local map[string]replica.LocalItem) {
+	if t.MailAuto != "pending" || !h.accepts(replica.KindMail) {
+		return
+	}
+	mailItem := replica.Item{Kind: replica.KindMail, ID: replica.MailItem}
+	if _, ok := local[mailItem.String()]; !ok {
+		return // no mail server here (yet)
+	}
+	// Mail goes to a server in one task only.
+	tasks, err := s.st.Tasks(ctx)
+	if err != nil {
+		return
+	}
+	for _, o := range tasks {
+		if o.TargetID == t.TargetID && slices.Contains(o.Items, mailItem) {
+			_ = s.st.dropMailAuto(ctx, t.ID)
+			return
+		}
+	}
+	items := append(slices.Clone(t.Items), mailItem)
+	if len(items) > MaxItemsPerTask {
+		_ = s.st.dropMailAuto(ctx, t.ID)
+		return
+	}
+	ok, err := s.st.addMail(ctx, t.ID, items)
+	if err != nil || !ok {
+		return
+	}
+	t.Items, t.MailAuto = items, "added"
+	s.log().Info("replication: mail added to a task", "task", t.ID, "target", tgt.Name)
+	s.record(ctx, "replication.task.mail.added", t.ID, "mail (with its DKIM keys) now replicates to "+tgt.Name, "", audit.Success)
+	s.notifier().Notify(context.WithoutCancel(ctx), Event{Kind: EventMailAdded, Severity: SeverityWarning,
+		Title: "Mail now replicates to " + tgt.Name,
+		Body: "The task " + t.Name + " now also copies this server's mail, calendars and DKIM keys to " + tgt.Name +
+			" (on by default since this update). To stop it, open Backup › Replication and choose Stop replicating mail on the task.",
+		Link: "backup/replication", Time: s.now()})
 }
 
 func (s *Service) replicateItem(ctx *jobs.Context, p *peer, t *Task, li replica.LocalItem, pr *progress) error {
@@ -371,6 +434,8 @@ type RestoreResult struct {
 	Bytes   int64  `json:"bytes"`
 	// Notes say what was changed on the way back (a VM's reset settings).
 	Notes []string `json:"notes"`
+	// Mail is what a mail restore did (mail.RestoreResult).
+	Mail json.RawMessage `json:"mail,omitempty"`
 }
 
 func (s *Service) restore(jc *jobs.Context, a RestoreParams) (any, error) {
@@ -394,6 +459,9 @@ func (s *Service) restore(jc *jobs.Context, a RestoreParams) (any, error) {
 		}
 	} else {
 		msg = fmt.Sprintf("%s/%s restored as %s", a.Kind, a.ID, res.Dataset)
+		if a.Kind == replica.KindMail {
+			msg = "the mail was restored (" + a.Mail.Scope + ")"
+		}
 		if len(res.Notes) > 0 {
 			msg += ". Changed: " + strings.Join(res.Notes, "; ")
 			jc.Progress(100, "Restored. Changed: "+strings.Join(res.Notes, "; "))
@@ -421,12 +489,27 @@ func (s *Service) restoreItem(jc *jobs.Context, p *peer, tgt *Target, a RestoreP
 	if err := replica.ValidSnap(a.Snapshot, ""); err != nil {
 		return nil, err
 	}
+	var mailArgs json.RawMessage
+	if a.Kind == replica.KindMail {
+		// The copy comes back under a new id, goes into the mail server as
+		// Mail says, and is removed (decision 466).
+		if a.Mail == nil {
+			return nil, errors.New("choose what of the mail to restore")
+		}
+		if err := a.Mail.Check(); err != nil {
+			return nil, err
+		}
+		mailArgs, _ = json.Marshal(a.Mail)
+		a.NewID, a.Pool, a.Name = "m"+newID(6), "", ""
+	} else if a.Mail != nil {
+		return nil, errors.New("only the mail item restores a mailbox, domain or calendars")
+	}
 	jc.Progress(3, "Looking at the replica on "+tgt.Name)
 	kids, err := p.children(jc, a.Kind, a.ID, a.Snapshot)
 	if err != nil {
 		return nil, err
 	}
-	finish := replica.RestoreFinishArgs{Kind: a.Kind, ID: a.ID, Pool: a.Pool, NewID: a.NewID, Snapshot: a.Snapshot}
+	finish := replica.RestoreFinishArgs{Kind: a.Kind, ID: a.ID, Pool: a.Pool, NewID: a.NewID, Snapshot: a.Snapshot, Mail: mailArgs}
 	pr := &progress{jc: jc, items: len(kids), started: time.Now()}
 	cleanup := func() {
 		if err := s.Root.RestoreAbort(context.Background(), finish); err != nil {
@@ -454,7 +537,7 @@ func (s *Service) restoreItem(jc *jobs.Context, p *peer, tgt *Target, a RestoreP
 	if notes == nil {
 		notes = []string{}
 	}
-	return &RestoreResult{Kind: a.Kind, ID: r.ID, Dataset: r.Dataset, Bytes: pr.total.Load(), Notes: notes}, nil
+	return &RestoreResult{Kind: a.Kind, ID: r.ID, Dataset: r.Dataset, Bytes: pr.total.Load(), Notes: notes, Mail: r.Mail}, nil
 }
 
 // pull receives one dataset of a replica's snapshot back here.

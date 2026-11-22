@@ -94,6 +94,7 @@ type Manifest struct {
 	Shares   []ShareRecord       `json:"shares"`
 	Apps     []apps.BackupSource `json:"apps"`
 	VMs      []VMRecord          `json:"vms"`
+	Mail     *MailRecord         `json:"mail,omitempty"`
 }
 
 // ManifestName is the manifest's file name in the repository.
@@ -154,6 +155,9 @@ func (r *Root) runDir() string {
 // mountDir is an item's stable folder: restic finds each file's previous
 // version by this path.
 func (r *Root) mountDir(it Item) string {
+	if it.Kind == ItemMail && it.ID == "" {
+		it.ID = MailPartFiles
+	}
 	return filepath.Join(r.runDir(), "mnt", it.Kind, it.ID)
 }
 
@@ -200,6 +204,8 @@ func (r *Root) runBackup(ctx context.Context, tc taskCtx, repo *Repo, a BackupAr
 			err = r.backupVM(ctx, repo, it, snap, tags, &ir, &m, step)
 		case ItemSystem:
 			err = r.backupSystem(ctx, repo, a, tags(it), &ir, step)
+		case ItemMail:
+			err = r.backupMail(ctx, repo, snap, func(extra ...string) []string { return tags(it, extra...) }, &ir, &m, step)
 		}
 		if err != nil {
 			if ctx.Err() != nil {

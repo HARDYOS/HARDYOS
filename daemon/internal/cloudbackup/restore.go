@@ -13,6 +13,7 @@ import (
 
 	"github.com/hardyos/hardyos/daemon/internal/backup"
 	"github.com/hardyos/hardyos/daemon/internal/fileworker"
+	"github.com/hardyos/hardyos/daemon/internal/mail"
 	"github.com/hardyos/hardyos/daemon/internal/shares"
 	"github.com/hardyos/hardyos/daemon/internal/vms"
 )
@@ -28,6 +29,9 @@ const (
 	// version (the item's name typed in Confirm); for the settings item,
 	// it stages a settings restore for the next restart.
 	ModeRollback = "rollback"
+	// ModeMail restores part of the mail item as Mail says (a mailbox, a
+	// domain, a person's calendars, or everything).
+	ModeMail = "mail"
 )
 
 // RestoreArgs restores from a version.
@@ -43,6 +47,8 @@ type RestoreArgs struct {
 	// MaxSchema is the newest settings database hardyd can open (settings
 	// restores).
 	MaxSchema int `json:"maxSchema,omitempty"`
+	// Mail says what of the mail item to restore (ModeMail).
+	Mail *mail.RestoreArgs `json:"mail,omitempty"`
 }
 
 // RestoreResult says what a restore did.
@@ -57,6 +63,8 @@ type RestoreResult struct {
 	Notes    []string `json:"notes"`
 	Restart  bool     `json:"restart,omitempty"` // settings: applies at the next restart
 	Snapshot string   `json:"snapshot"`
+	// Mail is what a mail restore did.
+	Mail *mail.RestoreResult `json:"mail,omitempty"`
 }
 
 // MaxUserEntries bounds a person's own restore.
@@ -99,7 +107,20 @@ func (r *Root) StartRestore(ctx context.Context, a RestoreArgs) (*Task, error) {
 		}
 		rels = append(rels, parts)
 	}
+	if (it.Kind == ItemMail) != (a.Mode == ModeMail) {
+		return nil, problemf("the mail is restored by choosing a mailbox, a domain, calendars or everything")
+	}
 	switch a.Mode {
+	case ModeMail:
+		if a.Who != nil || len(a.Paths) > 0 || a.Mail == nil {
+			return nil, problemf("choose what of the mail to restore")
+		}
+		if err := a.Mail.Check(); err != nil {
+			return nil, &Problem{Msg: err.Error()}
+		}
+		if r.Mail == nil {
+			return nil, problemf("the mail server can't be restored here")
+		}
 	case ModeCopy, ModeInPlace:
 		if it.Kind != ItemShare {
 			return nil, problemf("apps, VMs and settings are restored as a whole")
@@ -160,6 +181,8 @@ func (r *Root) restore(ctx context.Context, tc taskCtx, repo *Repo, snap *Snapsh
 		return r.restoreVM(ctx, tc, repo, snap, it, a.Confirm, "")
 	case ItemSystem:
 		return r.restoreSettings(ctx, tc, repo, snap, a.MaxSchema)
+	case ItemMail:
+		return r.restoreMail(ctx, tc, repo, snap, *a.Mail)
 	}
 	return nil, problemf("that can't be restored")
 }

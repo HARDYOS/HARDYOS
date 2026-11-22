@@ -27,8 +27,8 @@ export function usePoolNames() {
   });
 }
 
-export const KIND_LABEL: Record<ReplicationKind, string> = { share: "Shared folder", app: "App", vm: "VM" };
-export const KIND_PLURAL: Record<ReplicationKind, string> = { share: "Shared folders", app: "Apps", vm: "Virtual machines" };
+export const KIND_LABEL: Record<ReplicationKind, string> = { share: "Shared folder", app: "App", vm: "VM", mail: "Mail" };
+export const KIND_PLURAL: Record<ReplicationKind, string> = { share: "Shared folders", app: "Apps", vm: "Virtual machines", mail: "Mail server" };
 
 /** "every 15 minutes", "every 6 hours", "every day". */
 export function intervalLabel(minutes: number): string {

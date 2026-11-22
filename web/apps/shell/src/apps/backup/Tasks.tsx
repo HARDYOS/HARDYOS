@@ -1,13 +1,13 @@
 import type { BackupItem, BackupRetention, BackupSchedule, BackupTask, BackupTarget } from "@hardy/api-client";
 import { useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { errorMessage } from "../../api";
 import { dateTime, relativeTime } from "../../format";
 import { EditIcon, CloudUpIcon, PlayIcon, PlusIcon, TrashIcon } from "../../icons";
 import { Alert, Button, Card, EmptyState, ErrorBox, Field, IconButton, Loading, PageHeader, Select, TextInput, Toggle } from "../../ui";
 import { ConfirmDialog, Dialog } from "../../ui/Dialog";
 import { toast } from "../../ui/toasts";
-import { backupKeys, createTask, deleteTask, itemKey, itemLabel, kindLabel, runTask, targetWhere, updateTask, useOverview, useSources, weekdays } from "./backupApi";
+import { backupKeys, createTask, deleteTask, itemKey, itemLabel, kindLabel, parseItemKey, runTask, targetWhere, updateTask, useOverview, useSources, weekdays } from "./backupApi";
 import { JobProgress, RunBadge, RunSummary, StateDot } from "./parts";
 import type { BackupTabProps } from "./tabs";
 
@@ -51,7 +51,7 @@ export function Tasks({ go }: BackupTabProps) {
             </Button>
           }
         >
-          Choose shared folders, apps, virtual machines and this server's settings, and when to back them up.
+          Choose shared folders, apps, virtual machines, the mail and this server's settings, and when to back them up.
         </EmptyState>
       ) : (
         <div className="bk-grid">
@@ -218,6 +218,15 @@ export function TaskWizard({ task, targets, onClose }: { task: BackupTask | null
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const idx = steps.findIndex((s) => s.id === step);
+  // Mail is on by default (decision 460): a new task has it ticked once
+  // the server turns out to have a mail server.
+  const mailDefaulted = useRef(task !== null);
+  useEffect(() => {
+    if (!mailDefaulted.current && !sources.pending) {
+      mailDefaulted.current = true;
+      if (sources.mail) setItems((l) => (l.includes("mail") ? l : [...l, "mail"]));
+    }
+  }, [sources.pending, sources.mail]);
 
   const toggleItem = (k: string, on: boolean) => setItems((l) => (on ? [...l, k] : l.filter((x) => x !== k)));
   const ready: Record<Step, boolean> = {
@@ -233,7 +242,7 @@ export function TaskWizard({ task, targets, onClose }: { task: BackupTask | null
     const body = {
       name: name.trim(),
       target,
-      items: items.map((k): BackupItem => (k === "system" ? { kind: "system" } : { kind: k.slice(0, k.indexOf(":")) as BackupItem["kind"], id: k.slice(k.indexOf(":") + 1) })),
+      items: items.map((k): BackupItem => parseItemKey(k)),
       schedule,
       retention,
     };
@@ -293,6 +302,18 @@ export function TaskWizard({ task, targets, onClose }: { task: BackupTask | null
                     Settings and domain <span className="small muted">(accounts, network, encryption keys, the domain controller: with the folders, apps and VMs, enough to rebuild this server)</span>
                   </span>
                 </label>
+                {(sources.mail || items.includes("mail")) && (
+                  <label className={`bk-pick__item ${items.includes("mail") ? "is-on" : ""}`}>
+                    <input type="checkbox" checked={items.includes("mail")} onChange={(e) => toggleItem("mail", e.target.checked)} />
+                    <span>
+                      Mail{" "}
+                      <span className="small muted">
+                        (every mailbox, calendars and contacts, DKIM keys, the spam filter's learning and webmail settings; the DKIM keys stay encrypted like everything in
+                        the backup)
+                      </span>
+                    </span>
+                  </label>
+                )}
               </fieldset>
             </div>
           ))}

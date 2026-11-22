@@ -258,7 +258,7 @@ func main() {
 		// backup" left is taken over now (after the settings restore above).
 		cb := &cloudbackup.Root{
 			Restic: &cloudbackup.Restic{Sandbox: cloudbackup.SystemSandbox()}, Vol: &cloudbackup.ZFS{Runner: sysexec.Exec{}}, DBOwner: hardydUID,
-			Shares: shm, Apps: am, VMs: vmm, System: bk, Log: log,
+			Shares: shm, Apps: am, VMs: vmm, System: bk, Mail: mailRoot, Log: log,
 			Key: func() ([]byte, error) { return priv.RootKeyFor(zfs.KeyDir, "cloud-backup") },
 		}
 		if fw != nil {
@@ -272,8 +272,9 @@ func main() {
 		// Replication between servers: snapshots, zfs send and receive
 		// (into <pool>/replicas/<source>/ only), restores. VMs are frozen
 		// by their guest agent for the snapshot when they can be.
-		replItems := &priv.ReplicationItems{Shares: shm, Apps: am, VMs: vmm}
-		priv.RegisterReplication(s, &replica.Manager{Runner: sysexec.Exec{}, Items: replItems, Restore: replItems, Freeze: vmm.Frozen, Log: log})
+		replItems := &priv.ReplicationItems{Shares: shm, Apps: am, VMs: vmm, Mail: mailRoot}
+		priv.RegisterReplication(s, &replica.Manager{Runner: sysexec.Exec{}, Items: replItems, Restore: replItems, Freeze: vmm.Frozen,
+			Prepare: replItems.Prepare, Log: log})
 		priv.RegisterBootRepair(s, priv.StorageEnv{Runner: sysexec.Exec{}, Root: os.DirFS("/")}, "/", boot.ConfigPath)
 		// Monitoring: SMART self-tests and the UPS (NUT's configuration in
 		// /etc/nut and its services). The monitor's polling is logged quietly.

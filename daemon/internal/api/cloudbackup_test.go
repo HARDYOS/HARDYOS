@@ -17,6 +17,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/cloudbackups"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/mail"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 )
@@ -106,6 +107,14 @@ func (c *stubCloud) register(s *priv.Server) {
 		return priv.CloudBrowseResult{Entries: []cloudbackup.Entry{{Name: "a.txt", Path: "a.txt", Type: "file"}}}, nil
 	})
 	h(priv.OpCloudOffer, func(json.RawMessage) (any, error) { return priv.CloudOfferResult{}, nil })
+	h(priv.OpCloudMailContents, func(raw json.RawMessage) (any, error) {
+		var a cloudbackup.MailContentsArgs
+		_ = json.Unmarshal(raw, &a)
+		if a.Snapshot != "dddddddd" {
+			return nil, priv.Errorf(priv.CodeBadArgs, "that isn't a version of the mail")
+		}
+		return cloudbackup.MailContents{Contents: mail.Contents{Domains: []string{"example.net"}, Mailboxes: []mail.ContentsMailbox{{Key: "a11ce0000000000000000001", Address: "alice@example.net"}}}}, nil
+	})
 }
 
 func newCloudEnv(t *testing.T) (*testEnv, *stubCloud) {
@@ -255,6 +264,37 @@ func TestCloudBackupAPI(t *testing.T) {
 	waitJobDone(t, admin, acc.Job["id"].(string))
 	if len(stub.restores) != 1 || stub.restores[0].Who != nil || stub.restores[0].MaxSchema == 0 {
 		t.Fatalf("admin restore args: %+v", stub.restores)
+	}
+
+	// Mail (decisions 460-462): what to restore must be said, and
+	// overwriting needs its confirmation typed.
+	for _, body := range []map[string]any{
+		{"target": "offsite", "snapshot": "dddddddd", "mode": "mail"},
+		{"target": "offsite", "snapshot": "dddddddd", "mode": "mail", "mail": map[string]any{"scope": "mailbox", "key": "nope", "mode": "copy"}},
+	} {
+		if code := admin.do("POST", "/api/v1/backup/restore", body, &e); code != 400 || e.Code != "invalid" {
+			t.Fatalf("mail restore %v = %d %+v", body, code, e)
+		}
+	}
+	if code := admin.do("POST", "/api/v1/backup/restore", map[string]any{"target": "offsite", "snapshot": "dddddddd", "mode": "mail",
+		"mail": map[string]any{"scope": "all", "confirm": "everything"}}, &e); code != 400 || e.Code != "confirm_required" {
+		t.Fatalf("everything without mail typed = %d %+v", code, e)
+	}
+	if code := admin.do("POST", "/api/v1/backup/restore", map[string]any{"target": "offsite", "snapshot": "dddddddd", "mode": "mail", "paths": []string{"x"},
+		"mail": map[string]any{"scope": "mailbox", "key": "a11ce0000000000000000001", "mode": "copy"}}, &acc); code != 202 {
+		t.Fatalf("mail restore = %d", code)
+	}
+	waitJobDone(t, admin, acc.Job["id"].(string))
+	if last := stub.restores[len(stub.restores)-1]; last.Mail == nil || last.Mail.Into != "a11ce0000000000000000001" || last.Paths != nil || last.Mode != "mail" {
+		t.Fatalf("mail restore args: %+v", last)
+	}
+	stub.restores = stub.restores[:1]
+	var mc cloudbackup.MailContents
+	if code := admin.do("GET", "/api/v1/backup/targets/offsite/mail?snapshot=dddddddd", nil, &mc); code != 200 || len(mc.Mailboxes) != 1 {
+		t.Fatalf("mail contents = %d %+v", code, mc)
+	}
+	if code := admin.do("GET", "/api/v1/backup/targets/offsite/mail?snapshot=aaaaaaaa", nil, nil); code != 400 {
+		t.Fatalf("mail contents of a folder = %d", code)
 	}
 
 	// Family members don't see backup administration.

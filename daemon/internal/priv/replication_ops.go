@@ -2,11 +2,13 @@ package priv
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 
 	"github.com/hardyos/hardyos/daemon/internal/apps"
+	"github.com/hardyos/hardyos/daemon/internal/mail"
 	"github.com/hardyos/hardyos/daemon/internal/replica"
 	"github.com/hardyos/hardyos/daemon/internal/shares"
 	"github.com/hardyos/hardyos/daemon/internal/vms"
@@ -195,6 +197,71 @@ type ReplicationItems struct {
 	Shares *shares.Manager
 	Apps   *apps.Manager
 	VMs    *vms.Manager
+	Mail   ReplicationMail // nil: mail isn't replicated
+}
+
+// ReplicationMail is what replication needs of the mail server (mail.Root).
+type ReplicationMail interface {
+	PrepareBackup(ctx context.Context) (*mail.BackupSource, error)
+	Pool(ctx context.Context) (string, error)
+	RestoreFrom(ctx context.Context, dir string, a mail.RestoreArgs) (*mail.RestoreResult, error)
+}
+
+// Prepare readies the mail dataset for its replication snapshot
+// (replica.Manager.Prepare).
+func (r *ReplicationItems) Prepare(ctx context.Context, kind, id string) error {
+	if kind != replica.KindMail || r.Mail == nil {
+		return nil
+	}
+	_, err := r.Mail.PrepareBackup(ctx)
+	return err
+}
+
+// mailItem is the mail server's dataset when it's set up here.
+func (r *ReplicationItems) mailItem(ctx context.Context) (*replica.LocalItem, error) {
+	if r.Mail == nil {
+		return nil, replica.ErrNotFound
+	}
+	pool, err := r.Mail.Pool(ctx)
+	if errors.Is(err, mail.ErrNotSetUp) {
+		return nil, fmt.Errorf("the mail server isn't set up: %w", replica.ErrNotFound)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &replica.LocalItem{Kind: replica.KindMail, ID: replica.MailItem, Name: "Mail", Pool: pool, Dataset: pool + "/mail"}, nil
+}
+
+// MailPool implements replica.Restorer.
+func (r *ReplicationItems) MailPool(ctx context.Context) (string, error) {
+	li, err := r.mailItem(ctx)
+	if err != nil {
+		return "", errors.New("set the mail server up first (Control Panel › Mail), then restore into it")
+	}
+	return li.Pool, nil
+}
+
+// MailRestore implements replica.Restorer.
+func (r *ReplicationItems) MailRestore(ctx context.Context, dir string, raw json.RawMessage) (json.RawMessage, []string, error) {
+	if r.Mail == nil {
+		return nil, nil, errors.New("the mail server isn't available")
+	}
+	var a mail.RestoreArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return nil, nil, fmt.Errorf("%w: what to restore of the mail can't be read", replica.ErrInvalid)
+	}
+	// From another server: never its Rspamd data (decision 467).
+	a.FromReplica = true
+	res, err := r.Mail.RestoreFrom(ctx, dir, a)
+	if err != nil {
+		var ve *mail.ValidationError
+		if errors.As(err, &ve) {
+			return nil, nil, fmt.Errorf("%w: %s", replica.ErrInvalid, ve.Msg)
+		}
+		return nil, nil, err
+	}
+	b, _ := json.Marshal(res)
+	return b, res.Notes, nil
 }
 
 // List implements replica.Items.
@@ -237,6 +304,9 @@ func (r *ReplicationItems) List(ctx context.Context) ([]replica.LocalItem, error
 		}
 		return out[i].Name < out[j].Name
 	})
+	if li, err := r.mailItem(ctx); err == nil {
+		out = append(out, *li)
+	}
 	return out, nil
 }
 
@@ -282,6 +352,12 @@ func (r *ReplicationItems) Resolve(ctx context.Context, kind, id string) (string
 			}
 		}
 		return "", fmt.Errorf("app %s: %w", id, replica.ErrNotFound)
+	case replica.KindMail:
+		li, err := r.mailItem(ctx)
+		if err != nil || id != replica.MailItem {
+			return "", fmt.Errorf("mail: %w", replica.ErrNotFound)
+		}
+		return li.Dataset, nil
 	}
 	return "", replica.ErrNotFound
 }
