@@ -55,10 +55,26 @@ func TestRefreshFromOutsideNeedsSecondFactor(t *testing.T) {
 	if t2.Status != 200 {
 		t.Fatalf("refresh at home: %+v", t2)
 	}
-	// From outside the sign-in ends.
+	// A confidential client's server refreshing through the gateway says
+	// nothing about where the person is: allowed.
 	e.public.Store(true)
-	if t3 := e.refresh(f, t2.RefreshToken); t3.Status != 400 {
-		t.Fatalf("refresh from outside: %+v", t3)
+	t3 := e.refresh(f, t2.RefreshToken)
+	if t3.Status != 200 {
+		t.Fatalf("confidential refresh through the gateway: %+v", t3)
+	}
+	// A public client (an app on the person's device) refreshing from
+	// outside: the sign-in ends.
+	e.public.Store(false)
+	_, pf := publicClient(e)
+	pf.scopes = "openid profile offline_access"
+	pcb := e.browser().login(pf, "alice", "pw")
+	ptok := e.exchange(pf, pcb.Get("code"))
+	if ptok.RefreshToken == "" {
+		t.Fatalf("no refresh token for the public client: %+v", ptok)
+	}
+	e.public.Store(true)
+	if t4 := e.refresh(pf, ptok.RefreshToken); t4.Status != 400 {
+		t.Fatalf("public client refresh from outside: %+v", t4)
 	}
 	if !e.sawAudit("oidc.token.revoke success sign-in ended at refresh: this sign-in was made without a second factor") {
 		t.Fatalf("not audited: %v", e.audits)

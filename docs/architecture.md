@@ -74,7 +74,9 @@ undo only writes the network files).
   (`user_totp_failures`) that stops codes from outside at 20 until a new
   password or a reset; `MFA.Notify` reaches administrators and the person.
 - Grants record `browser_outside`; refresh without a second factor is refused
-  from outside, for outside browsers and while enrollment is due. Apps are
+  for outside browsers, for public clients refreshing from outside and while
+  enrollment is due. Per-app hosts' bind flow and host sessions
+  (`__Host-hardyos_host`) go through the same session gate. Apps are
   published only with HardyOS sign-in in front (`signsInWithHardyOS` names
   the exception, Photos).
 - Desktop: `POST /auth/login` answers 202 with a challenge; `/auth/login/2fa`,
@@ -2171,6 +2173,64 @@ cloud backups).
   (`TestImmichIntegration`: links followed and excluded, suspension ends
   sessions, restore, the package's `pg_dump`).
 
+## Hostnames (per-app origins)
+
+User guide: [hostnames.md](hostnames.md); plan `docs/plans/hostnames.md`;
+decisions 450-459.
+
+```
+ Browser ──https (SNI photos.<base>)──► hardyd :443 (every address)
+              wildcard *.<base> from Let's Encrypt, self-signed for the rest
+                 ├─ <desktop>.<base>  desktop, /__hardyos/bind
+                 ├─ sso.<base>        sign-in provider only
+                 ├─ files.<base>      /s/ share links only
+                 ├─ office.<base>     office origin (was :44250)
+                 ├─ mail.<base>       mail-app paths → hardyd, else webmail
+                 ├─ photos.<base>     Immich
+                 └─ <app>.<base>      127.0.0.1:<app's web port>
+ hardyd ──ACME (x/crypto/acme)──► Let's Encrypt
+ hardyd ──dns.acme.present/cleanup──► hardyd-priv ──► api.cloudflare.com
+```
+
+- **Token** (`priv/dns_ops.go`, `internal/cfdns`): root's only, sealed in
+  `_hardyos-dns.json` in the keys folder with a root-only key; operations
+  `dns.status`, `dns.token.set|verify|clear`, `dns.acme.present|cleanup`,
+  `dns.record.set` (for the NetBird take-over; code and tests, not
+  registered yet). Fake Cloudflare
+  for tests: `internal/cfdns/cftest`.
+- **Certificate** (`internal/hostnames`): hardyd makes the key and CSR,
+  answers DNS-01 through root, keeps `wildcard.pem` (key and chain, one
+  atomically replaced file) in the TLS folder; `tlscert.Store.GetCertificate`
+  serves it, only while the hostnames are active, for names one label
+  under the base on the desktop listener, the window proxies, the office
+  port and the app gateway. `RunHostnames` refreshes the state every 30 s
+  and checks renewal every 12 h (30 days before expiry). Fake ACME server
+  for tests: `internal/hostnames/acmetest`; both wired with real root ops in
+  `internal/hostnames/hosttest`.
+- **Routing** (`api/hostnames.go`): in `Server.ServeHTTP` before anything
+  else, for requests that didn't come through the app gateway, only while
+  hostnames are active (token, certificate, turned on, same base as Remote
+  Access).
+- **Sign-in**: the desktop-host bounce (`/__hardyos/bind` → app host
+  `/__hardyos/callback`), sessions in the window proxy's table marked
+  `host` (`__Host-hardyos_host`), rechecked like window sessions. The office
+  editor's host session (`.office`) has no access list; the editor ticket
+  must match its desktop session.
+- **Old addresses**: window proxy ports and the office port redirect when
+  reached by a name under the base; `/oidc/*` on the desktop host redirects
+  to `sso.<base>`. Photos adds `https://photos.<base>` to Immich's redirect
+  URIs.
+- **Off**: names under the last known base other than the desktop's get
+  "Hostnames are off" with `Clear-Site-Data`, never the desktop.
+- **Cookies**: per app host, the cookie names its responses set are learned;
+  request cookies another app host set (and this one never did) and names
+  sent twice are dropped (cookie tossing, decision 450).
+- **LAN DNS**: `domain.dns.hostnames` (root) keeps A records in the DC's DNS
+  for the names root allows (HardyOS's, the desktop's, apps with a web
+  page in root's apps state; not wpad, isatap or directory computer/SPN
+  names, checked with the directory helper's `names.taken`), its own list
+  of records and zones in `hardyos-hostnames.json` in the DC's data folder.
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly
@@ -2182,6 +2242,9 @@ cloud backups).
   tasks and runs in hardyd's database, restic's cache in
   `/var/cache/hardyos-restic`, snapshots mounted and restores staged under
   `/run/hardyos-backup` and `<pool>/hardyos-restore`.
+- Hostnames: the Cloudflare token sealed in
+  `/var/lib/hardyos/keys/_hardyos-dns.json` (root's), the wildcard
+  certificate in the TLS folder, issuance history in `hostname_certs`.
 - OS: ZFS root with boot environments; each update installs into a new boot
   environment and falls back automatically if the health check fails.
 

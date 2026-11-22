@@ -498,12 +498,20 @@ func (s *storage) TokenRequestByRefreshToken(ctx context.Context, rt string) (op
 		}
 	}
 	if err == nil && s.p.cfg.MFA != nil && !slices.Contains(g.AMR, "mfa") {
-		// From outside a second factor is required (decision 441): a
-		// sign-in made without one can't be carried on by a refresh from
-		// outside, nor one whose browser was outside (made before
-		// two-factor sign-in existed), nor while the person must set it up.
+		// From outside a second factor is required (decision 441). Where
+		// the person was is the grant's browser (recorded at sign-in): a
+		// confidential client's server refreshes from wherever it runs (a
+		// Docker network, the gateway), which says nothing about the person.
+		// Refused: a grant made by a browser outside without a second factor
+		// (before two-factor sign-in existed), a public client (an app on
+		// the person's own device) refreshing from outside, and anything
+		// while the person must set it up.
+		public := false
+		if c, cerr := s.p.Clients.Get(ctx, g.ClientID); cerr == nil {
+			public = !c.HasSecret
+		}
 		switch {
-		case outsideFrom(ctx) || g.BrowserOutside:
+		case g.BrowserOutside || (public && outsideFrom(ctx)):
 			err = errors.New("this sign-in was made without a second factor, which is needed from outside")
 		default:
 			if must, merr := s.p.cfg.MFA.MustEnroll(ctx, u); merr != nil || must {

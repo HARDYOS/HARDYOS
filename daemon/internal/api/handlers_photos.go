@@ -331,6 +331,10 @@ func (s *Server) photosSyncInto(jc *jobs.Context, st *photos.Status) error {
 		}
 	}
 	var others []string
+	if u := s.hosts.hostURL(a.ID); u != "" {
+		// photos.<base> on this server (Control Panel › Hostnames).
+		others = append(others, u)
+	}
 	if ports, err := s.appStore().ProxyPorts(ctx); err == nil && ports[a.ID] > 0 && s.cfg.PublicHost != nil {
 		if h := s.cfg.PublicHost(); h != "" {
 			others = append(others, "https://"+h+":"+strconv.Itoa(ports[a.ID]))

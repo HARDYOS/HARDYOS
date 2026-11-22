@@ -43,9 +43,17 @@ authenticator app (Google Authenticator, Microsoft Authenticator,
   desktop shows nothing but the setup screen until it's done.
 - **Everyone else may**, from the account menu › *Two-factor sign-in*.
 - **Everyone needs it from outside**: the published desktop, `sso.<base>`
-  (and so every app that signs in with HardyOS from outside, Immich's phone
-  app included) and published apps. A desktop session made at home without
-  a code doesn't work through the published address.
+  reached through Remote Access (and so every app that signs in with
+  HardyOS from outside, Immich's phone app included) and published apps. A
+  desktop session made at home without a code doesn't work through the
+  published address. The per-app addresses (Control Panel › Hostnames) are
+  reached at home or over NetBird; opening an app there needs a desktop
+  session that meets the same rule, and its app session ends with the
+  desktop's (two-factor set up, reset, sign-out).
+- An app's sign-in through HardyOS (an OIDC app) counts by where the
+  browser was when signing in. An app's server refreshing its tokens from a
+  container proves nothing about the person, so only an app on the person's
+  own device (a public client) is checked by where the refresh comes from.
 
 Setting up shows a QR code and the key to type, and turns on only after the
 first code works. You get **10 recovery codes**: each signs you in once if
