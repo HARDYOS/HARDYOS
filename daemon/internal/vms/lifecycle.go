@@ -236,6 +236,11 @@ func (m *Manager) Start(ctx context.Context, id string) (*Result, error) {
 			return nil, err
 		}
 	}
+	if s.HasStreamingMedia() {
+		if err := m.checkStreamingDisc(s); err != nil {
+			return nil, err
+		}
+	}
 	// Until Windows is installed the VM gets none of its devices, so
 	// Setup can't see (and wipe) a passed-through disk or controller.
 	devs := s.Devices
@@ -549,6 +554,11 @@ func (m *Manager) afterStop(ctx context.Context, st *stored) {
 	if !st.spec.HasUnattendMedia() {
 		m.removeUnattend(st)
 	}
+	if !st.spec.HasStreamingMedia() {
+		m.removeStreaming(st)
+	}
+	// Its streaming ports aren't forwarded while it's off.
+	m.kickStreaming()
 }
 
 // Releasing devices can fail for a while (libvirt busy, a GPU still
@@ -790,6 +800,11 @@ func (m *Manager) check(ctx context.Context, refreshAddrs bool) {
 					m.checkInstalled(ctx, id)
 				}
 			}
+		}
+	}
+	if refreshAddrs {
+		if err := m.syncStreaming(ctx); err != nil {
+			m.log().Debug("vms: game streaming forwarding", "err", err)
 		}
 	}
 }

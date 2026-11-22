@@ -27,6 +27,8 @@ type Paths struct {
 	CloudInit string
 	// Unattend is the generated Windows answer disc.
 	Unattend string
+	// Streaming is the generated game streaming disc.
+	Streaming string
 	// Bridge is the home network's bridge (br0).
 	Bridge string
 	// NATNetwork is libvirt's NAT network (default).
@@ -555,6 +557,11 @@ func DomainXML(s *Spec, a ArchInfo, p Paths, devs []devices.Prepared) ([]byte, e
 				return nil, errors.New("the Windows answer disc hasn't been made yet")
 			}
 			src = &diskSource{File: p.Unattend}
+		case MediaStreaming:
+			if p.Streaming == "" {
+				return nil, errors.New("the game streaming disc hasn't been made yet")
+			}
+			src = &diskSource{File: p.Streaming}
 		}
 		if src != nil {
 			// QEMU reads discs as itself; libvirt must not take shared

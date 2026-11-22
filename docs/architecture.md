@@ -1465,6 +1465,40 @@ Phase 5 part C (decisions 120-125; user guide `docs/vms.md`; plan
   RFB (`apps/vms/qemuAudio.ts`) to add pseudo-encoding -259 and parse
   QEMU audio messages, played with Web Audio.
 
+### Game streaming (phase 9, decisions 400-409; plan `docs/plans/streaming.md`)
+
+- **Root** (`vms/streaming.go`): `prepareStreaming` (in `Create`, before
+  validation) checks the unattended install, the bridged first card and the
+  password, adds the `streaming` disc and the `sunshine` hook, makes the RSA
+  key and self-signed certificate and sets `Spec.Streaming{Sunshine, User,
+  CertSHA256}`; `writeStreaming` builds the `HARDYOS_STREAM` disc with
+  xorriso (`-graft-points`: the staged files at the top, the two catalog files
+  from `<pool>/vm-catalog` after `checkStamp`). `setup.ps1` comes from
+  `streaming_setup.ps1.tmpl` (`text/template`, values pattern-checked, CRLF).
+  `checkInstalled`, `Delete`, `afterStop` and `Update` delete the disc as they
+  do the answer disc.
+- **Forwarding** (`vms/streamfwd.go`): `syncStreaming` (Watch, every 30 s;
+  after publish, stop, delete) computes the one wanted forward
+  (`desiredForward`: published, running, NetBird connected via
+  `Manager.NetBird` = `priv.VMNetBird`, address from `vmAddress`), renders
+  `RenderStreamingNFT` and `StreamingIPTables` (every value checked by
+  `StreamForward.check`, sources = the chosen `streaming.peers`) and loads
+  them only when they change, else checks the live table and chain
+  (`liveStreamingOK`); `StopStreaming` runs when hardyd-priv exits.
+  `vmAddress` uses `ip -j neigh` (one REACHABLE entry), the guest's
+  addresses and `bridge -j fdb` (the MAC on the VM's tap only). The app
+  gateway records the addresses NetBird's proxy came from
+  (`remoteRuntime.sawProxy`) so they can't be chosen. Ops
+  `vms.streaming.info` (address, pin, forwarding, NetBird address) and
+  `vms.streaming.publish`.
+- **hardyd** (`internal/streaming`, `api/handlers_vms_streaming.go`): the
+  sealed account store (`vm_streaming`), the pinned Sunshine client, the
+  panel/reveal/pair/unpair/remote endpoints; `registerVMStreamingJobs`
+  re-registers `vms.create`/`vms.delete` with the account store (fetch the
+  two catalog files, make and seal the password, pass it to `vms.create`;
+  forget it on delete). Web: `apps/vms/Streaming.tsx`, the wizard's
+  `setsUpStreaming`.
+
 ## Devices and GPUs
 
 Phase 5 part D (decisions 126-130; user guide `docs/gpus.md`). Two packages

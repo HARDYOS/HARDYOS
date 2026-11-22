@@ -7,8 +7,6 @@ import { useJob } from "../../hooks/queries";
 import {
   CameraIcon,
   DiscIcon,
-  ExternalIcon,
-  GamepadIcon,
   PlayIcon,
   PlusIcon,
   PowerIcon,
@@ -24,6 +22,7 @@ import { ConfirmDialog, Dialog } from "../../ui/Dialog";
 import { toast } from "../../ui/toasts";
 import { DevicePicker } from "./devices";
 import { AnswerDiscNotice, LiveUSBCard, MakeTemplateCard, ProtectionNote, ScheduleCard } from "./polish";
+import { StreamingPanel } from "./Streaming";
 import { Meter, StateBadge, VMGlyph } from "./parts";
 import { type VMAction, diskSize, isOn, memory, osLabel, pushSample, useLibrary, useSnapshots, useVM, vmAction, vmKeys } from "./vmApi";
 
@@ -212,7 +211,7 @@ function Overview({ vm, onOpenConsole, onJob }: { vm: VM; onOpenConsole: () => v
           ))}
         </div>
       </Card>
-      {gpu && <GameStreaming vm={vm} />}
+      {(gpu || vm.streaming?.sunshine) && <StreamingPanel vm={vm} onJob={onJob} />}
       {vm.state === "running" && (
         <div>
           <Button onClick={onOpenConsole}>
@@ -221,40 +220,6 @@ function Overview({ vm, onOpenConsole, onJob }: { vm: VM; onOpenConsole: () => v
         </div>
       )}
     </div>
-  );
-}
-
-/** Moonlight/Sunshine for GPU VMs: plain steps, the address to use. */
-function GameStreaming({ vm }: { vm: VM }) {
-  const addr = vm.addresses[0];
-  return (
-    <Card title={<span className="row" style={{ gap: 8 }}><GamepadIcon size={16} /> Game streaming</span>}>
-      <div className="stack">
-        <p className="small" style={{ margin: 0 }}>
-          Play this VM's games on a TV, laptop or phone with Moonlight, streamed from Sunshine inside the VM.
-        </p>
-        <ol className="small" style={{ margin: 0, paddingLeft: 18, lineHeight: 1.7 }}>
-          <li>
-            In the VM, install the graphics card's driver, then{" "}
-            <a href="https://github.com/LizardByte/Sunshine/releases" target="_blank" rel="noreferrer">
-              Sunshine <ExternalIcon size={11} />
-            </a>
-            .
-          </li>
-          <li>Open Sunshine's page in the VM (https://localhost:47990) and set a user name and password.</li>
-          <li>
-            Install{" "}
-            <a href="https://moonlight-stream.org" target="_blank" rel="noreferrer">
-              Moonlight <ExternalIcon size={11} />
-            </a>{" "}
-            on the device you play on and add the VM by its address: <strong className="mono">{addr ?? "(start the VM to see it)"}</strong>
-          </li>
-        </ol>
-        <Alert tone="info">
-          Playing away from home goes through HardyOS's VPN once remote access is set up; Sunshine's ports are then published only to your VPN devices.
-        </Alert>
-      </div>
-    </Card>
   );
 }
 

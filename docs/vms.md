@@ -9,7 +9,7 @@ disk image. Open **Virtual Machines** in the dock (administrators only).
 
 Graphics cards and other devices are covered in [GPUs and devices](gpus.md).
 How it works inside: [architecture](architecture.md#virtual-machines),
-decisions 120-125, 134-143 and 410-419.
+decisions 120-125, 134-143, 400-409 and 410-419.
 
 ## Before you start
 
@@ -275,12 +275,74 @@ The end of QEMU's log for the VM, for when something won't start.
 
 ## Game streaming
 
-A gaming VM with its own graphics card is played with **Moonlight**
-(phones, TVs, laptops), streaming from **Sunshine** inside the VM. The
-Game streaming card on the VM's overview walks through it: install the
-card's driver and Sunshine in the VM, set Sunshine's user, then add the VM
-in Moonlight by the address shown. Playing away from home goes through
-HardyOS's VPN once remote access is set up.
+A gaming VM with its own graphics card is played with **Moonlight** (phones,
+TVs, laptops, Steam Deck), streamed from **Sunshine** inside the VM.
+
+### Setting it up
+
+Make the VM from the **Gaming PC** template with **Install by itself** on;
+**Set up game streaming** is on too. Pick your graphics card in the Devices
+step and keep the VM's network card on the **Home network** (address spoofing
+off). While Windows installs, HardyOS also installs, at the first sign-in:
+
+- **Sunshine** (LizardByte's official Windows installer, a version HardyOS
+  pins), set up with an account HardyOS makes, its web page answering the
+  home network only, and UPnP off (nothing is opened on your router);
+- a **virtual display** (the open-source Virtual Display Driver), so the VM
+  has a screen to stream without a monitor or a dummy HDMI plug.
+
+Both are downloaded by HardyOS (not inside Windows), checked against the
+checksums HardyOS ships, and handed to Windows on a small read-only disc that
+is deleted when the install is done; Windows only runs HardyOS's setup
+script from it after checking the script's checksum. The log of the setup is in
+`C:\ProgramData\HardyOS\streaming-setup.log` in the VM.
+
+Then, in Windows, **install your graphics card's driver** (NVIDIA, AMD or
+Intel, from their sites). HardyOS doesn't install or unlock graphics drivers:
+no vGPU unlocks, no licence workarounds. Restart the VM once Windows is
+installed so the card joins (see *Windows* above).
+
+### Pairing Moonlight
+
+Open the VM's **Overview**: the **Game streaming** card says whether Sunshine
+answers. In Moonlight, pick the VM (it finds it on the home network) or add
+it by the address shown. Moonlight shows a 4-digit PIN; the device appears
+under **Pair a device**: click **Enter its PIN**, type it, done. Pair one
+device at a time: if two are waiting, HardyOS refuses (the PIN could go to
+the wrong one). Pair at home: a device that comes in through NetBird looks
+to Sunshine like the server itself, so it's marked *Through NetBird* and
+you have to confirm it's yours. Paired devices are listed with an
+**unpair** button. Only administrators can pair or unpair, and every
+pairing is logged.
+
+Sunshine's own page answers only inside the VM (`https://localhost:47990`)
+and HardyOS (a Windows Firewall rule lets in only the server's home network
+address). It uses the account HardyOS made; **Show the password** asks for
+your HardyOS password first (and is logged). If the server's address on the
+home network changes later, the card says so: HardyOS can't reach Sunshine
+until the rule `HardyOS-Sunshine-WebUI` in the VM's Windows Firewall names
+the new address (or the VM is made again).
+
+### Away from home
+
+Turn on **Play away from home over NetBird** (remote access must be set up)
+and tick the NetBird devices that may play (your phone, your laptop; none
+are ticked until you choose, and NetBird's reverse proxy can't be chosen).
+HardyOS then forwards Sunshine's streaming ports (TCP 47984, 47989, 48010;
+UDP 47998-48000, 48002, 48010) from the server's NetBird address to the VM,
+for those devices only and never from the internet; Sunshine's web page is
+never forwarded. NetBird's own access policies don't limit these forwarded
+ports, so the ticked list is what decides. In Moonlight away from home, add
+the NetBird address the card shows. The forwarding is there only while the
+VM runs and NetBird is connected, goes away when HardyOS's root helper
+stops, and only one VM can be published at a time (Moonlight uses fixed
+ports).
+
+### A VM HardyOS didn't set up
+
+For an older gaming VM the card gives the steps by hand: install the card's
+driver and Sunshine, set Sunshine's account on its page, then add the VM in
+Moonlight by its address.
 
 ## Good to know
 
@@ -294,3 +356,6 @@ HardyOS's VPN once remote access is set up.
   turned off), the app says VMs aren't supported and why.
 - Licences: noVNC (the screen) is MPL-2.0, its licence is served at
   `/licenses/noVNC-LICENSE.txt`.
+- Game streaming installs Sunshine (GPL-3.0, LizardByte) and the Virtual
+  Display Driver (MIT, VirtualDrivers) inside your Windows VM, unmodified,
+  from their official releases; HardyOS doesn't ship them itself.

@@ -143,8 +143,8 @@ func (i *Import) digest() digest {
 type Media struct {
 	// Kind: iso (a file in the ISOs shared folder), virtio (the VirtIO
 	// drivers disc for Windows), cloudinit (the generated seed), unattend
-	// (the generated Windows answer disc) or empty (a drive with nothing
-	// in it).
+	// (the generated Windows answer disc), streaming (the generated game
+	// streaming disc, streaming.go) or empty (a drive with nothing in it).
 	Kind string `json:"kind"`
 	ISO  string `json:"iso,omitempty"`
 }
@@ -185,13 +185,6 @@ type Autostart struct {
 	DelaySec int `json:"delaySec"`
 }
 
-// Streaming is the game streaming (Moonlight/Sunshine) panel's settings.
-type Streaming struct {
-	// Remote publishes Sunshine's ports through the VPN (needs the remote
-	// access part; recorded here, applied by it).
-	Remote bool `json:"remote"`
-}
-
 // Limits.
 const (
 	MaxDisks      = 8
@@ -213,7 +206,7 @@ var (
 	NICModels    = []string{"virtio", "e1000e"}
 	NICModes     = []string{NICBridge, NICNAT, NICVLAN}
 	VideoModels  = []string{"virtio", "vga", "bochs", "none"}
-	MediaKinds   = []string{MediaISO, MediaVirtio, MediaCloudInit, MediaUnattend, MediaEmpty}
+	MediaKinds   = []string{MediaISO, MediaVirtio, MediaCloudInit, MediaUnattend, MediaStreaming, MediaEmpty}
 	BootDevices  = []string{"disk", "cdrom", "network"}
 	FirmwareKind = []string{FirmwareUEFI, FirmwareBIOS}
 )
@@ -512,16 +505,27 @@ func (s *Spec) Validate(h Host) error {
 			} else if !IsISO(m.ISO) {
 				add("CD/DVD %d: %s isn't an .iso file", i+1, m.ISO)
 			}
-		case MediaVirtio, MediaCloudInit, MediaUnattend, MediaEmpty:
+		case MediaVirtio, MediaCloudInit, MediaUnattend, MediaStreaming, MediaEmpty:
 			if m.ISO != "" {
 				add("CD/DVD %d: a %s drive can't name a file", i+1, m.Kind)
 			}
 		default:
-			add("CD/DVD %d: the kind must be iso, virtio, cloudinit, unattend or empty", i+1)
+			add("CD/DVD %d: the kind must be iso, virtio, cloudinit, unattend, streaming or empty", i+1)
 		}
 	}
-	if kinds[MediaVirtio] > 1 || kinds[MediaCloudInit] > 1 || kinds[MediaUnattend] > 1 {
-		add("the drivers disc, the cloud-init disc and the Windows answer disc can each be attached once")
+	if kinds[MediaVirtio] > 1 || kinds[MediaCloudInit] > 1 || kinds[MediaUnattend] > 1 || kinds[MediaStreaming] > 1 {
+		add("the drivers disc, the cloud-init disc, the Windows answer disc and the game streaming disc can each be attached once")
+	}
+	if kinds[MediaStreaming] > 0 && (!s.StreamingSetUp() || s.Unattend == nil) {
+		add("the game streaming disc goes with an unattended Windows install that sets up game streaming")
+	}
+	if s.Unattend != nil && slices.Contains(s.Unattend.Hooks, StreamingHook) && kinds[MediaStreaming] == 0 {
+		add("the Sunshine first-logon step needs the game streaming disc")
+	}
+	if st := s.Streaming; st != nil {
+		for _, msg := range st.problems(s) {
+			add("%s", msg)
+		}
 	}
 	if (kinds[MediaCloudInit] > 0) != (s.CloudInit != nil) {
 		add("cloud-init settings and the cloud-init disc go together")
