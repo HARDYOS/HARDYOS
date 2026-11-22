@@ -241,6 +241,10 @@ export const ClipboardIcon = svg(
   </>,
 );
 export const DownloadIcon = svg(<path d="M12 3v12M7 10l5 5 5-5M4 19h16" />);
+export const SpeakerIcon = svg(<path d="M4 9h4l5-4v14l-5-4H4zM16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12" />);
+export const MuteIcon = svg(<path d="M4 9h4l5-4v14l-5-4H4zM17 9l5 6M22 9l-5 6" />);
+export const UsbIcon = svg(<path d="M12 3v15M9 6l3-3 3 3M12 13l-4-2V8M12 15l4-2v-2M12 18a2 2 0 1 0 0 4 2 2 0 0 0 0-4" />);
+export const TemplateIcon = svg(<path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM16.5 13v7M13 16.5h7" />);
 export const DocumentIcon = svg(<path d="M6 3h8l4 4v14H6zM14 3v4h4M9 12h6M9 16h6" />);
 export const NotesIcon = svg(<path d="M5 4h11l3 3v13H5zM8 9h8M8 13h8M8 17h5" />);
 export const CloudUpIcon = svg(

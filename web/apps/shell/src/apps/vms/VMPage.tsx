@@ -23,6 +23,7 @@ import { AreaChart } from "../../ui/Chart";
 import { ConfirmDialog, Dialog } from "../../ui/Dialog";
 import { toast } from "../../ui/toasts";
 import { DevicePicker } from "./devices";
+import { AnswerDiscNotice, LiveUSBCard, MakeTemplateCard, ProtectionNote, ScheduleCard } from "./polish";
 import { Meter, StateBadge, VMGlyph } from "./parts";
 import { type VMAction, diskSize, isOn, memory, osLabel, pushSample, useLibrary, useSnapshots, useVM, vmAction, vmKeys } from "./vmApi";
 
@@ -149,7 +150,7 @@ export function VMPage({
           </button>
         ))}
       </div>
-      {tab === "overview" && <Overview vm={vm} onOpenConsole={() => onOpenConsole(vm)} />}
+      {tab === "overview" && <Overview vm={vm} onOpenConsole={() => onOpenConsole(vm)} onJob={jobs.start} />}
       {tab === "console" && <ScreenTab vm={vm} onOpen={() => onOpenConsole(vm)} onStart={() => act("start")} />}
       {tab === "hardware" && <HardwareTab vm={vm} onJob={jobs.start} />}
       {tab === "snapshots" && <SnapshotsTab vm={vm} onJob={jobs.start} />}
@@ -160,7 +161,7 @@ export function VMPage({
   );
 }
 
-function Overview({ vm, onOpenConsole }: { vm: VM; onOpenConsole: () => void }) {
+function Overview({ vm, onOpenConsole, onJob }: { vm: VM; onOpenConsole: () => void; onJob: (j: Job) => void }) {
   const [cpu, setCpu] = useState<number[]>([]);
   const [mem, setMem] = useState<number[]>([]);
   useEffect(() => {
@@ -186,6 +187,19 @@ function Overview({ vm, onOpenConsole }: { vm: VM; onOpenConsole: () => void }) 
           <AreaChart values={mem.length > 1 ? mem : [0, 0]} max={vm.memory.mb} color="var(--hos-violet)" label="Memory use over the last minutes" />
         </Card>
       </div>
+      <AnswerDiscNotice
+        vm={vm}
+        onRemove={async () => {
+          const spec = cloneSpec(vm);
+          spec.media = spec.media.filter((m) => m.kind !== "unattend");
+          delete spec.unattend;
+          try {
+            onJob(await saveSpec(spec));
+          } catch (e) {
+            toast("error", "Not saved", errorMessage(e));
+          }
+        }}
+      />
       <Card title="Disks">
         <div className="stack">
           {vm.disks.map((d) => (
@@ -304,6 +318,10 @@ function cloneSpec(vm: VM): VMSpec {
   if (vm.cloudInit) s.cloudInit = { ...vm.cloudInit, sshKeys: [...vm.cloudInit.sshKeys] };
   if (vm.streaming) s.streaming = { ...vm.streaming };
   if (vm.labels) s.labels = { ...vm.labels };
+  if (vm.sound) s.sound = true;
+  if (vm.clipboard) s.clipboard = true;
+  // Kept by the server whatever is sent; sent back as they are.
+  if (vm.unattend) s.unattend = { ...vm.unattend, hooks: [...(vm.unattend.hooks ?? [])] };
   return s;
 }
 
@@ -479,7 +497,7 @@ function HardwareTab({ vm, onJob }: { vm: VM; onJob: (j: Job) => void }) {
                   ))}
                 </Select>
               ) : (
-                <span>{m.kind === "virtio" ? "VirtIO drivers disc" : "Cloud-init settings disc"}</span>
+                <span>{m.kind === "virtio" ? "VirtIO drivers disc" : m.kind === "unattend" ? "Windows setup disc (answer file)" : "Cloud-init settings disc"}</span>
               )}
               <IconButton label={`Remove drive ${i + 1}`} onClick={() => set({ media: spec.media.filter((_, j) => j !== i) })}>
                 <TrashIcon size={15} />
@@ -555,6 +573,23 @@ function HardwareTab({ vm, onJob }: { vm: VM; onJob: (j: Job) => void }) {
           ))}
         </div>
       </Card>
+      <Card title={<>Screen {later}</>}>
+        <div className="stack">
+          <Toggle
+            label="Sound"
+            description="An HD audio card. Its sound plays in the VM's screen window (turn on the speaker there)."
+            checked={!!spec.sound}
+            onChange={(v) => set({ sound: v || undefined })}
+          />
+          <Toggle
+            label="Clipboard"
+            description="Copy and paste between your computer and the VM's screen. Everyone with this VM's screen open shares its clipboard. The guest needs spice-vdagent (Linux) or the VirtIO guest tools (Windows)."
+            checked={!!spec.clipboard}
+            onChange={(v) => set({ clipboard: v || undefined })}
+          />
+        </div>
+      </Card>
+      {vm.state === "running" && <LiveUSBCard vm={vm} onJob={onJob} />}
       <Card title={<>Devices {later}</>} actions={<Button size="sm" onClick={() => setPicking(true)}>Choose devices…</Button>}>
         {spec.devices.length === 0 ? (
           <span className="small muted">No passed-through devices.</span>
@@ -629,6 +664,8 @@ function SnapshotsTab({ vm, onJob }: { vm: VM; onJob: (j: Job) => void }) {
   };
   return (
     <div className="stack">
+      <ProtectionNote vm={vm} />
+      <ScheduleCard key={JSON.stringify(vm.schedule ?? null)} vm={vm} onJob={onJob} />
       <Card title="Take a snapshot">
         <div className="row" style={{ gap: 8, alignItems: "flex-end" }}>
           <div className="grow">
@@ -668,8 +705,13 @@ function SnapshotsTab({ vm, onJob }: { vm: VM; onJob: (j: Job) => void }) {
                     <span className="cell-sub mono">{s.name}</span>
                   </td>
                   <td>
+                    {s.kind && s.kind !== "manual" && (
+                      <>
+                        <Badge tone="info">{s.kind[0]!.toUpperCase() + s.kind.slice(1)}</Badge>{" "}
+                      </>
+                    )}
                     {s.label || <span className="muted">—</span>}
-                    {!s.consistent && <span className="cell-sub">Taken while running without the guest agent</span>}
+                    {!s.consistent && <span className="cell-sub">Crash-consistent: taken while running without the guest agent</span>}
                   </td>
                   <td className="mono">{bytes(s.bytes)}</td>
                   <td className="actions">
@@ -831,6 +873,7 @@ function SettingsTab({ vm, onJob, onDelete }: { vm: VM; onJob: (j: Job) => void;
           Save settings
         </Button>
       </div>
+      <MakeTemplateCard vm={vm} onJob={onJob} />
       <Card title="Delete">
         <div className="row row--between">
           <span className="small muted">Delete the VM, and its disks unless you keep them.</span>

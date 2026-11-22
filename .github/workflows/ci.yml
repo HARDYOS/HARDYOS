@@ -277,10 +277,14 @@ jobs:
         run: go test -c -o "$RUNNER_TEMP/vms.test" ./internal/vms
       - name: download, import, boot, console, snapshot, roll back and delete a VM
         run: sudo HARDYOS_VM_INTEGRATION=1 "$RUNNER_TEMP/vms.test" -test.run TestLibvirtIntegration -test.v -test.timeout 20m
+      - name: verified Debian image, sound and clipboard, scheduled snapshot, template, Windows answer disc
+        run: sudo HARDYOS_VM_INTEGRATION=1 "$RUNNER_TEMP/vms.test" -test.run TestLibvirtPolishIntegration -test.v -test.timeout 30m
       - name: libvirt logs
         if: failure()
         run: |
           sudo tail -80 /var/log/libvirt/qemu/cirros.log || true
+          sudo tail -80 /var/log/libvirt/qemu/deb.log || true
+          sudo tail -80 /var/log/libvirt/qemu/deb-copy.log || true
           sudo journalctl -u libvirtd --no-pager -n 80 || true
           sudo dmesg | grep -iE "apparmor|kvm" | tail -30 || true
 

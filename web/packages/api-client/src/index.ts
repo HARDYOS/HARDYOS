@@ -260,6 +260,11 @@ export type VMSnapshot = S["VMSnapshot"];
 export type VMCreateRequest = S["VMCreateRequest"];
 export type VMUpdateRequest = S["VMUpdateRequest"];
 export type VMConsoleSession = S["VMConsoleSession"];
+export type VMCatalogImage = S["VMCatalogImage"];
+export type VMUserTemplate = S["VMUserTemplate"];
+export type VMSchedule = S["VMSchedule"];
+export type VMUnattend = S["VMUnattend"];
+export type VMUSBRequest = S["VMUSBRequest"];
 
 // Versioned cloud backups (phase 6 part A).
 export type BackupItem = S["BackupItem"];
