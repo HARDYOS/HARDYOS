@@ -1013,6 +1013,7 @@ func (s *Server) nbsTick(ctx context.Context, now time.Time) {
 		return
 	}
 	svc.CheckAlerts(ctx, st, set)
+	svc.RenewFence(ctx, &privStandby{s: s}, st)
 	if !nbstandby.Due(st, set, now) {
 		return
 	}

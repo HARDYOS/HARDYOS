@@ -121,7 +121,19 @@ type state struct {
 	// Handback is the sealed copy of what the last hand-back sent, kept
 	// until the next good sync.
 	Handback string `json:"handback,omitempty"`
+	// Fences are the fences made while not taken over (the last 24 h).
+	Fences []time.Time `json:"fences,omitempty"`
 }
+
+// FenceTTL is how long a fence lasts on the VPS unless renewed; HardyOS
+// renews it every FenceRenew while it has taken over (decision 426).
+// MaxFences fences a day may be made without a take-over following, so a
+// compromised hardyd can't keep the VPS's server stopped.
+const (
+	FenceTTL   = 2 * time.Hour
+	FenceRenew = 20 * time.Minute
+	MaxFences  = 3
+)
 
 // SnapshotRecord is one sealed snapshot.
 type SnapshotRecord struct {
@@ -206,9 +218,11 @@ type VPSStatus struct {
 	RestoreArmedUntil string `json:"restoreArmedUntil"`
 	// HandbackInstalled: the script was installed with --allow-handback.
 	HandbackInstalled bool `json:"handbackInstalled"`
-	// Fenced: HardyOS stopped the VPS's server for a take-over.
-	Fenced bool   `json:"fenced"`
-	Time   string `json:"time"`
+	// Fenced: HardyOS stopped the VPS's server for a take-over, until
+	// FencedUntil unless renewed (decision 426).
+	Fenced      bool   `json:"fenced"`
+	FencedUntil string `json:"fencedUntil,omitempty"`
+	Time        string `json:"time"`
 }
 
 // StageResult says what was staged.
@@ -441,9 +455,29 @@ func KeyFingerprint(line string) string {
 func (r *Root) Fence(ctx context.Context, on bool) error {
 	r.mu.Lock()
 	st, err := r.load()
+	if err == nil && on && st.Mode != ModeTakenOver {
+		// Not a renewal: at most MaxFences a day.
+		var recent []time.Time
+		for _, t := range st.Fences {
+			if r.now().Sub(t) < 24*time.Hour {
+				recent = append(recent, t)
+			}
+		}
+		if len(recent) >= MaxFences {
+			err = problemf("the VPS was fenced %d times in 24 hours without a take-over: refused (start or stop netbird-server on the VPS by hand if you need to)", len(recent))
+		} else {
+			st.Fences = append(recent, r.now())
+			err = r.save(st)
+		}
+	}
 	r.mu.Unlock()
 	if err != nil {
 		return err
+	}
+	if on {
+		r.log().Warn("netbird standby: fencing the VPS (its netbird-server stops)", "vps", st.VPSHost, "renewal", st.Mode == ModeTakenOver)
+	} else {
+		r.log().Warn("netbird standby: unfencing the VPS", "vps", st.VPSHost)
 	}
 	remote, err := r.target(st)
 	if err != nil {
@@ -816,9 +850,16 @@ func (r *Root) Stage(ctx context.Context, a ConfirmArgs) (*StageResult, error) {
 	if tmp, ok := sink.tmps["letsencrypt/acme.json"]; ok {
 		// Only the hostname's own certificate, without the ACME account's
 		// key (Traefik registers a fresh account when it renews).
-		if err := filterACMEFile(root, tmp, st.Hostname); err != nil {
+		// An empty or unreadable certificate store is skipped, not fatal:
+		// Traefik gets a certificate of its own (review L-c).
+		keep, err := filterACMEFile(root, tmp, st.Hostname)
+		if err != nil {
 			sink.abort()
 			return nil, err
+		}
+		if !keep {
+			r.log().Warn("netbird standby: the snapshot's acme.json is empty or unreadable; staged without the certificate")
+			delete(sink.tmps, "letsencrypt/acme.json")
 		}
 	}
 	// Everything checked: replace what the app has. Any failure from here
@@ -1012,36 +1053,38 @@ func removeStaged(root *os.Root) error {
 	return first
 }
 
-func filterACMEFile(root *os.Root, name, host string) error {
+// filterACMEFile keeps only host's certificate in name; false (and name
+// removed) when the store is empty or isn't Traefik's.
+func filterACMEFile(root *os.Root, name, host string) (bool, error) {
 	f, err := root.Open(name)
 	if err != nil {
-		return err
+		return false, err
 	}
 	b, err := io.ReadAll(io.LimitReader(f, entryLimits[EntryACME]+1))
 	f.Close()
 	if err != nil {
-		return err
+		return false, err
 	}
-	out, err := FilterACME(b, host)
-	if err != nil {
-		return err
-	}
+	out, ferr := FilterACME(b, host)
 	if err := root.Remove(name); err != nil {
-		return err
+		return false, err
+	}
+	if ferr != nil || len(bytes.TrimSpace(b)) == 0 {
+		return false, nil
 	}
 	w, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if _, err := w.Write(out); err != nil {
 		w.Close()
-		return err
+		return false, err
 	}
 	if err := w.Sync(); err != nil {
 		w.Close()
-		return err
+		return false, err
 	}
-	return w.Close()
+	return true, w.Close()
 }
 
 // Handback sends the stopped standby's databases to the VPS (restore verb),

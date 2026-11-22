@@ -96,7 +96,11 @@ func main() {
 		log.Warn("allowed user not found; only root may connect", "user", *allowUser)
 	}
 	priv.RegisterBuiltins(s)
-	priv.RegisterStorage(s, priv.StorageEnv{Runner: sysexec.Exec{}, Root: os.DirFS("/")})
+	priv.RegisterStorage(s, priv.StorageEnv{Runner: sysexec.Exec{}, Root: os.DirFS("/"),
+		StandbyTakenOver: func() bool {
+			_, on := nbstandby.TakenOver(filepath.Join(zfs.KeyDir, "netbird-standby"))
+			return on
+		}})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	var stopStreaming func(context.Context)
 	defer stop()

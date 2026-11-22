@@ -401,3 +401,47 @@ func TestHandBack(t *testing.T) {
 		t.Fatalf("%v", b.steps)
 	}
 }
+
+// The fence is renewed while taken over, every FenceRenew, and loudly when
+// it can't be (review L-g).
+func TestRenewFence(t *testing.T) {
+	s, alerts, now := testService(t)
+	b := &fakeBackend{st: configured()}
+	rec := &TakeoverRecord{Fenced: true, FenceRenewed: *now}
+	if err := s.saveTakeover(t.Context(), rec); err != nil {
+		t.Fatal(err)
+	}
+	st := b.st
+	s.RenewFence(t.Context(), b, &st) // not taken over
+	st.Mode = ModeTakenOver
+	s.RenewFence(t.Context(), b, &st) // too soon
+	if len(b.steps) != 0 {
+		t.Fatalf("%v", b.steps)
+	}
+	*now = now.Add(FenceRenew)
+	s.RenewFence(t.Context(), b, &st)
+	if stepNames(b) != "fence" {
+		t.Fatalf("%v", b.steps)
+	}
+	if r, _ := s.Takeover(t.Context()); !r.FenceRenewed.Equal(*now) {
+		t.Fatalf("%+v", r)
+	}
+	// Failing: an alert before the fence runs out.
+	b.fail = map[string]error{"fence": errors.New("vps down")}
+	*now = now.Add(FenceTTL - 10*time.Minute)
+	s.RenewFence(t.Context(), b, &st)
+	if len(*alerts) == 0 || !strings.Contains((*alerts)[len(*alerts)-1], "couldn't renew") {
+		t.Fatalf("%v", *alerts)
+	}
+	// Handed back: no more renewals.
+	b.fail = nil
+	rec, _ = s.Takeover(t.Context())
+	rec.HandedBack = true
+	s.saveTakeover(t.Context(), rec)
+	n := len(b.steps)
+	*now = now.Add(time.Hour)
+	s.RenewFence(t.Context(), b, &st)
+	if len(b.steps) != n {
+		t.Fatal("renewed after hand-back")
+	}
+}

@@ -111,6 +111,7 @@ export function takeoverBlockers(st: NBStandbyStatus): string[] {
   if (!st.dns.tokenSet) out.push("Save a Cloudflare token in Control Panel › Hostnames.");
   else if (st.dns.name !== c.hostname) out.push(`Let HardyOS manage ${c.hostname} in Cloudflare (step 4).`);
   else if (st.dns.adopted.some((r) => r.type === "AAAA") && !c.publicIPv6) out.push(`${c.hostname} has an AAAA record: enter this server's public IPv6 address.`);
+  else if (st.dns.needsRebind) out.push(`The public address or the VPS changed since ${c.hostname} was allowed: confirm the new values with the Cloudflare token (step 4).`);
   return out;
 }
 

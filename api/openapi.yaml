@@ -4062,6 +4062,29 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "409": { $ref: "#/components/responses/Conflict" }
         "503": { $ref: "#/components/responses/Unavailable" }
+  /netbird-standby/dns/rebind:
+    post:
+      operationId: rebindNetBirdStandbyDNS
+      summary: Allow the standby's current public address and VPS for the adopted name (a job; the Cloudflare token pasted again; not while taken over)
+      description: |
+        The adopted name is bound to this server's public addresses and the
+        VPS (host, port, host key) as they were when it was adopted
+        (decision 424). After any of them changes, a take-over refuses until
+        this runs with the token, or `hardyctl netbird-standby rebind` runs
+        as root on the console.
+      tags: [netbird-standby]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NBStandbyDNSRebindRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/Unavailable" }
   /netbird-standby/takeover:
     post:
       operationId: takeOverNetBird
@@ -6891,7 +6914,7 @@ components:
         version: { type: string }
     NBStandbyDNS:
       type: object
-      required: [tokenSet, base, zone, name, adopted, inBase, inZone]
+      required: [tokenSet, base, zone, name, adopted, inBase, inZone, needsRebind]
       properties:
         tokenSet: { type: boolean }
         base: { type: string }
@@ -6900,6 +6923,23 @@ components:
         adopted: { type: array, items: { $ref: "#/components/schemas/NBStandbyDNSRecord" } }
         inBase: { type: boolean }
         inZone: { type: boolean }
+        bound: { $ref: "#/components/schemas/NBStandbyBinding" }
+        needsRebind: { type: boolean, description: "The public address or the VPS changed since the name was allowed: confirm with the token (rebind) before a take-over" }
+    NBStandbyBinding:
+      type: object
+      required: [host, ipv4, ipv6, vpsHost, vpsPort, hostKeyFingerprint]
+      properties:
+        host: { type: string }
+        ipv4: { type: string }
+        ipv6: { type: string }
+        vpsHost: { type: string }
+        vpsPort: { type: integer }
+        hostKeyFingerprint: { type: string }
+    NBStandbyDNSRebindRequest:
+      type: object
+      required: [token]
+      properties:
+        token: { type: string, writeOnly: true, description: The Cloudflare token pasted again }
     NBStandbyDNSRecord:
       type: object
       required: [id, type, content, ttl, proxied]
@@ -6940,6 +6980,7 @@ components:
         fenced: { type: boolean, description: The VPS's server was stopped for the take-over }
         handedBack: { type: boolean }
         discarded: { type: boolean }
+        fenceRenewed: { type: string, format: date-time, description: "When HardyOS last made or renewed the VPS's fence (it lasts 2 hours unless renewed)" }
         ipv4: { type: string }
         ipv6: { type: string }
         peersTotal: { type: integer }
@@ -6987,6 +7028,7 @@ components:
         restoreArmedUntil: { type: string }
         handbackInstalled: { type: boolean }
         fenced: { type: boolean }
+        fencedUntil: { type: string, description: "When the fence ends unless HardyOS renews it (the VPS then starts its server again)" }
         time: { type: string }
     NBStandbyInstallRequest:
       type: object

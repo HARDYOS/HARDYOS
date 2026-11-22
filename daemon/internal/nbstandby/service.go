@@ -141,8 +141,10 @@ type TakeoverRecord struct {
 	Fenced bool `json:"fenced"`
 	// HandedBack / Discarded: the hand-back's VPS step is done (a retry
 	// only finishes DNS and the local steps).
-	HandedBack     bool      `json:"handedBack,omitempty"`
-	Discarded      bool      `json:"discarded,omitempty"`
+	HandedBack bool `json:"handedBack,omitempty"`
+	Discarded  bool `json:"discarded,omitempty"`
+	// FenceRenewed: the last time the VPS's fence was made or renewed.
+	FenceRenewed   time.Time `json:"fenceRenewed,omitzero"`
 	IPv4           string    `json:"ipv4"`
 	IPv6           string    `json:"ipv6,omitempty"`
 	PeersTotal     int       `json:"peersTotal"`
@@ -357,6 +359,36 @@ func orNone(s string) string {
 		return "none recorded"
 	}
 	return s
+}
+
+// RenewFence keeps the VPS fenced while HardyOS has taken over (decision
+// 426): every FenceRenew, through root, which counts it as a renewal only
+// while its own state says taken over.
+func (s *Service) RenewFence(ctx context.Context, b interface {
+	Fence(ctx context.Context, on bool) error
+}, st *Status) {
+	if st == nil || st.Mode != ModeTakenOver {
+		return
+	}
+	rec, err := s.Takeover(ctx)
+	if err != nil || rec == nil || !rec.Fenced || rec.HandedBack || rec.Discarded {
+		return
+	}
+	if s.now().Sub(rec.FenceRenewed) < FenceRenew {
+		return
+	}
+	fctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	err = b.Fence(fctx, true)
+	cancel()
+	if err != nil {
+		if s.Notify != nil && s.now().Sub(rec.FenceRenewed) > FenceTTL-30*time.Minute {
+			s.Notify(ctx, "error", "HardyOS couldn't renew the VPS's fence",
+				"The VPS starts its NetBird server again "+FenceTTL.String()+" after the last renewal ("+rec.FenceRenewed.Format(time.RFC3339)+"): "+clip(err.Error(), 200))
+		}
+		return
+	}
+	rec.FenceRenewed = s.now()
+	_ = s.saveTakeover(ctx, rec)
 }
 
 // Takeover returns the current take-over's record (nil when none).
@@ -574,6 +606,11 @@ func (s *Service) TakeOver(ctx context.Context, b Backend, a TakeOverArgs, p Pro
 	switch {
 	case ferr == nil:
 		fenced, rec.Fenced = true, true
+		rec.FenceRenewed = s.now()
+		if s.Notify != nil {
+			s.Notify(ctx, "warning", "The VPS's NetBird server was stopped (fenced)",
+				fmt.Sprintf("HardyOS stopped netbird-server on %s for a take-over. The fence lasts %s unless HardyOS renews it while it has taken over; then the VPS starts its server again.", st.VPSHost, FenceTTL))
+		}
 	case alive:
 		return nil, fmt.Errorf("the VPS still runs NetBird and couldn't be fenced (install its script with --allow-handback): %w", ferr)
 	default:

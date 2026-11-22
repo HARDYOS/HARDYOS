@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -50,7 +51,7 @@ func newVPSBox(t *testing.T) *vpsBox {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root (runuser, chown to nobody)")
 	}
-	for _, c := range []string{"bash", "sqlite3", "runuser", "jq", "tar", "sha256sum", "od", "comm"} {
+	for _, c := range []string{"bash", "sqlite3", "runuser", "jq", "tar", "sha256sum", "od", "comm", "awk", "cmp"} {
 		if _, err := exec.LookPath(c); err != nil {
 			t.Skipf("%s isn't installed", c)
 		}
@@ -76,7 +77,7 @@ func newVPSBox(t *testing.T) *vpsBox {
 	os.WriteFile(filepath.Join(r, "bin", "docker"), []byte(dockerStub), 0o755)
 	os.WriteFile(filepath.Join(r, "bin", "sleep"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
 	os.WriteFile(filepath.Join(r, "bin", "logger"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
-	os.WriteFile(filepath.Join(r, "etc/hardyos-standby/standby.conf"), []byte("SERVER=netbird-server\nPROJECT=netbird\nHOSTNAME_NB="+testHost+"\nHANDBACK=1\n"), 0o600)
+	os.WriteFile(filepath.Join(r, "etc/hardyos-standby/standby.conf"), []byte("SERVER=netbird-server\nPROJECT=netbird\nHOSTNAME_NB="+testHost+"\nHANDBACK=1\nCHECK_USER=nobody\n"), 0o600)
 	os.WriteFile(filepath.Join(r, "cfg/config.yaml"), []byte(testConfig), 0o600)
 	os.WriteFile(filepath.Join(r, "running"), []byte("true\n"), 0o644)
 	// acme.json with this name's certificate, another one and the account.
@@ -87,12 +88,19 @@ func newVPSBox(t *testing.T) *vpsBox {
 		map[string]any{"domain": map[string]any{"main": "other.example.net"}, "certificate": "x", "key": "OTHERKEY"})
 	acme, _ = json.Marshal(store)
 	os.WriteFile(filepath.Join(r, "le/acme.json"), acme, 0o600)
-	b.sql(filepath.Join(r, "data/store.db"), `CREATE TABLE accounts(id TEXT); CREATE TABLE users(id TEXT, account_id TEXT, role TEXT);
-		CREATE TABLE personal_access_tokens(id TEXT); CREATE TABLE setup_keys(id TEXT); CREATE TABLE policies(id TEXT);
-		CREATE TABLE routes(id TEXT); CREATE TABLE peers(id TEXT);
-		INSERT INTO accounts VALUES('acc1'); INSERT INTO users VALUES('u1','acc1','owner'); INSERT INTO setup_keys VALUES('k1');
-		INSERT INTO peers VALUES('p1');`)
-	b.sql(filepath.Join(r, "data/idp.db"), `CREATE TABLE x(id TEXT);`)
+	b.sql(filepath.Join(r, "data/store.db"), `CREATE TABLE accounts(id TEXT);
+		CREATE TABLE users(id TEXT, account_id TEXT, role TEXT, blocked NUMERIC, is_service_user NUMERIC);
+		CREATE TABLE personal_access_tokens(id TEXT, user_id TEXT, name TEXT, hashed_token TEXT);
+		CREATE TABLE setup_keys(id TEXT); CREATE TABLE policies(id TEXT); CREATE TABLE routes(id TEXT); CREATE TABLE peers(id TEXT);
+		INSERT INTO accounts VALUES('acc1'); INSERT INTO users VALUES('u1','acc1','owner',0,0);
+		INSERT INTO users VALUES('u3','acc1','user',0,0); INSERT INTO users VALUES('u5','acc1','admin',1,0);
+		INSERT INTO personal_access_tokens VALUES('t0','u3','ci','h0');
+		INSERT INTO setup_keys VALUES('k1'); INSERT INTO peers VALUES('p1');`)
+	// The embedded IdP's (Dex's) sign-in tables.
+	b.sql(filepath.Join(r, "data/idp.db"), `CREATE TABLE password(email TEXT PRIMARY KEY, hash BLOB, username TEXT, user_id TEXT);
+		CREATE TABLE keys(id TEXT PRIMARY KEY, signing_key BLOB); CREATE TABLE connector(id TEXT PRIMARY KEY, config BLOB);
+		CREATE TABLE client(id TEXT PRIMARY KEY, secret TEXT); CREATE TABLE auth_code(id TEXT PRIMARY KEY);
+		INSERT INTO password VALUES('owner@example.net', x'2432', 'owner', 'u1'); INSERT INTO keys VALUES('keys', x'00');`)
 	return b
 }
 
@@ -121,12 +129,24 @@ func (b *vpsBox) run(stdin []byte, env []string, args ...string) (string, string
 // upload builds a hand-back from a copy of the VPS's store changed by q.
 func (b *vpsBox) upload(gen, version, q string) []byte {
 	b.t.Helper()
+	return b.uploadDBs(gen, version, map[string]string{"store": q})
+}
+
+// uploadDBs builds a hand-back of the databases named (store, idp,
+// events): copies of the VPS's (empty when it has none) changed by their q.
+func (b *vpsBox) uploadDBs(gen, version string, dbs map[string]string) []byte {
+	b.t.Helper()
 	dir := b.t.TempDir()
 	os.MkdirAll(filepath.Join(dir, "data"), 0o700)
-	src, _ := os.ReadFile(filepath.Join(b.root, "data/store.db"))
-	os.WriteFile(filepath.Join(dir, "data/store.db"), src, 0o600)
-	if q != "" {
-		b.sql(filepath.Join(dir, "data/store.db"), q)
+	for db, q := range dbs {
+		dst := filepath.Join(dir, "data", db+".db")
+		if src, err := os.ReadFile(filepath.Join(b.root, "data", db+".db")); err == nil {
+			os.WriteFile(dst, src, 0o600)
+		}
+		if q == "" {
+			q = "PRAGMA user_version;"
+		}
+		b.sql(dst, q)
 	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
@@ -231,11 +251,53 @@ func TestVPSRootScript(t *testing.T) {
 	refused("unknown generation", strings.Repeat("a", 32), StandbyVersion, "", "doesn't come from a snapshot")
 	refused("newer standby", gen, "9.0.0", "", "older than the standby")
 	refused("other account", gen, StandbyVersion, "UPDATE accounts SET id='evil';", "other NetBird accounts")
-	refused("new admin", gen, StandbyVersion, "INSERT INTO users VALUES('u2','acc1','admin'); INSERT INTO setup_keys VALUES('k9');", "owner/admin")
-	refused("new token", gen, StandbyVersion, "INSERT INTO personal_access_tokens VALUES('t1');", "access tokens")
+	refused("new admin", gen, StandbyVersion, "INSERT INTO users VALUES('u2','acc1','admin',0,0); INSERT INTO setup_keys VALUES('k9');", "owner/admin")
+	refused("new token", gen, StandbyVersion, "INSERT INTO personal_access_tokens VALUES('t1','u3','x','h1');", "access tokens")
+	// Row contents, not only ids (security review N3).
+	refused("promoted user", gen, StandbyVersion, "UPDATE users SET role='admin' WHERE id='u3';", "owner/admin")
+	refused("promoted user, odd case", gen, StandbyVersion, "UPDATE users SET role='Owner' WHERE id='u3';", "owner/admin")
+	refused("unblocked admin", gen, StandbyVersion, "UPDATE users SET blocked=0 WHERE id='u5';", "owner/admin")
+	refused("service user flag", gen, StandbyVersion, "UPDATE users SET is_service_user=1 WHERE id='u1';", "owner/admin")
+	refused("new plain admin-named user", gen, StandbyVersion, "INSERT INTO users VALUES('u6','acc1','network_admin',0,0);", "owner/admin")
+	refused("token moved to the owner", gen, StandbyVersion, "UPDATE personal_access_tokens SET user_id='u1' WHERE id='t0';", "access tokens")
+	refused("token rehashed", gen, StandbyVersion, "UPDATE personal_access_tokens SET hashed_token='evil' WHERE id='t0';", "access tokens")
+	refused("table renamed (case)", gen, StandbyVersion,
+		"ALTER TABLE personal_access_tokens RENAME TO pat_tmp; ALTER TABLE pat_tmp RENAME TO Personal_Access_Tokens; INSERT INTO Personal_Access_Tokens VALUES('t9','u1','x','h9');", "access tokens")
+	refused("table renamed away", gen, StandbyVersion,
+		"ALTER TABLE personal_access_tokens RENAME TO pat_old; CREATE VIEW personal_access_tokens AS SELECT * FROM pat_old WHERE 0;", "no table personal_access_tokens")
+	refused("column missing", gen, StandbyVersion, "ALTER TABLE users DROP COLUMN blocked;", "no column blocked")
+	refused("broken schema query", gen, StandbyVersion, "ALTER TABLE users RENAME COLUMN role TO role2; ALTER TABLE users ADD COLUMN ROLE2X TEXT;", "no column role")
+	for _, q := range []string{
+		"UPDATE password SET hash=x'00' WHERE email='owner@example.net';",
+		"INSERT INTO password VALUES('evil@example.net', x'00', 'evil', 'u3');",
+		"UPDATE keys SET signing_key=x'ff';",
+		"INSERT INTO connector VALUES('evil', x'00');",
+		"INSERT INTO client VALUES('evil', 's');",
+		"DROP TABLE password; CREATE TABLE Password(email TEXT, hash BLOB, username TEXT, user_id TEXT);",
+	} {
+		before := b.count("setup_keys")
+		b.arm()
+		_, errs, err := b.run(b.uploadDBs(gen, StandbyVersion, map[string]string{"store": "", "idp": q}), nil, "restore")
+		if err == nil || !strings.Contains(errs, "sign-in tables") {
+			t.Fatalf("idp.db %q: %v %q", q, err, errs)
+		}
+		if b.count("setup_keys") != before {
+			t.Fatal("changed the VPS's store")
+		}
+	}
+	// Unchanged sign-in tables and a new plain user pass; the IdP's other
+	// tables (codes, sessions) may change.
+	b.arm()
+	if _, errs, err := b.run(b.uploadDBs(gen, StandbyVersion, map[string]string{
+		"store": "INSERT INTO users VALUES('u4','acc1','user',0,0); DELETE FROM personal_access_tokens;",
+		"idp":   "INSERT INTO auth_code VALUES('c1');"}), nil, "restore"); err != nil {
+		t.Fatalf("plain changes: %v %s", err, errs)
+	}
 	// Allowed by the person on the VPS.
 	b.arm("--allow-new-admins")
-	if _, errs, err := b.run(b.upload(gen, StandbyVersion, "INSERT INTO users VALUES('u2','acc1','admin');"), nil, "restore"); err != nil {
+	if _, errs, err := b.run(b.uploadDBs(gen, StandbyVersion, map[string]string{
+		"store": "INSERT INTO users VALUES('u2','acc1','admin',0,0);",
+		"idp":   "UPDATE keys SET signing_key=x'01';"}), nil, "restore"); err != nil {
 		t.Fatalf("allowed admin: %v %s", err, errs)
 	}
 	// A server that doesn't stay up is rolled back to the VPS's own copy.
@@ -245,10 +307,56 @@ func TestVPSRootScript(t *testing.T) {
 	if b.count("setup_keys") != before {
 		t.Fatal("not rolled back")
 	}
+	// The rollback puts back what the VPS had: a database the upload added
+	// goes, and a fenced VPS's server stays stopped (review L-a).
+	events := filepath.Join(b.root, "data/events.db")
+	os.Remove(events)
+	if _, errs, err := b.run(nil, nil, "fence"); err != nil {
+		t.Fatalf("%v %s", err, errs)
+	}
+	os.WriteFile(filepath.Join(b.root, "docker.log"), nil, 0o644)
+	b.arm()
+	if _, errs, err := b.run(b.uploadDBs(gen, StandbyVersion, map[string]string{"store": "", "events": "CREATE TABLE e(id TEXT);"}), nil, "restore"); err == nil || !strings.Contains(errs, "stays stopped") {
+		t.Fatalf("fenced rollback: %v %s", err, errs)
+	}
+	if _, err := os.Stat(events); err == nil {
+		t.Fatal("the upload's events.db stayed")
+	}
+	logb, _ := os.ReadFile(filepath.Join(b.root, "docker.log"))
+	var last string
+	for _, l := range strings.Split(string(logb), "\n") {
+		if strings.HasPrefix(l, "start ") || strings.HasPrefix(l, "stop ") {
+			last = l
+		}
+	}
+	if !strings.HasPrefix(last, "stop ") {
+		t.Fatalf("fenced server started again by the rollback:\n%s", logb)
+	}
+	if _, err := os.Stat(filepath.Join(b.root, "etc/hardyos-standby/fenced")); err != nil {
+		t.Fatal("the fence went with the rollback")
+	}
 	os.Remove(filepath.Join(b.root, "fail-start"))
+	if _, _, err := b.run(nil, nil, "unfence"); err != nil {
+		t.Fatal(err)
+	}
 	// Fence and unfence.
 	if _, errs, err := b.run(nil, nil, "fence"); err != nil {
 		t.Fatalf("%v %s", err, errs)
+	}
+	out, _, _ = b.run(nil, nil, "status")
+	json.Unmarshal([]byte(out), &vs)
+	if !vs.Fenced || vs.Running || vs.FencedUntil == "" {
+		t.Fatalf("%s", out)
+	}
+	if until, err := time.Parse(time.RFC3339, vs.FencedUntil); err != nil || until.Sub(time.Now()) > 2*time.Hour+time.Minute || until.Sub(time.Now()) < 110*time.Minute {
+		t.Fatalf("fenced until %s", vs.FencedUntil)
+	}
+	// Not expired: fence-expire leaves it; HardyOS's key can't run it.
+	if _, _, err := b.run(nil, nil, "fence-expire"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := b.run(nil, []string{"SUDO_USER=hardyos-standby"}, "fence-expire"); err == nil {
+		t.Fatal("HardyOS's key ran fence-expire")
 	}
 	out, _, _ = b.run(nil, nil, "status")
 	json.Unmarshal([]byte(out), &vs)
@@ -259,8 +367,24 @@ func TestVPSRootScript(t *testing.T) {
 	if _, err := Check(strings.NewReader(snap), testHost, nil); err == nil || !strings.Contains(err.Error(), "fenced") {
 		t.Fatalf("fenced snapshot: %v", err)
 	}
-	if _, _, err := b.run(nil, nil, "unfence"); err != nil {
-		t.Fatal(err)
+	// Expired (HardyOS didn't renew it): the timer starts the server.
+	fenceFile := filepath.Join(b.root, "etc/hardyos-standby/fenced")
+	os.WriteFile(fenceFile, []byte(strconv.FormatInt(time.Now().Add(-time.Minute).Unix(), 10)+"\n"), 0o600)
+	out, _, _ = b.run(nil, nil, "status")
+	json.Unmarshal([]byte(out), &vs)
+	if vs.Fenced {
+		t.Fatalf("expired fence shown: %s", out)
+	}
+	if out, errs, err := b.run(nil, nil, "fence-expire"); err != nil || !strings.Contains(out, "expired") {
+		t.Fatalf("%v %s %s", err, out, errs)
+	}
+	if _, err := os.Stat(fenceFile); err == nil {
+		t.Fatal("expired fence kept")
+	}
+	out, _, _ = b.run(nil, nil, "status")
+	json.Unmarshal([]byte(out), &vs)
+	if !vs.Running {
+		t.Fatalf("not started: %s", out)
 	}
 	// Only the newest five backups are kept.
 	entries, _ := os.ReadDir(filepath.Join(b.root, "var/lib/hardyos-standby/root"))

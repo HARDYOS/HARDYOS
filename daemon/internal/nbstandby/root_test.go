@@ -661,3 +661,50 @@ func TestStageRefusesChangedBinding(t *testing.T) {
 		t.Fatalf("%+v", info)
 	}
 }
+
+// An empty or unreadable acme.json is staged without the certificate, not
+// refused (review L-c).
+func TestStageSkipsBadACME(t *testing.T) {
+	for what, acme := range map[string][]byte{"empty": {}, "not json": []byte("{nope"), "odd shape": []byte(`{"le":{"Certificates":"x"}}`)} {
+		f := newRoot(t)
+		f.configure(t)
+		files := defaultFiles(t)
+		files[EntryACME] = acme
+		f.vps.snapshot = makeSnapshot(t, files, nil)
+		if _, err := f.root.Sync(t.Context()); err != nil {
+			t.Fatalf("%s: sync: %v", what, err)
+		}
+		if _, err := f.root.Stage(t.Context(), ConfirmArgs{Confirm: testHost}); err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		if _, err := os.Stat(filepath.Join(f.apps.dir, "letsencrypt", "acme.json")); err == nil {
+			t.Fatalf("%s: acme.json staged", what)
+		}
+		if _, err := os.Stat(filepath.Join(f.apps.dir, "data", "store.db")); err != nil {
+			t.Fatalf("%s: store not staged", what)
+		}
+	}
+}
+
+// Fences made without a take-over are limited (review L-g): a compromised
+// hardyd can't keep the VPS's server stopped; renewals while taken over
+// always go.
+func TestFenceLimit(t *testing.T) {
+	f := newRoot(t)
+	f.configure(t)
+	for i := 0; i < MaxFences; i++ {
+		if err := f.root.Fence(t.Context(), true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.root.Fence(t.Context(), true); err == nil || !strings.Contains(err.Error(), "without a take-over") {
+		t.Fatalf("%v", err)
+	}
+	if err := f.root.Fence(t.Context(), false); err != nil {
+		t.Fatal("unfence refused")
+	}
+	*f.now = f.now.Add(25 * time.Hour)
+	if err := f.root.Fence(t.Context(), true); err != nil {
+		t.Fatalf("a day later: %v", err)
+	}
+}

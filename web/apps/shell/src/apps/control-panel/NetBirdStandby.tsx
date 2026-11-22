@@ -228,7 +228,13 @@ function ScriptCard() {
             label="Hand back"
             value={!vps.handbackInstalled ? "Not installed" : vps.restoreAllowed ? "Armed" : "Not armed"}
             tone={vps.restoreAllowed ? "good" : "warn"}
-            sub={vps.restoreAllowed ? `until ${dateTime(vps.restoreArmedUntil)}` : vps.fenced ? "fenced (stopped by HardyOS)" : undefined}
+            sub={
+              vps.restoreAllowed
+                ? `until ${dateTime(vps.restoreArmedUntil)}`
+                : vps.fenced
+                  ? `fenced (stopped by HardyOS)${vps.fencedUntil ? ` until ${dateTime(vps.fencedUntil)} unless renewed` : ""}`
+                  : undefined
+            }
           />
           <Stat label="Name" value={<span className="mono">{vps.hostname || "—"}</span>} />
         </div>
@@ -275,6 +281,7 @@ function DNSCard({ st }: { st: NBStandbyStatus }) {
   const [preview, setPreview] = useState<NBStandbyDNSPreview | null>(null);
   const [confirm, setConfirm] = useState(false);
   const [token, setToken] = useState("");
+  const [rebind, setRebind] = useState(false);
   const look = useMutation({
     mutationFn: () => unwrap(api.GET("/netbird-standby/dns", { params: { query: { name: host } } })),
     onSuccess: setPreview,
@@ -293,6 +300,26 @@ function DNSCard({ st }: { st: NBStandbyStatus }) {
         <>
           <p className="small muted">HardyOS may change these records of {host} on a take-over and puts them back exactly on hand-back. Nothing else in the zone.</p>
           <RecordTable records={st.dns.adopted} />
+          {st.dns.bound && (
+            <p className="small muted">
+              Allowed for <span className="mono">{[st.dns.bound.ipv4, st.dns.bound.ipv6].filter(Boolean).join(", ")}</span> with the VPS{" "}
+              <span className="mono">
+                {st.dns.bound.vpsHost}:{st.dns.bound.vpsPort}
+              </span>{" "}
+              (host key <span className="mono">{st.dns.bound.hostKeyFingerprint}</span>).
+            </p>
+          )}
+          {st.dns.needsRebind && (
+            <Alert tone="warn">
+              This server&apos;s public address or the VPS changed since {host} was allowed: a take-over is refused until you confirm the new values with the
+              Cloudflare token (or run <span className="mono">sudo hardyctl netbird-standby rebind</span> on this server&apos;s console).
+              <div className="row">
+                <Button variant="primary" onClick={() => setRebind(true)}>
+                  Confirm the new values
+                </Button>
+              </div>
+            </Alert>
+          )}
         </>
       ) : (
         <>
@@ -315,6 +342,30 @@ function DNSCard({ st }: { st: NBStandbyStatus }) {
           {preview && <RecordTable records={preview.records} />}
           {preview?.problem && <Alert tone="warn">{preview.problem}</Alert>}
         </>
+      )}
+      {rebind && (
+        <ConfirmDialog
+          title={`Allow the new values for ${host}?`}
+          confirmLabel="Allow"
+          danger={false}
+          canConfirm={token.trim().length >= 20}
+          onClose={() => {
+            setRebind(false);
+            setToken("");
+          }}
+          onConfirm={async () => {
+            await jobDone(unwrap(api.POST("/netbird-standby/dns/rebind", { body: { token: token.trim() } })));
+            setToken("");
+            toast("success", `The new values are allowed for ${host}`);
+            void qc.invalidateQueries({ queryKey: KEY });
+          }}
+        >
+          On a take-over HardyOS will point {host} at {[st.settings.publicIPv4, st.settings.publicIPv6].filter(Boolean).join(", ") || "this server"} and copy from{" "}
+          {st.connection?.vpsHost} (host key <span className="mono">{st.connection?.hostKeyFingerprint}</span>). Check these are yours.
+          <Field label="Cloudflare token, pasted again" hint="The one saved in Control Panel › Hostnames: this step needs the person who holds it.">
+            {(id) => <TextInput id={id} type="password" autoComplete="off" value={token} onChange={(e) => setToken(e.target.value)} />}
+          </Field>
+        </ConfirmDialog>
       )}
       {confirm && preview && (
         <ConfirmDialog
@@ -550,7 +601,18 @@ function TakenOverCard({ st }: { st: NBStandbyStatus }) {
       <div className="grid-3">
         <Stat label="This server's NetBird" value={st.clientConnected ? "Connected" : "Not connected"} tone={st.clientConnected ? "good" : "warn"} sub="through the local standby" />
         <Stat label="DNS" value={t?.dnsChanged ? "Points here" : "Unchanged"} tone={t?.dnsChanged ? "accent" : "warn"} sub={<span className="mono">{t?.ipv4}</span>} />
-        <Stat label="VPS" value={t?.fenced ? "Fenced" : "Not fenced"} tone={t?.fenced ? "good" : "warn"} sub={t?.handedBack ? "state handed back; finish with Hand back" : undefined} />
+        <Stat
+          label="VPS"
+          value={t?.fenced ? "Fenced" : "Not fenced"}
+          tone={t?.fenced ? "good" : "warn"}
+          sub={
+            t?.handedBack
+              ? "state handed back; finish with Hand back"
+              : t?.fenced && t.fenceRenewed
+                ? `renewed ${dateTime(t.fenceRenewed)}; it ends 2 h after the last renewal`
+                : undefined
+          }
+        />
         <Stat label="Standby" value={st.app.state || "—"} tone={st.app.state === "running" ? "good" : "bad"} />
       </div>
       {t?.notes.map((n) => (
@@ -577,7 +639,8 @@ function TakenOverCard({ st }: { st: NBStandbyStatus }) {
           <p>
             First arm the hand-back on the VPS, as root: <span className="mono">hardyos-netbird-standby-root arm-restore 2h</span>. Then the standby stops
             (peers drop for a minute), its state goes to the VPS (which checks it, keeps a backup of its own and rolls back by itself if its server doesn&apos;t
-            come up), {host} points back at the VPS and HardyOS starts copying again. The VPS refuses new owners, admins or access tokens unless armed with{" "}
+            come up), {host} points back at the VPS and HardyOS starts copying again. The VPS refuses new or changed owners, admins, access tokens or sign-in
+            tables (the IdP rotates its signing keys every few hours, so a long take-over usually needs this) unless armed with{" "}
             <span className="mono">--allow-new-admins</span>.
           </p>
           <label className="row small">

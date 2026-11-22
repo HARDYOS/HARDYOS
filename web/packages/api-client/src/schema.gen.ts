@@ -3508,6 +3508,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/netbird-standby/dns/rebind": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Allow the standby's current public address and VPS for the adopted name (a job; the Cloudflare token pasted again; not while taken over)
+         * @description The adopted name is bound to this server's public addresses and the
+         *     VPS (host, port, host key) as they were when it was adopted
+         *     (decision 424). After any of them changes, a take-over refuses until
+         *     this runs with the token, or `hardyctl netbird-standby rebind` runs
+         *     as root on the console.
+         */
+        post: operations["rebindNetBirdStandbyDNS"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/netbird-standby/takeover": {
         parameters: {
             query?: never;
@@ -6228,6 +6252,21 @@ export interface components {
             adopted: components["schemas"]["NBStandbyDNSRecord"][];
             inBase: boolean;
             inZone: boolean;
+            bound?: components["schemas"]["NBStandbyBinding"];
+            /** @description The public address or the VPS changed since the name was allowed: confirm with the token (rebind) before a take-over */
+            needsRebind: boolean;
+        };
+        NBStandbyBinding: {
+            host: string;
+            ipv4: string;
+            ipv6: string;
+            vpsHost: string;
+            vpsPort: number;
+            hostKeyFingerprint: string;
+        };
+        NBStandbyDNSRebindRequest: {
+            /** @description The Cloudflare token pasted again */
+            token: string;
         };
         NBStandbyDNSRecord: {
             id: string;
@@ -6266,6 +6305,11 @@ export interface components {
             fenced: boolean;
             handedBack?: boolean;
             discarded?: boolean;
+            /**
+             * Format: date-time
+             * @description When HardyOS last made or renewed the VPS's fence (it lasts 2 hours unless renewed)
+             */
+            fenceRenewed?: string;
             ipv4: string;
             ipv6?: string;
             peersTotal: number;
@@ -6315,6 +6359,8 @@ export interface components {
             restoreArmedUntil: string;
             handbackInstalled: boolean;
             fenced: boolean;
+            /** @description When the fence ends unless HardyOS renews it (the VPS then starts its server again) */
+            fencedUntil?: string;
             time: string;
         };
         NBStandbyInstallRequest: {
@@ -16263,6 +16309,27 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["NBStandbyDNSForgetRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    rebindNetBirdStandbyDNS: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NBStandbyDNSRebindRequest"];
             };
         };
         responses: {

@@ -58,6 +58,10 @@ type StorageEnv struct {
 	KeyDir string // where pool encryption keys live (zfs.KeyDir on a real system)
 	// ARCConf is the modprobe file that persists the ARC limit; ARCParam the live sysfs knob.
 	ARCConf, ARCParam string
+	// StandbyTakenOver reports whether the NetBird standby has taken over
+	// (root's own state): its dataset is then never rolled back or
+	// destroyed (decision 425).
+	StandbyTakenOver func() bool
 }
 
 // Arguments ---------------------------------------------------------------
@@ -604,6 +608,9 @@ func (st *storageOps) destroyPool(ctx context.Context, a PoolDestroyArgs) (any, 
 	if a.ConfirmName != a.Pool {
 		return nil, Errorf(CodeBadArgs, "confirmName must repeat the pool name exactly")
 	}
+	if err := st.standbyGuard(ctx, a.Pool, "pool destroy"); err != nil {
+		return nil, err
+	}
 	defer st.srv.releaseDataset(ctx, a.Pool)()
 	if _, err := st.zpool(ctx, "destroy", a.Pool); err != nil {
 		return nil, err
@@ -700,6 +707,9 @@ func (st *storageOps) destroyDataset(ctx context.Context, a DatasetDestroyArgs) 
 	if a.ConfirmName != a.Name {
 		return nil, Errorf(CodeBadArgs, "confirmName must repeat the dataset name exactly")
 	}
+	if err := st.standbyGuard(ctx, a.Name, "dataset destroy"); err != nil {
+		return nil, err
+	}
 	defer st.srv.releaseDataset(ctx, a.Name)()
 	args := []string{"destroy"}
 	if a.Recursive {
@@ -731,12 +741,20 @@ func (st *storageOps) createSnapshot(ctx context.Context, a SnapshotCreateArgs) 
 	if err := zfs.ValidSnapshotName(name); err != nil {
 		return nil, Errorf(CodeBadArgs, "%v", err)
 	}
+	if standbyDataset(a.Dataset) {
+		return nil, Errorf(CodeForbidden, "the NetBird standby's dataset isn't snapshotted: its copies live sealed elsewhere")
+	}
 	args := []string{"snapshot"}
 	if a.Recursive {
 		args = append(args, "-r")
 	}
 	if _, err := st.zfs(ctx, append(args, name)...); err != nil {
 		return nil, err
+	}
+	if a.Recursive {
+		if err := st.dropStandbySnapshot(ctx, a.Dataset, a.Label); err != nil {
+			return nil, err
+		}
 	}
 	return map[string]string{"created": name}, nil
 }
@@ -747,6 +765,9 @@ func (st *storageOps) destroySnapshot(ctx context.Context, a SnapshotArgs) (any,
 	}
 	if err := dataPool(datasetPool(a.Name)); err != nil {
 		return nil, err
+	}
+	if standbyDataset(a.Name) && st.standbyTakenOver() {
+		return nil, Errorf(CodeForbidden, "the NetBird standby has taken over: hand back first")
 	}
 	if _, err := st.zfs(ctx, "destroy", a.Name); err != nil {
 		return nil, err
@@ -763,6 +784,9 @@ func (st *storageOps) rollback(ctx context.Context, a SnapshotRollbackArgs) (any
 	}
 	if !a.Confirm {
 		return nil, Errorf(CodeBadArgs, "confirm must be true: changes made after this snapshot will be lost")
+	}
+	if standbyDataset(a.Name) && st.standbyTakenOver() {
+		return nil, Errorf(CodeForbidden, "the NetBird standby has taken over: hand back first")
 	}
 	args := []string{"rollback"}
 	if a.DestroyNewer {

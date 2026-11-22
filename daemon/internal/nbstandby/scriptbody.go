@@ -9,9 +9,17 @@ package nbstandby
 // VPS by a person (arm-restore, expiring, at most 24 h), the generation id
 // of a snapshot this VPS served in the last 30 days, a standby version not
 // newer than the VPS's, SQLite checks run as nobody on copies (-safe,
-// trusted_schema off), the same NetBird accounts as the VPS has, and no new
-// owners, admins or access tokens unless the arm allows them; after the
-// swap it watches the server and rolls back to its own copy on any failure.
+// trusted_schema off) under the dedicated user hardyos-sqlcheck, the same
+// NetBird accounts as the VPS has, and (unless the arm allows them) no new or
+// changed owners, admins, access tokens or sign-in tables, compared row by
+// row with every query's exit status checked and the tables it reads
+// required; the checked copies are hash-verified as root before they go in
+// place. After the swap it watches the server and rolls back to its own copy
+// (as it was: stopped while fenced) on any failure.
+//
+// Fencing (decision 426) lasts two hours unless HardyOS renews it while it
+// has taken over; a systemd timer on the VPS starts the server again once a
+// fence expires.
 const scriptTemplate = `#!/bin/bash
 # HardyOS NetBird standby, VPS side, for @@HOSTNAME@@.
 #
@@ -43,9 +51,14 @@ done
 
 if [ "$UNINSTALL" = 1 ]; then
   rm -f /etc/sudoers.d/hardyos-standby /usr/local/sbin/hardyos-netbird-standby /usr/local/sbin/hardyos-netbird-standby-root
+  if command -v systemctl >/dev/null && [ -d /run/systemd/system ]; then
+    systemctl disable --now hardyos-standby-fence.timer >/dev/null 2>&1 || true
+  fi
+  rm -f /etc/systemd/system/hardyos-standby-fence.service /etc/systemd/system/hardyos-standby-fence.timer
   rm -f /etc/hardyos-standby/standby.conf /etc/hardyos-standby/restore-armed /etc/hardyos-standby/fenced /etc/hardyos-standby/allow-restore
   rmdir /etc/hardyos-standby 2>/dev/null || true
   if id hardyos-standby >/dev/null 2>&1; then userdel hardyos-standby || true; fi
+  if id hardyos-sqlcheck >/dev/null 2>&1; then userdel hardyos-sqlcheck || true; fi
   echo "Removed. Backups made by hand-back stay in /var/lib/hardyos-standby/root."
   exit 0
 fi
@@ -59,6 +72,11 @@ if ! command -v sqlite3 >/dev/null || ! command -v sudo >/dev/null || ! command 
   else
     echo "Install sqlite3, sudo and jq first." >&2; exit 1
   fi
+fi
+# The hand-back checks need sqlite3's -safe mode (3.37 or newer).
+sv=$(sqlite3 -version | cut -d' ' -f1)
+if [ "$(printf '%s\n3.37.0\n' "$sv" | sort -V | head -1)" != 3.37.0 ]; then
+  echo "sqlite3 $sv is too old: HardyOS needs 3.37 or newer (for -safe)." >&2; exit 1
 fi
 
 # NetBird's combined server (the current self-hosted layout).
@@ -79,6 +97,12 @@ if ! id hardyos-standby >/dev/null 2>&1; then
   useradd --system --create-home --home-dir /var/lib/hardyos-standby --shell /bin/sh hardyos-standby
 fi
 passwd -l hardyos-standby >/dev/null 2>&1 || true
+# The hand-back's SQLite checks run as this user (no login, no home, owns
+# nothing else): never nobody, whose processes other services share.
+if ! id hardyos-sqlcheck >/dev/null 2>&1; then
+  useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hardyos-sqlcheck
+fi
+passwd -l hardyos-sqlcheck >/dev/null 2>&1 || true
 install -d -m 0700 -o hardyos-standby -g hardyos-standby /var/lib/hardyos-standby /var/lib/hardyos-standby/.ssh
 install -d -m 0700 -o root -g root /var/lib/hardyos-standby/root
 cat > /var/lib/hardyos-standby/.ssh/authorized_keys <<'KEY'
@@ -88,7 +112,7 @@ chown hardyos-standby:hardyos-standby /var/lib/hardyos-standby/.ssh/authorized_k
 chmod 0600 /var/lib/hardyos-standby/.ssh/authorized_keys
 
 install -d -m 0700 /etc/hardyos-standby
-printf 'SERVER=%q\nPROJECT=%q\nHOSTNAME_NB=%q\nHANDBACK=%q\n' "$SERVER" "$PROJECT" "@@HOSTNAME@@" "$ALLOW_HANDBACK" > /etc/hardyos-standby/standby.conf
+printf 'SERVER=%q\nPROJECT=%q\nHOSTNAME_NB=%q\nHANDBACK=%q\nCHECK_USER=hardyos-sqlcheck\n' "$SERVER" "$PROJECT" "@@HOSTNAME@@" "$ALLOW_HANDBACK" > /etc/hardyos-standby/standby.conf
 chmod 0600 /etc/hardyos-standby/standby.conf
 # The old always-on marker is gone: a hand-back is armed each time.
 rm -f /etc/hardyos-standby/allow-restore /etc/hardyos-standby/restore-armed
@@ -109,6 +133,7 @@ cat > /usr/local/sbin/hardyos-netbird-standby-root <<'ROOT'
 # HardyOS NetBird standby, root side.
 #   status | snapshot | fence | unfence | restore   (HardyOS, through sudo)
 #   arm-restore <30m|2h|...> [--allow-new-admins]    (you, on the VPS)
+#   fence-expire                                     (the systemd timer)
 set -euo pipefail
 umask 077
 # R is for HardyOS's own tests only (sudo's env_reset never passes it on).
@@ -118,8 +143,11 @@ export LC_ALL=C PATH="${R:+$R/bin:}/usr/sbin:/usr/bin:/sbin:/bin"
 STATE=$R/var/lib/hardyos-standby/root
 ARM=$R/etc/hardyos-standby/restore-armed
 FENCED=$R/etc/hardyos-standby/fenced
+FENCE_TTL=7200
 MAX_UPLOAD=1073741824
+CHECK_USER="${CHECK_USER:-hardyos-sqlcheck}"
 fail() { echo "$*" >&2; exit 1; }
+case "$CHECK_USER" in hardyos-sqlcheck|nobody) ;; *) fail "bad CHECK_USER in standby.conf" ;; esac
 clean() { tr -cd 'A-Za-z0-9._:/@+-' | cut -c1-200; }
 mount_of() { docker inspect -f "{{range .Mounts}}{{if eq .Destination \"$2\"}}{{.Source}}{{end}}{{end}}" "$1"; }
 image_id() { docker inspect -f '{{.Image}}' "$SERVER"; }
@@ -149,6 +177,15 @@ traefik() {
     case "$(docker inspect -f '{{.Config.Image}}' "$n")" in *traefik*) echo "$n"; return ;; esac
   done
 }
+# The fence's expiry (seconds since 1970); fails when not fenced or expired.
+fenced_until() {
+  [ -e "$FENCED" ] || return 1
+  exp=""
+  read -r exp _ < "$FENCED" || true
+  case "$exp" in ''|*[!0-9]*) exp=$(( $(stat -c %Y "$FENCED") + FENCE_TTL )) ;; esac
+  [ "$exp" -gt "$(date +%s)" ] || return 1
+  echo "$exp"
+}
 armed_until() {
   [ -f "$ARM" ] || return 1
   read -r exp _ < "$ARM" || return 1
@@ -164,10 +201,11 @@ status)
   allowed=false; until_s=""
   if [ "$HANDBACK" = 1 ] && exp=$(armed_until); then allowed=true; until_s=$(date -u -d "@$exp" +%Y-%m-%dT%H:%M:%SZ); fi
   installed=false; [ "$HANDBACK" = 1 ] && installed=true
-  fenced=false; [ -e "$FENCED" ] && fenced=true
-  printf '{"format":2,"running":%s,"version":"%s","digest":"%s","image":"%s","hostname":"%s","restoreAllowed":%s,"restoreArmedUntil":"%s","handbackInstalled":%s,"fenced":%s,"time":"%s"}\n' \
+  fenced=false; fu=""
+  if fexp=$(fenced_until); then fenced=true; fu=$(date -u -d "@$fexp" +%Y-%m-%dT%H:%M:%SZ); fi
+  printf '{"format":2,"running":%s,"version":"%s","digest":"%s","image":"%s","hostname":"%s","restoreAllowed":%s,"restoreArmedUntil":"%s","handbackInstalled":%s,"fenced":%s,"fencedUntil":"%s","time":"%s"}\n' \
     "$( [ "$running" = true ] && echo true || echo false)" "$(version)" "$(digest)" \
-    "$(docker inspect -f '{{.Config.Image}}' "$SERVER" | clean)" "$(echo "$HOSTNAME_NB" | clean)" "$allowed" "$until_s" "$installed" "$fenced" \
+    "$(docker inspect -f '{{.Config.Image}}' "$SERVER" | clean)" "$(echo "$HOSTNAME_NB" | clean)" "$allowed" "$until_s" "$installed" "$fenced" "$fu" \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   ;;
 snapshot)
@@ -194,10 +232,12 @@ snapshot)
   tr_name=$(traefik || true)
   if [ -n "$tr_name" ]; then
     le=$(mount_of "$tr_name" /letsencrypt 2>/dev/null || true)
-    if [ -n "$le" ] && [ -f "$le/acme.json" ]; then
-      # Only this name's certificate, never the ACME account's key.
+    if [ -n "$le" ] && [ -s "$le/acme.json" ]; then
+      # Only this name's certificate, never the ACME account's key; none
+      # when Traefik's file is empty or unreadable.
       jq --arg h "$HOSTNAME_NB" 'with_entries(.value |= {Certificates: [ (.Certificates // [])[] | select(.domain.main == $h or (((.domain.sans // []) | index($h)) != null)) ]})' \
-        "$le/acme.json" > "$tmp/tls/acme.json"
+        "$le/acme.json" > "$tmp/tls/acme.json" 2>/dev/null || rm -f "$tmp/tls/acme.json"
+      [ ! -e "$tmp/tls/acme.json" ] || [ -s "$tmp/tls/acme.json" ] || rm -f "$tmp/tls/acme.json"
     fi
   fi
   host=$(sed -n 's/^[[:space:]]*exposedAddress:[[:space:]]*"\{0,1\}https:\/\/\([A-Za-z0-9.-]*\).*/\1/p' "$tmp/config/config.yaml" | head -1 | clean)
@@ -205,7 +245,7 @@ snapshot)
   gen=$(od -An -N16 -tx1 /dev/urandom | tr -cd 0-9a-f)
   printf '%s %s\n' "$gen" "$(date +%s)" >> "$STATE/generations"
   tail -n 50 "$STATE/generations" > "$STATE/generations.new" && mv -f "$STATE/generations.new" "$STATE/generations"
-  fenced=false; [ -e "$FENCED" ] && fenced=true
+  fenced=false; fenced_until >/dev/null && fenced=true
   files=""
   list=$(cd "$tmp" && find config data tls -type f | sort)
   for f in $list; do
@@ -220,16 +260,28 @@ snapshot)
   ;;
 fence)
   [ "$HANDBACK" = 1 ] || fail "fencing isn't allowed on this VPS (run HardyOS's script with --allow-handback)"
-  touch "$FENCED"
+  # Two hours, renewed by HardyOS while it has taken over; then the timer
+  # starts the server again.
+  exp=$(( $(date +%s) + FENCE_TTL ))
+  printf '%s\n' "$exp" > "$FENCED.new" && mv -f "$FENCED.new" "$FENCED"
   docker stop -t 30 "$SERVER" >/dev/null
-  logger -t hardyos-standby "fenced: netbird-server stopped for HardyOS's take-over" || true
-  echo "fenced"
+  logger -p daemon.warning -t hardyos-standby "FENCED: netbird-server stopped for HardyOS's take-over until $(date -u -d "@$exp" +%Y-%m-%dT%H:%M:%SZ) unless renewed" || true
+  echo "fenced until $(date -u -d "@$exp" +%Y-%m-%dT%H:%M:%SZ)"
+  ;;
+fence-expire)
+  [ "${SUDO_USER:-}" != hardyos-standby ] || fail "refused"
+  if [ -e "$FENCED" ] && ! fenced_until >/dev/null; then
+    rm -f "$FENCED"
+    docker start "$SERVER" >/dev/null
+    logger -p daemon.warning -t hardyos-standby "the fence expired (HardyOS didn't renew it): netbird-server started" || true
+    echo "the fence expired: started"
+  fi
   ;;
 unfence)
   [ "$HANDBACK" = 1 ] || fail "fencing isn't allowed on this VPS"
   rm -f "$FENCED"
   docker start "$SERVER" >/dev/null
-  logger -t hardyos-standby "unfenced: netbird-server started" || true
+  logger -p daemon.warning -t hardyos-standby "unfenced: netbird-server started" || true
   echo "started"
   ;;
 arm-restore)
@@ -263,23 +315,52 @@ restore)
   in=$(mktemp -d /tmp/hardyos-restore.XXXXXX)
   chmod 0711 "$in"
   bk=""
+  vd=""
   swapping=0
+  was_running=false
+  # Back as it was: the backup's databases only (one the upload added goes),
+  # and the server stopped while fenced or if it was stopped before.
   rollback() {
     swapping=0
     docker stop -t 30 "$SERVER" >/dev/null 2>&1 || true
     for db in store idp events; do
       if [ -f "$bk/$db.db" ]; then
         install -m 0600 -o root -g root "$bk/$db.db" "$data/$db.db"
-        rm -f "$data/$db.db-wal" "$data/$db.db-shm"
+      else
+        rm -f "$data/$db.db"
       fi
+      rm -f "$data/$db.db-wal" "$data/$db.db-shm"
     done
-    docker start "$SERVER" >/dev/null 2>&1 || true
+    if [ -e "$FENCED" ]; then
+      echo "the server stays stopped: the VPS is fenced (HardyOS's standby serves)" >&2
+    elif [ "$was_running" = true ]; then
+      docker start "$SERVER" >/dev/null 2>&1 || true
+    fi
     echo "the VPS's previous databases were put back from $bk" >&2
+  }
+  # The checker's processes end before root reads what it touched.
+  checker_stop() {
+    [ "$CHECK_USER" != nobody ] || return 0
+    command -v pkill >/dev/null || return 0
+    for _ in 1 2 3 4 5; do
+      pkill -KILL -u "$CHECK_USER" 2>/dev/null || return 0
+      sleep 0.2
+    done
+    return 1
+  }
+  # Root takes the copies back and refuses anything but plain files.
+  take_back() {
+    checker_stop || fail "the SQLite checker's processes didn't stop"
+    chown -R root:root "$in/x" "$in/cmp" 2>/dev/null || chown -R root:root "$in/x"
+    chmod -R go-rwx "$in/x"
+    [ -z "$(find "$in/x" ! -type f ! -type d)" ] || fail "the checked copies hold something other than files: refused"
   }
   cleanup() {
     set +e
     if [ "$swapping" = 1 ]; then rollback; fi
+    checker_stop
     rm -rf -- "$in"
+    [ -z "$vd" ] || rm -rf -- "$vd"
   }
   trap cleanup EXIT
   head -c $((MAX_UPLOAD + 1)) > "$in/upload.tar"
@@ -309,49 +390,121 @@ restore)
   if [ -n "$want" ] && [ -n "$have" ] && [ "$(printf '%s\n%s\n' "$want" "$have" | sort -V | head -1)" != "$want" ]; then
     fail "this VPS runs NetBird $have, older than the standby's $want: update netbird-server on the VPS first"
   fi
-  # SQLite runs as nobody on copies, without trusting the schema.
-  chown -R nobody "$in/x"
-  sq() { runuser -u nobody -- sqlite3 -safe -batch -noheader "$1" "PRAGMA trusted_schema=OFF; $2"; }
+  # SQLite runs as hardyos-sqlcheck on copies, without trusting the schema;
+  # root reads only its output (into a folder it can't write) and checks
+  # every exit status.
+  mkdir "$in/cmp"
+  install -d -m 0700 "$in/q"
+  sq() { runuser -u "$CHECK_USER" -- sqlite3 -safe -batch -noheader "$1" "PRAGMA trusted_schema=OFF; $2"; }
+  chown -R "$CHECK_USER" "$in/x"
   for db in store idp events; do
     f="$in/x/data/$db.db"
     [ -f "$f" ] || continue
-    sq "$f" 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null
-    [ "$(sq "$f" 'PRAGMA integrity_check;')" = ok ] || fail "$db.db from HardyOS failed SQLite's integrity check"
-    rm -f "$f-wal" "$f-shm"
+    sq "$f" 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null || fail "SQLite couldn't read $db.db from HardyOS: refused"
   done
-  bk="$STATE/before-handback-$(date -u +%Y%m%dT%H%M%SZ)"
-  install -d -m 0700 "$bk"
+  # What the checks read and what goes in place is the same: hashed here.
+  take_back
+  : > "$in/checked.sums"
+  for db in store idp events; do
+    f="$in/x/data/$db.db"
+    rm -f "$f-wal" "$f-shm"
+    [ -f "$f" ] || continue
+    (cd "$in/x" && sha256sum "data/$db.db") >> "$in/checked.sums"
+  done
+  bk=$(mktemp -d "$STATE/before-handback-$(date -u +%Y%m%dT%H%M%SZ).XXXX")
+  chmod 0700 "$bk"
+  # Keep the newest five backups.
+  for d in $(ls -1dt "$STATE"/before-handback-* 2>/dev/null | tail -n +6); do rm -rf -- "$d"; done
   for db in store idp events; do
     if [ -f "$data/$db.db" ]; then sqlite3 "$data/$db.db" ".backup '$bk/$db.db'"; fi
   done
-  # Compare with what the VPS has: the same accounts, and say what's new.
-  mkdir "$in/cmp"
   cp -- "$bk/store.db" "$in/cmp/old.db"
-  chown -R nobody "$in/cmp"
+  [ ! -f "$bk/idp.db" ] || cp -- "$bk/idp.db" "$in/cmp/old-idp.db"
+  chown -R "$CHECK_USER" "$in/x" "$in/cmp"
+  for db in store idp events; do
+    f="$in/x/data/$db.db"
+    [ -f "$f" ] || continue
+    sq "$f" 'PRAGMA integrity_check;' > "$in/q/ic" || fail "SQLite couldn't check $db.db from HardyOS: refused"
+    [ "$(cat "$in/q/ic")" = ok ] || fail "$db.db from HardyOS failed SQLite's integrity check"
+  done
+  # Compare with what the VPS has, row by row (security review N3).
   old="$in/cmp/old.db"; new="$in/x/data/store.db"
-  ids() {
-    if [ "$(sq "$1" "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='$2';")" = 1 ]; then
-      sq "$1" "SELECT id FROM \"$2\" ${3:-} ORDER BY id;"
-    fi
+  q() { sq "$1" "$2" > "$3" || fail "SQLite couldn't read $4: refused"; sort -o "$3" "$3"; }
+  need() { # db what table columns...
+    nd=$1; nw=$2; nt=$3; shift 3
+    q "$nd" "SELECT type FROM sqlite_master WHERE name='$nt' COLLATE NOCASE;" "$in/q/t" "$nw ($nt)"
+    [ "$(cat "$in/q/t")" = table ] || fail "$nw has no table $nt: refused"
+    for nc in "$@"; do
+      q "$nd" "SELECT count(*) FROM pragma_table_info('$nt') WHERE name='$nc' COLLATE NOCASE;" "$in/q/t" "$nw ($nt.$nc)"
+      [ "$(cat "$in/q/t")" = 1 ] || fail "$nw's table $nt has no column $nc: refused"
+    done
   }
-  added() { comm -13 <(ids "$old" "$1" "${2:-}") <(ids "$new" "$1" "${2:-}") | grep -c . || true; }
-  [ "$(ids "$old" accounts)" = "$(ids "$new" accounts)" ] || fail "the standby's state is for other NetBird accounts than this VPS's: refused"
+  for side in old new; do
+    sd=$old; sw="the VPS's store"
+    if [ "$side" = new ]; then sd=$new; sw="the standby's store"; fi
+    need "$sd" "$sw" accounts id
+    need "$sd" "$sw" users id role blocked is_service_user
+    need "$sd" "$sw" personal_access_tokens id user_id hashed_token
+    need "$sd" "$sw" setup_keys id
+    need "$sd" "$sw" policies id
+    need "$sd" "$sw" routes id
+  done
+  for side in old new; do
+    sd=$old; [ "$side" = new ] && sd=$new
+    q "$sd" "SELECT hex(quote(id)) FROM accounts;" "$in/q/accounts.$side" "accounts"
+    for t in users personal_access_tokens setup_keys policies routes; do
+      q "$sd" "SELECT hex(quote(id)) FROM $t;" "$in/q/$t.$side" "$t"
+    done
+    # Users: id, role, blocked, service user, and whether the role is plain.
+    q "$sd" "SELECT hex(quote(id))||' '||hex(quote(role))||' '||hex(quote(blocked))||' '||hex(quote(is_service_user))||' '||(role IS 'user') FROM users;" "$in/q/urows.$side" "users"
+    q "$sd" "SELECT hex(quote(id))||' '||hex(quote(user_id))||' '||hex(quote(hashed_token)) FROM personal_access_tokens;" "$in/q/prows.$side" "personal_access_tokens"
+  done
+  cmp -s "$in/q/accounts.old" "$in/q/accounts.new" || fail "the standby's state is for other NetBird accounts than this VPS's: refused"
   summary=""
-  for t in users personal_access_tokens setup_keys policies routes; do summary="$summary $t:+$(added "$t")"; done
-  admins=$(added users "WHERE role IN ('owner','admin')")
-  pats=$(added personal_access_tokens)
-  echo "changes from HardyOS's standby:$summary owners/admins:+$admins"
-  logger -t hardyos-standby "restore:$summary owners/admins:+$admins" || true
-  if { [ "$admins" != 0 ] || [ "$pats" != 0 ]; } && [ "$allow" != 1 ]; then
-    fail "the standby added $admins owner/admin users and $pats access tokens: check them, then on the VPS run arm-restore 2h --allow-new-admins and hand back again"
+  for t in users personal_access_tokens setup_keys policies routes; do
+    summary="$summary $t:+$(comm -13 "$in/q/$t.old" "$in/q/$t.new" | grep -c . || true)"
+  done
+  # Any user row that is new or changed, unless it's a new plain user.
+  comm -13 "$in/q/urows.old" "$in/q/urows.new" > "$in/q/urows.changed"
+  admins=$(awk 'NR==FNR { seen[$1] = 1; next } $5 != "1" || ($1 in seen)' "$in/q/users.old" "$in/q/urows.changed" | grep -c . || true)
+  # Any token that is new, moved to another user or given another hash.
+  pats=$(comm -13 "$in/q/prows.old" "$in/q/prows.new" | grep -c . || true)
+  # The embedded IdP's sign-in tables, when the upload carries idp.db.
+  idp=""
+  if [ -f "$in/x/data/idp.db" ]; then
+    for t in password keys connector client; do
+      for side in old new; do
+        f="$in/cmp/old-idp.db"; [ "$side" = new ] && f="$in/x/data/idp.db"
+        : > "$in/q/idp-$t.$side"
+        if [ -f "$f" ]; then
+          runuser -u "$CHECK_USER" -- sqlite3 -safe -batch -noheader -cmd 'PRAGMA trusted_schema=OFF;' "$f" ".dump $t" > "$in/q/idp-$t.raw" \
+            || fail "SQLite couldn't read idp.db ($t): refused"
+          grep -vxF -e 'PRAGMA foreign_keys=OFF;' -e 'BEGIN TRANSACTION;' -e 'COMMIT;' "$in/q/idp-$t.raw" | sort > "$in/q/idp-$t.$side" || true
+        fi
+      done
+      cmp -s "$in/q/idp-$t.old" "$in/q/idp-$t.new" || idp="$idp $t"
+    done
   fi
-  # Checked: take the copies back from nobody before they go in place.
-  chown -R root:root "$in/x"
-  chmod -R go-rwx "$in/x"
+  echo "changes from HardyOS's standby:$summary owners/admins changed:$admins tokens changed:$pats sign-in tables changed:${idp:- none}"
+  logger -p daemon.warning -t hardyos-standby "restore:$summary owners/admins changed:$admins tokens changed:$pats sign-in tables changed:${idp:- none}" || true
+  if { [ "$admins" != 0 ] || [ "$pats" != 0 ] || [ -n "$idp" ]; } && [ "$allow" != 1 ]; then
+    fail "the standby added or changed $admins owner/admin users and $pats access tokens, and these sign-in tables:${idp:- none}: check them, then on the VPS run arm-restore 2h --allow-new-admins and hand back again"
+  fi
+  # Checked: take the copies back, copy them where only root can write and
+  # check they are what was hashed before they go in place.
+  take_back
+  vd=$(mktemp -d "$STATE/verified.XXXXXX")
+  mkdir "$vd/data"
+  for db in store idp events; do
+    [ ! -f "$in/x/data/$db.db" ] || cp -- "$in/x/data/$db.db" "$vd/data/$db.db"
+  done
+  (cd "$vd" && sha256sum --check --strict --quiet "$in/checked.sums") || fail "the checked copies changed: refused"
+  [ "$(cd "$vd" && find data -type f | wc -l)" = "$(grep -c . "$in/checked.sums")" ] || fail "the checked copies changed: refused"
+  was_running=$(docker inspect -f '{{.State.Running}}' "$SERVER" 2>/dev/null || echo false)
   swapping=1
   docker stop -t 30 "$SERVER" >/dev/null
   for db in store idp events; do
-    f="$in/x/data/$db.db"
+    f="$vd/data/$db.db"
     [ -f "$f" ] || continue
     install -m 0600 -o root -g root "$f" "$data/$db.db.hardyos-new"
     rm -f "$data/$db.db-wal" "$data/$db.db-shm"
@@ -366,8 +519,6 @@ restore)
   [ "$(docker inspect -f '{{.RestartCount}}' "$SERVER")" = "$rc" ] || fail "netbird-server restarted with the handed-back state"
   swapping=0
   rm -f "$FENCED"
-  # Keep the newest five backups.
-  for d in $(ls -1dt "$STATE"/before-handback-* 2>/dev/null | tail -n +6); do rm -rf -- "$d"; done
   echo "restored; the VPS's previous databases are in $bk"
   ;;
 *)
@@ -385,6 +536,33 @@ printf 'Defaults:hardyos-standby env_reset, !requiretty\nhardyos-standby ALL=(ro
 visudo -cf "$tmp_sudo" >/dev/null
 install -m 0440 -o root -g root "$tmp_sudo" /etc/sudoers.d/hardyos-standby
 rm -f "$tmp_sudo"
+
+# A fence ends two hours after HardyOS last renewed it.
+if command -v systemctl >/dev/null && [ -d /run/systemd/system ]; then
+  cat > /etc/systemd/system/hardyos-standby-fence.service <<'UNIT'
+[Unit]
+Description=HardyOS NetBird standby: start netbird-server when a fence expires
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hardyos-netbird-standby-root fence-expire
+UNIT
+  cat > /etc/systemd/system/hardyos-standby-fence.timer <<'UNIT'
+[Unit]
+Description=HardyOS NetBird standby: check the fence's expiry
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now hardyos-standby-fence.timer >/dev/null
+else
+  echo "Note: no systemd here: run 'hardyos-netbird-standby-root fence-expire' from cron every few minutes."
+fi
 
 if grep -Eiq '^[[:space:]]*(AllowUsers|AllowGroups)' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null; then
   echo "Note: sshd has AllowUsers/AllowGroups; add hardyos-standby there, or HardyOS can't connect."

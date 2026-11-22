@@ -228,7 +228,7 @@ func TestScript(t *testing.T) {
 		`rm -f "$ARM" # one use`,
 		`[ "${SUDO_USER:-}" != hardyos-standby ] || fail "refused"`,
 		`rule="$rule, /usr/local/sbin/hardyos-netbird-standby-root restore, /usr/local/sbin/hardyos-netbird-standby-root fence, /usr/local/sbin/hardyos-netbird-standby-root unfence"`,
-		`runuser -u nobody -- sqlite3 -safe -batch -noheader "$1" "PRAGMA trusted_schema=OFF; $2"`,
+		`runuser -u "$CHECK_USER" -- sqlite3 -safe -batch -noheader "$1" "PRAGMA trusted_schema=OFF; $2"`,
 		`trap cleanup EXIT`,
 		`visudo -cf "$tmp_sudo"`,
 		`ssh-keygen -lf /var/lib/hardyos-standby/.ssh/authorized_keys`,

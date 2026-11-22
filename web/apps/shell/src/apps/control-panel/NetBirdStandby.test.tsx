@@ -58,6 +58,7 @@ function status(over: Partial<NBStandbyStatus> = {}): NBStandbyStatus {
       adopted: [{ id: "r1", type: "A", content: "198.51.100.10", ttl: 300, proxied: false }],
       inBase: false,
       inZone: true,
+      needsRebind: false,
     },
     takeover: null,
     standbyVersion: "0.83.1",
@@ -101,6 +102,7 @@ describe("NetBird standby rules", () => {
     expect(takeoverBlockers(status())).toEqual([]);
     expect(takeoverBlockers(status({ app: { installed: false, state: "", version: "" } }))[0]).toMatch(/Install/);
     expect(takeoverBlockers(status({ dns: { ...status().dns, name: "" } }))[0]).toMatch(/manage vpn.example.net/);
+    expect(takeoverBlockers(status({ dns: { ...status().dns, needsRebind: true } }))[0]).toMatch(/confirm the new values/);
     const aaaa = status({ dns: { ...status().dns, adopted: [...status().dns.adopted, { id: "r2", type: "AAAA", content: "2001:db8::1", ttl: 300, proxied: false }] } });
     expect(takeoverBlockers(aaaa)[0]).toMatch(/IPv6/);
     expect(standbyState(status({ health: { state: "stale", stale: true, staleAfterMinutes: 75 } })).tone).toBe("bad");
