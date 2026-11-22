@@ -42,6 +42,14 @@ func (e *testEnv) seedStreaming(t *testing.T) {
 		if err := r.WriteFile(cf.File, []byte(id), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		if cf.Size > 0 {
+			f, err := r.OpenFile(cf.File, os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = f.Truncate(cf.Size)
+			f.Close()
+		}
 		if err := seal(r, cf.File, digest{Algo: "sha256", Hex: cf.SHA256}); err != nil {
 			t.Fatal(err)
 		}

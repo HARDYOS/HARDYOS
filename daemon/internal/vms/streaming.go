@@ -67,7 +67,7 @@ type Streaming struct {
 }
 
 // Pinned streaming downloads (decision 402). A new version is a change to
-// these lines (and the CI job that downloads them checks the hashes).
+// these lines (and the CI job that downloads them checks the hashes, sizes and the driver signer).
 const (
 	CatalogSunshine = "sunshine"
 	CatalogVDD      = "virtual-display"
@@ -82,7 +82,7 @@ const (
 	// VDDSignerSHA1 is the Windows thumbprint (SHA-1 of the certificate)
 	// of the driver catalogs' signer; the setup script trusts only it,
 	// and CI checks it against the downloaded catalogs.
-	VDDSignerSHA1 = "0000000000000000000000000000000000000000"
+	VDDSignerSHA1 = "3CF8CF26D8BA266C3A483AB7D26D4A818E317D76"
 
 	// MediaStreaming is the per-VM streaming disc.
 	MediaStreaming = "streaming"
@@ -107,12 +107,12 @@ var streamingCatalog = []CatalogImage{
 			"x86_64": {
 				URL:    "https://github.com/LizardByte/Sunshine/releases/download/" + SunshineVersion + "/Sunshine-Windows-AMD64-installer.msi",
 				File:   "sunshine-" + SunshineVersion + "-amd64.msi",
-				SHA256: sunshineAMD64SHA256,
+				SHA256: sunshineAMD64SHA256, Size: 33710080,
 			},
 			"aarch64": {
 				URL:    "https://github.com/LizardByte/Sunshine/releases/download/" + SunshineVersion + "/Sunshine-Windows-ARM64-installer.msi",
 				File:   "sunshine-" + SunshineVersion + "-arm64.msi",
-				SHA256: sunshineARM64SHA256,
+				SHA256: sunshineARM64SHA256, Size: 24541615,
 			},
 		},
 	},

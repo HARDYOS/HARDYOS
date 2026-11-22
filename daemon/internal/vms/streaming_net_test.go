@@ -49,6 +49,9 @@ func TestStreamingPinsDownload(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				if f.Size > 0 && n != f.Size {
+					t.Fatalf("%s: %d bytes, pinned %d", f.URL, n, f.Size)
+				}
 				if got := hex.EncodeToString(h.Sum(nil)); got != f.SHA256 {
 					t.Fatalf("%s: SHA-256 %s (%d bytes), pinned %s", f.URL, got, n, f.SHA256)
 				}
