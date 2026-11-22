@@ -272,6 +272,16 @@ port forward at home isn't needed, and HardyOS doesn't set one up.)
   `https://100.x.y.z` like on the LAN, with the desktop's own sign-in. To
   keep the desktop to some devices, restrict TCP 443 to this server in
   NetBird's policies as above.
+- **Game streaming is an exception to NetBird's policies.** When a gaming
+  VM's streaming is published over NetBird (the VM's page, *Play away from
+  home*), HardyOS forwards Sunshine's streaming ports from this server's
+  NetBird address to the VM. In NetBird's kernel mode those forwarded
+  packets never pass NetBird's own access rules (they apply to traffic for
+  the server itself), so the port lists of your NetBird policies **don't
+  limit them**. That's why HardyOS forwards them only from the NetBird
+  devices you tick in the VM's Streaming panel (none until you do), never
+  from NetBird's reverse proxy, and never from anywhere but the NetBird
+  interface. See [Game streaming](vms.md#game-streaming).
 - **Desktop cookie**: over HTTPS the desktop's session cookie is
   `__Host-hardyos_session`, which no app on a sibling address can set.
   The old `hardyos_session` still works for one release at the desktop's

@@ -167,6 +167,44 @@ type remoteRuntime struct {
 	// client is the sign-in provider's client for app hosts.
 	client     *gatewayClient
 	clientURIs []string
+	// proxyPeers are the NetBird addresses requests carrying a valid
+	// service value came from: NetBird's reverse proxy peers (its API
+	// doesn't name them). Game streaming is never forwarded to them
+	// (decision 404).
+	proxyPeers map[netip.Addr]time.Time
+}
+
+// maxProxyPeers bounds the remembered proxy addresses.
+const maxProxyPeers = 64
+
+func (rt *remoteRuntime) sawProxy(a netip.Addr) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.proxyPeers == nil {
+		rt.proxyPeers = map[netip.Addr]time.Time{}
+	}
+	if _, ok := rt.proxyPeers[a]; !ok && len(rt.proxyPeers) >= maxProxyPeers {
+		var oldest netip.Addr
+		var at time.Time
+		for k, v := range rt.proxyPeers {
+			if at.IsZero() || v.Before(at) {
+				oldest, at = k, v
+			}
+		}
+		delete(rt.proxyPeers, oldest)
+	}
+	rt.proxyPeers[a] = time.Now()
+}
+
+// knownProxies lists the NetBird addresses NetBird's proxy came from.
+func (rt *remoteRuntime) knownProxies() map[string]bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	out := map[string]bool{}
+	for a := range rt.proxyPeers {
+		out[a.String()] = true
+	}
+	return out
 }
 
 func (rt *remoteRuntime) info() (*RemoteSyncInfo, RemoteGatewayInfo) {
@@ -507,6 +545,8 @@ func (rt *remoteRuntime) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// NetBird's reverse proxy peer: whatever it carries is outside, so
 		// its own address never counts as home (review M3).
 		rt.s.notePeerProxy(a)
+		rt.sawProxy(a.Unmap())
+
 	}
 	client := forwardedClient(r)
 

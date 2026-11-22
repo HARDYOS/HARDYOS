@@ -4608,6 +4608,101 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/vms/{id}/streaming": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Game streaming: Sunshine reachable, paired and waiting Moonlight devices, NetBird address */
+        get: operations["getVMStreaming"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/streaming/reveal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Show the Sunshine web UI account (your password again; rate-limited and audited) */
+        post: operations["revealVMStreamingAccount"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/streaming/pair": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Give Sunshine the PIN a waiting Moonlight device shows (a job, audited) */
+        post: operations["pairVMStreamingDevice"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/streaming/unpair": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Remove a paired Moonlight device (a job, audited) */
+        post: operations["unpairVMStreamingDevice"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/streaming/remote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /** Publish the VM's streaming ports to NetBird peers only, or stop (a job; one VM at a time) */
+        put: operations["setVMStreamingRemote"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/backup": {
         parameters: {
             query?: never;
@@ -8887,10 +8982,10 @@ export interface components {
         };
         VMMedia: {
             /**
-             * @description iso: a file from the ISO library; virtio: the VirtIO drivers disc; cloudinit: the generated cloud-init disc; unattend: the generated Windows answer disc (new VMs only)
+             * @description iso: a file from the ISO library; virtio: the VirtIO drivers disc; cloudinit: the generated cloud-init disc; unattend: the generated Windows answer disc (new VMs only); streaming: the generated game streaming disc (new VMs with streaming.sunshine only)
              * @enum {string}
              */
-            kind: "iso" | "virtio" | "cloudinit" | "unattend" | "empty";
+            kind: "iso" | "virtio" | "cloudinit" | "unattend" | "streaming" | "empty";
             iso?: string;
         };
         VMUnattend: {
@@ -8972,10 +9067,7 @@ export interface components {
             boot: ("disk" | "cdrom" | "network")[];
             autostart: components["schemas"]["VMAutostart"];
             devices: components["schemas"]["VMDevice"][];
-            streaming?: {
-                /** @description Publish Sunshine through the VPN for play away from home */
-                remote: boolean;
-            };
+            streaming?: components["schemas"]["VMStreaming"];
             labels?: {
                 [key: string]: string;
             };
@@ -9072,6 +9164,8 @@ export interface components {
             editions?: string[];
             sound?: boolean;
             clipboard?: boolean;
+            /** @description HardyOS can set up game streaming (Sunshine and a virtual display) during the unattended install */
+            streaming?: boolean;
         };
         VMArch: {
             arch: string;
@@ -9239,6 +9333,100 @@ export interface components {
             schedule: components["schemas"]["VMSchedule"];
             /** @description The VM's name, needed (400 confirm_required otherwise) when the counts delete automatic snapshots it has now */
             confirm?: string;
+        };
+        /** @description Game streaming (decisions 400-409). Root sets everything but sunshine when the VM is made; updates keep it; remote changes only with PUT /vms/{id}/streaming/remote. */
+        VMStreaming: {
+            /** @description Sunshine's streaming ports are published to NetBird peers */
+            remote: boolean;
+            /** @description HardyOS installs and sets up Sunshine and a virtual display at the first sign-in (with an unattended install) */
+            sunshine?: boolean;
+            /** @description The Sunshine web UI account HardyOS made */
+            user?: string;
+            /** @description SHA-256 of the certificate HardyOS made for the VM's Sunshine (pinned) */
+            certSHA256?: string;
+            /** @description NetBird devices (addresses) the streaming ports are forwarded from; none until chosen */
+            peers?: string[];
+            /** @description The server's home network address the VM's firewall lets reach Sunshine's web UI */
+            webUIFrom?: string;
+        };
+        VMStreamingStatus: {
+            /** @description HardyOS set Sunshine up in this VM */
+            setUp: boolean;
+            installPending: boolean;
+            running: boolean;
+            hasGPU: boolean;
+            /** @description The VM's verified address on the home network */
+            address: string;
+            /** @description Sunshine answered with its pinned certificate */
+            reachable: boolean;
+            problem?: string;
+            user: string;
+            /** @description HardyOS has the Sunshine password (sealed) */
+            accountKept: boolean;
+            revealedAt?: string;
+            devices: components["schemas"]["VMStreamingDevice"][];
+            waiting: components["schemas"]["VMStreamingPending"][];
+            /** @description The NetBird devices streaming is forwarded from */
+            peers: string[];
+            /** @description NetBird devices this server sees, to choose from */
+            netbirdPeers: components["schemas"]["VMStreamingNetBirdPeer"][];
+            /** @description NetBird runs on kernel WireGuard: its access policies don't cover the forwarded ports */
+            netbirdKernel: boolean;
+            /** @description This server's home network address (what Sunshine sees for devices forwarded from NetBird) */
+            bridgeAddress?: string;
+            remote: boolean;
+            /** @description The NetBird forwarding rules are in place now */
+            forwarding: boolean;
+            /** @description This server's NetBird address: add it in Moonlight away from home */
+            netbirdAddress?: string;
+            ports: {
+                tcp: number[];
+                udp: number[];
+            };
+        };
+        VMStreamingDevice: {
+            name: string;
+            uuid: string;
+            enabled: boolean;
+        };
+        VMStreamingPending: {
+            /** @description Sunshine's pairing id (32 hex digits) */
+            id: string;
+            name: string;
+            address: string;
+            /** @description It came through the NetBird forwarding, so HardyOS can't tell which device it is; pairing needs confirmRemote */
+            viaNetBird: boolean;
+        };
+        VMStreamingNetBirdPeer: {
+            ip: string;
+            name: string;
+            connected: boolean;
+            /** @description NetBird's reverse proxy came from this address; it can't be chosen */
+            proxy: boolean;
+        };
+        VMStreamingRevealRequest: {
+            /** @description Your own HardyOS password, asked again */
+            password: string;
+        };
+        VMStreamingAccount: {
+            user: string;
+            password: string;
+        };
+        VMStreamingPairRequest: {
+            pairingId: string;
+            /** @description The 4 digits Moonlight shows (kept out of the job's parameters) */
+            pin: string;
+            name: string;
+            /** @description Pair a device that came through NetBird (HardyOS can't tell it apart) */
+            confirmRemote?: boolean;
+        };
+        VMStreamingUnpairRequest: {
+            uuid: string;
+        };
+        VMStreamingRemoteRequest: {
+            enabled: boolean;
+            /** @description The NetBird devices (addresses) to forward from; at least one when enabled */
+            peers?: string[];
         };
         VMUSBRequest: {
             /** @description vendor:product, like 046d:c52b */
@@ -17138,6 +17326,154 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             /** @description The VM isn't running */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getVMStreaming: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The Streaming panel */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VMStreamingStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    revealVMStreamingAccount: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMStreamingRevealRequest"];
+            };
+        };
+        responses: {
+            /** @description The account */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VMStreamingAccount"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Too many wrong passwords */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    pairVMStreamingDevice: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMStreamingPairRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description HardyOS didn't set up game streaming in this VM */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    unpairVMStreamingDevice: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMStreamingUnpairRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description HardyOS didn't set up game streaming in this VM */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    setVMStreamingRemote: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMStreamingRemoteRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description HardyOS didn't set up game streaming in this VM */
             409: {
                 headers: {
                     [name: string]: unknown;

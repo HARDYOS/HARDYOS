@@ -95,6 +95,7 @@ func main() {
 	priv.RegisterBuiltins(s)
 	priv.RegisterStorage(s, priv.StorageEnv{Runner: sysexec.Exec{}, Root: os.DirFS("/")})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	var stopStreaming func(context.Context)
 	defer stop()
 
 	reboot := func() { _, _ = sysexec.Exec{}.Run(context.Background(), nil, "systemctl", "reboot") }
@@ -236,7 +237,8 @@ func main() {
 		netm.AfterBridges = dc.ReleaseNetwork
 		// Devices go to VMs through part D's Host, the same one its ops use;
 		// the Devices view shows which VM each device is assigned to.
-		vmm := &vms.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log, Network: netm, Library: priv.VMLibrary(shm, shareHooks...), Devices: devs}
+		vmm := &vms.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log, Network: netm, Library: priv.VMLibrary(shm, shareHooks...), Devices: devs,
+			NetBird: priv.VMNetBird(nbm)}
 		devs.Assignments = vmm.Assignments
 		go reconcileDevices(ctx, devs, log)
 		priv.RegisterVMs(s, vmm)
@@ -256,6 +258,8 @@ func main() {
 		go vmm.OnStart(ctx)
 		go vmm.Watch(ctx)
 		go vmm.RunSchedules(ctx)
+		// No game streaming forward outlives hardyd-priv (decision 404).
+		stopStreaming = vmm.StopStreaming
 		// Replication between servers: snapshots, zfs send and receive
 		// (into <pool>/replicas/<source>/ only), restores. VMs are frozen
 		// by their guest agent for the snapshot when they can be.
@@ -305,8 +309,14 @@ func main() {
 
 	s.OnListen = priv.NotifyReady
 	log.Info("hardyd-priv listening", "socket", *socket, "ops", s.Ops())
-	if err := s.ListenAndServe(ctx, *socket, 0o660, gid); err != nil {
-		log.Error("serve failed", "err", err)
+	serveErr := s.ListenAndServe(ctx, *socket, 0o660, gid)
+	if stopStreaming != nil {
+		sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		stopStreaming(sctx)
+		cancel()
+	}
+	if serveErr != nil {
+		log.Error("serve failed", "err", serveErr)
 		os.Exit(1)
 	}
 }

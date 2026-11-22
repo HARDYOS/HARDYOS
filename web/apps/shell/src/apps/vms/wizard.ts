@@ -65,6 +65,8 @@ export interface WizardState {
   /** Windows installs by itself (answer file); user and password are the account's. */
   unattend: boolean;
   edition: string;
+  /** HardyOS installs Sunshine and a virtual display at the first sign-in (gaming). */
+  streaming: boolean;
   locale: string;
   timeZone: string;
   sound: boolean;
@@ -169,6 +171,7 @@ export function initialState(t: VMTemplate, caps?: VMCapabilities, arch = "x86_6
     catalog,
     unattend: !!t.unattend,
     edition: t.editions?.[0] ?? "",
+    streaming: !!t.streaming && !!t.unattend,
     locale: browserLocale(),
     timeZone: "",
     sound: !!t.sound,
@@ -194,6 +197,7 @@ export function fromUserTemplate(ut: VMUserTemplate, base: VMTemplate, caps?: VM
     source: "template",
     catalog: "",
     unattend: false,
+    streaming: false,
     nics: sp.nics.map((n) => ({ mode: n.mode, vlan: n.vlan ?? 0, allowSpoofing: !!n.allowSpoofing })),
     nicModel: (sp.nics[0]?.model ?? s.nicModel) as WizardState["nicModel"],
     firmware: sp.firmware.type,
@@ -292,6 +296,9 @@ export function stepProblems(s: WizardState, step: StepId, c: StepContext): stri
       s.nics.forEach((n, i) => {
         if (n.mode === "vlan" && !(n.vlan >= 1 && n.vlan <= 4094)) p.push(`Network card ${i + 1}: the VLAN is 1 to 4094`);
       });
+      if (t && setsUpStreaming(s, t) && (s.nics[0]?.mode !== "bridge" || s.nics[0]?.allowSpoofing)) {
+        p.push("Game streaming needs the first card on the home network, with address spoofing off");
+      }
       break;
   }
   return p;
@@ -302,6 +309,11 @@ export function sshKeyList(text: string): string[] {
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l !== "");
+}
+
+/** HardyOS sets game streaming up: an unattended install of a template that offers it. */
+export function setsUpStreaming(s: WizardState, t: VMTemplate): boolean {
+  return installsFromISO(t) && s.source !== "template" && s.unattend && !!t.unattend && !!t.streaming && s.streaming;
 }
 
 /** The create request the wizard sends. */
@@ -316,6 +328,8 @@ export function toRequest(s: WizardState, t: VMTemplate): VMCreateRequest {
   if (s.virtio || unattend || (fromTemplate && s.templateMedia.includes("virtio"))) media.push({ kind: "virtio" });
   if (cloudInit) media.push({ kind: "cloudinit" });
   if (unattend) media.push({ kind: "unattend" });
+  const streaming = unattend && setsUpStreaming(s, t);
+  if (streaming) media.push({ kind: "streaming" });
   const disks = s.disks.map((d, i) => ({
     name: d.name,
     sizeGB: d.sizeGB,
@@ -349,6 +363,7 @@ export function toRequest(s: WizardState, t: VMTemplate): VMCreateRequest {
       ...(s.sound ? { sound: true } : {}),
       ...(s.clipboard ? { clipboard: true } : {}),
       ...(fromTemplate ? { fromTemplate: s.userTemplate } : {}),
+      ...(streaming ? { streaming: { remote: false, sunshine: true } } : {}),
     },
     start: s.start,
     ...(s.allowOvercommit ? { allowOvercommit: true } : {}),

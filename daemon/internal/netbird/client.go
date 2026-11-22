@@ -61,6 +61,13 @@ type ClientStatus struct {
 	ManagementConnected bool   `json:"managementConnected"`
 	Hostname            string `json:"hostname,omitempty"`
 	Interface           string `json:"interface,omitempty"`
+	// KernelInterface: NetBird uses the kernel's WireGuard (its access
+	// policies are then nftables rules on the input hook, which forwarded
+	// traffic doesn't pass); otherwise it filters in userspace.
+	KernelInterface bool `json:"kernelInterface"`
+	// PeerList is the peers this server sees (game streaming's choice of
+	// devices, decision 404).
+	PeerList []PeerState `json:"peerList,omitempty"`
 	// Problem says what's wrong in a sentence, if anything.
 	Problem string `json:"problem,omitempty"`
 }
@@ -164,17 +171,30 @@ var setupKeyRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$`)
 // ValidSetupKey checks a setup key's shape (NetBird's are UUIDs).
 func ValidSetupKey(k string) bool { return setupKeyRE.MatchString(k) }
 
+// PeerState is one peer as `netbird status` reports it.
+type PeerState struct {
+	IP        string `json:"ip"`
+	FQDN      string `json:"fqdn"`
+	Connected bool   `json:"connected"`
+}
+
 // netbirdStatus is the part of `netbird status --json` HardyOS reads
 // (client/status/status.go: OutputOverview).
 type netbirdStatus struct {
 	Peers struct {
 		Total     int `json:"total"`
 		Connected int `json:"connected"`
+		Details   []struct {
+			FQDN   string `json:"fqdn"`
+			IP     string `json:"netbirdIp"`
+			Status string `json:"status"`
+		} `json:"details"`
 	} `json:"peers"`
-	CliVersion    string `json:"cliVersion"`
-	DaemonVersion string `json:"daemonVersion"`
-	DaemonStatus  string `json:"daemonStatus"`
-	Management    struct {
+	KernelInterface bool   `json:"usesKernelInterface"`
+	CliVersion      string `json:"cliVersion"`
+	DaemonVersion   string `json:"daemonVersion"`
+	DaemonStatus    string `json:"daemonStatus"`
+	Management      struct {
 		URL       string `json:"url"`
 		Connected bool   `json:"connected"`
 		Error     string `json:"error"`
@@ -198,6 +218,19 @@ func ParseStatus(raw []byte, st *ClientStatus) error {
 		st.Version = s.CliVersion
 	}
 	st.PeersTotal, st.PeersConnected = s.Peers.Total, s.Peers.Connected
+	st.KernelInterface = s.KernelInterface
+	for _, d := range s.Peers.Details {
+		a, err := netip.ParseAddr(strings.TrimSpace(d.IP))
+		if err != nil {
+			if p, perr := netip.ParsePrefix(strings.TrimSpace(d.IP)); perr == nil {
+				a, err = p.Addr(), nil
+			}
+		}
+		if err != nil || !a.Is4() || len(st.PeerList) >= 512 {
+			continue
+		}
+		st.PeerList = append(st.PeerList, PeerState{IP: a.String(), FQDN: clip(strings.TrimSuffix(d.FQDN, ".")), Connected: d.Status == "Connected"})
+	}
 	st.ManagementURL = strings.TrimSuffix(strings.TrimSuffix(s.Management.URL, ":443"), "/")
 	st.ManagementConnected = s.Management.Connected
 	st.FQDN = strings.TrimSuffix(s.FQDN, ".")
