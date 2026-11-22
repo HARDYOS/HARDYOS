@@ -496,7 +496,7 @@ func (s *Server) runHostnamesIssue(jc *jobs.Context) (any, error) {
 		if p.Auto && s.cfg.Notify != nil {
 			_ = s.cfg.Notify.Send(jc, notify.Notification{Level: notify.Error, Title: "The hostnames' certificate couldn't be renewed",
 				Body:   err.Error() + " HardyOS tries again in a few hours; apps go back to their old addresses if it expires.",
-				Source: "hostnames", AdminOnly: true, Kind: "hostnames.certificate", Link: "control-panel/hostnames"})
+				Source: "hostnames", AdminOnly: true, Kind: "hostnames.certificate", Link: "control/hostnames"})
 		}
 		return nil, err
 	}

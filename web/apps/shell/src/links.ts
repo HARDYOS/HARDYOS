@@ -2,9 +2,10 @@ import type { User } from "@hardy/api-client";
 import { openApp } from "./wm/open";
 
 /** Where a notification's link opens: app id and arguments. Links are
- * written by hardyd ("storage/disks/sda", "storage/pool/tank", "ups",
- * "control/notifications", "apps/immich", "vms/haos", "monitor", "logs",
- * "backup/tasks/<id>", "backup/replication"). */
+ * written by hardyd; notification-links.json lists every one it can emit
+ * ("storage/disks/sda", "storage/pool/tank", "ups", "control/mail",
+ * "apps/immich", "vms/haos", "monitor", "logs", "backup/tasks/<id>", ...),
+ * and links.test.ts checks each opens somewhere real. */
 export function linkTarget(link: string): { app: string; args?: Record<string, string> } | null {
   const [head, a, b] = link.split("/");
   switch (head) {
@@ -15,6 +16,7 @@ export function linkTarget(link: string): { app: string; args?: Record<string, s
     case "ups":
       return { app: "os.hardy.control", args: { section: "ups" } };
     case "control":
+    case "control-panel": // written by older versions; kept for stored notifications
       return { app: "os.hardy.control", args: a ? { section: a } : undefined };
     case "apps":
       return { app: "os.hardy.store" };
@@ -25,8 +27,9 @@ export function linkTarget(link: string): { app: string; args?: Record<string, s
     case "logs":
       return { app: "os.hardy.logs" };
     case "backup":
-      // backup/tasks/<id>, backup/targets/<id>, backup/replication
-      return { app: "os.hardy.backup", args: a ? { tab: a, ...(b ? { id: b } : {}) } : undefined };
+      // backup/tasks/<id>, backup/targets/<id> (decision 234; targets live
+      // on the Destinations tab), backup/replication.
+      return { app: "os.hardy.backup", args: a ? { tab: a === "targets" ? "destinations" : a, ...(b ? { id: b } : {}) } : undefined };
   }
   return null;
 }
@@ -51,5 +54,10 @@ export function openLinkFromHash(user: User) {
     return;
   }
   history.replaceState(null, "", window.location.pathname + window.location.search);
-  if (/^[a-z]+(\/[A-Za-z0-9._:@-]+){0,2}$/.test(link)) openLink(link, user);
+  if (isLinkShaped(link)) openLink(link, user);
+}
+
+/** Whether a link handed over in the address looks like one hardyd writes. */
+export function isLinkShaped(link: string): boolean {
+  return /^[a-z]+(-[a-z]+)?(\/[A-Za-z0-9._:@-]+){0,2}$/.test(link);
 }

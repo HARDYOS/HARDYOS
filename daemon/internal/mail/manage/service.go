@@ -720,9 +720,12 @@ func (s *Service) LoopbackTLS(ctx context.Context) *tls.Config {
 
 // ---- alerts ----
 
+// mailLink is where mail alerts open in the desktop: Control Panel > Mail.
+const mailLink = "control/mail"
+
 // raise sends an alert when key's condition is new or changed; clear sends
 // one "resolved" notice when it goes away.
-func (s *Service) raise(ctx context.Context, key, kind, sev, title, body, link string) {
+func (s *Service) raise(ctx context.Context, key, kind, sev, title, body string) {
 	s.mu.Lock()
 	if s.conds == nil {
 		s.conds = map[string]string{}
@@ -734,17 +737,17 @@ func (s *Service) raise(ctx context.Context, key, kind, sev, title, body, link s
 		return
 	}
 	if s.Notify != nil {
-		s.Notify.Notify(ctx, notify.Event{Kind: kind, Severity: sev, Title: title, Body: body, Link: link, Time: time.Now()})
+		s.Notify.Notify(ctx, notify.Event{Kind: kind, Severity: sev, Title: title, Body: body, Link: mailLink, Time: time.Now()})
 	}
 }
 
-func (s *Service) clear(ctx context.Context, key, kind, title, link string) {
+func (s *Service) clear(ctx context.Context, key, kind, title string) {
 	s.mu.Lock()
 	_, had := s.conds[key]
 	delete(s.conds, key)
 	s.mu.Unlock()
 	if had && s.Notify != nil {
-		s.Notify.Notify(ctx, notify.Event{Kind: kind, Severity: notify.SeverityInfo, Title: title, Body: "Resolved.", Link: link, Time: time.Now()})
+		s.Notify.Notify(ctx, notify.Event{Kind: kind, Severity: notify.SeverityInfo, Title: title, Body: "Resolved.", Link: mailLink, Time: time.Now()})
 	}
 }
 
@@ -800,7 +803,7 @@ func (s *Service) flushSigninAlert(ctx context.Context, now time.Time) {
 		strings.Join(list, ", "), map[bool]string{true: fmt.Sprintf(" and %d more", len(nets)-len(list)), false: ""}[len(nets) > len(list)])
 	if s.Notify != nil {
 		s.Notify.Notify(ctx, notify.Event{Kind: "mail.signin", Severity: notify.SeverityWarning, Title: title, Body: body,
-			Link: "control-panel/mail", Time: now})
+			Link: mailLink, Time: now})
 	}
 }
 
@@ -833,10 +836,9 @@ func (s *Service) CheckHealth(ctx context.Context) {
 	if authErr != nil {
 		s.raise(ctx, "signin-socket", "mail.service", notify.SeverityCritical, "Nobody can sign in to mail",
 			"hardyd can't answer the mail server's sign-in questions: "+mail.ClipText(authErr.Error(), 300)+
-				". Restart HardyOS's services (or the server); if this stays, the mail sign-in socket (hardyd-mail-auth.socket) is missing.",
-			"control-panel/mail")
+				". Restart HardyOS's services (or the server); if this stays, the mail sign-in socket (hardyd-mail-auth.socket) is missing.")
 	} else {
-		s.clear(ctx, "signin-socket", "mail.service", "Mail sign-in works again", "control-panel/mail")
+		s.clear(ctx, "signin-socket", "mail.service", "Mail sign-in works again")
 	}
 	var status mail.Status
 	if err := s.Priv.Call(ctx, mail.OpStatus, mail.StatusArgs{Pool: st.Pool}, &status); err != nil {
@@ -850,9 +852,9 @@ func (s *Service) CheckHealth(ctx context.Context) {
 	}
 	if len(down) > 0 {
 		s.raise(ctx, "service", "mail.service", notify.SeverityCritical, "The mail server isn't fully running",
-			"Not running: "+strings.Join(down, ", ")+". Mail may not arrive or send.", "control-panel/mail")
+			"Not running: "+strings.Join(down, ", ")+". Mail may not arrive or send.")
 	} else {
-		s.clear(ctx, "service", "mail.service", "The mail server is running again", "control-panel/mail")
+		s.clear(ctx, "service", "mail.service", "The mail server is running again")
 	}
 	stuck, sesErr := 0, ""
 	for _, q := range status.Queue {
@@ -866,26 +868,26 @@ func (s *Service) CheckHealth(ctx context.Context) {
 	}
 	if stuck > 0 {
 		s.raise(ctx, "queue", "mail.queue", notify.SeverityWarning, fmt.Sprintf("%d messages are stuck in the mail queue", stuck),
-			"Messages have been waiting over an hour to be delivered. Check Control Panel > Mail > Queue for the reason.", "control-panel/mail")
+			"Messages have been waiting over an hour to be delivered. Check Control Panel > Mail > Queue for the reason.")
 	} else {
-		s.clear(ctx, "queue", "mail.queue", "The mail queue is moving again", "control-panel/mail")
+		s.clear(ctx, "queue", "mail.queue", "The mail queue is moving again")
 	}
 	if sesErr != "" {
-		s.raise(ctx, "ses", "mail.ses", notify.SeverityCritical, "Amazon SES refuses outgoing mail", mail.ClipText(sesErr, 400), "control-panel/mail")
+		s.raise(ctx, "ses", "mail.ses", notify.SeverityCritical, "Amazon SES refuses outgoing mail", mail.ClipText(sesErr, 400))
 	} else {
-		s.clear(ctx, "ses", "mail.ses", "Amazon SES accepts outgoing mail again", "control-panel/mail")
+		s.clear(ctx, "ses", "mail.ses", "Amazon SES accepts outgoing mail again")
 	}
 	if c := status.Cert; c != nil {
 		left := time.Until(c.NotAfter)
 		switch {
 		case left < 0:
 			s.raise(ctx, "cert", "mail.certificate", notify.SeverityCritical, "The mail server's certificate has expired",
-				"Mail apps refuse to connect. Renew it in Control Panel > Mail > Certificate.", "control-panel/mail")
+				"Mail apps refuse to connect. Renew it in Control Panel > Mail > Certificate.")
 		case left < 14*24*time.Hour && !c.SelfSigned:
 			s.raise(ctx, "cert", "mail.certificate", notify.SeverityWarning, "The mail server's certificate expires soon",
-				fmt.Sprintf("It expires on %s. HardyOS renews Let's Encrypt certificates by itself; an uploaded one must be replaced.", c.NotAfter.Format("2 Jan 2006")), "control-panel/mail")
+				fmt.Sprintf("It expires on %s. HardyOS renews Let's Encrypt certificates by itself; an uploaded one must be replaced.", c.NotAfter.Format("2 Jan 2006")))
 		default:
-			s.clear(ctx, "cert", "mail.certificate", "The mail server's certificate is valid", "control-panel/mail")
+			s.clear(ctx, "cert", "mail.certificate", "The mail server's certificate is valid")
 		}
 	}
 }
@@ -923,9 +925,9 @@ func (s *Service) CheckAllDNS(ctx context.Context) {
 				continue
 			}
 			s.raise(ctx, key, "mail.dns", notify.SeverityWarning, "DNS records for "+d.Name+" need attention",
-				"Missing or wrong: "+strings.Join(bad, ", ")+". Mail may be rejected or not arrive.", "control-panel/mail")
+				"Missing or wrong: "+strings.Join(bad, ", ")+". Mail may be rejected or not arrive.")
 		} else {
-			s.clear(ctx, key, "mail.dns", "DNS records for "+d.Name+" are right", "control-panel/mail")
+			s.clear(ctx, key, "mail.dns", "DNS records for "+d.Name+" are right")
 		}
 	}
 }
