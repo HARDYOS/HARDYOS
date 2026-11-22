@@ -172,6 +172,14 @@ type Server struct {
 	// a database or the sign-in provider.
 	photos    *photos.Store
 	photosRun photosState
+	// mfa, appPw and challenges are two-factor sign-in (decisions
+	// 440-449): second factors, app passwords, and sign-ins waiting for a
+	// code.
+	mfa        *auth.MFA
+	appPw      *auth.AppPasswords
+	challenges *auth.Challenges
+	// inside knows this server's LAN networks and router (inside.go).
+	inside insideNets
 }
 
 // New builds the API server and registers its routes.
@@ -202,6 +210,7 @@ func New(cfg Config) *Server {
 			s.signin.Domain = &privDirectory{pc: cfg.Priv, ttl: cfg.DomainInfoTTL}
 		}
 		if cfg.Installer == nil {
+			s.newMFA()
 			if s.cfg.PublicHost == nil {
 				s.cfg.PublicHost = func() string { h, _ := os.Hostname(); return strings.ToLower(h) }
 			}
@@ -258,6 +267,7 @@ func (s *Server) routes() {
 		// Signed in
 		m.Handle("GET /api/v1/auth/me", s.authed(s.handleMe))
 		m.Handle("POST /api/v1/auth/password", s.authed(s.handleChangePassword))
+		s.mfaRoutes() // two-factor sign-in and app passwords
 		m.Handle("GET /api/v1/jobs", s.authed(s.handleListJobs))
 		m.Handle("GET /api/v1/jobs/{id}", s.authed(s.handleGetJob))
 		m.Handle("POST /api/v1/jobs/{id}/cancel", s.authed(s.handleCancelJob))

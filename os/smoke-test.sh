@@ -5,7 +5,10 @@
 #
 #   1. boot the installer and read the install code from the serial console
 #   2. install onto both NVMe disks (mirror) and restart from them
-#   3. sign in as the administrator chosen in the installer
+#   3. sign in as the administrator chosen in the installer: QEMU's user
+#      network makes this client the guest's router (10.0.2.2), which counts
+#      as outside, so it sets up two-factor sign-in with the one-time setup
+#      code the first boot shows on the console, and answers a code later
 #   4. create a storage pool from the recommendation
 #   5. back up the settings onto the pool
 #   6. create a domain, a domain user and a group; the DC must answer
@@ -13,7 +16,7 @@
 #      that the domain carried over
 #
 # Usage: os/smoke-test.sh <hardyos.iso> [update.hupd]
-# Needs qemu-system-x86_64, OVMF, bsdtar, curl and jq; KVM makes it fast.
+# Needs qemu-system-x86_64, OVMF, bsdtar, curl, jq and python3; KVM makes it fast.
 set -euo pipefail
 
 ISO=$(realpath "$1")
@@ -116,6 +119,53 @@ wait_api() { # wait_api PATH SECONDS
   done
 }
 
+# totp SECRET -> the current RFC 6238 code (SHA-1, 6 digits, 30 s).
+totp() {
+  python3 -I -c '
+import base64, hashlib, hmac, struct, sys, time
+s = sys.argv[1].replace(" ", "").upper()
+k = base64.b32decode(s + "=" * (-len(s) % 8))
+h = hmac.new(k, struct.pack(">Q", int(time.time()) // 30), hashlib.sha1).digest()
+o = h[-1] & 15
+print("%06d" % ((struct.unpack(">I", h[o:o + 4])[0] & 0x7fffffff) % 1000000))
+' "$1"
+}
+
+# fresh_totp SECRET: a code from a 30-second step not used yet (codes are
+# single-use), waiting for the next step when needed.
+LAST_STEP=
+fresh_totp() {
+  local step
+  step=$(( $(date +%s) / 30 ))
+  while [ "$step" = "$LAST_STEP" ]; do sleep 2; step=$(( $(date +%s) / 30 )); done
+  LAST_STEP=$step
+  totp "$1"
+}
+
+# sign_in: the password, then the second step it asks for.
+TOTP_SECRET=
+sign_in() {
+  local res step ch en
+  res=$(api POST /auth/login "$(jq -nc --arg u "$ADMIN_USER" --arg p "$ADMIN_PASS" '{username:$u, password:$p}')") || return 1
+  step=$(jq -r '.step // empty' <<<"$res")
+  ch=$(jq -r '.challenge // empty' <<<"$res")
+  case $step in
+    "") return 0 ;;
+    setup_code)
+      [ -n "$SETUP_CODE" ] || { echo "a setup code is needed and none was shown" >&2; return 1; }
+      en=$(api POST /auth/login/enroll "$(jq -nc --arg c "$ch" --arg s "$SETUP_CODE" '{challenge:$c, setupCode:$s}')") || return 1
+      TOTP_SECRET=$(jq -r .secret <<<"$en")
+      api POST /auth/login/enroll/confirm "$(jq -nc --arg c "$ch" --arg t "$(fresh_totp "$TOTP_SECRET")" '{challenge:$c, code:$t}')" |
+        jq -e '.recoveryCodes | length == 10' > /dev/null || return 1
+      ;;
+    totp)
+      [ -n "$TOTP_SECRET" ] || { echo "a code is asked for before an authenticator was set up" >&2; return 1; }
+      api POST /auth/login/2fa "$(jq -nc --arg c "$ch" --arg t "$(fresh_totp "$TOTP_SECRET")" '{challenge:$c, code:$t}')" > /dev/null || return 1
+      ;;
+    *) echo "unexpected sign-in step $step" >&2; return 1 ;;
+  esac
+}
+
 wait_job() { # wait_job ID [SECONDS] -> the job JSON
   local id=$1 deadline=$((SECONDS + ${2:-1200})) j state
   while :; do
@@ -182,9 +232,21 @@ setup=$(curl -skf "$API/setup") || fail "setup status"
 [ "$(jq -r .needsAdmin <<<"$setup")" = false ] || fail "the installer's administrator wasn't created: $setup"
 
 log "Signing in"
-api POST /auth/login "$(jq -nc --arg u "$ADMIN_USER" --arg p "$ADMIN_PASS" '{username:$u, password:$p}')" > /dev/null || fail "sign-in"
+# The first boot shows a one-time two-factor setup code on the login screen
+# (the serial console here).
+deadline=$((SECONDS + 300))
+SETUP_CODE=
+until [ -n "$SETUP_CODE" ]; do
+  SETUP_CODE=$(tr -d '\r' < "$WORK/serial-disk.log" | sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g' |
+    grep -A3 'Two-factor setup code for' | grep -oE '[a-z2-9]{4}-[a-z2-9]{4}-[a-z2-9]{4}-[a-z2-9]{4}' | tail -n1 || true)
+  [ $SECONDS -lt $deadline ] || fail "no two-factor setup code on the serial console"
+  [ -n "$SETUP_CODE" ] || sleep 3
+done
+echo "setup code shown on the console"
+sign_in || fail "sign-in (with two-factor setup)"
 me=$(api GET /auth/me) || fail "who am I"
 [ "$(jq -r .role <<<"$me")" = admin ] || fail "signed in, but not as an administrator: $me"
+jq -e '.twoFactor.enabled == true' > /dev/null <<<"$me" || fail "two-factor sign-in isn't on after setting it up: $me"
 bootpool=$(api GET /storage/boot) || fail "boot disks"
 [ "$(jq -r '.disks | length' <<<"$bootpool")" = 2 ] || fail "boot mirror: $bootpool"
 [ "$(jq -r .status.state <<<"$bootpool")" = ONLINE ] || fail "boot pool not ONLINE: $(jq -r .status.state <<<"$bootpool")"
@@ -244,7 +306,11 @@ if [ -n "$UPDATE" ]; then
   wait_vm_exit 300
   start_vm updated
   wait_api /health 600
-  api POST /auth/login "$(jq -nc --arg u "$ADMIN_USER" --arg p "$ADMIN_PASS" '{username:$u, password:$p}')" > /dev/null || fail "sign-in after update"
+  # The setup code was for the first boot only; a code now.
+  SETUP_CODE=
+  rm -f "$JAR"
+  sign_in || fail "sign-in after update (with a two-factor code)"
+
   # hardyd confirms the new version after a minute of running well.
   deadline=$((SECONDS + 300))
   until api GET /system/updates | jq -e '.pending == null and .last.ok == true' > /dev/null; do

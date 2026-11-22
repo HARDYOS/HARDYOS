@@ -1075,7 +1075,7 @@ func (s *Server) handleMailDAV(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(mail.WithSignIn(r.Context(), src, mail.SignInCalendars), 20*time.Second)
 	err := svc.CheckLogin(ctx, login, pw)
 	cancel()
 	if svc.Throttle.ResultDAV(login, src, err == nil) {
@@ -1174,12 +1174,41 @@ func (m mailPasswords) CheckDomainPassword(ctx context.Context, account, passwor
 	if info == nil {
 		return "", auth.ErrNoLocalDC
 	}
-	u, err := si.Authenticate(ctx, info.NetBIOS+`\`+account, password)
+	// Two-factor sign-in (decision 446): an app password with the scope
+	// always works; the account's own password only from inside and only
+	// without two-factor sign-in. Without a recorded source, outside.
+	src, scope, known := mail.SignInFrom(ctx)
+	if !known || (scope != mail.SignInMail && scope != mail.SignInCalendars) {
+		scope = mail.SignInMail
+	}
+	// Inside only from this server's own loopback, LAN and NetBird peers:
+	// Docker's networks (the webmail app's included) are outside here,
+	// whatever mail's throttling counts them as (review M3).
+	outside := !known || src.Forced || src.Internet || !m.s.insideAddr(src.Addr)
+	ip := ""
+	if src.Addr.IsValid() {
+		ip = src.Addr.String()
+	}
+	principal := info.NetBIOS + `\` + account
+	apU, passwordOK, err := m.s.servicePassword(ctx, principal, password, scope, ip, outside)
+	if err != nil {
+		return "", err
+	}
+	if apU != nil {
+		return m.AccountGUID(ctx, account)
+	}
+	if !passwordOK {
+		return "", errAppPasswordRequired
+	}
+	u, err := si.Authenticate(ctx, principal, password)
 	if err != nil {
 		return "", err
 	}
 	if u.Disabled {
 		return "", auth.ErrDisabledHere
+	}
+	if err := m.s.passwordStillAllowed(ctx, u); err != nil {
+		return "", err
 	}
 	return m.AccountGUID(ctx, account)
 }

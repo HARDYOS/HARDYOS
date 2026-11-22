@@ -39,6 +39,8 @@ type SessionInfo struct {
 	// (SourceLocal "alice", SourceDomain "HOME\alice").
 	Source    string
 	Principal string
+	// MFA: signed in with a second factor (decisions 440-449).
+	MFA bool
 }
 
 func hashToken(token string) string {
@@ -49,19 +51,37 @@ func hashToken(token string) string {
 // Create starts a session for a local account and returns the token for the
 // cookie. Use Start when the User is at hand.
 func (s *Sessions) Create(ctx context.Context, userID int64, ip, userAgent string) (string, time.Time, error) {
-	return s.create(ctx, userID, SourceLocal, "", ip, userAgent)
+	return s.create(ctx, userID, SourceLocal, "", ip, userAgent, false)
 }
 
 // Start starts a session for u, recording its source and principal.
 func (s *Sessions) Start(ctx context.Context, u *User, ip, userAgent string) (string, time.Time, error) {
+	return s.StartMFA(ctx, u, ip, userAgent, false)
+}
+
+// StartMFA is Start recording whether a second factor was used.
+func (s *Sessions) StartMFA(ctx context.Context, u *User, ip, userAgent string, mfa bool) (string, time.Time, error) {
 	src := u.Source
 	if src == "" {
 		src = SourceLocal
 	}
-	return s.create(ctx, u.ID, src, u.Principal, ip, userAgent)
+	return s.create(ctx, u.ID, src, u.Principal, ip, userAgent, mfa)
 }
 
-func (s *Sessions) create(ctx context.Context, userID int64, source, principal, ip, userAgent string) (string, time.Time, error) {
+// MarkMFA records that a session's person has just proved a second factor
+// (they set one up while signed in).
+func (s *Sessions) MarkMFA(ctx context.Context, token string) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE sessions SET mfa = 1 WHERE id_hash = ?`, hashToken(token))
+	return err
+}
+
+// RevokeOthers ends every session of a user but the one with token.
+func (s *Sessions) RevokeOthers(ctx context.Context, userID int64, token string) error {
+	_, err := s.DB.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ? AND id_hash != ?`, userID, hashToken(token))
+	return err
+}
+
+func (s *Sessions) create(ctx context.Context, userID int64, source, principal, ip, userAgent string, mfa bool) (string, time.Time, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return "", time.Time{}, err
@@ -72,9 +92,9 @@ func (s *Sessions) create(ctx context.Context, userID int64, source, principal, 
 	if len(userAgent) > 256 {
 		userAgent = userAgent[:256]
 	}
-	_, err := s.DB.ExecContext(ctx, `INSERT INTO sessions (id_hash, user_id, created_at, last_seen_at, expires_at, ip, user_agent, source, principal)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		hashToken(token), userID, store.FormatTime(now), store.FormatTime(now), store.FormatTime(expires), ip, userAgent, source, principal)
+	_, err := s.DB.ExecContext(ctx, `INSERT INTO sessions (id_hash, user_id, created_at, last_seen_at, expires_at, ip, user_agent, source, principal, mfa)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		hashToken(token), userID, store.FormatTime(now), store.FormatTime(now), store.FormatTime(expires), ip, userAgent, source, principal, boolInt(mfa))
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -89,8 +109,8 @@ func (s *Sessions) Validate(ctx context.Context, token string) (*SessionInfo, er
 	id := hashToken(token)
 	var info SessionInfo
 	var created, seen, expires string
-	err := s.DB.QueryRowContext(ctx, `SELECT user_id, created_at, last_seen_at, expires_at, source, principal FROM sessions WHERE id_hash = ?`, id).
-		Scan(&info.UserID, &created, &seen, &expires, &info.Source, &info.Principal)
+	err := s.DB.QueryRowContext(ctx, `SELECT user_id, created_at, last_seen_at, expires_at, source, principal, mfa FROM sessions WHERE id_hash = ?`, id).
+		Scan(&info.UserID, &created, &seen, &expires, &info.Source, &info.Principal, &info.MFA)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNoSession
 	}

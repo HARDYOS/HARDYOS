@@ -22,11 +22,11 @@ func TestDesktopSessionReused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.p.cfg.DesktopUser = func(r *http.Request) (*auth.User, time.Time, bool) {
+	e.p.cfg.DesktopUser = func(r *http.Request) (*auth.User, time.Time, bool, bool) {
 		if c, err := r.Cookie(desktopCookie); err == nil && c.Value == "desk" {
-			return alice, e.clock.now(), true
+			return alice, e.clock.now(), false, true
 		}
-		return nil, time.Time{}, false
+		return nil, time.Time{}, false, false
 	}
 	_, f := confidentialClient(e, ClientSpec{})
 	b := e.browser()

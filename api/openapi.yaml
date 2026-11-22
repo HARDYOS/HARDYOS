@@ -120,6 +120,16 @@ paths:
         401 codes: `bad_credentials` (wrong password or unknown name),
         `unknown_domain`, `account_disabled`, `account_locked`,
         `account_expired`, `account_unavailable`, `password_expired`.
+
+        Two-factor sign-in (decisions 440-449): when the password is right
+        but a second step is needed, the answer is 202 with a challenge:
+        `totp` (an authenticator or recovery code, `POST /auth/login/2fa`),
+        `enroll` (an administrator past the grace period at home sets one
+        up now, `POST /auth/login/enroll`), or `setup_code` (from outside
+        without two-factor sign-in: only an administrator's one-time setup
+        code leads to enrollment). From outside (through the app gateway,
+        or from an address that isn't private, link-local or NetBird's)
+        everyone needs a second factor.
       tags: [auth]
       security: []
       requestBody:
@@ -133,6 +143,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/User" }
+        "202":
+          description: The password is right; a second step is needed (no session yet)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoginChallenge" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "503":
           description: This server's own domain controller isn't answering (`domain_unavailable`), its clock is too far off (`clock_skew`), or this server runs no domain controller of its own (`no_local_dc`)
@@ -181,6 +196,253 @@ paths:
         "204": { description: Password changed }
         "400": { $ref: "#/components/responses/Invalid" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /auth/login/2fa:
+    post:
+      operationId: loginSecondFactor
+      summary: Finish a sign-in with an authenticator or recovery code
+      description: |
+        A 6-digit code (the current 30-second step or one either side, never
+        one already used) or a recovery code (`xxxx-xxxx-xxxx-xxxx`, single
+        use). A challenge allows 5 tries in 10 minutes. Wrong codes count
+        per account and origin (at home; from outside per address, IPv6 per
+        /64): 5 in 15 minutes pause code entry from there for 15 minutes
+        (429), and recovery codes have a bucket of their own. Wrong codes
+        from outside also count in a rolling 60-day budget that a right
+        code doesn't reset: at 20, authenticator codes stop working from
+        outside (`code_locked`; at home they still do) until the password
+        changes or an administrator resets two-factor sign-in.
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SecondFactorRequest" }
+      responses:
+        "200":
+          description: Signed in; session cookie set
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401":
+          description: "`bad_code`, `code_locked`, `secret_unusable` or `challenge_expired`"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Too many wrong codes; see Retry-After
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /auth/login/enroll:
+    post:
+      operationId: loginEnroll
+      summary: Start setting up an authenticator during sign-in
+      description: For an `enroll` challenge, or a `setup_code` challenge with the administrator's one-time code (`bad_setup_code` otherwise).
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginEnrollRequest" }
+      responses:
+        "200":
+          description: The secret to scan or type
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Enrollment" }
+        "401":
+          description: "`bad_setup_code` or `challenge_expired`"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /auth/login/enroll/confirm:
+    post:
+      operationId: loginEnrollConfirm
+      summary: Turn on two-factor sign-in with the first code and sign in
+      description: Every other session of the account ends. The recovery codes are shown only here.
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SecondFactorRequest" }
+      responses:
+        "200":
+          description: Signed in; session cookie set
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnrollResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: "`no_pending`: enrollment wasn't started or expired (15 minutes)"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /auth/2fa:
+    get:
+      operationId: getTwoFactor
+      summary: Your two-factor sign-in
+      tags: [auth]
+      responses:
+        "200":
+          description: State
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TwoFactorStatus" }
+  /auth/2fa/enroll:
+    post:
+      operationId: enrollTwoFactor
+      summary: Start setting up (or replacing) your authenticator
+      description: Needs your password; replacing one that is set up also needs a current code. The old one keeps working until `POST /auth/2fa/confirm`.
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReauthCodeRequest" }
+      responses:
+        "200":
+          description: The secret to scan or type
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Enrollment" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /auth/2fa/confirm:
+    post:
+      operationId: confirmTwoFactor
+      summary: Turn on the new authenticator with its first code
+      description: This browser counts as signed in with two factors; every other session of the account ends.
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CodeRequest" }
+      responses:
+        "200":
+          description: Recovery codes (shown once)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecoveryCodes" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /auth/2fa/disable:
+    post:
+      operationId: disableTwoFactor
+      summary: Turn your two-factor sign-in off (not for administrators)
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReauthCodeRequest" }
+      responses:
+        "204": { description: Turned off }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /auth/2fa/recovery-codes:
+    post:
+      operationId: regenerateRecoveryCodes
+      summary: Replace your recovery codes
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReauthCodeRequest" }
+      responses:
+        "200":
+          description: New recovery codes (shown once; the old ones stop working)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecoveryCodes" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /auth/2fa/notice/dismiss:
+    post:
+      operationId: dismissTwoFactorNotice
+      summary: Dismiss the notice about wrong codes from outside
+      tags: [auth]
+      responses:
+        "204": { description: Dismissed }
+  /auth/2fa/policy:
+    get:
+      operationId: getTwoFactorPolicy
+      summary: Two-factor settings (admin)
+      tags: [auth]
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TwoFactorPolicy" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    put:
+      operationId: setTwoFactorPolicy
+      summary: Change the administrators' grace period or trusting the router's address (admin, audited)
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TwoFactorPolicyRequest" }
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TwoFactorPolicy" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /auth/app-passwords:
+    get:
+      operationId: listAppPasswords
+      summary: Your app passwords
+      tags: [auth]
+      responses:
+        "200":
+          description: Newest first (never their values)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AppPassword" }
+    post:
+      operationId: createAppPassword
+      summary: Make an app password for one device (domain accounts; needs your password)
+      description: |
+        For services that can't ask for a code: `files` (WebDAV), `mail`
+        (IMAP and SMTP), `calendars` (CalDAV and CardDAV). From outside only
+        app passwords work there, and once you have two-factor sign-in your
+        own password stops working there too. Removed when the domain
+        password changes.
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppPasswordRequest" }
+      responses:
+        "201":
+          description: The password (shown once)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppPasswordCreated" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /auth/app-passwords/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+    delete:
+      operationId: deleteAppPassword
+      summary: Revoke one of your app passwords
+      tags: [auth]
+      responses:
+        "204": { description: Revoked }
+        "404": { $ref: "#/components/responses/NotFound" }
   /users:
     get:
       operationId: listUsers
@@ -267,6 +529,77 @@ paths:
       responses:
         "204": { description: Password set }
         "400": { $ref: "#/components/responses/Invalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /users/{id}/2fa/reset:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+    post:
+      operationId: resetUserTwoFactor
+      summary: Remove an account's authenticator and recovery codes (admin; lost phone)
+      description: |
+        Needs `confirm` set to the account's username (400 `confirm_required`
+        otherwise). Signs the account out everywhere, revokes every app
+        sign-in and refresh token, removes the stop on codes from outside
+        and the record of wrong codes, revokes the app passwords unless
+        `revokeAppPasswords` is false, and is audited (`users.2fa.reset`).
+        An administrator sets up a new authenticator at the next sign-in,
+        with no new grace period.
+      tags: [users]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ConfirmUsernameRequest" }
+      responses:
+        "200":
+          description: The account after the reset
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /users/{id}/2fa/setup-code:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+    post:
+      operationId: issueTwoFactorSetupCode
+      summary: A one-time code that lets the account set up two-factor sign-in from outside (admin)
+      description: Good for 24 hours, single use, replaces an earlier one, shown once and audited. 409 `already_enrolled` when the account has two-factor sign-in.
+      tags: [users]
+      responses:
+        "200":
+          description: The code
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TwoFactorSetupCode" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /users/{id}/app-passwords:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+    get:
+      operationId: listUserAppPasswords
+      summary: An account's app passwords (admin)
+      tags: [users]
+      responses:
+        "200":
+          description: Newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AppPassword" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /users/{id}/app-passwords/{pid}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+      - { name: pid, in: path, required: true, schema: { type: integer, format: int64 } }
+    delete:
+      operationId: deleteUserAppPassword
+      summary: Revoke an account's app password (admin, audited)
+      tags: [users]
+      responses:
+        "204": { description: Revoked }
         "404": { $ref: "#/components/responses/NotFound" }
   /jobs:
     get:
@@ -3718,6 +4051,13 @@ paths:
     put:
       operationId: publishApp
       summary: Publish an app NetBird-only or publicly, or not at all (job remote.service)
+      description: |
+        Two-factor sign-in (decision 441): an app is published only with
+        HardyOS sign-in in front (`hardyosSignIn`), since its own sign-in
+        can't ask for a code (400 `signin_required`), except an app whose
+        sign-in is HardyOS's own (Photos with "Sign in with HardyOS" on and
+        Immich's passwords off). One published without it before is refused
+        at the gateway until it is turned on.
       tags: [remote, apps]
       requestBody:
         required: true
@@ -6304,6 +6644,9 @@ components:
             Why a domain account's role isn't what its groups give: its groups
             couldn't be looked up for over 30 minutes, so it has user rights
             until the domain answers again. Absent otherwise.
+        twoFactor:
+          $ref: "#/components/schemas/TwoFactorStatus"
+          description: Two-factor sign-in state (on sign-in, /auth/me and the users list)
     CreateUserRequest:
       type: object
       required: [username, password]
@@ -6328,6 +6671,153 @@ components:
       additionalProperties: false
       properties:
         password: { type: string, minLength: 10 }
+    TwoFactorStatus:
+      type: object
+      required: [enabled, enabledAt, recoveryCodesLeft, required, graceUntil, locked, outsideFailures, setupCodeExpires, mustEnroll]
+      properties:
+        enabled: { type: boolean }
+        enabledAt: { type: [string, "null"], format: date-time }
+        recoveryCodesLeft: { type: integer }
+        required: { type: boolean, description: An administrator, who must have it }
+        graceUntil:
+          type: [string, "null"]
+          format: date-time
+          description: An administrator's deadline to set it up (starts at the first sign-in that asks)
+        locked: { type: boolean, description: "Too many wrong codes from outside: authenticator codes work only at home (recovery codes everywhere) until the password changes or an administrator resets" }
+        outsideFailures: { type: integer, description: Wrong authenticator codes from outside in the last 60 days (a right code doesn't reset them) }
+        notice: { type: string, description: What the person should know (wrong codes from outside); absent when there's nothing }
+        noticeAt: { type: [string, "null"], format: date-time }
+        setupCodeExpires: { type: [string, "null"], format: date-time, description: An administrator's setup code is waiting until then }
+        mustEnroll: { type: boolean, description: Past the grace period; nothing but enrollment works until it is set up }
+    LoginChallenge:
+      type: object
+      required: [challenge, step, expiresAt]
+      properties:
+        challenge: { type: string, description: Send it with the next step; good for 10 minutes and 5 tries }
+        step: { type: string, enum: [totp, enroll, setup_code] }
+        expiresAt: { type: string, format: date-time }
+    SecondFactorRequest:
+      type: object
+      required: [challenge, code]
+      additionalProperties: false
+      properties:
+        challenge: { type: string }
+        code: { type: string, description: A 6-digit authenticator code or a recovery code }
+    LoginEnrollRequest:
+      type: object
+      required: [challenge]
+      additionalProperties: false
+      properties:
+        challenge: { type: string }
+        setupCode: { type: string, description: Needed for a `setup_code` challenge }
+    QRCode:
+      type: object
+      required: [size, path]
+      properties:
+        size: { type: integer, description: Modules on a side, quiet zone included }
+        path: { type: string, description: "SVG path data of the dark modules (M, h, v, z and numbers only)" }
+    Enrollment:
+      type: object
+      required: [secret, uri, qr]
+      properties:
+        secret: { type: string, description: The key in base32, in groups of four, to type into an app }
+        uri: { type: string, description: "otpauth://totp/… (what the QR code holds)" }
+        qr: { $ref: "#/components/schemas/QRCode" }
+    EnrollResult:
+      type: object
+      required: [user, recoveryCodes]
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        recoveryCodes: { type: array, items: { type: string } }
+    RecoveryCodes:
+      type: object
+      required: [recoveryCodes]
+      properties:
+        recoveryCodes: { type: array, items: { type: string }, description: "10 single-use codes, shown once" }
+    CodeRequest:
+      type: object
+      required: [code]
+      additionalProperties: false
+      properties:
+        code: { type: string }
+    ReauthCodeRequest:
+      type: object
+      required: [password]
+      additionalProperties: false
+      properties:
+        password: { type: string }
+        code: { type: string, description: A current authenticator or recovery code (when one is set up) }
+    TwoFactorPolicy:
+      type: object
+      required: [adminGraceDays, outsideRequired, trustRouter, canChangeTrustRouter]
+      properties:
+        adminGraceDays: { type: integer, minimum: 0, maximum: 30 }
+        outsideRequired: { type: boolean, description: Always true — everyone needs a second factor from outside }
+        routerSeenAt:
+          type: [string, "null"]
+          format: date-time
+          description: "When a request last came from the router's own address (hairpin NAT, a port forward or a tunnel on the router look like this; kept across restarts): such requests count as outside unless trustRouter is on"
+        trustRouter: { $ref: "#/components/schemas/RouterTrust" }
+        canChangeTrustRouter: { type: boolean, description: "This request is from this server's own network (not the router's address, not outside), where trustRouter may be changed" }
+    RouterTrust:
+      type: object
+      required: [on, lapsed]
+      description: "\"This server is behind NAT: trust the router's address\" (off by default). Bound to the router's IP and MAC when turned on; lapses if the gateway changes. Even on, codes from the router have their own limit and count toward the 60-day outside budget, and own passwords stay refused for WebDAV, mail and calendars from it."
+      properties:
+        on: { type: boolean }
+        lapsed: { type: boolean, description: It was turned on for another router (IP or MAC changed) and doesn't apply }
+        ip: { type: string, description: The router it was turned on for }
+        since: { type: string, format: date-time }
+    TwoFactorPolicyRequest:
+      type: object
+      required: [adminGraceDays]
+      additionalProperties: false
+      properties:
+        adminGraceDays: { type: integer, minimum: 0, maximum: 30 }
+        trustRouter:
+          type: boolean
+          description: "Turn \"this server is behind NAT: trust the router's address\" on (for the router as it is now) or off. Only from this server's own network (403 not_from_home otherwise; hardyctl trust-router works too). Audited, and administrators are notified."
+
+    TwoFactorSetupCode:
+      type: object
+      required: [code, expiresAt]
+      properties:
+        code: { type: string }
+        expiresAt: { type: string, format: date-time }
+    ConfirmUsernameRequest:
+      type: object
+      required: [confirm]
+      additionalProperties: false
+      properties:
+        confirm: { type: string, description: The account's username }
+        revokeAppPasswords: { type: boolean, default: true, description: Also revoke the account's app passwords }
+    AppPasswordScope:
+      type: string
+      enum: [files, mail, calendars]
+    AppPassword:
+      type: object
+      required: [id, name, scopes, createdAt, lastUsedAt, lastUsedIp]
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        scopes: { type: array, items: { $ref: "#/components/schemas/AppPasswordScope" } }
+        createdAt: { type: string, format: date-time }
+        lastUsedAt: { type: [string, "null"], format: date-time }
+        lastUsedIp: { type: string }
+    AppPasswordRequest:
+      type: object
+      required: [name, scopes, password]
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 64 }
+        scopes: { type: array, items: { $ref: "#/components/schemas/AppPasswordScope" }, minItems: 1 }
+        password: { type: string, description: Your account password, checked again }
+    AppPasswordCreated:
+      type: object
+      required: [appPassword, password]
+      properties:
+        appPassword: { $ref: "#/components/schemas/AppPassword" }
+        password: { type: string, description: "xxxx-xxxx-xxxx-xxxx-xxxx, shown once" }
     JobState:
       type: string
       enum: [queued, running, succeeded, failed, cancelled]
@@ -8024,6 +8514,9 @@ components:
         clientId: { type: string }
         redirectUris: { type: array, items: { type: string } }
         why: { type: string, description: Why it's off while the settings ask for it }
+        passwordLoginOff:
+          type: boolean
+          description: "Immich itself said (its server features, at the last sync) that it offers sign-in with HardyOS and not its own passwords. Immich may be published without HardyOS sign-in in front only after a successful sync saw this (decision 441)."
     PhotosML:
       type: object
       required: [mode, reason, lent]

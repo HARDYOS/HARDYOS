@@ -768,7 +768,8 @@ func (p *appProxy) verify(r *http.Request, ss *proxySession) bool {
 		return false
 	}
 	u, err := s.sessionUser(r, ss.desktopToken, info.UserID)
-	if err != nil {
+	// The sweep's request has no client address (RemoteAddr empty).
+	if err != nil || s.sessionGateAt(r, info, u, r.RemoteAddr != "" && s.outside(r)) != gateOK {
 		return false
 	}
 	if !(ss.host && ss.appID == hostOfficeID) {

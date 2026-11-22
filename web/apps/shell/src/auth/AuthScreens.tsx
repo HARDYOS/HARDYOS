@@ -1,6 +1,10 @@
+import type { EnrollResult, LoginChallenge } from "@hardy/api-client";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useState } from "react";
-import { errorMessage } from "../api";
-import { useCreateFirstAdmin, useLogin, useSetupStatus } from "../hooks/session";
+import { ApiFailure, api, errorMessage, unwrap } from "../api";
+import { useCreateFirstAdmin, useLogin, useLoginCode, useSetupStatus } from "../hooks/session";
+import { EnrollSteps, RecoveryCodesView } from "./TwoFactor";
+import { codeReady, isChallenge, setupCodeReady } from "./twoFactorRules";
 import { BrandIcon, BrandMark } from "../brand";
 import { PowerIcon, RestartIcon } from "../icons";
 import { Alert, Button, Field, TextInput } from "../ui";
@@ -51,11 +55,35 @@ export function LoginScreen() {
   const domain = setup.data?.domainSignIn === true;
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [challenge, setChallenge] = useState<LoginChallenge | null>(null);
 
   function submit(e: FormEvent) {
     e.preventDefault();
     if (!username || !password) return;
-    login.mutate({ username, password }, { onError: () => setPassword("") });
+    login.mutate(
+      { username, password },
+      {
+        onError: () => setPassword(""),
+        onSuccess: (r) => {
+          setPassword("");
+          if (isChallenge(r)) setChallenge(r);
+        },
+      },
+    );
+  }
+
+  if (challenge) {
+    const back = () => {
+      setChallenge(null);
+      login.reset();
+    };
+    return (
+      <div className="lock-screen wallpaper">
+        <LockClock />
+        {challenge.step === "totp" ? <CodeStep challenge={challenge} onBack={back} /> : <EnrollStep challenge={challenge} username={username} onBack={back} />}
+        <Footer />
+      </div>
+    );
   }
 
   return (
@@ -86,6 +114,121 @@ export function LoginScreen() {
       </form>
       <Footer />
     </div>
+  );
+}
+
+/** The second step: a code from the authenticator app, or a recovery code. */
+function CodeStep({ challenge, onBack }: { challenge: LoginChallenge; onBack: () => void }) {
+  const send = useLoginCode();
+  const [code, setCode] = useState("");
+  const expired = send.error instanceof ApiFailure && send.error.code === "challenge_expired";
+  function submit(e: FormEvent) {
+    e.preventDefault();
+    if (codeReady(code)) send.mutate({ challenge: challenge.challenge, code }, { onError: () => setCode("") });
+  }
+  return (
+    <form className="lock-card glass" onSubmit={submit} aria-label="Two-factor sign-in">
+      <div className="lock-card__heading">
+        <h1>Enter your code</h1>
+        <p>Open your authenticator app and enter the 6-digit code for HardyOS.</p>
+      </div>
+      <Field label="Code" hint="Lost your phone? Enter one of your recovery codes instead.">
+        {(id) => (
+          <TextInput
+            id={id}
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            autoCapitalize="none"
+            spellCheck={false}
+            className="input tfa-code-input"
+            autoFocus
+            required
+          />
+        )}
+      </Field>
+      {send.error && <Alert tone="bad">{errorMessage(send.error)}</Alert>}
+      {expired ? (
+        <Button variant="primary" className="btn--block btn--lg" onClick={onBack}>
+          Sign in again
+        </Button>
+      ) : (
+        <Button type="submit" variant="primary" className="btn--block btn--lg" busy={send.isPending} disabled={!codeReady(code)}>
+          Continue
+        </Button>
+      )}
+      <Button onClick={onBack}>Back</Button>
+    </form>
+  );
+}
+
+/** Setting up an authenticator while signing in: an administrator past the
+ *  grace period, or from outside with an administrator's setup code. */
+function EnrollStep({ challenge, username, onBack }: { challenge: LoginChallenge; username: string; onBack: () => void }) {
+  const qc = useQueryClient();
+  const needsSetupCode = challenge.step === "setup_code";
+  const [setupCode, setSetupCode] = useState("");
+  const [result, setResult] = useState<EnrollResult | null>(null);
+  const start = useMutation({
+    mutationFn: () => unwrap(api.POST("/auth/login/enroll", { body: { challenge: challenge.challenge, setupCode: needsSetupCode ? setupCode : undefined } })),
+  });
+  const confirm = useMutation({
+    mutationFn: (code: string) => unwrap(api.POST("/auth/login/enroll/confirm", { body: { challenge: challenge.challenge, code } })),
+    onSuccess: setResult,
+  });
+  if (result) {
+    return (
+      <div className="lock-card glass lock-card--wide" aria-label="Recovery codes">
+        <div className="lock-card__heading">
+          <h1>Two-factor sign-in is on</h1>
+        </div>
+        <RecoveryCodesView codes={result.recoveryCodes} who={result.user.displayName || username} />
+        <Button variant="primary" className="btn--block btn--lg" onClick={() => qc.setQueryData(["me"], result.user)}>
+          I've saved them — continue
+        </Button>
+      </div>
+    );
+  }
+  if (start.data) {
+    return (
+      <div className="lock-card glass lock-card--wide">
+        <div className="lock-card__heading">
+          <h1>Set up two-factor sign-in</h1>
+        </div>
+        <EnrollSteps enrollment={start.data} busy={confirm.isPending} error={confirm.error} onConfirm={(c) => confirm.mutate(c)} />
+        <Button onClick={onBack}>Cancel</Button>
+      </div>
+    );
+  }
+  return (
+    <form
+      className="lock-card glass lock-card--wide"
+      aria-label="Set up two-factor sign-in"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!needsSetupCode || setupCodeReady(setupCode)) start.mutate();
+      }}
+    >
+      <div className="lock-card__heading">
+        <h1>Set up two-factor sign-in</h1>
+        <p>
+          {needsSetupCode
+            ? "Signing in from outside your home network needs two-factor sign-in, and your account hasn't set it up. Set it up at home, or enter the one-time setup code an administrator gave you."
+            : "Administrators must use an authenticator app. Set it up now to continue."}
+        </p>
+      </div>
+      {needsSetupCode && (
+        <Field label="Setup code from your administrator">
+          {(id) => <TextInput id={id} value={setupCode} onChange={(e) => setSetupCode(e.target.value)} autoComplete="off" autoCapitalize="none" spellCheck={false} className="input tfa-code-input" required />}
+        </Field>
+      )}
+      {start.error && <Alert tone="bad">{errorMessage(start.error)}</Alert>}
+      <Button type="submit" variant="primary" className="btn--block btn--lg" busy={start.isPending} disabled={needsSetupCode && !setupCodeReady(setupCode)}>
+        Set up an authenticator
+      </Button>
+      <Button onClick={onBack}>Back</Button>
+    </form>
   );
 }
 

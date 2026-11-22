@@ -28,7 +28,139 @@ Everything is set up in **Control Panel > Sign-in (OIDC)** (administrators).
 
 If you're already signed in in that browser (to an app through HardyOS in
 the last 12 hours, or to the desktop when the sign-in page is on the
-desktop's own address), HardyOS doesn't ask for the password again.
+desktop's own address), HardyOS doesn't ask for the password again (unless
+two-factor sign-in needs a code there and that sign-in didn't use one).
+
+## Two-factor sign-in
+
+After the password, HardyOS can ask for a 6-digit code from an
+authenticator app (Google Authenticator, Microsoft Authenticator,
+1Password, Bitwarden, Aegis…).
+
+- **Administrators must use it.** After their first sign-in that asks, they
+  have a grace period (7 days by default; Control Panel › Security, 0-30
+  days) shown in Users & Groups and in their account menu. After it, the
+  desktop shows nothing but the setup screen until it's done.
+- **Everyone else may**, from the account menu › *Two-factor sign-in*.
+- **Everyone needs it from outside**: the published desktop, `sso.<base>`
+  reached through Remote Access (and so every app that signs in with
+  HardyOS from outside, Immich's phone app included) and published apps. A
+  desktop session made at home without a code doesn't work through the
+  published address. The per-app addresses (Control Panel › Hostnames) are
+  reached at home or over NetBird; opening an app there needs a desktop
+  session that meets the same rule, and its app session ends with the
+  desktop's (two-factor set up, reset, sign-out).
+- An app's sign-in through HardyOS (an OIDC app) counts by where the
+  browser was when signing in. An app's server refreshing its tokens from a
+  container proves nothing about the person, so only an app on the person's
+  own device (a public client) is checked by where the refresh comes from.
+
+Setting up shows a QR code and the key to type, and turns on only after the
+first code works. You get **10 recovery codes**: each signs you in once if
+you lose your phone. Save them (Copy / Download) — they aren't shown again;
+*New recovery codes* replaces them.
+
+**From outside without two-factor sign-in** you can't sign in until it's set
+up. Set it up at home, or ask an administrator for a **setup code** (Users &
+Groups › the shield button): with your password and that code (24 hours,
+once) the sign-in page lets you set it up from outside. A password alone
+never can: whoever stole it would register their own phone.
+
+**Wrong codes**: they count per place. At home they're one bucket; from outside
+each address (each /64 for IPv6) is one. 5 in 15 minutes pause code entry from
+that place for 15 minutes, so a stranger can never pause it for you at home,
+and recovery codes always work.
+
+Wrong codes from outside also count in a rolling 60-day budget that a right code
+doesn't reset. At 20, authenticator codes stop working from outside (at home
+they keep working) until you change your password or an administrator resets
+two-factor sign-in. Administrators get a notification, and you see a notice in
+your account menu, when codes are paused, every 5 wrong codes from outside, and
+when they stop. Whoever typed them knows your password, so change it.
+
+A code works once, and only within about a minute and a half of your phone's
+clock.
+
+**What counts as outside**: anything through Remote Access, and any address
+that isn't this server's own private network (10.x, 172.16-31.x, 192.168.x,
+IPv6 unique-local, or a global IPv6 prefix on an interface that isn't the way
+to the internet) or NetBird while it's connected. That includes apps' Docker
+networks, apps running with the host's network (their connections to the
+server's own addresses count as home only when they're HardyOS's own, so an
+SSH tunnel to the server counts as outside too), and a server whose own
+network is public (a VPS).
+
+**The router's own address counts as outside.** Hairpin NAT (a phone at home
+using the public address), a port forward the router masquerades, a VPN or
+tunnel on the router, and a server running in a VM behind NAT all make
+visitors look like the router, and HardyOS can't tell those apart from the
+internet. Control Panel › Security warns when it sees such a request, and
+administrators get a notification once. At home, use the server's local
+address, and don't forward ports to HardyOS (Remote Access publishes through
+NetBird instead).
+
+If the server really is behind NAT and the people at home reach it through
+the router (for example from a separate network behind it), an administrator
+can turn on *This server is behind NAT: trust the router's address* in Control
+Panel › Security (from the server's own network, not through the router), or
+as root with `hardyctl trust-router on`. It's off by default, audited, applies
+only to that router (its address and hardware address: it lapses if the
+router changes), and administrators see a banner while it's on. Even then,
+codes from the router have their own limit and count toward the outside
+budget, and WebDAV, mail and calendars still need app passwords from it.
+
+**A new server behind NAT**: its first boot shows a one-time setup code for
+the administrator on the console login screen. Sign in with the password,
+then enter that code to set up your authenticator. Later, root can make a new
+one with `hardyctl setup-code <username>`.
+
+
+**Lost your phone?** Use a recovery code, then *New phone* in the account
+menu. No codes left: another administrator uses *Reset two-factor sign-in*
+(type the username to confirm). It signs the person out everywhere and ends
+every app sign-in; their app passwords are revoked too, unless the tick is
+cleared. The only administrator, with no codes: as root on the server's
+console, `hardyctl reset-2fa <username>` (add `-keep-app-passwords` to keep
+them), then set it up again at the next sign-in from home. Setting up a new
+phone yourself also signs out everything else, apps included. After restoring a server from the recovery kit your
+authenticator keeps working (the keys come back with it).
+
+### App passwords
+
+Mail apps (IMAP and SMTP), mapped drives (WebDAV) and calendar apps can't
+ask for a code, so they use **app passwords**: account menu › *Two-factor
+sign-in* › *App passwords* (domain accounts). Each is for one device, can
+sign in to the services you tick (files, mail, calendars), shows when it was
+last used, and can be revoked on its own. The rules:
+
+| | Your own password | An app password |
+| --- | --- | --- |
+| At home, without two-factor sign-in | works | works |
+| At home, with two-factor sign-in | refused | works |
+| From outside | refused | works |
+
+App passwords are removed when your domain password changes.
+
+**Not covered**: shared folders over SMB, SFTP, Windows sign-in, Kerberos and
+LDAP check the domain password in Samba itself, and keep doing so. HardyOS
+doesn't publish them outside.
+
+**Published apps**: an app with its own sign-in is published only with HardyOS
+sign-in in front, which asks for the code from outside. That includes apps
+published **NetBird-only**: being a NetBird device used to be enough, and now
+HardyOS sign-in is in front of them too (a change in this release). Photos is
+the exception, because Immich signs in through HardyOS: only once a Photos sync
+has seen, from Immich itself, that sign-in with HardyOS works and Immich's own
+passwords are off (Control Panel › Photos, *Sync now*). An app published
+without HardyOS sign-in before two-factor sign-in isn't served from outside
+until you turn it on in Remote Access.
+
+
+An app's own session (its cookie, a phone app's token) is the app's. Once
+someone signed in through HardyOS, HardyOS can end it only by ending the app
+sign-in. It does that when you reset two-factor sign-in, set up a new phone, or
+change the password. Phones signed in to Immich before two-factor sign-in
+existed sign in once more.
 
 ## What apps learn about you
 

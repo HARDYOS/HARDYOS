@@ -27,8 +27,8 @@ func (s *Server) peekSession(ctx context.Context, token string) (*auth.SessionIn
 	sum := sha256.Sum256([]byte(token))
 	var info auth.SessionInfo
 	var created, seen, expires string
-	err := s.cfg.DB.QueryRowContext(ctx, `SELECT user_id, created_at, last_seen_at, expires_at, source, principal FROM sessions WHERE id_hash = ?`,
-		hex.EncodeToString(sum[:])).Scan(&info.UserID, &created, &seen, &expires, &info.Source, &info.Principal)
+	err := s.cfg.DB.QueryRowContext(ctx, `SELECT user_id, created_at, last_seen_at, expires_at, source, principal, mfa FROM sessions WHERE id_hash = ?`,
+		hex.EncodeToString(sum[:])).Scan(&info.UserID, &created, &seen, &expires, &info.Source, &info.Principal, &info.MFA)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, auth.ErrNoSession
 	}

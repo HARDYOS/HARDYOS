@@ -105,6 +105,18 @@ func (s *Server) currentUser(w http.ResponseWriter, r *http.Request) (*auth.User
 		writeError(w, http.StatusUnauthorized, "unauthenticated", "account unavailable")
 		return nil, false
 	}
+	switch s.sessionGate(r, info, u) {
+	case gateOutside:
+		// A session signed in at home without a second factor isn't
+		// enough from outside (decision 441).
+		writeError(w, http.StatusUnauthorized, "unauthenticated", "sign in again with two-factor sign-in to use HardyOS from outside")
+		return nil, false
+	case gateEnroll:
+		if !enrollOnlyPath(r) {
+			writeError(w, http.StatusForbidden, "mfa_enrollment_required", "administrators must set up two-factor sign-in before going on (Two-factor sign-in in your account menu)")
+			return nil, false
+		}
+	}
 	return u, true
 }
 

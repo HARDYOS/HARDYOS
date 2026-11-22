@@ -1597,3 +1597,116 @@
   min-width: 0;
   padding-left: 6px;
 }
+
+/* ---------- Two-factor sign-in ---------- */
+.avatar--attention {
+  box-shadow: 0 0 0 2px var(--hos-warn);
+}
+.menu-item__note {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--hos-warn-text);
+}
+.tfa-qr-box {
+  display: flex;
+  justify-content: center;
+}
+.tfa-qr {
+  border-radius: var(--hos-radius-sm);
+  background: #fff;
+  padding: 6px;
+  max-width: 100%;
+  height: auto;
+}
+.tfa-secret {
+  margin: 0;
+  text-align: center;
+  font-family: var(--hos-font-mono);
+  font-size: 14px;
+  letter-spacing: 0.06em;
+  color: var(--hos-text-2);
+  word-break: break-all;
+  user-select: all;
+}
+.tfa-secret--big {
+  font-size: 18px;
+  color: var(--hos-accent-text);
+  padding: 12px;
+  border-radius: var(--hos-radius-sm);
+  background: var(--hos-surface);
+  border: 1px solid var(--hos-surface-border);
+}
+.tfa-code-input {
+  font-family: var(--hos-font-mono);
+  font-size: 18px;
+  letter-spacing: 0.12em;
+  text-align: center;
+}
+.tfa-codes {
+  margin: 0;
+  padding: 12px 12px 12px 36px;
+  columns: 2;
+  column-gap: 32px;
+  font-family: var(--hos-font-mono);
+  font-size: 14px;
+  border-radius: var(--hos-radius-sm);
+  background: var(--hos-surface);
+  border: 1px solid var(--hos-surface-border);
+}
+.tfa-codes li {
+  margin: 3px 0;
+}
+.tfa-steps {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--hos-text-muted);
+}
+.tfa-steps li {
+  margin: 2px 0;
+}
+.tfa-status {
+  align-items: center;
+}
+.tfa-apps {
+  padding-top: 12px;
+  border-top: 1px solid var(--hos-surface-border);
+}
+.tfa-applist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tfa-applist li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--hos-radius-sm);
+  background: var(--hos-surface);
+}
+.tfa-applist li > div {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.tfa-scopes {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tfa-scopes legend {
+  margin-bottom: 4px;
+  color: var(--hos-text-muted);
+}
+@media (max-width: 480px) {
+  .tfa-codes {
+    columns: 1;
+  }
+}
