@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/store"
@@ -43,14 +44,14 @@ func TestFirstBootCode(t *testing.T) {
 	issue := filepath.Join(t.TempDir(), "run", "code.issue")
 	var out bytes.Buffer
 	// No administrator yet: nothing.
-	if err := firstBootCode(path, issue, &out); err != nil || out.Len() != 0 {
+	if err := firstBootCode(path, issue, "", 0, &out); err != nil || out.Len() != 0 {
 		t.Fatalf("no admin: %v %q", err, out.String())
 	}
 	u, err := (&auth.Users{DB: db}).Create(ctx, auth.NewUser{Username: "cade", Password: "supersecret1", Role: auth.RoleAdmin})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := firstBootCode(path, issue, &out); err != nil {
+	if err := firstBootCode(path, issue, "", 0, &out); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(issue)
@@ -67,7 +68,7 @@ func TestFirstBootCode(t *testing.T) {
 	}
 	// Once: the next boot clears the screen and issues nothing.
 	out.Reset()
-	if err := firstBootCode(path, issue, &out); err != nil || out.Len() != 0 {
+	if err := firstBootCode(path, issue, "", 0, &out); err != nil || out.Len() != 0 {
 		t.Fatalf("second boot: %v %q", err, out.String())
 	}
 	if _, err := os.Stat(issue); !os.IsNotExist(err) {
@@ -76,6 +77,33 @@ func TestFirstBootCode(t *testing.T) {
 	m := &auth.MFA{DB: db}
 	if err := m.ConsumeSetupCode(ctx, u.ID, code, auth.Origin{Outside: true, IP: "203.0.113.9"}); err != nil {
 		t.Fatalf("first-boot code: %v", err)
+	}
+}
+
+// On a real first boot hardyd makes the installer's administrator from the
+// seed only once it starts: the code waits for it (the CI smoke test's
+// first failure).
+func TestFirstBootCodeWaitsForTheSeed(t *testing.T) {
+	ctx := context.Background()
+	path, db := newDB(t)
+	dir := t.TempDir()
+	seed, issue := filepath.Join(dir, "install-seed.json"), filepath.Join(dir, "code.issue")
+	if err := os.WriteFile(seed, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		if _, err := (&auth.Users{DB: db}).Create(ctx, auth.NewUser{Username: "smoke", Password: "supersecret1", Role: auth.RoleAdmin}); err != nil {
+			t.Error(err)
+		}
+		os.Remove(seed)
+	}()
+	var out bytes.Buffer
+	if err := firstBootCode(path, issue, seed, 10*time.Second, &out); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(issue); err != nil || !codeRE.Match(b) || !strings.Contains(string(b), "smoke") {
+		t.Fatalf("no code after the seed: %q %v", b, err)
 	}
 }
 

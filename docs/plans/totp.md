@@ -64,7 +64,7 @@ from it.
 
 **A new server behind NAT** (the QEMU smoke test is one: its client is the
 guest's router): `hardyos-setup-code.service` runs `hardyctl first-boot-code`
-as the hardyd user after hardyd starts. On the first boot with exactly one
+as the hardyd user after hardyd starts (and waits, up to 3 minutes, while hardyd still has the installer's seed to turn into the administrator). On the first boot with exactly one
 administrator and no authenticator it issues the same 80-bit, 24-hour
 single-use setup code an administrator would (audited) and writes it to
 `/run/hardyos-setup-code/code.issue` (0600), which `hardyos-issue` (root, as

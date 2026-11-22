@@ -22,6 +22,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/boot"
+	"github.com/hardyos/hardyos/daemon/internal/install"
 	"github.com/hardyos/hardyos/daemon/internal/oidc"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/store"
@@ -104,7 +105,7 @@ func main() {
 	case "trust-router":
 		err = trustRouter(*dbPath, args, os.Stdout)
 	case "first-boot-code":
-		err = firstBootCode(*dbPath, *issue, os.Stdout)
+		err = firstBootCode(*dbPath, *issue, install.SeedFile, 3*time.Minute, os.Stdout)
 
 	case "app-pack":
 		err = appPack(args)

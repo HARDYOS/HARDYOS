@@ -16,6 +16,9 @@ Group=hardyd
 RuntimeDirectory=hardyos-setup-code
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
+# hardyd makes the installer's administrator when it starts; this waits
+# for that (up to 3 minutes).
+TimeoutStartSec=5min
 ExecStart=/usr/bin/hardyctl -issue /run/hardyos-setup-code/code.issue first-boot-code
 # Redraw the login screen with it (the script runs as root, as in
 # hardyos-issue.service).

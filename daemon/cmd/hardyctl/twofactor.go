@@ -68,9 +68,20 @@ func setupCode(dbPath string, args []string, out io.Writer) error {
 // authenticator yet, it issues a setup code and writes it for the console
 // login screen, so the owner can finish setting up from anywhere, NAT or
 // not (re-review HIGH 1). Later boots only clear the screen of it.
-func firstBootCode(dbPath, issue string, out io.Writer) error {
+//
+// hardyd creates the installer's administrator from seed when it starts,
+// so while that file is still there (and there's no administrator yet)
+// this waits for it, up to wait.
+func firstBootCode(dbPath, issue, seed string, wait time.Duration, out io.Writer) error {
 	ctx := context.Background()
+	// hardyd makes the database on its first start: don't race it to that.
+	for deadline := time.Now().Add(wait); seed != ""; time.Sleep(time.Second) {
+		if _, err := os.Stat(dbPath); err == nil || !time.Now().Before(deadline) {
+			break
+		}
+	}
 	db, err := openDB(ctx, dbPath)
+
 	if err != nil {
 		return err
 	}
@@ -89,16 +100,33 @@ func firstBootCode(dbPath, issue string, out io.Writer) error {
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
-	users, err := (&auth.Users{DB: db}).List(ctx)
-	if err != nil {
-		return err
-	}
 	var admins []*auth.User
-	for _, u := range users {
-		if u.Role == auth.RoleAdmin && !u.Disabled {
-			admins = append(admins, u)
+	for deadline := time.Now().Add(wait); ; {
+		users, err := (&auth.Users{DB: db}).List(ctx)
+		if err != nil {
+			return err
 		}
+		admins = admins[:0]
+		for _, u := range users {
+			if u.Role == auth.RoleAdmin && !u.Disabled {
+				admins = append(admins, u)
+			}
+		}
+		if len(admins) > 0 || seed == "" || !time.Now().Before(deadline) {
+			break
+		}
+		if _, err := os.Stat(seed); err != nil {
+			// No seed waiting: hardyd used it up, or there was none.
+			if len(admins) == 0 {
+				// It may have just made the administrator: look once more.
+				seed = ""
+				continue
+			}
+			break
+		}
+		time.Sleep(time.Second)
 	}
+
 	if len(admins) != 1 {
 		// None yet (set up in the browser later: then an administrator
 		// issues codes) or several: nothing to show.
