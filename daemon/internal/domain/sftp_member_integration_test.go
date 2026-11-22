@@ -179,8 +179,7 @@ func TestSFTPMemberIntegration(t *testing.T) {
 	docs.RootDev = uint64(dst.Dev)
 	src := &listShares{l: []shares.Share{docs}}
 	conf := sub("smb.conf")
-	mr := &memberRunner{conf: conf, resolv: sub("resolv.conf"), krb5: sub("krb5.conf"), log: sub("log"), procs: map[string]*memberProc{}}
-	t.Cleanup(mr.stopAll)
+	mr := newMemberRunner(t, tmp, "NASIT", dom)
 	sr := &sshdRunner{inner: mr, sshd: sshd, conf: mainConf, key: key, pam: pamDir, log: sub("log", "sshd.out")}
 	t.Cleanup(sr.stop)
 	sm := &sftp.Manager{Runner: sr, Root: views, DropIn: sub("sshd_config.d", "hardyos-sftp.conf"), PAMPath: pamPath, CommonAuth: sub("common-auth")}

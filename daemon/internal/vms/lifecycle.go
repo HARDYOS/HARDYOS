@@ -217,8 +217,8 @@ func (m *Manager) Start(ctx context.Context, id string) (*Result, error) {
 		return nil, err
 	}
 	if s.NeedsVirtio() {
-		if _, err := m.virtioPath(ctx); err != nil {
-			return nil, Problems{"the VirtIO drivers disc isn't downloaded yet"}
+		if _, err := m.virtioPath(ctx, s.Pool); err != nil {
+			return nil, Problems{"the VirtIO drivers disc isn't downloaded and checked yet on " + s.Pool + "; save the VM's Hardware to get it"}
 		}
 	}
 	if s.CloudInit != nil {
@@ -231,20 +231,32 @@ func (m *Manager) Start(ctx context.Context, id string) (*Result, error) {
 			return nil, err
 		}
 	}
+	if s.HasUnattendMedia() {
+		if err := m.checkUnattendDisc(s); err != nil {
+			return nil, err
+		}
+	}
+	// Until Windows is installed the VM gets none of its devices, so
+	// Setup can't see (and wipe) a passed-through disk or controller.
+	devs := s.Devices
+	if s.InstallPending() && len(devs) > 0 {
+		devs = nil
+		warnings = append(warnings, "The VM's passed-through devices join once Windows is installed (so Setup only sees the VM's own disk); restart it then.")
+	}
 	if s.Firmware.TPM {
 		if err := m.restoreTPM(st); err != nil {
 			m.log().Warn("vms: restoring the TPM state", "id", id, "err", err)
 		}
 	}
 	var prepared []devices.Prepared
-	if len(s.Devices) > 0 {
+	if len(devs) > 0 {
 		if m.Devices == nil {
 			return nil, Problems{"passing devices through to VMs isn't available on this server yet"}
 		}
-		if err := m.Devices.Check(ctx, id, s.Devices); err != nil {
+		if err := m.Devices.Check(ctx, id, devs); err != nil {
 			return nil, err
 		}
-		prepared, err = m.Devices.Prepare(ctx, id, s.Devices)
+		prepared, err = m.Devices.Prepare(ctx, id, devs)
 		if err != nil {
 			_ = m.Devices.Release(context.Background(), id)
 			return nil, err
@@ -257,7 +269,7 @@ func (m *Manager) Start(ctx context.Context, id string) (*Result, error) {
 		m.statsMu.Unlock()
 	}
 	release := func() {
-		if len(s.Devices) > 0 {
+		if len(devs) > 0 {
 			if err := m.Devices.Release(context.Background(), id); err != nil {
 				m.log().Warn("vms: giving devices back after a failed start", "id", id, "err", err)
 			}
@@ -325,6 +337,9 @@ func (m *Manager) Start(ctx context.Context, id string) (*Result, error) {
 	}
 	m.setRunning(id, true)
 	undefineDevices()
+	if s.InstallPending() && !s.Unattend.Started {
+		m.answerBootPrompt(st)
+	}
 	m.log().Info("vms: started", "id", id)
 	v, err := m.Get(ctx, id)
 	if err != nil {
@@ -336,9 +351,6 @@ func (m *Manager) Start(ctx context.Context, id string) (*Result, error) {
 // grantMedia lets QEMU read the library files the VM uses.
 func (m *Manager) grantMedia(ctx context.Context, s *Spec) error {
 	files := s.Files()
-	if s.NeedsVirtio() {
-		files = append(files, VirtioFile)
-	}
 	if len(files) == 0 {
 		return nil
 	}
@@ -368,10 +380,12 @@ func (m *Manager) grantMedia(ctx context.Context, s *Spec) error {
 // profile (only the paths libvirt was given) and user are what's left
 // for the moment after this check.
 func (m *Manager) verifyMedia(ctx context.Context, s *Spec) error {
-	files := s.Files()
 	if s.NeedsVirtio() {
-		files = append(files, VirtioFile)
+		if _, err := m.virtioPath(ctx, s.Pool); err != nil {
+			return err
+		}
 	}
+	files := s.Files()
 	if len(files) == 0 {
 		return nil
 	}
@@ -512,6 +526,7 @@ func notRunning(err error) bool {
 func (m *Manager) afterStop(ctx context.Context, st *stored) {
 	id := st.spec.ID
 	m.setRunning(id, false)
+	m.forgetHotplugged(id)
 	m.statsMu.Lock()
 	was := m.prepared[id]
 	delete(m.prepared, id)
@@ -528,6 +543,11 @@ func (m *Manager) afterStop(ctx context.Context, st *stored) {
 		if err := m.saveTPM(st); err != nil {
 			m.log().Warn("vms: saving the TPM state", "id", id, "err", err)
 		}
+	}
+	// An answer disc taken out while the VM ran goes now (it holds the
+	// Windows password).
+	if !st.spec.HasUnattendMedia() {
+		m.removeUnattend(st)
 	}
 }
 
@@ -766,6 +786,9 @@ func (m *Manager) check(ctx context.Context, refreshAddrs bool) {
 		for _, id := range running {
 			if st, err := m.find(ctx, id); err == nil {
 				m.addresses(ctx, st)
+				if st.spec.InstallPending() {
+					m.checkInstalled(ctx, id)
+				}
 			}
 		}
 	}

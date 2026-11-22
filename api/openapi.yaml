@@ -4539,6 +4539,130 @@ paths:
         "400": { $ref: "#/components/responses/Invalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  # ---- VM polish (phase 9, decisions 410-419) ----
+  /vms/catalog:
+    get:
+      operationId: listVMCatalog
+      summary: The verified images (Debian, Ubuntu, Home Assistant OS, VirtIO drivers) this server can fetch by name
+      description: |
+        A create request names one in `catalog`; the root helper downloads it
+        only from the image's own hosts and checks it against its publisher's
+        checksums (Ubuntu's are signature-checked).
+      tags: [vms]
+      responses:
+        "200":
+          description: Images
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/VMCatalogImage" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /vms/usertemplates:
+    get:
+      operationId: listVMUserTemplates
+      summary: Templates saved from VMs ("Make template")
+      tags: [vms]
+      responses:
+        "200":
+          description: Saved templates
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/VMUserTemplate" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /vms/usertemplates/{tid}:
+    parameters:
+      - { name: tid, in: path, required: true, schema: { type: string } }
+    delete:
+      operationId: deleteVMUserTemplate
+      summary: Delete a saved template (a job; its name typed to confirm). VMs made from it keep their disks
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMTemplateDeleteRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /vms/{id}/template:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: makeVMTemplate
+      summary: Save a stopped VM as a template (a job; its disks are copied, its identity left out)
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMMakeTemplateRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: The VM is running }
+  /vms/{id}/schedule:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    put:
+      operationId: setVMSchedule
+      summary: Set how many automatic snapshots of each kind the VM keeps (a job; all zero turns it off)
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMScheduleRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /vms/{id}/usb:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: attachVMUSB
+      summary: Plug a USB device (vendor:product) into the running VM (a job)
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMUSBRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: The VM isn't running }
+  /vms/{id}/usb/detach:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: detachVMUSB
+      summary: Take a USB device out of the running VM (a job)
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMUSBRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: The VM isn't running }
   # ---- end of virtual machines API ----
   # ---- versioned cloud backups (Phase 6 part A, docs/backup.md) ----
   /backup:
@@ -8462,6 +8586,8 @@ components:
         critical: { type: string }
         owner: { type: string }
         assigned: { type: array, items: { type: string } }
+        controller: { type: string, description: "PCI address of the USB controller it's on (a whole controller can go to a VM as a PCI device)" }
+        input: { type: boolean, description: "It has a keyboard, mouse or other HID interface" }
     GPUInfo:
       type: object
       required: [address, vendor, vendorName, model, vramBytes, sharedMemory, functions, driver, bootVga, iommuGroup, owner, users, assigned, problem, hints, vgpu]
@@ -8719,12 +8845,41 @@ components:
           required: [file]
           properties:
             file: { type: string, description: A disk image in the ISO library, copied into the disk when the VM is created }
+            digest: { type: string, description: "sha256:<hex> or sha512:<hex>, checked again while the image is read (set by the server for catalog images)" }
+            catalog: { type: string, description: "The verified image (set by the server): file is in the pool's root-only catalog store, not the ISOs shared folder" }
+        clone:
+          type: object
+          required: [template]
+          properties:
+            template: { type: string, description: "A saved template whose disk of the same name is copied into this one" }
     VMMedia:
       type: object
       required: [kind]
       properties:
-        kind: { type: string, enum: [iso, virtio, cloudinit, empty], description: "iso: a file from the ISO library; virtio: the VirtIO drivers disc; cloudinit: the generated cloud-init disc" }
+        kind: { type: string, enum: [iso, virtio, cloudinit, unattend, empty], description: "iso: a file from the ISO library; virtio: the VirtIO drivers disc; cloudinit: the generated cloud-init disc; unattend: the generated Windows answer disc (new VMs only)" }
         iso: { type: string }
+    VMUnattend:
+      type: object
+      required: [user, locale, pending]
+      properties:
+        user: { type: string, description: The local administrator account Windows Setup makes }
+        computerName: { type: string, maxLength: 15 }
+        locale: { type: string, description: "Language and formats, like en-US" }
+        keyboard: { type: string, description: "Input locale (default the same as locale), or a layout like 0409:00000409" }
+        timeZone: { type: string, description: "A Windows time zone name, like W. Europe Standard Time" }
+        edition: { type: string, description: "The edition to install, as the ISO names it (Windows 11 Pro)" }
+        imageIndex: { type: integer, minimum: 0, maximum: 64, description: "Or its number in install.wim" }
+        hooks: { type: array, items: { type: string }, description: First-logon steps HardyOS ships (by name) }
+        pending: { type: boolean, description: "Windows isn't installed yet (set by the server); passed-through devices and USB hot-plug wait until it is" }
+        started: { type: boolean, description: "The install has started (the first start happened)" }
+    VMSchedule:
+      type: object
+      required: [hourly, daily, weekly, monthly]
+      properties:
+        hourly: { type: integer, minimum: 0, maximum: 48 }
+        daily: { type: integer, minimum: 0, maximum: 62 }
+        weekly: { type: integer, minimum: 0, maximum: 52 }
+        monthly: { type: integer, minimum: 0, maximum: 36 }
     VMNIC:
       type: object
       required: [mode, model]
@@ -8779,11 +8934,16 @@ components:
           properties:
             remote: { type: boolean, description: Publish Sunshine through the VPN for play away from home }
         labels: { type: object, additionalProperties: { type: string } }
+        sound: { type: boolean, description: "An HD audio card, heard through the web console" }
+        clipboard: { type: boolean, description: "Copy and paste with the web console (the guest needs spice-vdagent)" }
+        unattend: { $ref: "#/components/schemas/VMUnattend" }
+        schedule: { $ref: "#/components/schemas/VMSchedule" }
+        fromTemplate: { type: string, description: The saved template the VM was made from }
     VM:
       allOf:
         - $ref: "#/components/schemas/VMSpec"
         - type: object
-          required: [dataset, state, cpuPercent, memoryUsedMB, addresses, passwordSet, restartNeeded, diskUsage]
+          required: [dataset, state, cpuPercent, memoryUsedMB, addresses, passwordSet, restartNeeded, diskUsage, liveUSB, snapshotsBehind]
           properties:
             dataset: { type: string }
             state: { type: string, enum: [running, stopped, paused, shutting-down, crashed, suspended, unknown] }
@@ -8793,6 +8953,8 @@ components:
             passwordSet: { type: boolean }
             restartNeeded: { type: boolean, description: Hardware changed while it ran }
             diskUsage: { type: object, additionalProperties: { type: integer, format: int64 }, description: Bytes each disk uses on the pool }
+            liveUSB: { type: array, items: { type: string }, description: USB devices plugged into the running VM by hand }
+            snapshotsBehind: { type: boolean, description: "A scheduled snapshot has been waiting for a while (the VM is busy or snapshots fail)" }
     VMKeptDisk:
       type: object
       required: [dataset, vm, pool, bytes]
@@ -8852,6 +9014,11 @@ components:
         minDiskGB: { type: integer }
         images: { type: [array, "null"], items: { $ref: "#/components/schemas/VMImage" } }
         notes: { type: [array, "null"], items: { type: string } }
+        catalog: { type: string, description: The verified image (/vms/catalog) the template starts from }
+        unattend: { type: boolean, description: Windows can install by itself }
+        editions: { type: array, items: { type: string }, description: Usual edition names; the first is the default }
+        sound: { type: boolean }
+        clipboard: { type: boolean }
     VMArch:
       type: object
       required: [arch, machine]
@@ -8866,6 +9033,7 @@ components:
         vmport: { type: boolean }
         legacyBios: { type: boolean }
         pit: { type: boolean }
+        soundModel: { type: string }
     VMCapabilities:
       type: object
       required: [supported, problem, kvm, arch, cpus, memoryMB, pools, uefi, secureBoot, tpm, libvirt, bridge, library, virtio, devices, committedMB, security, spoofingFilter]
@@ -8893,9 +9061,10 @@ components:
       required: [id, kind, vm, file, progress, message, done, error, started, finished]
       properties:
         id: { type: string }
-        kind: { type: string, enum: [download, import] }
+        kind: { type: string, enum: [download, import, template, clone] }
         vm: { type: string }
         file: { type: string }
+        digest: { type: string, description: "A catalog image's verified checksum (algo:hex)" }
         progress: { type: number }
         message: { type: string }
         done: { type: boolean }
@@ -8935,6 +9104,7 @@ components:
         password: { type: string, description: The cloud-init user's password (never stored as typed) }
         start: { type: boolean }
         downloads: { type: array, items: { $ref: "#/components/schemas/VMDownload" }, maxItems: 4, description: Files to download into the ISO library first }
+        catalog: { type: string, description: "A verified image (/vms/catalog) for the first disk, fetched and checked by the server" }
         allowOvercommit: { type: boolean, description: "Create the VM even when its (thin) disks are bigger than the pool's free space" }
     VMUpdateRequest:
       type: object
@@ -8959,13 +9129,60 @@ components:
         confirm: { type: string, description: The deleted VM's name }
     VMSnapshot:
       type: object
-      required: [name, label, created, bytes, consistent]
+      required: [name, label, created, bytes, consistent, kind]
       properties:
         name: { type: string }
         label: { type: string }
         created: { type: string, format: date-time }
         bytes: { type: integer, format: int64 }
         consistent: { type: boolean, description: The guest's file systems were frozen first (or it was off) }
+        kind: { type: string, enum: [manual, hourly, daily, weekly, monthly] }
+    VMCatalogImage:
+      type: object
+      required: [id, name, kind, file, verified]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        kind: { type: string, enum: [disk, iso] }
+        file: { type: string, description: Its name in the ISO library }
+        verified: { type: string, description: How it's checked, in plain words }
+    VMUserTemplate:
+      type: object
+      required: [id, name, description, pool, created, from, spec, bytes]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        pool: { type: string }
+        created: { type: string, format: date-time }
+        from: { type: string, description: The VM it was made from }
+        spec: { $ref: "#/components/schemas/VMSpec" }
+        bytes: { type: integer, format: int64 }
+    VMMakeTemplateRequest:
+      type: object
+      required: [templateId, name]
+      properties:
+        templateId: { type: string, description: "Short name: 2-32 lowercase letters, digits and dashes" }
+        name: { type: string, maxLength: 64 }
+        description: { type: string }
+    VMTemplateDeleteRequest:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: string, description: "The template's name or display name" }
+    VMScheduleRequest:
+      type: object
+      required: [schedule]
+      properties:
+        schedule: { $ref: "#/components/schemas/VMSchedule" }
+        confirm: { type: string, description: "The VM's name, needed (400 confirm_required otherwise) when the counts delete automatic snapshots it has now" }
+    VMUSBRequest:
+      type: object
+      required: [device]
+      properties:
+        device: { type: string, description: "vendor:product, like 046d:c52b" }
+        persist: { type: boolean, description: "Also add it to (or remove it from) the VM's devices for its next start" }
+        allowInput: { type: boolean, description: "Confirms giving a keyboard or mouse to the VM (refused otherwise)" }
     VMSnapshotDeleteRequest:
       type: object
       required: [confirm]

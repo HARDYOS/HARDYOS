@@ -53,7 +53,7 @@ func TestCreateLinuxVM(t *testing.T) {
 	for _, want := range []string{
 		"zfs create -o org.hardyos:vm=web -o canmount=on -o devices=off -o setuid=off -o exec=off -o quota=45097156608 tank/vms/web",
 		"zfs create -s -V 32G -o volblocksize=16K -o org.hardyos:vm=web tank/vms/web/disk0",
-		"xorriso -as mkisofs -quiet -volid cidata -joliet -rock -output /mnt/tank/vms/web/cloud-init.iso.new /mnt/tank/vms/web/cloud-init",
+		"xorriso -as mkisofs -quiet -volid cidata -joliet -rock -output /mnt/tank/vms/web/cloud-init.stage/out.iso /mnt/tank/vms/web/cloud-init.stage/in",
 		"virsh -c qemu:///system -q define --validate /run/hardyos/vms/web.xml",
 		"virsh -c qemu:///system -q autostart --disable web",
 	} {
@@ -142,15 +142,7 @@ func gamingVM(t *testing.T, e *testEnv) {
 	t.Helper()
 	e.bridge.name = "br0"
 	e.addISO(t, "Win11_24H2_English_x64.iso", 10)
-	if err := os.MkdirAll(e.isoDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	f, err := os.Create(filepath.Join(e.isoDir, VirtioFile))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = f.Truncate(VirtioSize)
-	f.Close()
+	e.seedVirtio(t)
 	g := fromTemplate(t, "game", "gaming")
 	g.UUID = ""
 	g.Media = []Media{{Kind: MediaISO, ISO: "Win11_24H2_English_x64.iso"}, {Kind: MediaVirtio}}
@@ -181,8 +173,12 @@ func TestStartStopWithDevices(t *testing.T) {
 		t.Fatalf("start asked part D: %s", got)
 	}
 	// The discs are opened up for QEMU, and libvirt is told not to take them.
-	if strings.Join(e.granted, ",") != "Win11_24H2_English_x64.iso,"+VirtioFile {
+	// (The VirtIO disc is root's own, verified copy: nothing to grant.)
+	if strings.Join(e.granted, ",") != "Win11_24H2_English_x64.iso" {
 		t.Fatalf("granted = %v", e.granted)
+	}
+	if !strings.Contains(e.sim.defined["game"], "/mnt/tank/vm-catalog/"+VirtioFile) {
+		t.Fatal("the VirtIO disc isn't the catalog store's")
 	}
 	// It started with the device and was then redefined without it.
 	lines := e.sim.Lines()

@@ -112,6 +112,8 @@ type VMCreateRequest struct {
 	Password  string             `json:"password,omitempty"`
 	Start     bool               `json:"start"`
 	Downloads []vms.DownloadArgs `json:"downloads,omitempty"`
+	// Catalog names a verified image (vms.Catalog) for the first disk.
+	Catalog string `json:"catalog,omitempty"`
 	// AllowOvercommit: the disks may be bigger than the pool's free space.
 	AllowOvercommit bool `json:"allowOvercommit,omitempty"`
 }
@@ -154,7 +156,17 @@ func (s *Server) handleVMCreate(w http.ResponseWriter, r *http.Request, u *auth.
 		writeError(w, http.StatusBadRequest, "invalid", "at most 4 downloads")
 		return
 	}
-	p := vmCreateParams{Spec: req.Spec, Start: req.Start, Downloads: req.Downloads, AllowOvercommit: req.AllowOvercommit}
+	if req.Catalog != "" {
+		if !catalogIDRE.MatchString(req.Catalog) || len(req.Spec.Disks) == 0 || req.Spec.Disks[0].Import != nil || req.Spec.Disks[0].Clone != nil {
+			writeError(w, http.StatusBadRequest, "invalid", "a verified image fills the first disk, which then can't have another image")
+			return
+		}
+	}
+	if req.Spec.Unattend != nil && len(req.Password) < 8 {
+		writeError(w, http.StatusBadRequest, "invalid", "the Windows account needs a password of at least 8 characters")
+		return
+	}
+	p := vmCreateParams{Spec: req.Spec, Start: req.Start, Downloads: req.Downloads, Catalog: req.Catalog, AllowOvercommit: req.AllowOvercommit}
 	if req.Password != "" {
 		p.PasswordRef = jobSecrets.put(req.Password)
 	}
@@ -170,6 +182,12 @@ func (s *Server) handleVMCreate(w http.ResponseWriter, r *http.Request, u *auth.
 func checkSpecLoose(w http.ResponseWriter, sp *vms.Spec) bool {
 	s := *sp
 	s.Firmware.SecureBoot, s.Firmware.TPM = false, false
+	// The first-logon steps are root's to know (code registered there).
+	if sp.Unattend != nil {
+		u := *sp.Unattend
+		u.Hooks = nil
+		s.Unattend = &u
+	}
 	if sp.CloudInit != nil {
 		ci := *sp.CloudInit
 		ci.PasswordHash = "$6$x$" + strings.Repeat("a", 86) // a password may follow
