@@ -20,18 +20,18 @@ const testCFToken = "abcdefghijklmnopqrstuvwxyz0123456789ABCD"
 
 func dnsServer(t *testing.T) (*Server, *cftest.Server, string, *time.Time) {
 	t.Helper()
-	return dnsServerWith(t, nil)
+	return dnsServerWith(t, nil, nil)
 }
 
 // dnsServerWith is dnsServer with the standby's take-over state.
-func dnsServerWith(t *testing.T, takenOver func() (nbstandby.TakeOverInfo, bool)) (*Server, *cftest.Server, string, *time.Time) {
+func dnsServerWith(t *testing.T, takenOver func() (nbstandby.TakeOverInfo, bool), binding func() (nbstandby.Binding, bool)) (*Server, *cftest.Server, string, *time.Time) {
 	t.Helper()
 	cf := cftest.New(testCFToken, "example.net")
 	t.Cleanup(cf.Close)
 	dir := filepath.Join(t.TempDir(), "keys")
 	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
 	s := &Server{}
-	d := registerDNS(s, DNSEnv{KeyDir: dir, Client: cf.Client, Now: func() time.Time { return now }, StandbyTakenOver: takenOver})
+	d := registerDNS(s, DNSEnv{KeyDir: dir, Client: cf.Client, Now: func() time.Time { return now }, StandbyTakenOver: takenOver, StandbyBinding: binding})
 	registerRecordSet(s, d)
 	registerStandbyDNS(s, d)
 	return s, cf, dir, &now

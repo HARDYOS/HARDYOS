@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -69,25 +70,48 @@ func (s *Settings) Validate() error {
 	if s.PublicIPv6 != "" {
 		s.PublicIPv6 = netip.MustParseAddr(s.PublicIPv6).String()
 	}
-	if s.ConnectFrom == nil {
-		s.ConnectFrom = []string{}
+	from, err := CanonicalFrom(s.ConnectFrom)
+	if err != nil {
+		return err
 	}
-	return ScriptSetup{Hostname: "x.invalid", From: s.ConnectFrom}.validateFrom()
+	s.ConnectFrom = from
+	return nil
 }
 
 func (s ScriptSetup) validateFrom() error {
-	if len(s.From) > 8 {
-		return errors.New("at most 8 addresses HardyOS connects from")
+	_, err := CanonicalFrom(s.From)
+	return err
+}
+
+// fromRE is everything a canonical address or prefix can hold: the from=
+// list goes into the VPS's authorized_keys inside double quotes, in a
+// script run as root, so nothing else may ever reach it.
+var fromRE = regexp.MustCompile(`^[0-9A-Fa-f.:/]{2,49}$`)
+
+// CanonicalFrom checks the addresses HardyOS connects from and returns them
+// in canonical form: plain IPv4/IPv6 addresses or prefixes, never a zone
+// (netip accepts "fe80::1%<anything>"), at most 8.
+func CanonicalFrom(in []string) ([]string, error) {
+	if len(in) > 8 {
+		return nil, errors.New("at most 8 addresses HardyOS connects from")
 	}
-	for _, f := range s.From {
-		if _, err := netip.ParsePrefix(f); err == nil {
-			continue
+	out := make([]string, 0, len(in))
+	for _, f := range in {
+		f = strings.Trim(f, " ")
+		var c string
+		if p, err := netip.ParsePrefix(f); err == nil && p.Addr().Zone() == "" {
+			c = p.Masked().String()
+		} else if a, err := netip.ParseAddr(f); err == nil && a.Zone() == "" {
+			c = a.String()
+		} else {
+			return nil, fmt.Errorf("%q isn't an address or prefix", clip(f, 60))
 		}
-		if _, err := netip.ParseAddr(f); err != nil {
-			return fmt.Errorf("%q isn't an address or prefix", clip(f, 60))
+		if !fromRE.MatchString(c) {
+			return nil, fmt.Errorf("%q isn't an address or prefix", clip(f, 60))
 		}
+		out = append(out, c)
 	}
-	return nil
+	return out, nil
 }
 
 // SyncRow is one sync attempt.

@@ -1,8 +1,10 @@
 package priv
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/cfdns"
 	"github.com/hardyos/hardyos/daemon/internal/cfdns/cftest"
@@ -24,10 +26,14 @@ type takeover struct {
 
 func (t *takeover) get() (nbstandby.TakeOverInfo, bool) { return t.info, t.on }
 
+// binding is the standby's current binding, taken over or not.
+func (t *takeover) binding() (nbstandby.Binding, bool) { return t.info, t.info.Host != "" }
+
 func standbyDNS(t *testing.T) (*Server, *cftest.Server, *takeover) {
 	t.Helper()
-	to := &takeover{info: nbstandby.TakeOverInfo{Host: standbyName, IPv4: homeV4, IPv6: homeV6}}
-	s, cf, dir, _ := dnsServerWith(t, to.get)
+	to := &takeover{info: nbstandby.TakeOverInfo{Host: standbyName, IPv4: homeV4, IPv6: homeV6,
+		VPSHost: "198.51.100.10", VPSPort: 22, HostKeyFP: "SHA256:vps"}}
+	s, cf, dir, _ := dnsServerWith(t, to.get, to.binding)
 	if err := dnsCall(t, s, OpDNSTokenSet, DNSTokenSetArgs{Token: testCFToken, Base: "home.example.net"}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +187,7 @@ func TestStandbyNameCreatedRecord(t *testing.T) {
 }
 
 func TestStandbyNameRefusesOddRecords(t *testing.T) {
-	s, cf, _ := standbyDNS(t)
+	s, cf, to := standbyDNS(t)
 	cf.Add("example.net", cfdns.Record{Type: "CNAME", Name: standbyName, Content: "vps.hoster.example", TTL: 1})
 	var pv DNSStandbyPreview
 	if err := dnsCall(t, s, OpDNSStandbyPreview, DNSStandbyNameArgs{Name: standbyName}, &pv); err != nil {
@@ -196,6 +202,7 @@ func TestStandbyNameRefusesOddRecords(t *testing.T) {
 	if err := dnsCall(t, s, OpDNSStandbyAdopt, DNSStandbyAdoptArgs{Name: "new.example.net", Confirm: "new.example.net", Token: testCFToken}, nil); err == nil {
 		t.Fatal("adopted an empty name")
 	}
+	to.info.Host = "nb.example.net"
 	cf.Add("example.net", cfdns.Record{Type: "A", Name: "nb.example.net", Content: "198.51.100.10", TTL: 1})
 	_ = dnsCall(t, s, OpDNSStandbyPreview, DNSStandbyNameArgs{Name: "nb.example.net"}, &pv)
 	if err := dnsCall(t, s, OpDNSStandbyAdopt, DNSStandbyAdoptArgs{Name: "nb.example.net", Confirm: "nb.example.net", IDs: []string{pv.Records[0].ID}, Token: testCFToken}, nil); err != nil {
@@ -218,5 +225,115 @@ func TestPublicAddress(t *testing.T) {
 		if publicAddress(a) != want {
 			t.Errorf("%s: %v", a, !want)
 		}
+	}
+}
+
+// The adopted name is bound to this server's addresses and the VPS (security
+// review N2): when any of them changes afterwards, a take-over can't move the
+// name until the token is pasted again (rebind) or the console rebinds.
+func TestStandbyNameBinding(t *testing.T) {
+	s, cf, to := standbyDNS(t)
+	cf.Add("example.net", cfdns.Record{Type: "A", Name: standbyName, Content: "198.51.100.10", TTL: 300})
+	var pv DNSStandbyPreview
+	if err := dnsCall(t, s, OpDNSStandbyPreview, DNSStandbyNameArgs{Name: standbyName}, &pv); err != nil {
+		t.Fatal(err)
+	}
+	adopt := DNSStandbyAdoptArgs{Name: standbyName, Confirm: standbyName, IDs: []string{pv.Records[0].ID}, Token: testCFToken}
+	saved := to.info
+	to.info.IPv4 = ""
+	if err := dnsCall(t, s, OpDNSStandbyAdopt, adopt, nil); err == nil {
+		t.Fatal("adopted without a public address")
+	}
+	to.info = saved
+	to.info.Host = "other.example.net"
+	if err := dnsCall(t, s, OpDNSStandbyAdopt, adopt, nil); err == nil {
+		t.Fatal("adopted for a standby with another name")
+	}
+	to.info = saved
+	if err := dnsCall(t, s, OpDNSStandbyAdopt, adopt, nil); err != nil {
+		t.Fatal(err)
+	}
+	if b, ok := StandbyDNSBound(to.keys); !ok || b != saved {
+		t.Fatalf("bound %+v %v", b, ok)
+	}
+
+	// A compromised hardyd changes the address (or the VPS, or its host key)
+	// and takes over: the name doesn't move.
+	for what, change := range map[string]func(*nbstandby.Binding){
+		"address":  func(b *nbstandby.Binding) { b.IPv4 = "8.8.8.8" },
+		"ipv6":     func(b *nbstandby.Binding) { b.IPv6 = "2606:4700::2" },
+		"vps":      func(b *nbstandby.Binding) { b.VPSHost = "203.0.113.9" },
+		"vps port": func(b *nbstandby.Binding) { b.VPSPort = 2222 },
+		"host key": func(b *nbstandby.Binding) { b.HostKeyFP = "SHA256:evil" },
+	} {
+		to.info = saved
+		change(&to.info)
+		to.on = true
+		if err := dnsCall(t, s, OpDNSRecordSet, DNSRecordSetArgs{Name: standbyName, Type: "A", Content: to.info.IPv4, TTL: 60}, nil); err == nil {
+			t.Errorf("%s changed: the name moved", what)
+		}
+		// Rebinding: never while taken over, only with the token.
+		if err := dnsCall(t, s, OpDNSStandbyRebind, DNSStandbyRebindArgs{Token: testCFToken}, nil); err == nil {
+			t.Errorf("%s: rebound while taken over", what)
+		}
+		to.on = false
+		if err := dnsCall(t, s, OpDNSStandbyRebind, DNSStandbyRebindArgs{}, nil); err == nil {
+			t.Errorf("%s: rebound without the token", what)
+		}
+		if err := dnsCall(t, s, OpDNSStandbyRebind, DNSStandbyRebindArgs{Token: strings.Repeat("z", 40)}, nil); err == nil {
+			t.Errorf("%s: rebound with another token", what)
+		}
+	}
+	if got := cf.Find(standbyName, "A"); got[0].Content != "198.51.100.10" {
+		t.Fatalf("%+v", got)
+	}
+
+	// The administrator confirms the new address with the token.
+	to.info = saved
+	to.info.IPv4 = "93.184.215.15"
+	if err := dnsCall(t, s, OpDNSStandbyRebind, DNSStandbyRebindArgs{Token: testCFToken}, nil); err != nil {
+		t.Fatal(err)
+	}
+	to.on = true
+	if err := dnsCall(t, s, OpDNSRecordSet, DNSRecordSetArgs{Name: standbyName, Type: "A", Content: "93.184.215.15", TTL: 60}, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Restore puts back the VPS's record even if the address changed again
+	// after the name moved (it matches the bound address, not the current).
+	to.info.IPv4 = "93.184.215.16"
+	var res DNSStandbyRestoreResult
+	if err := dnsCall(t, s, OpDNSStandbyRestore, struct{}{}, &res); err != nil || res.Restored != 1 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	to.on = false
+
+	// The console rebinds and forgets without the token.
+	env := DNSEnv{KeyDir: to.keys, Client: cf.Client, Now: time.Now, StandbyTakenOver: to.get, StandbyBinding: to.binding}
+	if err := ConsoleRebind(env); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := StandbyDNSBound(to.keys); b.IPv4 != "93.184.215.16" {
+		t.Fatalf("%+v", b)
+	}
+	to.on = true
+	if err := ConsoleForget(env); err == nil {
+		t.Fatal("console forgot while taken over")
+	}
+	to.on = false
+	if err := ConsoleForget(env); err != nil {
+		t.Fatal(err)
+	}
+	if StandbyDNSName(to.keys) != "" {
+		t.Fatal("still adopted")
+	}
+	pvc, err := ConsolePreview(context.Background(), env, standbyName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ConsoleAdopt(context.Background(), env, standbyName, []string{pvc.Records[0].ID}); err != nil {
+		t.Fatal(err)
+	}
+	if StandbyDNSName(to.keys) != standbyName {
+		t.Fatal("console adopt")
 	}
 }

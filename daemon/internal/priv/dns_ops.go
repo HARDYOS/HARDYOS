@@ -57,6 +57,7 @@ const (
 	OpDNSStandbyAdopt   = "dns.standby.adopt"
 	OpDNSStandbyRestore = "dns.standby.restore"
 	OpDNSStandbyForget  = "dns.standby.forget"
+	OpDNSStandbyRebind  = "dns.standby.rebind"
 )
 
 // DNSStateFile is root's DNS state in the keys folder ('_' first, like the
@@ -94,6 +95,17 @@ type DNSStandbyState struct {
 	Name      string       `json:"name"`
 	AdoptedAt time.Time    `json:"adoptedAt"`
 	Adopted   []DNSAdopted `json:"adopted"`
+	// Bound is what was allowed with the token: the name, this server's
+	// addresses and the VPS (decision 424). DNS moves only while the
+	// standby's current values are exactly these.
+	Bound   nbstandby.Binding `json:"bound"`
+	BoundAt time.Time         `json:"boundAt"`
+}
+
+// DNSStandbyRebindArgs confirms the standby's current addresses and VPS
+// with the Cloudflare token.
+type DNSStandbyRebindArgs struct {
+	Token string `json:"token"`
 }
 
 // DNSAdopted is one adopted record as it was.
@@ -209,6 +221,9 @@ type DNSEnv struct {
 	// addresses only then, and adopted or forgotten only otherwise. nil:
 	// never taken over.
 	StandbyTakenOver func() (nbstandby.TakeOverInfo, bool)
+	// StandbyBinding is the standby's current binding from root's own
+	// state (nbstandby.CurrentBinding); false when it isn't configured.
+	StandbyBinding func() (nbstandby.Binding, bool)
 }
 
 type dnsState struct {
@@ -237,6 +252,8 @@ type dnsChallenge struct {
 type dnsOps struct {
 	env DNSEnv
 	mu  sync.Mutex
+	// console: run by hardyctl as root (no token pasted again).
+	console bool
 }
 
 // tokenRE is what a Cloudflare API token looks like (they are 40
@@ -851,6 +868,18 @@ func registerStandbyDNS(s *Server, d *dnsOps) {
 	s.Handle(OpDNSStandbyAdopt, typed(func(ctx context.Context, a DNSStandbyAdoptArgs) (any, error) {
 		return d.adoptStandby(ctx, a)
 	}))
+	s.Handle(OpDNSStandbyRebind, typed(func(ctx context.Context, a DNSStandbyRebindArgs) (any, error) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		st, err := d.load()
+		if err != nil {
+			return nil, Errorf(CodeFailed, "dns state: %v", err)
+		}
+		if err := d.sameToken(st, a.Token); err != nil {
+			return nil, err
+		}
+		return d.rebind(st)
+	}))
 	s.Handle(OpDNSStandbyRestore, func(ctx context.Context, _ json.RawMessage) (any, error) {
 		return d.restoreStandby(ctx)
 	})
@@ -938,8 +967,10 @@ func (d *dnsOps) adoptStandby(ctx context.Context, a DNSStandbyAdoptArgs) (any, 
 	if d.takenOver() {
 		return nil, Errorf(CodeForbidden, "the NetBird standby has taken over: hand back first")
 	}
-	if err := d.sameToken(st, a.Token); err != nil {
-		return nil, err
+	if !d.console {
+		if err := d.sameToken(st, a.Token); err != nil {
+			return nil, err
+		}
 	}
 	if st.Standby != nil {
 		// Adopting again could record HardyOS's own address as the
@@ -974,7 +1005,12 @@ func (d *dnsOps) adoptStandby(ctx context.Context, a DNSStandbyAdoptArgs) (any, 
 			return nil, Errorf(CodeBadArgs, "the records for %s changed since you looked: look again", name)
 		}
 	}
-	st.Standby = &DNSStandbyState{Name: name, AdoptedAt: d.env.Now().UTC(), Adopted: recs}
+	bound, err := d.currentBinding(name)
+	if err != nil {
+		return nil, err
+	}
+	now := d.env.Now().UTC()
+	st.Standby = &DNSStandbyState{Name: name, AdoptedAt: now, Adopted: recs, Bound: bound, BoundAt: now}
 	if err := d.save(st); err != nil {
 		return nil, Errorf(CodeFailed, "dns state: %v", err)
 	}
@@ -997,10 +1033,12 @@ func (d *dnsOps) restoreStandby(ctx context.Context) (any, error) {
 		return nil, Errorf(CodeBadArgs, "there is no standby name")
 	}
 	sb := st.Standby
-	info, ok := d.takeOverInfo()
-	if !ok || info.Host != sb.Name {
+	cur, ok := d.takeOverInfo()
+	if !ok || cur.Host != sb.Name {
 		return nil, Errorf(CodeForbidden, "the NetBird standby hasn't taken over %s", sb.Name)
 	}
+	// What HardyOS set is the bound address, whatever changed since.
+	info := sb.Bound
 	ours := func(typ, content string) bool {
 		c := cfdns.Normalize(content)
 		return (typ == "A" && info.IPv4 != "" && c == info.IPv4) || (typ == "AAAA" && info.IPv6 != "" && c == strings.ToLower(info.IPv6))
@@ -1085,6 +1123,42 @@ func (d *dnsOps) takenOver() bool {
 	return ok
 }
 
+// currentBinding is the standby's binding from root's own state, for name.
+func (d *dnsOps) currentBinding(name string) (nbstandby.Binding, error) {
+	if d.env.StandbyBinding == nil {
+		return nbstandby.Binding{}, Errorf(CodeUnavailable, "the NetBird standby isn't available")
+	}
+	b, ok := d.env.StandbyBinding()
+	if !ok || b.Host != name {
+		return nbstandby.Binding{}, Errorf(CodeBadArgs, "set up the NetBird standby for %s first (its VPS and this server's public address)", name)
+	}
+	if !nbstandby.PublicAddr(b.IPv4, true) {
+		return nbstandby.Binding{}, Errorf(CodeBadArgs, "save this server's public IPv4 address in the standby first")
+	}
+	return b, nil
+}
+
+// rebind records the standby's current binding for the adopted name (the
+// caller checked the token, or is the console).
+func (d *dnsOps) rebind(st *dnsState) (any, error) {
+	if st.Standby == nil {
+		return nil, Errorf(CodeBadArgs, "there is no standby name")
+	}
+	if d.takenOver() {
+		return nil, Errorf(CodeForbidden, "the NetBird standby has taken over: hand back first")
+	}
+	b, err := d.currentBinding(st.Standby.Name)
+	if err != nil {
+		return nil, err
+	}
+	st.Standby.Bound, st.Standby.BoundAt = b, d.env.Now().UTC()
+	if err := d.save(st); err != nil {
+		return nil, Errorf(CodeFailed, "dns state: %v", err)
+	}
+	slog.Info("dns standby name rebound", "name", st.Standby.Name, "ipv4", b.IPv4, "vps", b.VPSHost)
+	return st.status(), nil
+}
+
 // sameToken checks a token pasted again against the sealed one.
 func (d *dnsOps) sameToken(st *dnsState, pasted string) error {
 	tok, err := d.open(st)
@@ -1109,6 +1183,9 @@ func (d *dnsOps) setStandbyRecord(ctx context.Context, st *dnsState, name, typ, 
 	info, ok := d.takeOverInfo()
 	if !ok || info.Host != name {
 		return nil, Errorf(CodeForbidden, "the NetBird standby hasn't taken over %s", name)
+	}
+	if info != st.Standby.Bound {
+		return nil, Errorf(CodeForbidden, "the standby's public address or VPS changed since %s was allowed: confirm again with the Cloudflare token", name)
 	}
 	want := info.IPv4
 	if typ == "AAAA" {
@@ -1174,6 +1251,101 @@ func (d *dnsOps) setStandbyRecord(ctx context.Context, st *dnsState, name, typ, 
 	}
 	slog.Info("dns standby name set", "name", name, "type", typ, "content", content, "action", res.Action)
 	return res, nil
+}
+
+// StandbyDNSBound is the binding recorded with the adopted name.
+func StandbyDNSBound(keyDir string) (nbstandby.Binding, bool) {
+	d := &dnsOps{env: DNSEnv{KeyDir: keyDir}}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	st, err := d.load()
+	if err != nil || st.Standby == nil {
+		return nbstandby.Binding{}, false
+	}
+	return st.Standby.Bound, true
+}
+
+// Console operations (hardyctl netbird-standby ..., as root on the server):
+// the person at the console stands in for the token pasted again, so they
+// work even when hardyd is suspected. They write root's DNS state directly;
+// run them while nothing else changes the standby.
+
+// ConsoleEnv builds the DNS operations for the console.
+func ConsoleEnv(keyDir, standbyDir string) DNSEnv {
+	return DNSEnv{KeyDir: keyDir, Client: cfdns.New, Now: time.Now,
+		StandbyTakenOver: func() (nbstandby.TakeOverInfo, bool) { return nbstandby.TakenOver(standbyDir) },
+		StandbyBinding:   func() (nbstandby.Binding, bool) { return nbstandby.CurrentBinding(standbyDir) }}
+}
+
+// ConsoleRebind records the standby's current binding.
+func ConsoleRebind(env DNSEnv) error {
+	d := &dnsOps{env: env}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	st, err := d.load()
+	if err != nil {
+		return err
+	}
+	_, err = d.rebind(st)
+	return err
+}
+
+// ConsoleForget stops managing the adopted name (not while taken over).
+func ConsoleForget(env DNSEnv) error {
+	d := &dnsOps{env: env}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	st, err := d.load()
+	if err != nil {
+		return err
+	}
+	if st.Standby == nil {
+		return nil
+	}
+	if d.takenOver() {
+		return errors.New("the NetBird standby has taken over: hand back first")
+	}
+	var keep []DNSRecordState
+	for _, r := range st.Records {
+		if r.Name != st.Standby.Name {
+			keep = append(keep, r)
+		}
+	}
+	st.Records, st.Standby = keep, nil
+	return d.save(st)
+}
+
+// ConsolePreview lists the records at name.
+func ConsolePreview(ctx context.Context, env DNSEnv, name string) (*DNSStandbyPreview, error) {
+	d := &dnsOps{env: env}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	st, err := d.load()
+	if err != nil {
+		return nil, err
+	}
+	n, err := st.standbyName(name)
+	if err != nil {
+		return nil, err
+	}
+	cl, err := d.client(st)
+	if err != nil {
+		return nil, err
+	}
+	recs, err := d.standbyRecords(ctx, cl, st, n)
+	if err != nil {
+		return nil, err
+	}
+	out := &DNSStandbyPreview{Name: n, Zone: st.Zone, Records: recs}
+	out.Adoptable, out.Problem = adoptable(recs)
+	return out, nil
+}
+
+// ConsoleAdopt adopts exactly ids at name, without the token (the console).
+func ConsoleAdopt(ctx context.Context, env DNSEnv, name string, ids []string) error {
+	d := &dnsOps{env: env, console: true}
+	_, err := d.adoptStandby(ctx, DNSStandbyAdoptArgs{Name: name, Confirm: name, IDs: ids})
+	return err
 }
 
 // StandbyDNSName is the adopted NetBird standby name in root's DNS state

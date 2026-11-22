@@ -619,3 +619,45 @@ func TestStageWithoutGenerationRefusesHandback(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+// The adopted name's binding (security review N2): Stage refuses while the
+// addresses, the VPS or its host key differ from what the token allowed.
+func TestStageRefusesChangedBinding(t *testing.T) {
+	f := newRoot(t)
+	f.configure(t)
+	if _, err := f.root.Address(t.Context(), AddressArgs{IPv4: "93.184.215.14", Confirm: testHost}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.root.Sync(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	var bound Binding
+	adopted := false
+	f.root.DNSBound = func() (Binding, bool) { return bound, adopted }
+	if _, err := f.root.Stage(t.Context(), ConfirmArgs{Confirm: testHost}); err == nil || !strings.Contains(err.Error(), "Cloudflare") {
+		t.Fatalf("staged without an adopted name: %v", err)
+	}
+	cur, ok := CurrentBinding(f.root.Dir)
+	if !ok || cur.Host != testHost || cur.IPv4 != "93.184.215.14" || cur.VPSHost != "vps.example.net" || cur.VPSPort != 22 || !strings.HasPrefix(cur.HostKeyFP, "SHA256:") {
+		t.Fatalf("%+v %v", cur, ok)
+	}
+	adopted = true
+	for what, change := range map[string]func(*Binding){
+		"address":  func(b *Binding) { b.IPv4 = "8.8.8.8" },
+		"vps":      func(b *Binding) { b.VPSHost = "evil.example.net" },
+		"host key": func(b *Binding) { b.HostKeyFP = "SHA256:evil" },
+	} {
+		bound = cur
+		change(&bound)
+		if _, err := f.root.Stage(t.Context(), ConfirmArgs{Confirm: testHost}); err == nil || !strings.Contains(err.Error(), "rebind") {
+			t.Errorf("%s: %v", what, err)
+		}
+	}
+	bound = cur
+	if _, err := f.root.Stage(t.Context(), ConfirmArgs{Confirm: testHost}); err != nil {
+		t.Fatal(err)
+	}
+	if info, ok := TakenOver(f.root.Dir); !ok || info != cur {
+		t.Fatalf("%+v", info)
+	}
+}

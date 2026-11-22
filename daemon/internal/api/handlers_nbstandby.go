@@ -76,6 +76,12 @@ type NBStandbyDNS struct {
 	// needs the standby name extension, decision 424).
 	InBase bool `json:"inBase"`
 	InZone bool `json:"inZone"`
+	// Bound is what the token allowed when the name was adopted (decision
+	// 424): the name, this server's addresses and the VPS. NeedsRebind:
+	// the current ones differ, so a take-over refuses until the token is
+	// pasted again (or hardyctl netbird-standby rebind on the console).
+	Bound       *nbstandby.Binding `json:"bound,omitempty"`
+	NeedsRebind bool               `json:"needsRebind"`
 }
 
 // NBPortForward is one router port forward the standby needs.
@@ -130,6 +136,7 @@ func (s *Server) nbStandbyRoutes() {
 	m.Handle("GET /api/v1/netbird-standby/dns", s.admin(s.handleNBStandbyDNSPreview))
 	m.Handle("POST /api/v1/netbird-standby/dns", s.admin(s.handleNBStandbyDNSAdopt))
 	m.Handle("DELETE /api/v1/netbird-standby/dns", s.admin(s.handleNBStandbyDNSForget))
+	m.Handle("POST /api/v1/netbird-standby/dns/rebind", s.admin(s.handleNBStandbyDNSRebind))
 	m.Handle("POST /api/v1/netbird-standby/takeover", s.admin(s.handleNBStandbyTakeover))
 	m.Handle("POST /api/v1/netbird-standby/handback", s.admin(s.handleNBStandbyHandback))
 	m.Handle("DELETE /api/v1/netbird-standby", s.admin(s.handleNBStandbyForget))
@@ -168,6 +175,8 @@ func (s *Server) nbsDNS(ctx context.Context, host string) (NBStandbyDNS, *priv.D
 	out.TokenSet, out.Base, out.Zone = st.Set, st.Base, st.Zone
 	if st.Standby != nil {
 		out.Name, out.Adopted = st.Standby.Name, st.Standby.Adopted
+		b := st.Standby.Bound
+		out.Bound = &b
 	}
 	if host != "" && st.Set {
 		out.InBase = cfdns.Under(host, st.Base, false)
@@ -213,6 +222,11 @@ func (s *Server) handleNBStandby(w http.ResponseWriter, r *http.Request, _ *auth
 		host = st.Hostname
 	}
 	out.DNS, _ = s.nbsDNS(ctx, host)
+	if st != nil && out.DNS.Bound != nil {
+		cur := nbstandby.Binding{Host: st.Hostname, IPv4: st.PublicIPv4, IPv6: st.PublicIPv6,
+			VPSHost: st.VPSHost, VPSPort: st.VPSPort, HostKeyFP: st.HostKeyFP}
+		out.DNS.NeedsRebind = *out.DNS.Bound != cur
+	}
 	if o, err := s.appsStatus(ctx); err == nil {
 		if a := findApp(o, ports.NetBirdStandbyApp); a != nil {
 			out.App = NBStandbyApp{Installed: true, State: a.State, Version: a.Version}
@@ -490,6 +504,38 @@ func (s *Server) handleNBStandbyDNSForget(w http.ResponseWriter, r *http.Request
 		"netbird.standby.dns.forget", d.Name, nil)
 }
 
+// NBStandbyDNSRebindRequest confirms the standby's current addresses and
+// VPS for the adopted name with the Cloudflare token pasted again.
+type NBStandbyDNSRebindRequest struct {
+	Token string `json:"token"`
+}
+
+func (s *Server) handleNBStandbyDNSRebind(w http.ResponseWriter, r *http.Request, u *auth.User) {
+	if !s.nbsReady(w) {
+		return
+	}
+	var req NBStandbyDNSRebindRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if st, err := s.nbsRootStatus(r.Context()); err == nil && st.Mode == nbstandby.ModeTakenOver {
+		writeError(w, http.StatusConflict, "taken_over", "HardyOS has taken over: hand back first")
+		return
+	}
+	d, _ := s.nbsDNS(r.Context(), "")
+	if d.Name == "" {
+		writeError(w, http.StatusBadRequest, "no_name", "HardyOS doesn't manage a standby name")
+		return
+	}
+	if !validTokenShape(req.Token) {
+		writeError(w, http.StatusBadRequest, "token_required", "paste the Cloudflare token again (the one saved in Control Panel › Hostnames)")
+		return
+	}
+	s.submit(w, r, u, JobKindNBStandbyDNS, "Confirm the standby's address and VPS for "+d.Name,
+		nbsDNSParams{Action: "rebind", Name: d.Name, TokenRef: jobSecrets.put(strings.TrimSpace(req.Token))},
+		"netbird.standby.dns.rebind", d.Name, nil)
+}
+
 func (s *Server) handleNBStandbyTakeover(w http.ResponseWriter, r *http.Request, u *auth.User) {
 	if !s.nbsReady(w) {
 		return
@@ -751,6 +797,10 @@ func (s *Server) runNBStandbyDNS(jc *jobs.Context) (any, error) {
 		}
 	case "forget":
 		if err := s.cfg.Priv.Call(jc, priv.OpDNSStandbyForget, priv.DNSStandbyForgetArgs{Confirm: p.Confirm, Token: tok}, &st); err != nil {
+			return nil, err
+		}
+	case "rebind":
+		if err := s.cfg.Priv.Call(jc, priv.OpDNSStandbyRebind, priv.DNSStandbyRebindArgs{Token: tok}, &st); err != nil {
 			return nil, err
 		}
 	default:

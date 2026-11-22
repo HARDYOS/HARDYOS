@@ -152,10 +152,13 @@ func newNBSEnv(t *testing.T) *nbsEnv {
 	keys := filepath.Join(t.TempDir(), "keys")
 	ps := &priv.Server{AllowedUIDs: []uint32{uint32(os.Getuid())}}
 	nbsDir := filepath.Join(keys, "netbird-standby")
-	priv.RegisterDNS(ps, priv.DNSEnv{KeyDir: keys, Client: e.cf.Client, StandbyTakenOver: func() (nbstandby.TakeOverInfo, bool) { return nbstandby.TakenOver(nbsDir) }})
+	priv.RegisterDNS(ps, priv.DNSEnv{KeyDir: keys, Client: e.cf.Client,
+		StandbyTakenOver: func() (nbstandby.TakeOverInfo, bool) { return nbstandby.TakenOver(nbsDir) },
+		StandbyBinding:   func() (nbstandby.Binding, bool) { return nbstandby.CurrentBinding(nbsDir) }})
 	key := bytes.Repeat([]byte{9}, 32)
 	priv.RegisterNetBirdStandby(ps, &nbstandby.Root{Dir: nbsDir, Key: func() ([]byte, error) { return key, nil },
-		Remote: func(nbstandby.SSHTarget) nbstandby.Remote { return e.vps }, Apps: e.apps, Net: e.net})
+		Remote: func(nbstandby.SSHTarget) nbstandby.Remote { return e.vps }, Apps: e.apps, Net: e.net,
+		DNSBound: func() (nbstandby.Binding, bool) { return priv.StandbyDNSBound(keys) }})
 	// The apps engine, as far as the standby uses it.
 	ps.Handle(priv.OpAppsStatus, func(context.Context, json.RawMessage) (any, error) {
 		e.apps.mu.Lock()
@@ -311,6 +314,15 @@ func TestNBStandbyAPI(t *testing.T) {
 		t.Fatalf("adopt another name = %d", code)
 	}
 	jobOK(t, admin, admin.do("POST", "/api/v1/netbird-standby/dns", NBStandbyDNSRequest{Name: nbsHost, Confirm: nbsHost, IDs: []string{pv.Records[0].ID}, Token: cfTok}, &acc), acc, "adopt")
+	admin.do("GET", "/api/v1/netbird-standby", nil, &st)
+	if st.DNS.Bound == nil || st.DNS.Bound.Host != nbsHost || st.DNS.Bound.IPv4 == "" || st.DNS.Bound.VPSHost == "" || st.DNS.NeedsRebind {
+		t.Fatalf("binding: %+v", st.DNS)
+	}
+	// Rebinding needs the token pasted again.
+	if code := admin.do("POST", "/api/v1/netbird-standby/dns/rebind", NBStandbyDNSRebindRequest{}, nil); code != 400 {
+		t.Fatalf("rebind without the token = %d", code)
+	}
+	jobOK(t, admin, admin.do("POST", "/api/v1/netbird-standby/dns/rebind", NBStandbyDNSRebindRequest{Token: cfTok}, &acc), acc, "rebind")
 
 	// Take over: typed name, the app installed.
 	if code := admin.do("POST", "/api/v1/netbird-standby/takeover", nbstandby.TakeOverArgs{Confirm: "vpn.example"}, nil); code != 400 {

@@ -49,6 +49,10 @@ type Root struct {
 	// DNSName is the NetBird standby name adopted in root's DNS state ("" when
 	// none): the hostname can't move away from it (decision 424).
 	DNSName func() string
+	// DNSBound is the binding recorded when the name was adopted (false
+	// when none): a take-over is staged only while it equals the current
+	// one.
+	DNSBound func() (Binding, bool)
 
 	mu     sync.Mutex // state file
 	syncMu sync.Mutex // one transfer at a time
@@ -314,12 +318,11 @@ func (r *Root) Configure(ctx context.Context, a ConfigureArgs) (*Status, error) 
 		// During a take-over the name leads here, never to the VPS.
 		return nil, problemf("the VPS's SSH address can't be the NetBird name itself (it points here during a take-over): use the VPS's own name or address")
 	}
-	if a.From == nil {
-		a.From = []string{}
-	}
-	if err := (ScriptSetup{From: a.From}).validateFrom(); err != nil {
+	from, err := CanonicalFrom(a.From)
+	if err != nil {
 		return nil, &Problem{Msg: err.Error()}
 	}
+	a.From = from
 	if r.DNSName != nil {
 		if adopted := r.DNSName(); adopted != "" && adopted != name {
 			return nil, problemf("HardyOS manages %s in Cloudflare: stop managing it first (step 4) to use another name", adopted)
@@ -766,6 +769,15 @@ func (r *Root) Stage(ctx context.Context, a ConfirmArgs) (*StageResult, error) {
 	}
 	if st.Mode == ModeTakenOver {
 		return nil, problemf("HardyOS has already taken over")
+	}
+	if r.DNSBound != nil {
+		bound, ok := r.DNSBound()
+		if !ok {
+			return nil, problemf("let HardyOS manage %s in Cloudflare first", st.Hostname)
+		}
+		if bound != st.binding() {
+			return nil, problemf("the public address or the VPS changed since %s was allowed in Cloudflare: confirm again with the Cloudflare token (or hardyctl netbird-standby rebind on the console)", st.Hostname)
+		}
 	}
 	if len(st.Snapshots) == 0 {
 		return nil, problemf("there is no copy of the VPS's NetBird server yet: sync first")
@@ -1289,9 +1301,56 @@ func (r *Root) OnStart(ctx context.Context) {
 	r.applyNet(ctx, st)
 }
 
-// TakeOverInfo is what root's DNS operations need from the standby's state.
-type TakeOverInfo struct {
-	Host, IPv4, IPv6 string
+// TakeOverInfo is what root's DNS operations need from the standby's state:
+// the binding (decision 424) of name, this server's addresses and the VPS.
+type TakeOverInfo = Binding
+
+// Binding is what the administrator allowed when adopting the NetBird name
+// with the Cloudflare token (decision 424): the name, the addresses DNS may
+// point it at, and the VPS (address, port, host key) copies come from. If
+// any of them changes afterwards, a take-over refuses until the token is
+// pasted again (or `hardyctl netbird-standby rebind` runs on the console).
+type Binding struct {
+	Host      string `json:"host"`
+	IPv4      string `json:"ipv4"`
+	IPv6      string `json:"ipv6"`
+	VPSHost   string `json:"vpsHost"`
+	VPSPort   int    `json:"vpsPort"`
+	HostKeyFP string `json:"hostKeyFingerprint"`
+}
+
+func (st *state) binding() Binding {
+	b := Binding{Host: st.Hostname, IPv4: st.PublicIPv4, IPv6: st.PublicIPv6, VPSHost: st.VPSHost, VPSPort: st.VPSPort}
+	if pk, err := ParseHostKey(st.HostKey); err == nil {
+		b.HostKeyFP = Fingerprint(pk)
+	}
+	return b
+}
+
+// CurrentBinding reads root's state in dir (false when the standby isn't
+// configured).
+func CurrentBinding(dir string) (Binding, bool) {
+	r := &Root{Dir: dir}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	st, err := r.load()
+	if err != nil || st.Hostname == "" || st.VPSHost == "" {
+		return Binding{}, false
+	}
+	return st.binding(), true
+}
+
+// SetAddressConsole sets the public addresses from the console (hardyctl,
+// as root), with the same checks as Address but no typed name: the person
+// at the console is the confirmation. A bound adoption must be confirmed
+// again (rebind) afterwards.
+func SetAddressConsole(dir, ipv4, ipv6 string) (*Status, error) {
+	r := &Root{Dir: dir}
+	st, err := r.Status(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	return r.Address(context.Background(), AddressArgs{IPv4: ipv4, IPv6: ipv6, Confirm: st.Hostname})
 }
 
 // TakenOver reads root's state in dir and, when the standby has taken
@@ -1305,7 +1364,7 @@ func TakenOver(dir string) (TakeOverInfo, bool) {
 	if err != nil || st.Mode != ModeTakenOver || st.Hostname == "" {
 		return TakeOverInfo{}, false
 	}
-	return TakeOverInfo{Host: st.Hostname, IPv4: st.PublicIPv4, IPv6: st.PublicIPv6}, true
+	return st.binding(), true
 }
 
 // SyncApp re-applies the firewall after the app was installed or removed.

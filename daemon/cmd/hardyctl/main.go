@@ -64,6 +64,9 @@ Boot (run as root):
 NetBird standby (run as root):
   netbird-standby fingerprint  show HardyOS's VPS key and the VPS host key it trusts,
                                to compare with what the VPS script prints
+  netbird-standby address|rebind|dns-preview|adopt|forget-dns
+                               change the standby's addresses and Cloudflare name from
+                               the console (no token; see docs/netbird-standby.md)
 
 Apps:
   app-pack [-o file] <folder>  build a .hardyapp package from a folder (hardyapp.json,

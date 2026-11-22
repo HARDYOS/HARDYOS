@@ -2,6 +2,7 @@ package nbstandby
 
 import (
 	"errors"
+	"regexp"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
@@ -55,14 +56,44 @@ func (s ScriptSetup) Validate() error {
 	return s.validateFrom()
 }
 
-func (s ScriptSetup) keyLine() string {
-	pk, _, _, _, _ := ssh.ParseAuthorizedKey([]byte(s.PublicKey))
-	opts := `restrict,command="/usr/local/sbin/hardyos-netbird-standby"`
-	if len(s.From) > 0 {
-		opts += `,from="` + strings.Join(s.From, ",") + `"`
+// keyLine is the authorized_keys line. Every part is checked again here,
+// whatever validated it before: it goes into a quoted heredoc of a script
+// the administrator runs as root (security review N1).
+func (s ScriptSetup) keyLine() (string, error) {
+	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(s.PublicKey))
+	if err != nil || pk.Type() != ssh.KeyAlgoED25519 || strings.ContainsAny(strings.TrimRight(s.PublicKey, "\n"), "\r\n\x00") {
+		return "", errors.New("HardyOS hasn't made its SSH key yet")
 	}
-	return opts + " " + strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pk))) + " hardyos-standby@" + s.Hostname
+	from, err := CanonicalFrom(s.From)
+	if err != nil {
+		return "", err
+	}
+	opts := `restrict,command="/usr/local/sbin/hardyos-netbird-standby"`
+	if len(from) > 0 {
+		for _, f := range from {
+			if !fromRE.MatchString(f) {
+				return "", errors.New("bad from= address")
+			}
+		}
+		opts += `,from="` + strings.Join(from, ",") + `"`
+	}
+	if !ValidHostname(s.Hostname) {
+		return "", errors.New("bad hostname")
+	}
+	line := opts + " " + strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pk))) + " hardyos-standby@" + s.Hostname
+	want := 2 // command="..."
+	if len(from) > 0 {
+		want = 4 // and from="..."
+	}
+	if strings.ContainsAny(line, "\n\r\x00'`$\\") || strings.Count(line, `"`) != want || !keyLineRE.MatchString(line) {
+		return "", errors.New("the key line isn't safe to put in the VPS script")
+	}
+	return line, nil
 }
+
+// keyLineRE is the whole authorized_keys line: nothing outside it reaches
+// the script.
+var keyLineRE = regexp.MustCompile(`^restrict,command="/usr/local/sbin/hardyos-netbird-standby"(,from="[0-9A-Fa-f.:/,]+")? ssh-ed25519 [A-Za-z0-9+/=]+ hardyos-standby@[a-z0-9.-]+$`)
 
 // Script is the shell script to run once on the VPS as root (again after a
 // new key). It installs the user, its one key, the forced command, the root
@@ -71,6 +102,15 @@ func Script(s ScriptSetup) (string, error) {
 	if err := s.Validate(); err != nil {
 		return "", err
 	}
-	return strings.NewReplacer("@@HOSTNAME@@", s.Hostname, "@@KEYLINE@@", s.keyLine(),
+	line, err := s.keyLine()
+	if err != nil {
+		return "", err
+	}
+	// The other values in the script: a host name (lower-case letters,
+	// digits, dots and dashes only) and fixed entry names.
+	if !hostRE.MatchString(s.Hostname) {
+		return "", errors.New("bad hostname")
+	}
+	return strings.NewReplacer("@@HOSTNAME@@", s.Hostname, "@@KEYLINE@@", line,
 		"@@RESTORE_CASE@@", strings.Join(restoreEntries, "|")).Replace(scriptTemplate), nil
 }

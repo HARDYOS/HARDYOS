@@ -167,7 +167,9 @@ func main() {
 		// The Cloudflare token for hostnames (decision 451): root's alone,
 		// used only for named DNS operations.
 		nbsDir := filepath.Join(zfs.KeyDir, "netbird-standby")
-		priv.RegisterDNS(s, priv.DNSEnv{KeyDir: zfs.KeyDir, StandbyTakenOver: func() (nbstandby.TakeOverInfo, bool) { return nbstandby.TakenOver(nbsDir) }})
+		priv.RegisterDNS(s, priv.DNSEnv{KeyDir: zfs.KeyDir,
+			StandbyTakenOver: func() (nbstandby.TakeOverInfo, bool) { return nbstandby.TakenOver(nbsDir) },
+			StandbyBinding:   func() (nbstandby.Binding, bool) { return nbstandby.CurrentBinding(nbsDir) }})
 		// Kept attached to the LAN and running through network changes and
 		// crashes.
 		priv.RegisterDomain(s, dc)
@@ -213,7 +215,8 @@ func main() {
 			Dir:  filepath.Join(zfs.KeyDir, "netbird-standby"),
 			Key:  func() ([]byte, error) { return priv.RootKeyFor(zfs.KeyDir, "netbird-standby") },
 			Apps: priv.StandbyApps(am), Net: &nbstandby.System{Runner: sysexec.Exec{}, Root: "/"}, Log: log,
-			DNSName: func() string { return priv.StandbyDNSName(zfs.KeyDir) },
+			DNSName:  func() string { return priv.StandbyDNSName(zfs.KeyDir) },
+			DNSBound: func() (nbstandby.Binding, bool) { return priv.StandbyDNSBound(zfs.KeyDir) },
 		}
 		// The standby's app can't change under a take-over (decision 425).
 		am.Guard = func(id string) error {
