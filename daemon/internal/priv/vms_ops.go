@@ -51,6 +51,10 @@ const (
 	OpVMsScheduleSet        = "vms.schedule.set"
 	OpVMsUSBAttach          = "vms.usb.attach"
 	OpVMsUSBDetach          = "vms.usb.detach"
+
+	// Game streaming (decisions 400-409).
+	OpVMsStreamingInfo    = "vms.streaming.info"
+	OpVMsStreamingPublish = "vms.streaming.publish"
 )
 
 // VMCatalogResult lists the verified images.
@@ -221,6 +225,14 @@ func RegisterVMs(s *Server, m *vms.Manager) {
 	}))
 	s.Handle(OpVMsScheduleSet, typed(func(ctx context.Context, a vms.SetScheduleArgs) (any, error) {
 		v, err := m.SetSchedule(ctx, a)
+		return v, vmsErr(err)
+	}))
+	s.Handle(OpVMsStreamingInfo, typed(func(ctx context.Context, a VMRef) (any, error) {
+		v, err := m.StreamingInfo(ctx, a.ID)
+		return v, vmsErr(err)
+	}))
+	s.Handle(OpVMsStreamingPublish, typed(func(ctx context.Context, a vms.StreamingPublishArgs) (any, error) {
+		v, err := m.SetStreamingRemote(ctx, a)
 		return v, vmsErr(err)
 	}))
 	s.Handle(OpVMsUSBAttach, typed(func(ctx context.Context, a vms.USBArgs) (any, error) {

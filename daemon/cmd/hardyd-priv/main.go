@@ -218,7 +218,8 @@ func main() {
 		netm.AfterBridges = dc.ReleaseNetwork
 		// Devices go to VMs through part D's Host, the same one its ops use;
 		// the Devices view shows which VM each device is assigned to.
-		vmm := &vms.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log, Network: netm, Library: priv.VMLibrary(shm, shareHooks...), Devices: devs}
+		vmm := &vms.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log, Network: netm, Library: priv.VMLibrary(shm, shareHooks...), Devices: devs,
+			NetBird: priv.VMNetBird(nbm)}
 		devs.Assignments = vmm.Assignments
 		go reconcileDevices(ctx, devs, log)
 		priv.RegisterVMs(s, vmm)

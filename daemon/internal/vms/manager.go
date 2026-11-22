@@ -103,6 +103,18 @@ type Manager struct {
 	ImportUser string
 	ImportGID  func() (int, error)
 
+	// NetBird reports this server's NetBird interface, address and
+	// network (game streaming forwards to NetBird peers only); nil: no
+	// NetBird, nothing is forwarded.
+	NetBird func(ctx context.Context) NetBirdInfo
+	// streamDial replaces dialling a VM to fill the ARP table (tests).
+	streamDial func(ctx context.Context, addr string) error
+
+	streamMu      sync.Mutex
+	streamSynced  bool   // the forwarding rules were set at least once
+	streamApplied string // the ruleset in place ("" none)
+	streamActive  string // the VM forwarded to
+
 	// grant replaces grantQEMU in tests (some test file systems have no
 	// POSIX ACLs); verify replaces verifyPath.
 	grant  func(f *Folder, name string, uid uint32) error
@@ -751,6 +763,10 @@ func (m *Manager) kept(ctx context.Context) []KeptDisk {
 type CreateArgs struct {
 	Spec     Spec   `json:"spec"`
 	Password string `json:"password,omitempty"`
+	// StreamingPassword is the Sunshine web UI account's password when
+	// HardyOS sets game streaming up (hardyd makes it and keeps it
+	// sealed); it's only ever on the streaming disc (streaming.go).
+	StreamingPassword string `json:"streamingPassword,omitempty"`
 	// AllowOvercommit makes the VM even when its disks are bigger than
 	// the pool's free space (they're thin).
 	AllowOvercommit bool `json:"allowOvercommit,omitempty"`
@@ -874,6 +890,10 @@ func (m *Manager) Create(ctx context.Context, a CreateArgs) (*Result, error) {
 	if err := m.prepareSpec(ctx, &s, a.Password, nil); err != nil {
 		return nil, err
 	}
+	kit, err := m.prepareStreaming(ctx, &s, a.StreamingPassword)
+	if err != nil {
+		return nil, err
+	}
 	if err := s.Validate(m.host(ctx)); err != nil {
 		return nil, err
 	}
@@ -952,6 +972,13 @@ func (m *Manager) Create(ctx context.Context, a CreateArgs) (*Result, error) {
 	}
 	if s.HasUnattendMedia() {
 		if err := m.writeUnattend(ctx, st, a.Password); err != nil {
+			cleanup()
+			return nil, err
+		}
+	}
+	if kit != nil {
+		if err := m.writeStreaming(ctx, st, kit); err != nil {
+			m.removeUnattend(st)
 			cleanup()
 			return nil, err
 		}
@@ -1040,6 +1067,8 @@ func (m *Manager) Update(ctx context.Context, a UpdateArgs) (*Result, error) {
 	// the unattended install settings are history.
 	s.Schedule = prev.Schedule
 	s.FromTemplate = prev.FromTemplate
+	// Game streaming has its own operation (vms.streaming.publish).
+	s.Streaming = prev.Streaming
 	dropUnattend := false
 	switch {
 	case s.HasUnattendMedia() && !prev.HasUnattendMedia():
@@ -1052,6 +1081,22 @@ func (m *Manager) Update(ctx context.Context, a UpdateArgs) (*Result, error) {
 		// the disc (it holds the password) is deleted.
 		dropUnattend = prev.HasUnattendMedia()
 		s.Unattend = nil
+	}
+	// The streaming disc goes with the answer disc (its step runs at the
+	// install's first sign-in) and holds Sunshine's password and key.
+	dropStreaming := false
+	switch {
+	case s.HasStreamingMedia() && !prev.HasStreamingMedia():
+		p = append(p, "the game streaming disc only comes with a new VM")
+		s.Media = withoutMedia(s.Media, MediaStreaming)
+	case s.HasStreamingMedia() && s.Unattend == nil:
+		s.Media = withoutMedia(s.Media, MediaStreaming)
+		dropStreaming = true
+	case !s.HasStreamingMedia():
+		dropStreaming = prev.HasStreamingMedia()
+		if s.Unattend != nil {
+			s.Unattend.Hooks = slices.DeleteFunc(slices.Clone(s.Unattend.Hooks), func(h string) bool { return h == StreamingHook })
+		}
 	}
 	if err := s.Validate(m.host(ctx)); err != nil {
 		var vp Problems
@@ -1183,6 +1228,9 @@ func (m *Manager) Update(ctx context.Context, a UpdateArgs) (*Result, error) {
 		// password, once QEMU closes it) is gone now.
 		m.removeUnattend(st)
 	}
+	if dropStreaming {
+		m.removeStreaming(st)
+	}
 	var warnings []string
 	if running && hardwareChanged(&prev, &s) {
 		m.statsMu.Lock()
@@ -1257,6 +1305,7 @@ func (m *Manager) Delete(ctx context.Context, a DeleteArgs) error {
 		}
 	}
 	m.removeUnattend(st)
+	m.removeStreaming(st)
 	if a.KeepDisks {
 		kept := fmt.Sprintf("%s/vms/%s-kept-%s", st.spec.Pool, st.spec.ID, m.now().Format("20060102-150405"))
 		if _, err := m.zfs(ctx, "rename", st.dataset, kept); err != nil {
@@ -1276,6 +1325,7 @@ func (m *Manager) Delete(ctx context.Context, a DeleteArgs) error {
 		m.log().Info("vms: deleted", "id", a.ID)
 	}
 	m.forget(a.ID)
+	m.kickStreaming()
 	return nil
 }
 
@@ -1393,6 +1443,9 @@ func (m *Manager) paths(ctx context.Context, st *stored) (Paths, error) {
 	}
 	if st.spec.HasUnattendMedia() {
 		p.Unattend = unattendPath(&st.spec)
+	}
+	if st.spec.HasStreamingMedia() {
+		p.Streaming = streamingPath(&st.spec)
 	}
 	if files := st.spec.Files(); len(files) > 0 {
 		f, err := m.folder(ctx, "", false)

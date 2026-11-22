@@ -110,7 +110,13 @@ func (s *sim) Run(_ context.Context, stdin []byte, name string, args ...string) 
 		return ok("")
 	case "bridge":
 		return s.bridge(args)
+	case "nft":
+		return ok("")
 	case "ip":
+		if len(args) > 2 && args[2] == "addr" {
+			// ip -j -4 addr show dev br0
+			return ok(fmt.Sprintf(`[{"ifname":%q,"addr_info":[{"family":"inet","local":"192.168.1.10","prefixlen":24,"scope":"global"}]}]`, args[len(args)-1]))
+		}
 		// ip -j -d link show dev br0
 		return ok(fmt.Sprintf(`[{"ifname":%q,"linkinfo":{"info_kind":"bridge","info_data":{"vlan_filtering":%d}}}]`, args[len(args)-1], s.filtering))
 	}

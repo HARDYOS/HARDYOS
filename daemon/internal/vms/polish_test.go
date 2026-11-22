@@ -202,7 +202,7 @@ func TestCatalogStaysOnItsHosts(t *testing.T) {
 			if f.SHA256 == "" && f.SumsURL == "" {
 				t.Errorf("%s/%s has nothing to check it against", img.ID, arch)
 			}
-			if ValidFile(f.File) != nil || !(IsDiskImage(f.File) || IsISO(f.File)) {
+			if ValidFile(f.File) != nil || !(IsDiskImage(f.File) || IsISO(f.File) || (img.Kind == "file" && (strings.HasSuffix(f.File, ".msi") || strings.HasSuffix(f.File, ".zip")))) {
 				t.Errorf("%s/%s: library name %q", img.ID, arch, f.File)
 			}
 		}

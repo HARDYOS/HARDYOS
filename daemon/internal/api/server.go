@@ -36,6 +36,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/sharelinks"
 	"github.com/hardyos/hardyos/daemon/internal/storage"
 	"github.com/hardyos/hardyos/daemon/internal/store"
+	"github.com/hardyos/hardyos/daemon/internal/streaming"
 	"github.com/hardyos/hardyos/daemon/internal/updates"
 )
 
@@ -127,12 +128,17 @@ type Config struct {
 	// OfficeCallbackBase replaces http://host.docker.internal:44251, how
 	// the Document Server reaches hardyd (tests, the integration job).
 	OfficeCallbackBase string
+
+	// StreamingClient replaces the client for Sunshine's API in game
+	// streaming VMs (tests).
+	StreamingClient *streaming.Client
 }
 
 // Server is hardyd's HTTP handler.
 type Server struct {
 	cfg      Config
 	users    *auth.Users
+	stream   *vmStreaming
 	sessions *auth.Sessions
 	signin   *auth.SignIn
 	audit    *audit.Log
@@ -280,6 +286,8 @@ func (s *Server) routes() {
 			s.snapshotRoutes()
 			s.vmRoutes()
 			s.vmPolishRoutes()
+			s.newVMStreaming()
+			s.vmStreamingRoutes()
 			s.deviceRoutes()
 			s.replicationRoutes()
 		}

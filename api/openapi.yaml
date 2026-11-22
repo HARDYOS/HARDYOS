@@ -4663,6 +4663,101 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { description: The VM isn't running }
+  /vms/{id}/streaming:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getVMStreaming
+      summary: "Game streaming: Sunshine reachable, paired and waiting Moonlight devices, NetBird address"
+      tags: [vms]
+      responses:
+        "200":
+          description: The Streaming panel
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VMStreamingStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /vms/{id}/streaming/reveal:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: revealVMStreamingAccount
+      summary: "Show the Sunshine web UI account (your password again; rate-limited and audited)"
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMStreamingRevealRequest" }
+      responses:
+        "200":
+          description: The account
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VMStreamingAccount" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { description: Too many wrong passwords }
+  /vms/{id}/streaming/pair:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: pairVMStreamingDevice
+      summary: "Give Sunshine the PIN a waiting Moonlight device shows (a job, audited)"
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMStreamingPairRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: HardyOS didn't set up game streaming in this VM }
+  /vms/{id}/streaming/unpair:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: unpairVMStreamingDevice
+      summary: "Remove a paired Moonlight device (a job, audited)"
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMStreamingUnpairRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: HardyOS didn't set up game streaming in this VM }
+  /vms/{id}/streaming/remote:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    put:
+      operationId: setVMStreamingRemote
+      summary: "Publish the VM's streaming ports to NetBird peers only, or stop (a job; one VM at a time)"
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMStreamingRemoteRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: HardyOS didn't set up game streaming in this VM }
   # ---- end of virtual machines API ----
   # ---- versioned cloud backups (Phase 6 part A, docs/backup.md) ----
   /backup:
@@ -8826,7 +8921,7 @@ components:
       type: object
       required: [kind]
       properties:
-        kind: { type: string, enum: [iso, virtio, cloudinit, unattend, empty], description: "iso: a file from the ISO library; virtio: the VirtIO drivers disc; cloudinit: the generated cloud-init disc; unattend: the generated Windows answer disc (new VMs only)" }
+        kind: { type: string, enum: [iso, virtio, cloudinit, unattend, streaming, empty], description: "iso: a file from the ISO library; virtio: the VirtIO drivers disc; cloudinit: the generated cloud-init disc; unattend: the generated Windows answer disc (new VMs only); streaming: the generated game streaming disc (new VMs with streaming.sunshine only)" }
         iso: { type: string }
     VMUnattend:
       type: object
@@ -8898,11 +8993,7 @@ components:
         boot: { type: array, items: { type: string, enum: [disk, cdrom, network] } }
         autostart: { $ref: "#/components/schemas/VMAutostart" }
         devices: { type: array, items: { $ref: "#/components/schemas/VMDevice" } }
-        streaming:
-          type: object
-          required: [remote]
-          properties:
-            remote: { type: boolean, description: Publish Sunshine through the VPN for play away from home }
+        streaming: { $ref: "#/components/schemas/VMStreaming" }
         labels: { type: object, additionalProperties: { type: string } }
         sound: { type: boolean, description: "An HD audio card, heard through the web console" }
         clipboard: { type: boolean, description: "Copy and paste with the web console (the guest needs spice-vdagent)" }
@@ -8989,6 +9080,7 @@ components:
         editions: { type: array, items: { type: string }, description: Usual edition names; the first is the default }
         sound: { type: boolean }
         clipboard: { type: boolean }
+        streaming: { type: boolean, description: "HardyOS can set up game streaming (Sunshine and a virtual display) during the unattended install" }
     VMArch:
       type: object
       required: [arch, machine]
@@ -9146,6 +9238,82 @@ components:
       properties:
         schedule: { $ref: "#/components/schemas/VMSchedule" }
         confirm: { type: string, description: "The VM's name, needed (400 confirm_required otherwise) when the counts delete automatic snapshots it has now" }
+    VMStreaming:
+      type: object
+      description: "Game streaming (decisions 400-409). Root sets everything but sunshine when the VM is made; updates keep it; remote changes only with PUT /vms/{id}/streaming/remote."
+      required: [remote]
+      properties:
+        remote: { type: boolean, description: "Sunshine's streaming ports are published to NetBird peers" }
+        sunshine: { type: boolean, description: "HardyOS installs and sets up Sunshine and a virtual display at the first sign-in (with an unattended install)" }
+        user: { type: string, description: "The Sunshine web UI account HardyOS made" }
+        certSHA256: { type: string, description: "SHA-256 of the certificate HardyOS made for the VM's Sunshine (pinned)" }
+    VMStreamingStatus:
+      type: object
+      required: [setUp, installPending, running, hasGPU, address, reachable, user, accountKept, devices, waiting, remote, forwarding, ports]
+      properties:
+        setUp: { type: boolean, description: HardyOS set Sunshine up in this VM }
+        installPending: { type: boolean }
+        running: { type: boolean }
+        hasGPU: { type: boolean }
+        address: { type: string, description: "The VM's verified address on the home network" }
+        reachable: { type: boolean, description: "Sunshine answered with its pinned certificate" }
+        problem: { type: string }
+        user: { type: string }
+        accountKept: { type: boolean, description: HardyOS has the Sunshine password (sealed) }
+        revealedAt: { type: string }
+        devices: { type: array, items: { $ref: "#/components/schemas/VMStreamingDevice" } }
+        waiting: { type: array, items: { $ref: "#/components/schemas/VMStreamingPending" } }
+        remote: { type: boolean }
+        forwarding: { type: boolean, description: "The NetBird forwarding rules are in place now" }
+        netbirdAddress: { type: string, description: "This server's NetBird address: add it in Moonlight away from home" }
+        ports:
+          type: object
+          required: [tcp, udp]
+          properties:
+            tcp: { type: array, items: { type: integer } }
+            udp: { type: array, items: { type: integer } }
+    VMStreamingDevice:
+      type: object
+      required: [name, uuid, enabled]
+      properties:
+        name: { type: string }
+        uuid: { type: string }
+        enabled: { type: boolean }
+    VMStreamingPending:
+      type: object
+      required: [id, name, address]
+      properties:
+        id: { type: string, description: "Sunshine's pairing id (32 hex digits)" }
+        name: { type: string }
+        address: { type: string }
+    VMStreamingRevealRequest:
+      type: object
+      required: [password]
+      properties:
+        password: { type: string, description: "Your own HardyOS password, asked again" }
+    VMStreamingAccount:
+      type: object
+      required: [user, password]
+      properties:
+        user: { type: string }
+        password: { type: string }
+    VMStreamingPairRequest:
+      type: object
+      required: [pairingId, pin, name]
+      properties:
+        pairingId: { type: string, pattern: "^[0-9a-f]{32}$" }
+        pin: { type: string, pattern: "^[0-9]{4}$", description: "The 4 digits Moonlight shows (kept out of the job's parameters)" }
+        name: { type: string, maxLength: 64 }
+    VMStreamingUnpairRequest:
+      type: object
+      required: [uuid]
+      properties:
+        uuid: { type: string }
+    VMStreamingRemoteRequest:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean }
     VMUSBRequest:
       type: object
       required: [device]
