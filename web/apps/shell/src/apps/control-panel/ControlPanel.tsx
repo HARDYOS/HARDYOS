@@ -26,7 +26,7 @@ import { RemoteAccess } from "./RemoteAccess";
 import { Updates } from "./Updates";
 import { TwoFactorPolicyCard, Users } from "./Users";
 
-const SECTIONS = [
+export const SECTIONS = [
   { id: "overview", label: "Overview", icon: <GridIcon size={16} /> },
   { id: "users", label: "Users & Groups", icon: <UsersIcon size={16} /> },
   { id: "domain", label: "Domain", icon: <DomainIcon size={16} /> },
