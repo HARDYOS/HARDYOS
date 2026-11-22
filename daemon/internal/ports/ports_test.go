@@ -103,6 +103,26 @@ func portName(n string) bool {
 	return true
 }
 
+func TestOwnedPorts(t *testing.T) {
+	for _, p := range []int{NetBirdStandbyHTTP, NetBirdStandbyHTTPS, NetBirdStandbySTUN} {
+		if OwnedBy(p) != NetBirdStandbyApp || !Reserved(p) {
+			t.Errorf("%d: owner %q reserved %v", p, OwnedBy(p), Reserved(p))
+		}
+	}
+	if OwnedBy(AppGateway) != "" || OwnedBy(HTTPS) != "" {
+		t.Fatal("only the standby's ports are owned")
+	}
+	for p := range owned {
+		inFixed := false
+		for _, v := range Fixed {
+			inFixed = inFixed || v == p
+		}
+		if !inFixed {
+			t.Errorf("owned port %d isn't in Fixed", p)
+		}
+	}
+}
+
 func TestPortName(t *testing.T) {
 	for n, want := range map[string]bool{"DefaultPort": true, "PortRelay": true, "InternalPort": true, "DefaultOfficePort": true,
 		"maxReports": false, "Transport": false, "ImportTimeout": false} {

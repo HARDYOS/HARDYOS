@@ -19,6 +19,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/domain"
 	"github.com/hardyos/hardyos/daemon/internal/hostnames"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/nbstandby"
 	"github.com/hardyos/hardyos/daemon/internal/notify"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/publish"
@@ -308,6 +309,11 @@ func (s *Server) handleHostnamesClear(w http.ResponseWriter, r *http.Request, u 
 	}
 	if !st.Set || cfdns.Normalize(req.Confirm) != st.Base {
 		writeError(w, http.StatusBadRequest, "confirm_required", "type the base domain to forget the token")
+		return
+	}
+	if nst, err := s.nbsRootStatus(r.Context()); err == nil && nst.Mode == nbstandby.ModeTakenOver {
+		// Hand-back needs the token to put the NetBird name back.
+		writeError(w, http.StatusConflict, "taken_over", "the NetBird standby has taken over: hand back before forgetting the token")
 		return
 	}
 	s.submit(w, r, u, JobKindHostnamesDNS, "Forget the Cloudflare token", hostDNSParams{Action: "clear", Confirm: st.Base}, "hostnames.token.clear", st.Base, nil)

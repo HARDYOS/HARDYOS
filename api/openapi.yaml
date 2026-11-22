@@ -39,6 +39,7 @@ tags:
   - name: files
   - name: remote
   - name: hostnames
+  - name: netbird-standby
   - name: photos
   - name: oidc
   - name: vms
@@ -3893,6 +3894,243 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "503": { $ref: "#/components/responses/Unavailable" }
+  /netbird-standby:
+    get:
+      operationId: getNetBirdStandby
+      summary: Control Panel › NetBird Standby status
+      description: |
+        The VPS connection hardyd-priv keeps (address, user, pinned host
+        key, HardyOS's public key; never the private key), the sealed
+        copies of the VPS's NetBird server (time, size, hash, version; never
+        their contents), sync health and history, the app, the standby
+        name's DNS records, the current take-over, and the router port
+        forwards the standby needs. Administrators only.
+      tags: [netbird-standby]
+      responses:
+        "200":
+          description: The status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NBStandbyStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    delete:
+      operationId: forgetNetBirdStandby
+      summary: Forget the VPS connection, HardyOS's key and every copy (a job; not while taken over)
+      tags: [netbird-standby]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NBStandbyConfirm" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /netbird-standby/settings:
+    put:
+      operationId: setNetBirdStandbySettings
+      summary: Save the VPS connection, the schedule and this server's public address (a job, audited)
+      description: |
+        hardyd-priv checks and keeps the connection and makes HardyOS's own
+        ed25519 key the first time (or with newKey); the VPS script then
+        installs its public half with a forced command.
+      tags: [netbird-standby]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NBStandbySettingsRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /netbird-standby/script:
+    get:
+      operationId: getNetBirdStandbyScript
+      summary: The script to run once on the VPS as root
+      tags: [netbird-standby]
+      responses:
+        "200":
+          description: The script
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NBStandbyScript" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /netbird-standby/vps:
+    get:
+      operationId: getNetBirdStandbyVPS
+      summary: Ask the VPS how its NetBird server is (the status verb; changes nothing)
+      tags: [netbird-standby]
+      responses:
+        "200":
+          description: What the VPS said
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NBStandbyVPSStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502":
+          description: The VPS didn't answer
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /netbird-standby/install:
+    post:
+      operationId: installNetBirdStandby
+      summary: Install the standby app, stopped (a job)
+      tags: [netbird-standby]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NBStandbyInstallRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /netbird-standby/sync:
+    post:
+      operationId: syncNetBirdStandby
+      summary: Copy the VPS's NetBird server now (a job; not while taken over)
+      tags: [netbird-standby]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /netbird-standby/dns:
+    get:
+      operationId: previewNetBirdStandbyDNS
+      summary: The records that hold the NetBird server's name in Cloudflare now
+      tags: [netbird-standby]
+      parameters:
+        - { name: name, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: The records
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NBStandbyDNSPreview" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    post:
+      operationId: adoptNetBirdStandbyDNS
+      summary: Let HardyOS change exactly these records of the name on a take-over (a job; the name typed)
+      tags: [netbird-standby]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NBStandbyDNSRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    delete:
+      operationId: forgetNetBirdStandbyDNS
+      summary: Stop HardyOS managing the name (a job; the name typed; not while taken over)
+      tags: [netbird-standby]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NBStandbyDNSForgetRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /netbird-standby/dns/rebind:
+    post:
+      operationId: rebindNetBirdStandbyDNS
+      summary: Allow the standby's current public address and VPS for the adopted name (a job; the Cloudflare token pasted again; not while taken over)
+      description: |
+        The adopted name is bound to this server's public addresses and the
+        VPS (host, port, host key) as they were when it was adopted
+        (decision 424). After any of them changes, a take-over refuses until
+        this runs with the token, or `hardyctl netbird-standby rebind` runs
+        as root on the console.
+      tags: [netbird-standby]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NBStandbyDNSRebindRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /netbird-standby/takeover:
+    post:
+      operationId: takeOverNetBird
+      summary: Take over the NetBird server (a job; the hostname typed)
+      description: |
+        A last copy if the VPS still answers, then the newest copy goes into
+        the standby, which starts; its ports open and this server reaches
+        it locally; the name's A (and AAAA) record points at this server's
+        public address with TTL 60; peers are watched reconnecting. 400
+        `version_newer` when the VPS runs a newer NetBird than the standby
+        (send acceptVersion to go on anyway), `confirm_required` without
+        the typed name.
+      tags: [netbird-standby]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NBStandbyTakeoverRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /netbird-standby/handback:
+    post:
+      operationId: handBackNetBird
+      summary: Give the NetBird server back to the VPS (a job; the hostname typed and the split-brain warning acknowledged)
+      description: |
+        The VPS must answer and allow hand-back. The standby stops, its
+        databases go to the VPS (which keeps a copy of its own first), the
+        name's records go back to what they were, the ports close and the
+        staged state is removed. With discard, nothing is sent to the VPS.
+      tags: [netbird-standby]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NBStandbyHandbackRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/Unavailable" }
   /remote:
     get:
       operationId: getRemote
@@ -6560,6 +6798,268 @@ components:
             - { type: "null" }
         names: { type: array, items: { $ref: "#/components/schemas/HostnameEntry" } }
         lan: { $ref: "#/components/schemas/HostnamesLANState" }
+    NBStandbyStatus:
+      type: object
+      required: [connection, settings, health, history, app, dns, takeover, standbyVersion, versionNewer, portForwards, clientConnected, clientIp, managementUrl]
+      properties:
+        connection:
+          oneOf:
+            - { $ref: "#/components/schemas/NBStandbyConnection" }
+            - { type: "null" }
+        problem: { type: string }
+        settings: { $ref: "#/components/schemas/NBStandbySettings" }
+        health: { $ref: "#/components/schemas/NBStandbyHealth" }
+        history: { type: array, items: { $ref: "#/components/schemas/NBStandbySyncRow" } }
+        app: { $ref: "#/components/schemas/NBStandbyApp" }
+        dns: { $ref: "#/components/schemas/NBStandbyDNS" }
+        takeover:
+          oneOf:
+            - { $ref: "#/components/schemas/NBStandbyTakeover" }
+            - { type: "null" }
+        standbyVersion: { type: string, description: The netbird-server version the standby app pins }
+        versionNote: { type: string }
+        versionNewer: { type: boolean, description: The VPS runs a newer NetBird than the standby }
+        portForwards: { type: array, items: { $ref: "#/components/schemas/NBPortForward" } }
+        clientConnected: { type: boolean }
+        clientIp: { type: string }
+        managementUrl: { type: string }
+    NBStandbyConnection:
+      type: object
+      description: hardyd-priv's side; never the private key or a copy's contents
+      required: [configured, vpsHost, vpsPort, vpsUser, hostKey, hostKeyFingerprint, hostname, publicKey, snapshots, mode, networkOpen, publicIPv4, publicIPv6, from, handbackCopy]
+      properties:
+        configured: { type: boolean }
+        vpsHost: { type: string }
+        vpsPort: { type: integer }
+        vpsUser: { type: string }
+        hostKey: { type: string, description: The VPS's pinned SSH host key }
+        hostKeyFingerprint: { type: string }
+        hostname: { type: string, description: The NetBird server's name }
+        publicKey: { type: string, description: HardyOS's public key for the VPS's authorized_keys }
+        keyCreated: { type: string, format: date-time }
+        snapshots: { type: array, items: { $ref: "#/components/schemas/NBStandbySnapshot" } }
+        lastTry: { type: string, format: date-time }
+        lastOk: { type: string, format: date-time }
+        lastError: { type: string }
+        mode: { type: string, enum: [standby, takenover] }
+        staged: { type: string }
+        takenOverAt: { type: string, format: date-time }
+        networkOpen: { type: boolean }
+        publicIPv4: { type: string, description: The only IPv4 address DNS may point the name at (root's) }
+        publicIPv6: { type: string }
+        from: { type: array, items: { type: string } }
+        handbackCopy: { type: boolean, description: A sealed copy of the last hand-back is kept until the next good sync }
+    NBStandbySnapshot:
+      type: object
+      required: [id, at, sealedBytes, info]
+      properties:
+        id: { type: string }
+        at: { type: string, format: date-time }
+        sealedBytes: { type: integer }
+        info: { $ref: "#/components/schemas/NBStandbySnapshotInfo" }
+    NBStandbySnapshotInfo:
+      type: object
+      required: [created, hostname, image, digest, version, peers, setupKeys, files, bytes, sha256, warnings, generation]
+      properties:
+        created: { type: string, format: date-time }
+        hostname: { type: string }
+        image: { type: string }
+        digest: { type: string }
+        version: { type: string }
+        peers: { type: integer }
+        setupKeys: { type: integer }
+        files: { type: array, items: { type: string } }
+        generation: { type: string, description: The VPS's id for this snapshot; a hand-back must name it }
+        bytes: { type: integer }
+        sha256: { type: string }
+        certNotAfter: { type: string, format: date-time }
+        warnings: { type: array, items: { type: string } }
+    NBStandbySettings:
+      type: object
+      required: [intervalMinutes, autoSync, publicIPv4, publicIPv6, connectFrom]
+      properties:
+        intervalMinutes: { type: integer, minimum: 5, maximum: 1440 }
+        autoSync: { type: boolean }
+        publicIPv4: { type: string, description: This server's public IPv4 address (where the router forwards the NetBird ports) }
+        publicIPv6: { type: string }
+        connectFrom: { type: array, items: { type: string }, description: Addresses HardyOS reaches the VPS from (the key's from= restriction) }
+    NBStandbyHealth:
+      type: object
+      required: [state, stale, staleAfterMinutes]
+      properties:
+        state: { type: string, enum: [unconfigured, waiting, ok, failing, stale, takenover] }
+        stale: { type: boolean }
+        staleAfterMinutes: { type: integer }
+        nextSync: { type: string, format: date-time }
+        problem: { type: string }
+    NBStandbySyncRow:
+      type: object
+      required: [startedAt, finishedAt, ok, auto, bytes, sha256, version, peers, error]
+      properties:
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+        ok: { type: boolean }
+        auto: { type: boolean }
+        bytes: { type: integer }
+        sha256: { type: string }
+        version: { type: string }
+        peers: { type: integer }
+        error: { type: string }
+    NBStandbyApp:
+      type: object
+      required: [installed, state, version]
+      properties:
+        installed: { type: boolean }
+        state: { type: string }
+        version: { type: string }
+    NBStandbyDNS:
+      type: object
+      required: [tokenSet, base, zone, name, adopted, inBase, inZone, needsRebind]
+      properties:
+        tokenSet: { type: boolean }
+        base: { type: string }
+        zone: { type: string }
+        name: { type: string, description: The adopted standby name ("" when none) }
+        adopted: { type: array, items: { $ref: "#/components/schemas/NBStandbyDNSRecord" } }
+        inBase: { type: boolean }
+        inZone: { type: boolean }
+        bound: { $ref: "#/components/schemas/NBStandbyBinding" }
+        needsRebind: { type: boolean, description: "The public address or the VPS changed since the name was allowed: confirm with the token (rebind) before a take-over" }
+    NBStandbyBinding:
+      type: object
+      required: [host, ipv4, ipv6, vpsHost, vpsPort, hostKeyFingerprint]
+      properties:
+        host: { type: string }
+        ipv4: { type: string }
+        ipv6: { type: string }
+        vpsHost: { type: string }
+        vpsPort: { type: integer }
+        hostKeyFingerprint: { type: string }
+    NBStandbyDNSRebindRequest:
+      type: object
+      required: [token]
+      properties:
+        token: { type: string, writeOnly: true, description: The Cloudflare token pasted again }
+    NBStandbyDNSRecord:
+      type: object
+      required: [id, type, content, ttl, proxied]
+      properties:
+        id: { type: string }
+        type: { type: string }
+        content: { type: string }
+        ttl: { type: integer }
+        proxied: { type: boolean }
+        comment: { type: string }
+    NBStandbyDNSPreview:
+      type: object
+      required: [name, zone, records, adoptable]
+      properties:
+        name: { type: string }
+        zone: { type: string }
+        records: { type: array, items: { $ref: "#/components/schemas/NBStandbyDNSRecord" } }
+        adoptable: { type: boolean }
+        problem: { type: string }
+    NBStandbyDNSRequest:
+      type: object
+      required: [name, confirm, ids, token]
+      properties:
+        name: { type: string }
+        confirm: { type: string, description: The name, typed }
+        ids: { type: array, items: { type: string }, description: Exactly the record ids the preview showed }
+        token: { type: string, writeOnly: true, description: "The Cloudflare token pasted again (compared by hardyd-priv with the saved one)" }
+    NBStandbyTakeover:
+      type: object
+      required: [at, by, snapshotAt, finalSync, dnsChanged, fenced, ipv4, peersTotal, peersConnected, notes]
+      properties:
+        at: { type: string, format: date-time }
+        by: { type: string }
+        snapshotAt: { type: string, format: date-time }
+        finalSync: { type: boolean }
+        finalSyncError: { type: string }
+        dnsChanged: { type: boolean }
+        fenced: { type: boolean, description: The VPS's server was stopped for the take-over }
+        handedBack: { type: boolean }
+        discarded: { type: boolean }
+        fenceRenewed: { type: string, format: date-time, description: "When HardyOS last made or renewed the VPS's fence (it lasts 2 hours unless renewed)" }
+        ipv4: { type: string }
+        ipv6: { type: string }
+        peersTotal: { type: integer }
+        peersConnected: { type: integer }
+        peersCheckedAt: { type: string, format: date-time }
+        peersProblem: { type: string }
+        notes: { type: array, items: { type: string } }
+    NBPortForward:
+      type: object
+      required: [protocol, public, internal, purpose]
+      properties:
+        protocol: { type: string, enum: [TCP, UDP] }
+        public: { type: integer }
+        internal: { type: integer }
+        purpose: { type: string }
+    NBStandbySettingsRequest:
+      type: object
+      required: [vpsHost, hostKey, hostname, settings]
+      properties:
+        vpsHost: { type: string }
+        vpsPort: { type: integer, description: "SSH port (default 22)" }
+        vpsUser: { type: string, description: "Default hardyos-standby" }
+        hostKey: { type: string, description: "The VPS's SSH host key (ssh-ed25519 AAAA…)" }
+        hostname: { type: string, description: The NetBird server's name }
+        newKey: { type: boolean, description: Make a new SSH key (run the VPS script again) }
+        settings: { $ref: "#/components/schemas/NBStandbySettings" }
+        addressConfirm: { type: string, description: "The NetBird name, typed, when the public address changes (400 confirm_required otherwise)" }
+    NBStandbyScript:
+      type: object
+      required: [script, fileName, fingerprint]
+      properties:
+        script: { type: string }
+        fileName: { type: string }
+        fingerprint: { type: string, description: "HardyOS's key fingerprint, to compare with the VPS script's output and hardyctl netbird-standby fingerprint" }
+    NBStandbyVPSStatus:
+      type: object
+      required: [running, version, digest, image, hostname, restoreAllowed, restoreArmedUntil, handbackInstalled, fenced, time]
+      properties:
+        running: { type: boolean }
+        version: { type: string }
+        digest: { type: string }
+        image: { type: string }
+        hostname: { type: string }
+        restoreAllowed: { type: boolean, description: Hand-back installed and armed on the VPS now }
+        restoreArmedUntil: { type: string }
+        handbackInstalled: { type: boolean }
+        fenced: { type: boolean }
+        fencedUntil: { type: string, description: "When the fence ends unless HardyOS renews it (the VPS then starts its server again)" }
+        time: { type: string }
+    NBStandbyInstallRequest:
+      type: object
+      properties:
+        pool: { type: string, description: The pool apps go on, when no app is installed yet }
+    NBStandbyDNSForgetRequest:
+      type: object
+      required: [confirm, token]
+      properties:
+        confirm: { type: string, description: The adopted name, typed }
+        token: { type: string, writeOnly: true, description: The Cloudflare token pasted again }
+    NBStandbyConfirm:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: string, description: The NetBird server's name (or the adopted name), typed }
+    NBStandbyTakeoverRequest:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: string, description: The NetBird server's name, typed }
+        acceptVersion: { type: boolean, description: Go on although the VPS runs a newer NetBird }
+        skipFinalSync: { type: boolean, description: "Don't try a last copy first" }
+        acceptVpsAlive: { type: boolean, description: "Take over although the VPS still answers (its server is stopped first)" }
+    NBStandbyHandbackRequest:
+      type: object
+      required: [confirm, acceptSplitBrain]
+      properties:
+        confirm: { type: string, description: The NetBird server's name, typed }
+        acceptSplitBrain: { type: boolean, description: "The standby's state replaces whatever the VPS changed since the take-over" }
+        discard: { type: boolean, description: "Don't send the standby's state; the VPS keeps its own" }
     HostnamesDesktop:
       type: object
       required: [url]

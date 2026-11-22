@@ -299,6 +299,7 @@ func (s *Server) routes() {
 			s.appRoutes()
 			s.remoteRoutes()
 			s.hostnamesRoutes()
+			s.nbStandbyRoutes()
 			s.photosRoutes()
 			s.shareRoutes()
 			s.fileServiceRoutes()

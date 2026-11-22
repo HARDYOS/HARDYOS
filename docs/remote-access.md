@@ -308,3 +308,8 @@ port forward at home isn't needed, and HardyOS doesn't set one up.)
   on a service user with the Network Admin role.
 - **NetBird-only greyed out**: your proxy cluster has no Private
   capability (see the table above).
+
+## If the VPS goes down
+
+HardyOS can keep a stopped copy of the VPS's NetBird server and take over
+by hand: see [netbird-standby.md](netbird-standby.md).

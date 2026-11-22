@@ -27,6 +27,9 @@ func (m *Manager) AdoptRestored(ctx context.Context, id string) error {
 	if err := ValidID(id); err != nil {
 		return Problems{err.Error()}
 	}
+	if err := m.guard(id); err != nil {
+		return err
+	}
 	c, err := m.engine()
 	if err != nil {
 		return err

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -29,9 +30,11 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/hw"
 	"github.com/hardyos/hardyos/daemon/internal/install"
 	"github.com/hardyos/hardyos/daemon/internal/mail"
+	"github.com/hardyos/hardyos/daemon/internal/nbstandby"
 	"github.com/hardyos/hardyos/daemon/internal/netbird"
 	"github.com/hardyos/hardyos/daemon/internal/network"
 	"github.com/hardyos/hardyos/daemon/internal/nfs"
+	"github.com/hardyos/hardyos/daemon/internal/ports"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/replica"
 	"github.com/hardyos/hardyos/daemon/internal/sftp"
@@ -93,7 +96,11 @@ func main() {
 		log.Warn("allowed user not found; only root may connect", "user", *allowUser)
 	}
 	priv.RegisterBuiltins(s)
-	priv.RegisterStorage(s, priv.StorageEnv{Runner: sysexec.Exec{}, Root: os.DirFS("/")})
+	priv.RegisterStorage(s, priv.StorageEnv{Runner: sysexec.Exec{}, Root: os.DirFS("/"),
+		StandbyTakenOver: func() bool {
+			_, on := nbstandby.TakenOver(filepath.Join(zfs.KeyDir, "netbird-standby"))
+			return on
+		}})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	var stopStreaming func(context.Context)
 	defer stop()
@@ -163,7 +170,10 @@ func main() {
 		priv.RegisterSecrets(s, zfs.KeyDir)
 		// The Cloudflare token for hostnames (decision 451): root's alone,
 		// used only for named DNS operations.
-		priv.RegisterDNS(s, priv.DNSEnv{KeyDir: zfs.KeyDir})
+		nbsDir := filepath.Join(zfs.KeyDir, "netbird-standby")
+		priv.RegisterDNS(s, priv.DNSEnv{KeyDir: zfs.KeyDir,
+			StandbyTakenOver: func() (nbstandby.TakeOverInfo, bool) { return nbstandby.TakenOver(nbsDir) },
+			StandbyBinding:   func() (nbstandby.Binding, bool) { return nbstandby.CurrentBinding(nbsDir) }})
 		// Kept attached to the LAN and running through network changes and
 		// crashes.
 		priv.RegisterDomain(s, dc)
@@ -202,6 +212,28 @@ func main() {
 			}
 			return ids, nil
 		})
+		// The NetBird standby (decisions 420-429): root's SSH key to the VPS,
+		// the sealed snapshots, staging a take-over into the app and the
+		// firewall table for its ports.
+		nbs := &nbstandby.Root{
+			Dir:  filepath.Join(zfs.KeyDir, "netbird-standby"),
+			Key:  func() ([]byte, error) { return priv.RootKeyFor(zfs.KeyDir, "netbird-standby") },
+			Apps: priv.StandbyApps(am), Net: &nbstandby.System{Runner: sysexec.Exec{}, Root: "/"}, Log: log,
+			DNSName:  func() string { return priv.StandbyDNSName(zfs.KeyDir) },
+			DNSBound: func() (nbstandby.Binding, bool) { return priv.StandbyDNSBound(zfs.KeyDir) },
+		}
+		// The standby's app can't change under a take-over (decision 425).
+		am.Guard = func(id string) error {
+			if id != ports.NetBirdStandbyApp {
+				return nil
+			}
+			if _, on := nbstandby.TakenOver(nbsDir); on {
+				return errors.New("the NetBird standby has taken over: hand back before changing its app")
+			}
+			return nil
+		}
+		priv.RegisterNetBirdStandby(s, nbs)
+		go nbs.OnStart(ctx)
 		// The office suite's Document Server: its address and firewall rules.
 		priv.RegisterOffice(s, &dsnet.Manager{Runner: sysexec.Exec{}, HardydUID: func() (int, error) {
 			if hardydUID < 0 {

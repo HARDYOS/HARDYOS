@@ -83,6 +83,25 @@ func (s *Server) Find(name, typ string) []cfdns.Record {
 	return out
 }
 
+// Get returns a record by id (zero when there's none).
+func (s *Server) Get(id string) cfdns.Record {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r := s.records[id]; r != nil {
+		return r.Record
+	}
+	return cfdns.Record{}
+}
+
+// Set changes a record's content, as someone editing it by hand.
+func (s *Server) Set(id, content string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r := s.records[id]; r != nil {
+		r.Content = content
+	}
+}
+
 // TXT returns the values of TXT records with a name.
 func (s *Server) TXT(name string) []string {
 	var out []string

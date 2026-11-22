@@ -35,6 +35,13 @@ jobs:
       - name: test
         working-directory: daemon
         run: go test -race ./...
+      - name: NetBird standby's VPS script run for real as root (sqlite3, jq, a stub Docker)
+        working-directory: daemon
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sqlite3 jq
+          go test -c -o "$RUNNER_TEMP/nbstandby.test" ./internal/nbstandby
+          sudo "$RUNNER_TEMP/nbstandby.test" -test.run TestVPSRootScript -test.v
       - name: build
         run: make build-daemon
 

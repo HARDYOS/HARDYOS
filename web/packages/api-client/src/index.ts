@@ -337,3 +337,17 @@ export type HostnamesStatus = S["HostnamesStatus"];
 export type HostnamesSettings = S["HostnamesSettings"];
 export type HostnameEntry = S["HostnameEntry"];
 export type HostnamesCert = S["HostnamesCert"];
+// NetBird standby (phase 9, decisions 420-429)
+export type NBStandbyStatus = S["NBStandbyStatus"];
+export type NBStandbyConnection = S["NBStandbyConnection"];
+export type NBStandbySnapshot = S["NBStandbySnapshot"];
+export type NBStandbySettings = S["NBStandbySettings"];
+export type NBStandbyHealth = S["NBStandbyHealth"];
+export type NBStandbySyncRow = S["NBStandbySyncRow"];
+export type NBStandbyDNS = S["NBStandbyDNS"];
+export type NBStandbyDNSRecord = S["NBStandbyDNSRecord"];
+export type NBStandbyDNSPreview = S["NBStandbyDNSPreview"];
+export type NBStandbyBinding = S["NBStandbyBinding"];
+export type NBStandbyTakeover = S["NBStandbyTakeover"];
+export type NBPortForward = S["NBPortForward"];
+export type NBStandbyVPSStatus = S["NBStandbyVPSStatus"];

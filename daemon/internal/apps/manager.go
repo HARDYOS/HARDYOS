@@ -66,6 +66,15 @@ var reservedPorts = map[int]bool{
 	1080: true, 2049: true, 3260: true, 3268: true, 3269: true, 5353: true, 8443: true,
 }
 
+// keptPort reports whether port p is kept from app id: HardyOS's own ports,
+// except the fixed ports registered as that app's (internal/ports.OwnedBy).
+func keptPort(p int, id string) bool {
+	if reservedPorts[p] {
+		return true
+	}
+	return portreg.Reserved(p) && (id == "" || portreg.OwnedBy(p) != id)
+}
+
 // Manager installs and runs apps. It runs inside hardyd-priv (root).
 type Manager struct {
 	Runner sysexec.Runner
@@ -73,6 +82,9 @@ type Manager struct {
 	// Root prefixes system paths (/etc, /var/lib/hardyos); "/" in
 	// production. App folders come from ZFS mountpoints and are used as-is.
 	Root string
+	// Guard, if set, may refuse changing an app (the NetBird standby while
+	// it has taken over).
+	Guard func(id string) error
 	// StateDir overrides DefaultStateDir (tests).
 	StateDir string
 	// MemTotal reports the server's memory in bytes (tests can fake it).
@@ -750,6 +762,9 @@ func (m *Manager) Prepare(ctx context.Context, a PrepareArgs) (*PrepareResult, e
 	if err != nil {
 		return nil, err
 	}
+	if err := m.guard(pkg.Manifest.ID); err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.prepare(ctx, pkg, a, false)
@@ -1140,7 +1155,7 @@ func (m *Manager) SuggestPorts(ctx context.Context, wanted []PortCheck, forID st
 			proto = "tcp"
 		}
 		p := w.Default
-		if w.Fixed {
+		if w.Fixed || (forID != "" && portreg.OwnedBy(p) == forID) {
 			out[w.Name] = p
 			continue
 		}
@@ -1149,7 +1164,7 @@ func (m *Manager) SuggestPorts(ctx context.Context, wanted []PortCheck, forID st
 		}
 		for i := 0; i < 2000; i++ {
 			key := fmt.Sprintf("%d/%s", p, proto)
-			if !used[key] && !reservedPorts[p] && !portreg.Reserved(p) {
+			if !used[key] && !keptPort(p, forID) {
 				break
 			}
 			p++
@@ -1243,7 +1258,9 @@ func (m *Manager) choosePorts(ctx context.Context, mf Manifest, asked, prev map[
 			p.addf("%s: %s uses the server's network directly, so this port is fixed at %d", pt.Label, mf.Name, pt.Default)
 		case port < minPort(mf.Permissions.HostNetwork) || port > 65535:
 			p.addf("%s: port %d must be 1024-65535", pt.Label, port)
-		case reservedPorts[port] || portreg.Reserved(port):
+		case portreg.OwnedBy(pt.Default) == mf.ID && port != pt.Default:
+			p.addf("%s: %s's ports are fixed at %d (the router forwards to them)", pt.Label, mf.Name, pt.Default)
+		case keptPort(port, mf.ID):
 			p.addf("%s: port %d is kept for HardyOS", pt.Label, port)
 		case used[key]:
 			p.addf("%s: port %d is already in use", pt.Label, port)
@@ -1533,6 +1550,9 @@ type RemoveArgs struct {
 func (m *Manager) Remove(ctx context.Context, a RemoveArgs) error {
 	if err := ValidID(a.ID); err != nil {
 		return Problems{err.Error()}
+	}
+	if err := m.guard(a.ID); err != nil {
+		return err
 	}
 	c, err := m.engine()
 	if err != nil {

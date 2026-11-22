@@ -44,6 +44,18 @@ const (
 	// Replication is the receiving side of replication (decision 190).
 	Replication = 44400
 
+	// The NetBird standby server (docs/netbird-standby.md, decisions
+	// 420-429): the netbird-standby app's own host ports, which the router
+	// forwards to (public TCP 80, TCP 443 and UDP 3478). Only that app may
+	// publish them (OwnedBy) and nothing reaches them from outside unless
+	// HardyOS has taken over (hardyd-priv's hardyos_nbstandby table).
+	NetBirdStandbyHTTP  = 44620
+	NetBirdStandbyHTTPS = 44621
+	NetBirdStandbySTUN  = 44622 // UDP
+	// NetBirdSTUN is the STUN port NetBird's server advertises and listens
+	// on inside its container (the router's public side of
+	// NetBirdStandbySTUN; not a host port of this server).
+	NetBirdSTUN = 3478
 	// Sunshine's ports (game streaming inside a VM, decision 404). On the
 	// host they're only ever forwarded from the NetBird interface, to the
 	// one VM whose streaming is published; nothing on the host listens
@@ -64,6 +76,9 @@ var (
 	SunshineUDP = []int{SunshineVideo, SunshineControl, SunshineAudio, SunshineMic, SunshineRTSP}
 )
 
+// NetBirdStandbyApp is the app id that owns the NetBird standby ports.
+const NetBirdStandbyApp = "netbird-standby"
+
 // Fixed lists every single fixed port with its owner (the app proxy range
 // is checked separately), including ports services HardyOS runs take that
 // no Go code listens on itself.
@@ -82,6 +97,9 @@ var Fixed = map[string]int{
 	"office origin":              Office,
 	"office internal":            OfficeInternal,
 	"replication":                Replication,
+	"netbird standby http":       NetBirdStandbyHTTP,
+	"netbird standby https":      NetBirdStandbyHTTPS,
+	"netbird standby stun":       NetBirdStandbySTUN,
 	"sunshine https (netbird)":   SunshineHTTPS,
 	"sunshine http (netbird)":    SunshineHTTP,
 	"sunshine rtsp (netbird)":    SunshineRTSP,
@@ -109,11 +127,28 @@ func Reserved(p int) bool {
 	return false
 }
 
+// owned are fixed ports one app may publish (and no other).
+var owned = map[int]string{
+	NetBirdStandbyHTTP:  NetBirdStandbyApp,
+	NetBirdStandbyHTTPS: NetBirdStandbyApp,
+	NetBirdStandbySTUN:  NetBirdStandbyApp,
+}
+
+// OwnedBy names the app allowed to publish the fixed port p ("" for none):
+// the apps engine lets that app, and only that app, use it.
+func OwnedBy(p int) string { return owned[p] }
+
 // WebmailSubnet is the Docker network of the webmail app (Roundcube): its
 // compose file asks for exactly this subnet, and hardyd's mail sign-in
 // accepts webmail tokens from it alone and never a password from it
 // (decision 305). Outside Docker's default pools (172.17-31.0.0/16).
 var WebmailSubnet = netip.MustParsePrefix("172.16.253.0/28")
+
+// NetBirdStandbySubnet is the netbird-standby app's Docker network (its
+// compose file asks for exactly this subnet; no other app may use it), so
+// hardyd-priv's table can also drop traffic to its containers outside a
+// take-over (decision 426).
+var NetBirdStandbySubnet = netip.MustParsePrefix("172.16.253.16/28")
 
 // WebmailAddr is the webmail container's own address in WebmailSubnet
 // (its compose file pins it; decision 317).

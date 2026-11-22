@@ -13,20 +13,27 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/cfdns"
 	"github.com/hardyos/hardyos/daemon/internal/cfdns/cftest"
 	"github.com/hardyos/hardyos/daemon/internal/domain"
+	"github.com/hardyos/hardyos/daemon/internal/nbstandby"
 )
 
 const testCFToken = "abcdefghijklmnopqrstuvwxyz0123456789ABCD"
 
 func dnsServer(t *testing.T) (*Server, *cftest.Server, string, *time.Time) {
 	t.Helper()
+	return dnsServerWith(t, nil, nil)
+}
+
+// dnsServerWith is dnsServer with the standby's take-over state.
+func dnsServerWith(t *testing.T, takenOver func() (nbstandby.TakeOverInfo, bool), binding func() (nbstandby.Binding, bool)) (*Server, *cftest.Server, string, *time.Time) {
+	t.Helper()
 	cf := cftest.New(testCFToken, "example.net")
 	t.Cleanup(cf.Close)
 	dir := filepath.Join(t.TempDir(), "keys")
 	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
 	s := &Server{}
-	d := registerDNS(s, DNSEnv{KeyDir: dir, Client: cf.Client, Now: func() time.Time { return now }})
-	// Not registered in hardyd-priv yet (decision 454), tested here.
+	d := registerDNS(s, DNSEnv{KeyDir: dir, Client: cf.Client, Now: func() time.Time { return now }, StandbyTakenOver: takenOver, StandbyBinding: binding})
 	registerRecordSet(s, d)
+	registerStandbyDNS(s, d)
 	return s, cf, dir, &now
 }
 
@@ -329,12 +336,16 @@ func TestDNSAccountTokensAndPendingZones(t *testing.T) {
 	}
 }
 
-func TestRecordSetIsNotRegistered(t *testing.T) {
+// dns.record.set ships registered with the NetBird standby (decision 424),
+// with the standby's own name operations.
+func TestRecordSetIsRegistered(t *testing.T) {
 	s := &Server{}
 	RegisterDNS(s, DNSEnv{KeyDir: t.TempDir()})
+	want := map[string]bool{OpDNSRecordSet: true, OpDNSStandbyPreview: true, OpDNSStandbyAdopt: true, OpDNSStandbyRestore: true, OpDNSStandbyForget: true}
 	for _, op := range s.Ops() {
-		if op == OpDNSRecordSet {
-			t.Fatal("dns.record.set is registered (decision 454: only with the NetBird take-over)")
-		}
+		delete(want, op)
+	}
+	if len(want) != 0 {
+		t.Fatalf("not registered: %v", want)
 	}
 }

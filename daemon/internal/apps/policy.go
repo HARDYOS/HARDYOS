@@ -375,6 +375,9 @@ func checkNetwork(p *Problems, project, name string, n map[string]any, catalog b
 					if pre.Overlaps(portreg.WebmailSubnet) && (project != ProjectName(WebmailAppID) || !catalog) {
 						p.addf("network %s: %s is kept for the webmail app", name, portreg.WebmailSubnet)
 					}
+					if pre.Overlaps(portreg.NetBirdStandbySubnet) && (project != ProjectName(portreg.NetBirdStandbyApp) || !catalog) {
+						p.addf("network %s: %s is kept for the NetBird standby", name, portreg.NetBirdStandbySubnet)
+					}
 				}
 			}
 		default:

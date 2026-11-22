@@ -279,6 +279,9 @@ func (r *ReplicationItems) List(ctx context.Context) ([]replica.LocalItem, error
 	if r.Apps != nil && r.Apps.Available() {
 		if o, err := r.Apps.Status(ctx); err == nil {
 			for _, a := range o.Apps {
+				if apps.Excluded(a.ID) {
+					continue
+				}
 				out = append(out, replica.LocalItem{Kind: replica.KindApp, ID: a.ID, Name: a.Name, Pool: o.Pool, Dataset: a.Dataset})
 			}
 		}
@@ -347,7 +350,7 @@ func (r *ReplicationItems) Resolve(ctx context.Context, kind, id string) (string
 			return "", err
 		}
 		for _, a := range o.Apps {
-			if a.ID == id && a.Dataset == o.Pool+"/apps/"+id {
+			if a.ID == id && a.Dataset == o.Pool+"/apps/"+id && !apps.Excluded(id) {
 				return a.Dataset, nil
 			}
 		}
