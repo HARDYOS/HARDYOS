@@ -357,6 +357,7 @@ func TestMailServerIntegration(t *testing.T) {
 			t.Fatalf("wrong calendar password: %d", resp.StatusCode)
 		}
 	})
+	t.Run("backup and restore with the real Dovecot", func(t *testing.T) { backupRoundTrip(t, r) })
 	securityReview(t)
 	_ = netip.Addr{}
 }

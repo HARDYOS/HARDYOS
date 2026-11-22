@@ -56,6 +56,16 @@ picks up where it stopped). **History** lists each run with what it sent.
   (like pulling the plug). Replication snapshots count against a VM's space
   limit: keep few on A.
 - Running apps are copied as they are (crash-consistent).
+- **Mail** (the mail server's `<pool>/mail`: mailboxes, calendars, DKIM
+  and TLS keys, its configuration and the spam filter's learning) is
+  ticked for a new task, with the *Mail (Roundcube)* app for webmail
+  settings, once the mail server is set up. A server without one skips it.
+  Existing tasks: the oldest one to each server gets Mail once that server
+  is updated too (it says it accepts mail replicas), with a notification and
+  a **Stop replicating mail** button on the task; until then, and with any
+  older receiving server, the mail item is skipped with a note.
+  The receiving server never mounts or shows the mail copy (it can't be
+  browsed there); it only ever goes back to this server.
 - A task that fails sends a notification once; one with no success for
   three intervals (at least an interval plus an hour) is reported as
   behind; the first success afterwards says so.
@@ -82,7 +92,16 @@ copies the chosen copy back:
   is checked like any install; restored compose files never run as they
   are).
 
-Nothing on A is overwritten. A restore that fails removes what it copied.
+- **Mail**: pick a copy, then one mailbox, a domain, one person's calendars
+  and contacts, or everything, the same way as from a cloud backup
+  ([mail.md › Backups](mail.md#backups)). The copy comes back to
+  `<pool>/mail-restores/<id>` (read only, mounted only in a folder root
+  alone can open), the chosen part goes into the mail server, and the copy
+  is removed. This is the one restore that can replace data on A: only
+  when you choose "Replace what's there" and type the address, domain or
+  `mail`, after a snapshot of the mail.
+
+Otherwise nothing on A is overwritten. A restore that fails removes what it copied.
 
 ### On the receiving server
 
@@ -102,7 +121,9 @@ that A wrote. Allow it only for servers you trust; A can always restore a
 copy and look at it on its own side.
 
 Replicas are never mounted, shared over SMB/NFS, listed as shared folders,
-VMs or apps, and they're read only.
+VMs or apps, and they're read only. Mail replicas can't be browsed even
+when browsing is allowed: they hold the sending server's DKIM and TLS keys
+(decision 465).
 
 ## How it works
 

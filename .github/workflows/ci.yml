@@ -187,7 +187,7 @@ jobs:
         with:
           go-version-file: daemon/go.mod
           cache: false
-      - name: no open relay, TLS-only sign-in, PROXY only from the VPS, brute force blocked without locking out the LAN, DKIM, Junk, calendars
+      - name: no open relay, TLS-only sign-in, PROXY only from the VPS, brute force blocked without locking out the LAN, DKIM, Junk, calendars, backup and restore of a mailbox
         run: scripts/mail-integration.sh
 
   office:

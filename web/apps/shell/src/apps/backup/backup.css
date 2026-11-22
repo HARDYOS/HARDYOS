@@ -237,6 +237,22 @@
   border-color: rgba(251, 191, 36, 0.35);
   color: var(--hos-warn-text);
 }
+.bk-chip--mail {
+  border-color: rgba(139, 92, 255, 0.45);
+  color: #c4b5fd;
+}
+/* Mail restore: the four scopes in a 2×2 grid (one column on narrow windows). */
+.bk-mailscope {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.bk-mailscope legend {
+  margin-bottom: 6px;
+}
 
 .bk-facts {
   display: grid;

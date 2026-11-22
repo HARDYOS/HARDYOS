@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -503,10 +504,25 @@ func (s *Service) handlePair(w http.ResponseWriter, r *http.Request) {
 type helloResponse struct {
 	Name     string `json:"name"`
 	SourceID string `json:"sourceId"`
+	// Kinds are the item kinds this server accepts (servers from before
+	// decision 469 send none: shares, apps and VMs).
+	Kinds []string `json:"kinds,omitempty"`
+}
+
+// accepts says whether the other server takes replicas of kind.
+func (h *helloResponse) accepts(kind string) bool {
+	if kind == replica.KindShare || kind == replica.KindApp || kind == replica.KindVM {
+		return true
+	}
+	return slices.Contains(h.Kinds, kind)
 }
 
 func (s *Service) handleHello(w http.ResponseWriter, r *http.Request, src *Source) {
-	replyJSON(w, http.StatusOK, helloResponse{Name: s.hostname(), SourceID: src.ID})
+	kinds := replica.Kinds
+	if s.acceptKinds != nil {
+		kinds = s.acceptKinds
+	}
+	replyJSON(w, http.StatusOK, helloResponse{Name: s.hostname(), SourceID: src.ID, Kinds: kinds})
 }
 
 // itemNote is what a source says about one of its items.
@@ -809,6 +825,12 @@ func (s *Service) handleBrowse(w http.ResponseWriter, r *http.Request, src *Sour
 	t, err := target(r, src)
 	if err != nil {
 		replyErr(w, err)
+		return
+	}
+	if t.Kind == replica.KindMail {
+		// Mail replicas hold DKIM and TLS keys: never mounted here
+		// (decision 465).
+		replyError(w, http.StatusForbidden, "browse_off", "mail replicas can't be browsed; restore the mail to look inside")
 		return
 	}
 	if !src.AllowBrowse {

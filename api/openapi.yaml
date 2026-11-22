@@ -38,6 +38,7 @@ tags:
   - name: office
   - name: files
   - name: remote
+  - name: hostnames
   - name: photos
   - name: oidc
   - name: vms
@@ -3437,6 +3438,128 @@ paths:
         "503": { $ref: "#/components/responses/Unavailable" }
   # ---- end of App Store v2 apps API ----
   # ---- Remote access: NetBird client and publishing (docs/remote-access.md, part A) ----
+  /hostnames:
+    get:
+      operationId: getHostnames
+      summary: Control Panel › Hostnames status
+      description: |
+        Whether apps are served at their own names under the base domain,
+        the Cloudflare token's state (kept by hardyd-priv; never returned,
+        only whether one is set and when it was last verified), the
+        wildcard certificate in service, every name and what it serves,
+        and how devices at home can find them.
+      tags: [hostnames]
+      responses:
+        "200":
+          description: The status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HostnamesStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /hostnames/desktop:
+    get:
+      operationId: getHostnamesDesktop
+      summary: Where the desktop is at its own hostname ("" while hostnames are off)
+      tags: [hostnames]
+      responses:
+        "200":
+          description: The address
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HostnamesDesktop" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /hostnames/token:
+    put:
+      operationId: setHostnamesToken
+      summary: Hand a Cloudflare API token to hardyd-priv (a job, audited)
+      description: |
+        The token (Zone › DNS › Edit on the base domain's zone only) goes
+        to the job in memory and on to hardyd-priv, which verifies it with
+        Cloudflare, checks the base domain is in a zone it can edit, and
+        keeps it encrypted where only root can read it. It is never
+        returned. The base domain must be Remote Access's when that has one.
+      tags: [hostnames]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HostnamesTokenRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    delete:
+      operationId: clearHostnamesToken
+      summary: Forget the Cloudflare token (a job); apps go back to their ports
+      tags: [hostnames]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HostnamesClearRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /hostnames/token/verify:
+    post:
+      operationId: verifyHostnamesToken
+      summary: Check the saved token with Cloudflare again (a job)
+      tags: [hostnames]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /hostnames/settings:
+    put:
+      operationId: setHostnamesSettings
+      summary: Turn hostnames on or off (a job; turning on gets the certificate when needed)
+      tags: [hostnames]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HostnamesSettings" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /hostnames/certificate:
+    post:
+      operationId: issueHostnamesCertificate
+      summary: Get (or renew) the wildcard certificate now (a job)
+      tags: [hostnames]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /hostnames/lan:
+    post:
+      operationId: setHostnamesLAN
+      summary: Add the names to (or remove them from) this server's own domain controller's DNS (a job)
+      tags: [hostnames]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HostnamesLANRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
   /remote:
     get:
       operationId: getRemote
@@ -4936,6 +5059,23 @@ paths:
         "400": { $ref: "#/components/responses/Invalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /backup/targets/{id}/mail:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: snapshot, in: query, required: true, schema: { type: string } }
+    get:
+      operationId: backupMailContents
+      summary: The domains and mailboxes in a version of the mail
+      tags: [cloudbackup]
+      responses:
+        "200":
+          description: Contents
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackupMailContents" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /backup/tasks:
     get:
       operationId: listBackupTasks
@@ -5565,6 +5705,19 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/MailOverview" }
+  /mail/restore-targets:
+    get:
+      operationId: getMailRestoreTargets
+      summary: This server's mailboxes by storage key, for restoring mail from a backup or replica (admin)
+      tags: [mail]
+      responses:
+        "200":
+          description: Domains and mailboxes (webmail is always false here)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackupMailContents" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /mail/settings:
     put:
       operationId: saveMailSettings
@@ -5978,6 +6131,100 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
+    HostnamesSettings:
+      type: object
+      required: [enabled, email, staging]
+      properties:
+        enabled: { type: boolean, description: Serve apps at their hostnames once the certificate is there (and keep it renewed) }
+        email: { type: string, description: "Let's Encrypt's contact for expiry warnings (\"\" = none)" }
+        staging: { type: boolean, description: "Use Let's Encrypt's staging server (untrusted certificates, for trying the setup)" }
+    HostnamesTokenRequest:
+      type: object
+      required: [token, base]
+      properties:
+        token: { type: string, writeOnly: true }
+        base: { type: string, description: "The base domain, e.g. home.example.net" }
+    HostnamesClearRequest:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: string, description: The base domain, typed }
+    HostnamesLANRequest:
+      type: object
+      properties:
+        remove: { type: boolean }
+        address: { type: string, description: One of this server's addresses (lan.addresses) }
+    HostnamesTokenState:
+      type: object
+      required: [set, base, zone, verifiedAt, apex]
+      properties:
+        set: { type: boolean }
+        base: { type: string }
+        zone: { type: string }
+        verifiedAt: { type: [string, "null"], format: date-time }
+        problem: { type: string }
+        apex: { type: boolean, description: "The base is its Cloudflare zone's apex: this server's domain controller holds the names only when the base is the AD domain or inside it" }
+    HostnamesCert:
+      type: object
+      required: [names, issuer, notBefore, notAfter, fingerprint, renewsAt]
+      properties:
+        names: { type: array, items: { type: string } }
+        issuer: { type: string }
+        notBefore: { type: string, format: date-time }
+        notAfter: { type: string, format: date-time }
+        fingerprint: { type: string, description: SHA-256 of the certificate }
+        renewsAt: { type: string, format: date-time }
+    HostnamesCertAttempt:
+      type: object
+      required: [names, at]
+      properties:
+        names: { type: string }
+        serial: { type: string }
+        notBefore: { type: string, format: date-time }
+        notAfter: { type: string, format: date-time }
+        issuer: { type: string }
+        error: { type: string }
+        at: { type: string, format: date-time }
+    HostnameEntry:
+      type: object
+      required: [label, host, what]
+      properties:
+        label: { type: string }
+        host: { type: string }
+        what: { type: string }
+    HostnamesLANState:
+      type: object
+      required: [addresses, netbirdIp, domainDns, domain]
+      properties:
+        addresses: { type: array, items: { type: string } }
+        netbirdIp: { type: string }
+        domainDns: { type: boolean, description: "HardyOS's own domain controller runs and can hold the names" }
+        domain: { type: string }
+    HostnamesStatus:
+      type: object
+      required: [active, settings, token, remoteBase, desktopUrl, certificate, lastError, names, lan]
+      properties:
+        active: { type: boolean }
+        problem: { type: string }
+        settings: { $ref: "#/components/schemas/HostnamesSettings" }
+        token: { $ref: "#/components/schemas/HostnamesTokenState" }
+        remoteBase: { type: string }
+        desktopUrl: { type: string }
+        certificate:
+          oneOf:
+            - { $ref: "#/components/schemas/HostnamesCert" }
+            - { type: "null" }
+        lastError:
+          oneOf:
+            - { $ref: "#/components/schemas/HostnamesCertAttempt" }
+            - { type: "null" }
+        names: { type: array, items: { $ref: "#/components/schemas/HostnameEntry" } }
+        lan: { $ref: "#/components/schemas/HostnamesLANState" }
+    HostnamesDesktop:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string }
     Health:
       type: object
       required: [status, uptimeSeconds]
@@ -7938,6 +8185,7 @@ components:
         url: { type: string }
         proxied: { type: boolean, description: Through HardyOS's HTTPS window proxy (can be shown in a desktop window) }
         published: { type: boolean, description: "The app's own published address (https://<app>.<base>, through NetBird's reverse proxy), given when the desktop is used at its published address" }
+        hostname: { type: boolean, description: "The app's own hostname under the base domain on this server (Control Panel › Hostnames), given when the desktop is used at its hostname" }
     AppCatalogApp:
       type: object
       required: [id, name, version, summary, url, sha256, icon]
@@ -9364,8 +9612,8 @@ components:
       type: object
       required: [kind]
       properties:
-        kind: { type: string, enum: [share, app, vm, system] }
-        id: { type: string, description: The shared folder's, app's or VM's id (none for system) }
+        kind: { type: string, enum: [share, app, vm, system, mail] }
+        id: { type: string, description: "The shared folder's, app's or VM's id (none for system and mail)" }
     BackupSchedule:
       type: object
       required: [frequency]
@@ -9502,9 +9750,10 @@ components:
       type: object
       required: [item, snapshot, time, files, bytes]
       properties:
-        item: { type: string, description: "share:<id>, app:<id>, vm:<id> or system" }
+        item: { type: string, description: "share:<id>, app:<id>, vm:<id>, system or mail" }
         snapshot: { type: string, description: The snapshot to browse and restore }
         disks: { type: object, additionalProperties: { type: string } }
+        webmail: { type: string, description: "mail: the webmail part (Roundcube's data), restored with everything" }
         time: { type: string, format: date-time }
         files: { type: integer, format: int64 }
         bytes: { type: integer, format: int64 }
@@ -9541,9 +9790,10 @@ components:
         target: { type: string }
         snapshot: { type: string }
         paths: { type: array, items: { type: string }, description: Inside the item; none = all }
-        mode: { type: string, enum: [copy, in_place, rollback] }
+        mode: { type: string, enum: [copy, in_place, rollback, mail] }
         folder: { type: string, description: "copy: the new folder's name" }
         confirm: { type: string, description: "rollback: the shared folder's, app's or VM's name (settings: \"settings\")" }
+        mail: { $ref: "#/components/schemas/MailRestoreArgs" }
     BackupRebuildRequest:
       type: object
       required: [target, run, pool, confirm]
@@ -9589,11 +9839,56 @@ components:
         hostname: { type: string }
         items: { type: array, items: { type: string } }
         target: { type: string }
+    MailRestoreArgs:
+      type: object
+      description: >-
+        What of the mail item to restore (mode mail; replication: kind mail).
+        Mailboxes are matched by storage key: key is the version's mailbox,
+        into the one it goes into here (default the same; another needs that
+        mailbox's address typed in confirm).
+      required: [scope]
+      properties:
+        scope: { type: string, enum: [mailbox, domain, calendars, all] }
+        key: { type: string, description: "mailbox, calendars: the version's mailbox key" }
+        into: { type: string, description: "mailbox, calendars: the mailbox key here" }
+        domain: { type: string, description: "domain: the domain" }
+        mode: { type: string, enum: [copy, overwrite], description: "copy: a new folder \"Restored <date>\" (calendars: new collections); overwrite: replaces what's there (all: always)" }
+        confirm: { type: string, description: "overwrite: the mailbox's address (domain: the domain); all: \"mail\"" }
+    MailRestoreResult:
+      type: object
+      required: [scope, mailboxes, messages, collections, bytes, dkim, bayes, notes]
+      properties:
+        scope: { type: string }
+        mailboxes: { type: integer }
+        messages: { type: integer }
+        collections: { type: integer }
+        bytes: { type: integer, format: int64 }
+        folder: { type: string, description: The new folder (copy) }
+        safety: { type: string, description: The snapshot of <pool>/mail taken first }
+        dkim: { type: array, items: { type: string } }
+        bayes: { type: boolean }
+        notes: { type: array, items: { type: string } }
+    BackupMailContents:
+      type: object
+      required: [hostname, domains, mailboxes, webmail]
+      properties:
+        hostname: { type: string }
+        domains: { type: array, items: { type: string } }
+        mailboxes:
+          type: array
+          items:
+            type: object
+            required: [key, address]
+            properties:
+              key: { type: string }
+              address: { type: string }
+        webmail: { type: boolean, description: "The version has Roundcube's data" }
+        freeBytes: { type: integer, format: int64, description: "Free space on the mail storage now (a restore needs about the version's size; it's refused when clearly too little)" }
     # ---- end of cloud backup API schemas ----
     # ---- replication API schemas ----
     ReplicationKind:
       type: string
-      enum: [share, app, vm]
+      enum: [share, app, vm, mail]
     ReplicationItem:
       type: object
       required: [kind, id]
@@ -9628,6 +9923,7 @@ components:
         name: { type: string }
         targetId: { type: string }
         items: { type: array, items: { $ref: "#/components/schemas/ReplicationItem" } }
+        mailAuto: { type: string, enum: ["", pending, added], description: "pending: Mail is added once the other server accepts mail replicas; added: it was (shown until the task is changed)" }
         intervalMinutes: { type: integer, minimum: 5, maximum: 10080 }
         bandwidthKBps: { type: integer, minimum: 0, description: KiB per second; 0 for no limit }
         keepLocal: { type: integer, minimum: 1 }
@@ -9723,6 +10019,7 @@ components:
         newId: { type: string, description: "Shared folders: the new folder's id" }
         name: { type: string, description: "Shared folders: the new folder's name" }
         confirm: { type: boolean }
+        mail: { $ref: "#/components/schemas/MailRestoreArgs" }
     ReplicationRun:
       type: object
       required: [id, taskId, jobId, kind, startedAt, finishedAt, state, bytes, message]

@@ -180,7 +180,9 @@ func (s Settings) Validate() error {
 	if !netbird.ValidDNSLabel(s.DesktopName) {
 		return errors.New("the desktop's name is letters, digits and dashes (like nas)")
 	}
-	if s.DesktopName == SSOLabel || s.DesktopName == FilesLabel {
+	switch s.DesktopName {
+	case SSOLabel, FilesLabel, "office", "photos", "mail":
+		// HardyOS's own names (hostnames.Reserved, decision 456).
 		return errors.New(s.DesktopName + " is HardyOS's own name under the base domain: choose another for the desktop")
 	}
 	if s.APIURL != "" {
