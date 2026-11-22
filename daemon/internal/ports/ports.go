@@ -56,6 +56,24 @@ const (
 	// on inside its container (the router's public side of
 	// NetBirdStandbySTUN; not a host port of this server).
 	NetBirdSTUN = 3478
+	// Sunshine's ports (game streaming inside a VM, decision 404). On the
+	// host they're only ever forwarded from the NetBird interface, to the
+	// one VM whose streaming is published; nothing on the host listens
+	// on them. SunshineWebUI is never forwarded (the VM's network only).
+	SunshineHTTPS   = 47984 // TCP, pairing and app list over TLS
+	SunshineHTTP    = 47989 // TCP, server info and pairing
+	SunshineWebUI   = 47990 // TCP, Sunshine's web UI and API (not forwarded)
+	SunshineRTSP    = 48010 // TCP and UDP, RTSP session setup
+	SunshineVideo   = 47998 // UDP
+	SunshineControl = 47999 // UDP
+	SunshineAudio   = 48000 // UDP
+	SunshineMic     = 48002 // UDP
+)
+
+// SunshineTCP and SunshineUDP are the ports forwarded to a streaming VM.
+var (
+	SunshineTCP = []int{SunshineHTTPS, SunshineHTTP, SunshineRTSP}
+	SunshineUDP = []int{SunshineVideo, SunshineControl, SunshineAudio, SunshineMic, SunshineRTSP}
 )
 
 // NetBirdStandbyApp is the app id that owns the NetBird standby ports.
@@ -65,30 +83,37 @@ const NetBirdStandbyApp = "netbird-standby"
 // is checked separately), including ports services HardyOS runs take that
 // no Go code listens on itself.
 var Fixed = map[string]int{
-	"http":                      HTTP,
-	"https":                     HTTPS,
-	"mail submissions":          MailSubmissions,
-	"mail submission":           MailSubmission,
-	"mail imaps":                MailIMAPS,
-	"mail relay":                MailRelay,
-	"mail proxied submissions":  MailProxySubmissions,
-	"mail proxied submission":   MailProxySubmission,
-	"mail proxied imaps":        MailProxyIMAPS,
-	"ups (nut)":                 NUT,
-	"app gateway":               AppGateway,
-	"office origin":             Office,
-	"office internal":           OfficeInternal,
-	"replication":               Replication,
-	"netbird standby http":      NetBirdStandbyHTTP,
-	"netbird standby https":     NetBirdStandbyHTTPS,
-	"netbird standby stun":      NetBirdStandbySTUN,
-	"socks (netbird)":           1080,
-	"nfs":                       2049,
-	"iscsi":                     3260,
-	"global catalog":            3268,
-	"global catalog (tls)":      3269,
-	"mdns":                      5353,
-	"https (alternative, apps)": 8443,
+	"http":                       HTTP,
+	"https":                      HTTPS,
+	"mail submissions":           MailSubmissions,
+	"mail submission":            MailSubmission,
+	"mail imaps":                 MailIMAPS,
+	"mail relay":                 MailRelay,
+	"mail proxied submissions":   MailProxySubmissions,
+	"mail proxied submission":    MailProxySubmission,
+	"mail proxied imaps":         MailProxyIMAPS,
+	"ups (nut)":                  NUT,
+	"app gateway":                AppGateway,
+	"office origin":              Office,
+	"office internal":            OfficeInternal,
+	"replication":                Replication,
+	"netbird standby http":       NetBirdStandbyHTTP,
+	"netbird standby https":      NetBirdStandbyHTTPS,
+	"netbird standby stun":       NetBirdStandbySTUN,
+	"sunshine https (netbird)":   SunshineHTTPS,
+	"sunshine http (netbird)":    SunshineHTTP,
+	"sunshine rtsp (netbird)":    SunshineRTSP,
+	"sunshine video (netbird)":   SunshineVideo,
+	"sunshine control (netbird)": SunshineControl,
+	"sunshine audio (netbird)":   SunshineAudio,
+	"sunshine mic (netbird)":     SunshineMic,
+	"socks (netbird)":            1080,
+	"nfs":                        2049,
+	"iscsi":                      3260,
+	"global catalog":             3268,
+	"global catalog (tls)":       3269,
+	"mdns":                       5353,
+	"https (alternative, apps)":  8443,
 }
 
 // Reserved reports whether p is one of the fixed ports: allocators (app

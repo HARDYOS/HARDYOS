@@ -572,19 +572,16 @@ func (m *Manager) checkInstalled(ctx context.Context, id string) {
 		return
 	}
 	s := st.spec
-	media := []Media{}
-	for _, md := range s.Media {
-		if md.Kind != MediaUnattend {
-			media = append(media, md)
-		}
-	}
-	s.Media, s.Unattend = media, nil
+	// The streaming disc goes too: its step ran at the first sign-in
+	// (a running QEMU keeps reading the file it has open).
+	s.Media, s.Unattend = withoutMedia(withoutMedia(s.Media, MediaUnattend), MediaStreaming), nil
 	st.spec = s
 	if err := m.saveSpec(st); err != nil {
 		m.log().Warn("vms: saving the VM after its Windows install", "id", id, "err", err)
 		return
 	}
 	m.removeUnattend(st)
+	m.removeStreaming(st)
 	if err := m.define(ctx, st, nil); err != nil {
 		m.log().Warn("vms: redefining the VM after its Windows install", "id", id, "err", err)
 	}

@@ -62,7 +62,8 @@ var ubuntuKey string
 type CatalogImage struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
-	// Kind: disk (a disk image to import) or iso.
+	// Kind: disk (a disk image to import), iso, or file (goes onto the
+	// game streaming disc only; streaming.go).
 	Kind string `json:"kind"`
 	// Files per architecture (ArchInfo.Arch).
 	Files map[string]CatalogFile `json:"files"`
@@ -97,7 +98,7 @@ type CatalogFile struct {
 }
 
 // Catalog is every image, in the order the wizard shows them.
-var Catalog = []CatalogImage{
+var Catalog = append([]CatalogImage{
 	{
 		ID: CatalogDebian13, Name: "Debian 13 (trixie) cloud image", Kind: "disk",
 		Hosts: []string{"cloud.debian.org"}, Mirrors: true,
@@ -162,7 +163,7 @@ var Catalog = []CatalogImage{
 			"aarch64": {URL: VirtioURL, File: VirtioFile, SHA256: VirtioSHA256, Size: VirtioSize},
 		},
 	},
-}
+}, streamingCatalog...)
 
 func (m *Manager) catalog() []CatalogImage {
 	if m.CatalogImages != nil {
@@ -524,7 +525,7 @@ type CatalogView struct {
 func (m *Manager) CatalogList() []CatalogView {
 	out := []CatalogView{}
 	for _, c := range m.catalog() {
-		if f, ok := c.Files[m.arch().Arch]; ok {
+		if f, ok := c.Files[m.arch().Arch]; ok && c.Kind != "file" {
 			out = append(out, CatalogView{ID: c.ID, Name: c.Name, Kind: c.Kind, File: f.File, Verified: c.Verified})
 		}
 	}

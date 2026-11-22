@@ -258,6 +258,29 @@ jobs:
           sudo docker ps -a --filter label=com.docker.compose.project=hardyos-immich-it
           for c in $(sudo docker ps -aq --filter label=com.docker.compose.project=hardyos-immich-it); do sudo docker logs --tail 80 "$c" 2>&1; done
 
+  streaming:
+    name: Game streaming (pinned downloads, firewall rules, disc)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache: false
+      - name: nftables, iptables, xorriso
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nftables iptables xorriso python3
+      - name: build test binary
+        working-directory: daemon
+        run: go test -c -o "$RUNNER_TEMP/vms.test" ./internal/vms
+      - name: download Sunshine and the Virtual Display Driver and check their pinned SHA-256
+        run: HARDYOS_NET_TESTS=1 "$RUNNER_TEMP/vms.test" -test.run TestStreamingPinsDownload -test.v -test.timeout 15m
+      - name: load the forwarding rules in network namespaces and stream through them
+        run: sudo HARDYOS_NFT_TEST=1 "$RUNNER_TEMP/vms.test" -test.run 'TestStreamingRulesLoad|TestStreamingForwardsInNamespaces' -test.v
+      - name: make a streaming disc with xorriso
+        run: HARDYOS_XORRISO_TEST=1 "$RUNNER_TEMP/vms.test" -test.run TestStreamingDiscXorriso -test.v
+
   vms:
     name: Virtual machines (KVM)
     runs-on: ubuntu-24.04

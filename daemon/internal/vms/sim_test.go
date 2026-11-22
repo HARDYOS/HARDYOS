@@ -40,6 +40,9 @@ type sim struct {
 	filtering int              // the bridge's vlan_filtering
 	vlanAdd   string           // a VLAN `bridge vlan add` ignores (fails silently)
 	agent     bool             // the guest agent answers
+	neigh     string           // ip -j -4 neigh show dev br0 (JSON)
+	fdb       string           // bridge -j fdb show br br0 (JSON)
+	nftLive   string           // the loaded game streaming ruleset
 }
 
 type simDomain struct {
@@ -110,7 +113,31 @@ func (s *sim) Run(_ context.Context, stdin []byte, name string, args ...string) 
 		return ok("")
 	case "bridge":
 		return s.bridge(args)
+	case "nft":
+		switch {
+		case len(args) == 2 && args[0] == "-f":
+			b, _ := os.ReadFile(filepath.Join(s.root, args[1]))
+			s.nftLive = string(b)
+		case len(args) >= 2 && args[0] == "list":
+			if s.nftLive == "" {
+				return bad("Error: No such file or directory")
+			}
+			return ok(s.nftLive)
+		case len(args) >= 2 && args[0] == "delete":
+			s.nftLive = ""
+		}
+		return ok("")
 	case "ip":
+		if len(args) > 2 && args[2] == "neigh" {
+			if s.neigh == "" {
+				return ok(`[{"dst":"192.168.1.77","lladdr":"52:54:00:12:34:56","state":["REACHABLE"]}]`)
+			}
+			return ok(s.neigh)
+		}
+		if len(args) > 2 && args[2] == "addr" {
+			// ip -j -4 addr show dev br0
+			return ok(fmt.Sprintf(`[{"ifname":%q,"addr_info":[{"family":"inet","local":"192.168.1.10","prefixlen":24,"scope":"global"}]}]`, args[len(args)-1]))
+		}
 		// ip -j -d link show dev br0
 		return ok(fmt.Sprintf(`[{"ifname":%q,"linkinfo":{"info_kind":"bridge","info_data":{"vlan_filtering":%d}}}]`, args[len(args)-1], s.filtering))
 	}
@@ -119,6 +146,12 @@ func (s *sim) Run(_ context.Context, stdin []byte, name string, args ...string) 
 
 // bridge pretends to be iproute2's bridge vlan.
 func (s *sim) bridge(args []string) (sysexec.Result, error) {
+	if len(args) >= 2 && args[0] == "-j" && args[1] == "fdb" {
+		if s.fdb == "" {
+			return ok("[]")
+		}
+		return ok(s.fdb)
+	}
 	if len(args) >= 5 && args[0] == "-j" && args[1] == "vlan" && args[2] == "show" {
 		tap := args[4]
 		var vl []string

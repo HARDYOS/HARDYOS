@@ -48,6 +48,9 @@ type Template struct {
 	// Sound and Clipboard are on for new VMs of the template (console).
 	Sound     bool `json:"sound,omitempty"`
 	Clipboard bool `json:"clipboard,omitempty"`
+	// Streaming: HardyOS can set up game streaming (Sunshine and a
+	// virtual display) during the unattended install (streaming.go).
+	Streaming bool `json:"streaming,omitempty"`
 }
 
 // Preset is a named size.
@@ -220,11 +223,11 @@ var Templates = []Template{
 			Preset{Summary: "New big games", Cores: 8, Threads: 2, MemoryMB: 32768, DiskGB: 512},
 		),
 		DefaultPreset: "standard", MinMemoryMB: 8192, MinDiskGB: 96,
-		Unattend: true, Editions: win11Editions, Sound: true, Clipboard: true,
+		Unattend: true, Editions: win11Editions, Sound: true, Clipboard: true, Streaming: true,
 		Images: []Image{{Name: "Windows 11", Kind: "iso", Page: "https://www.microsoft.com/software-download/windows11"}},
 		Notes: append([]string{
 			"Add your graphics card in the Devices step. While the VM is off, the card goes back to Docker apps.",
-			"Install Sunshine in Windows, then play from any device with Moonlight (see Game streaming on the VM's page).",
+			"With game streaming on, HardyOS installs Sunshine and a virtual display while Windows installs; you install your graphics card's driver, then pair Moonlight on the VM's page.",
 		}, windowsNotes...),
 	},
 	{

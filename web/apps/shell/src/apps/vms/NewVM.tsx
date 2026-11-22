@@ -35,6 +35,7 @@ import {
   installsFromISO,
   isISO,
   isImage,
+  setsUpStreaming,
   stepProblems,
   toRequest,
   usesCloudInit,
@@ -47,6 +48,9 @@ const GROUPS: { id: VMTemplate["group"]; label: string }[] = [
   { id: "appliance", label: "Home and network appliances" },
   { id: "other", label: "Something else" },
 ];
+
+/** The Sunshine release HardyOS pins (daemon/internal/vms/streaming.go). */
+const SUNSHINE_LABEL = "LizardByte's official installer";
 
 const MEMORY_STEPS = [512, 1024, 2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072];
 
@@ -728,6 +732,14 @@ function UnattendCard({ s, t, set }: { s: WizardState; t: VMTemplate; set: (p: P
             <Field label="Time zone (optional)" hint="Windows' name, like W. Europe Standard Time or Pacific Standard Time.">
               {(id) => <TextInput id={id} value={s.timeZone} onChange={(e) => set({ timeZone: e.target.value })} />}
             </Field>
+            {t.streaming && (
+              <Toggle
+                label="Set up game streaming"
+                description={`At the first sign-in HardyOS installs Sunshine (${SUNSHINE_LABEL}) and a virtual display, so no dummy HDMI plug is needed, from its own checked copies; nothing is downloaded inside Windows. You install your graphics card's driver; then pair Moonlight on the VM's page.`}
+                checked={s.streaming}
+                onChange={(v) => set({ streaming: v })}
+              />
+            )}
           </>
         )}
       </div>
@@ -820,6 +832,7 @@ function ReviewStep({ s, t, caps, catalog, set }: { s: WizardState; t: VMTemplat
     ["Disks", `${s.disks.length} on ${s.pool}, ${diskSize(total)} in all (thin)`],
     [iso ? "Installer" : "Image", `${file || "none"}${s.source === "url" ? " (downloaded first)" : ""}`],
     ...(iso && s.unattend && t.unattend ? ([["Windows setup", `By itself, as ${s.user}${s.edition ? ` · ${s.edition}` : ""}`]] as [string, ReactNode][]) : []),
+    ...(setsUpStreaming(s, t) ? ([["Game streaming", "Sunshine and a virtual display, set up by HardyOS"]] as [string, ReactNode][]) : []),
     ["Network", nets],
     ["Devices", s.devices.length === 0 ? "None" : s.devices.map((d) => `${d.kind.toUpperCase()} ${d.id}`).join(", ")],
   ];

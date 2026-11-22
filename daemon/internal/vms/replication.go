@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -132,6 +133,10 @@ func ResetRestored(s *Spec) []string {
 	}
 	if s.Streaming != nil {
 		s.Streaming = nil
+		s.Media = withoutMedia(s.Media, MediaStreaming)
+		if s.Unattend != nil {
+			s.Unattend.Hooks = slices.DeleteFunc(s.Unattend.Hooks, func(h string) bool { return h == StreamingHook })
+		}
 		notes = append(notes, "game streaming was turned off")
 	}
 	if s.CloudInit != nil {
