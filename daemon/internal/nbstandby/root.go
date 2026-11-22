@@ -123,6 +123,9 @@ type state struct {
 	Handback string `json:"handback,omitempty"`
 	// Fences are the fences made while not taken over (the last 24 h).
 	Fences []time.Time `json:"fences,omitempty"`
+	// Returned: during this take-over the VPS was unfenced or got the state
+	// back, so the fence is no longer renewed (until the next take-over).
+	Returned bool `json:"returned,omitempty"`
 }
 
 // FenceTTL is how long a fence lasts on the VPS unless renewed; HardyOS
@@ -453,8 +456,19 @@ func KeyFingerprint(line string) string {
 // Fence stops the VPS's NetBird server (take-over); Unfence starts it again
 // (hand-back without sending state).
 func (r *Root) Fence(ctx context.Context, on bool) error {
+	// Never at the same time as a hand-back: a renewal must not stop the
+	// server the VPS just started with the handed-back state.
+	r.syncMu.Lock()
+	defer r.syncMu.Unlock()
 	r.mu.Lock()
 	st, err := r.load()
+	if err == nil && on && st.Mode == ModeTakenOver && st.Returned {
+		err = problemf("the VPS runs NetBird again for this hand-back: not fenced")
+	}
+	if err == nil && !on && st.Mode == ModeTakenOver && !st.Returned {
+		st.Returned = true
+		err = r.save(st)
+	}
 	if err == nil && on && st.Mode != ModeTakenOver {
 		// Not a renewal: at most MaxFences a day.
 		var recent []time.Time
@@ -887,7 +901,7 @@ func (r *Root) Stage(ctx context.Context, a ConfirmArgs) (*StageResult, error) {
 	if err := writeIn(root, "traefik/dynamic.yaml", []byte(routes)); err != nil {
 		return fail(err)
 	}
-	st.Mode, st.Staged, st.TakenOver = ModeTakenOver, snap.ID, r.now()
+	st.Mode, st.Staged, st.TakenOver, st.Returned = ModeTakenOver, snap.ID, r.now(), false
 	if err := r.save(st); err != nil {
 		return fail(err)
 	}
@@ -1030,7 +1044,7 @@ func (r *Root) Unstage(ctx context.Context, a ConfirmArgs) (*Status, error) {
 			return nil, err
 		}
 	}
-	st.Mode, st.Staged, st.TakenOver, st.NetOpen = ModeStandby, "", time.Time{}, false
+	st.Mode, st.Staged, st.TakenOver, st.NetOpen, st.Returned = ModeStandby, "", time.Time{}, false, false
 	if err := r.save(st); err != nil {
 		return nil, err
 	}
@@ -1174,6 +1188,7 @@ func (r *Root) Handback(ctx context.Context, a ConfirmArgs) (*HandbackResult, er
 			_ = os.Remove(filepath.Join(r.Dir, cur.Handback))
 		}
 		cur.Handback = copyName
+		cur.Returned = true
 		if r.save(cur) == nil {
 			keep = true
 		}

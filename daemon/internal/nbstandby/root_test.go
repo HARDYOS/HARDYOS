@@ -563,10 +563,20 @@ func TestRootGuards(t *testing.T) {
 	if bytes.Contains(b, []byte("Account")) || !bytes.Contains(b, []byte("Certificates")) {
 		t.Fatalf("%s", b)
 	}
+	// While taken over the fence is renewed, as often as needed.
+	for i := 0; i < MaxFences+1; i++ {
+		if err := f.root.Fence(t.Context(), true); err != nil {
+			t.Fatalf("renewal %d: %v", i, err)
+		}
+	}
 	// Hand-back names the generation and the standby's version, and a
 	// sealed copy stays here until the next good sync.
 	if _, err := f.root.Handback(t.Context(), ConfirmArgs{Confirm: testHost}); err != nil {
 		t.Fatal(err)
+	}
+	// The VPS runs with the state again: no more renewals.
+	if err := f.root.Fence(t.Context(), true); err == nil {
+		t.Fatal("fence renewed after the hand-back")
 	}
 	sent := readTar(t, f.vps.restored)
 	if string(sent["GENERATION"]) != testGeneration+"\n" || string(sent["VERSION"]) != StandbyVersion+"\n" {
