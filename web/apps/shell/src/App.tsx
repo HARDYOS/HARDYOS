@@ -1,6 +1,7 @@
 import { LoginScreen, SetupScreen } from "./auth/AuthScreens";
+import { EnrollRequired } from "./auth/TwoFactor";
 import { Desktop } from "./desktop/Desktop";
-import { useMe, useSetupStatus } from "./hooks/session";
+import { useLogout, useMe, useSetupStatus } from "./hooks/session";
 import { Installer, useInstallerStatus } from "./installer/Installer";
 import { Alert, Button, Loading } from "./ui";
 
@@ -12,6 +13,7 @@ export function App() {
   const isInstaller = installer.data?.active === true;
   const setup = useSetupStatus(installerKnown && !isInstaller);
   const me = useMe(installerKnown && !isInstaller);
+  const logout = useLogout();
 
   if (isInstaller) return <Installer status={installer.data!} />;
   if (!installerKnown || setup.isPending || me.isPending) {
@@ -34,5 +36,7 @@ export function App() {
   }
   if (setup.data?.needsAdmin) return <SetupScreen />;
   if (!me.data) return <LoginScreen />;
+  // An administrator past the grace period sets up two-factor sign-in first.
+  if (me.data.twoFactor?.mustEnroll) return <EnrollRequired user={me.data} onSignOut={() => logout.mutate()} />;
   return <Desktop user={me.data} />;
 }

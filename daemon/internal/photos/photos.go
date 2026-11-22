@@ -454,6 +454,9 @@ type SSOState struct {
 	RedirectURIs []string `json:"redirectUris"`
 	// Why it's off when the settings ask for it.
 	Why string `json:"why,omitempty"`
+	// PasswordLoginOff: Immich itself said (server features) that it
+	// offers OAuth and not its own passwords.
+	PasswordLoginOff bool `json:"passwordLoginOff,omitempty"`
 }
 
 // LibraryState is one library HardyOS keeps in Immich.

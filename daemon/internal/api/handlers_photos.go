@@ -235,6 +235,12 @@ func (s *Server) photosSync(jc *jobs.Context) (*photos.Status, error) {
 	if serr := s.photos.SaveStatus(context.WithoutCancel(jc), st); serr != nil {
 		s.log.Warn("photos: saving the status", "err", serr)
 	}
+	if err == nil {
+		// What this successful sync saw of Immich's sign-in (a failed
+		// one leaves the last; nothing seen means not exempt).
+		s.savePhotosSignIn(context.WithoutCancel(jc), st.SSO.Active && st.SSO.PasswordLoginOff)
+	}
+
 	if len(st.Notes) > 0 {
 		s.recordSystem(context.WithoutCancel(jc), "photos.sync", photos.AppID, strings.Join(st.Notes, "; "))
 	}

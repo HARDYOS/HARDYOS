@@ -53,6 +53,9 @@ type User struct {
 	// groups would give: the domain couldn't be asked about them for too
 	// long (see SignIn.Refresh). Empty otherwise.
 	RoleNote string `json:"roleNote,omitempty"`
+	// TwoFactor is the account's two-factor state, filled in by the API
+	// where it shows accounts (nil elsewhere).
+	TwoFactor *MFAStatus `json:"twoFactor,omitempty"`
 
 	passwordHash    string
 	groupsCheckedAt time.Time

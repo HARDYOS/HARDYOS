@@ -96,6 +96,16 @@ export interface paths {
          *     401 codes: `bad_credentials` (wrong password or unknown name),
          *     `unknown_domain`, `account_disabled`, `account_locked`,
          *     `account_expired`, `account_unavailable`, `password_expired`.
+         *
+         *     Two-factor sign-in (decisions 440-449): when the password is right
+         *     but a second step is needed, the answer is 202 with a challenge:
+         *     `totp` (an authenticator or recovery code, `POST /auth/login/2fa`),
+         *     `enroll` (an administrator past the grace period at home sets one
+         *     up now, `POST /auth/login/enroll`), or `setup_code` (from outside
+         *     without two-factor sign-in: only an administrator's one-time setup
+         *     code leads to enrollment). From outside (through the app gateway,
+         *     or from an address that isn't private, link-local or NetBird's)
+         *     everyone needs a second factor.
          */
         post: operations["login"];
         delete?: never;
@@ -150,6 +160,245 @@ export interface paths {
         /** Change your own password (signs out your other sessions) */
         post: operations["changePassword"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/login/2fa": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Finish a sign-in with an authenticator or recovery code
+         * @description A 6-digit code (the current 30-second step or one either side, never
+         *     one already used) or a recovery code (`xxxx-xxxx-xxxx-xxxx`, single
+         *     use). A challenge allows 5 tries in 10 minutes. Wrong codes count
+         *     per account and origin (at home; from outside per address, IPv6 per
+         *     /64): 5 in 15 minutes pause code entry from there for 15 minutes
+         *     (429), and recovery codes have a bucket of their own. Wrong codes
+         *     from outside also count in a rolling 60-day budget that a right
+         *     code doesn't reset: at 20, authenticator codes stop working from
+         *     outside (`code_locked`; at home they still do) until the password
+         *     changes or an administrator resets two-factor sign-in.
+         */
+        post: operations["loginSecondFactor"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/login/enroll": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start setting up an authenticator during sign-in
+         * @description For an `enroll` challenge, or a `setup_code` challenge with the administrator's one-time code (`bad_setup_code` otherwise).
+         */
+        post: operations["loginEnroll"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/login/enroll/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Turn on two-factor sign-in with the first code and sign in
+         * @description Every other session of the account ends. The recovery codes are shown only here.
+         */
+        post: operations["loginEnrollConfirm"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/2fa": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Your two-factor sign-in */
+        get: operations["getTwoFactor"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/2fa/enroll": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start setting up (or replacing) your authenticator
+         * @description Needs your password; replacing one that is set up also needs a current code. The old one keeps working until `POST /auth/2fa/confirm`.
+         */
+        post: operations["enrollTwoFactor"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/2fa/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Turn on the new authenticator with its first code
+         * @description This browser counts as signed in with two factors; every other session of the account ends.
+         */
+        post: operations["confirmTwoFactor"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/2fa/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Turn your two-factor sign-in off (not for administrators) */
+        post: operations["disableTwoFactor"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/2fa/recovery-codes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Replace your recovery codes */
+        post: operations["regenerateRecoveryCodes"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/2fa/notice/dismiss": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Dismiss the notice about wrong codes from outside */
+        post: operations["dismissTwoFactorNotice"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/2fa/policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Two-factor settings (admin) */
+        get: operations["getTwoFactorPolicy"];
+        /** Change the administrators' grace period or trusting the router's address (admin, audited) */
+        put: operations["setTwoFactorPolicy"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/app-passwords": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Your app passwords */
+        get: operations["listAppPasswords"];
+        put?: never;
+        /**
+         * Make an app password for one device (domain accounts; needs your password)
+         * @description For services that can't ask for a code: `files` (WebDAV), `mail`
+         *     (IMAP and SMTP), `calendars` (CalDAV and CardDAV). From outside only
+         *     app passwords work there, and once you have two-factor sign-in your
+         *     own password stops working there too. Removed when the domain
+         *     password changes.
+         */
+        post: operations["createAppPassword"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/app-passwords/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Revoke one of your app passwords */
+        delete: operations["deleteAppPassword"];
         options?: never;
         head?: never;
         patch?: never;
@@ -211,6 +460,95 @@ export interface paths {
         /** Set another user's password (admin; signs them out) */
         post: operations["resetUserPassword"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/users/{id}/2fa/reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Remove an account's authenticator and recovery codes (admin; lost phone)
+         * @description Needs `confirm` set to the account's username (400 `confirm_required`
+         *     otherwise). Signs the account out everywhere, revokes every app
+         *     sign-in and refresh token, removes the stop on codes from outside
+         *     and the record of wrong codes, revokes the app passwords unless
+         *     `revokeAppPasswords` is false, and is audited (`users.2fa.reset`).
+         *     An administrator sets up a new authenticator at the next sign-in,
+         *     with no new grace period.
+         */
+        post: operations["resetUserTwoFactor"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/users/{id}/2fa/setup-code": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * A one-time code that lets the account set up two-factor sign-in from outside (admin)
+         * @description Good for 24 hours, single use, replaces an earlier one, shown once and audited. 409 `already_enrolled` when the account has two-factor sign-in.
+         */
+        post: operations["issueTwoFactorSetupCode"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/users/{id}/app-passwords": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        /** An account's app passwords (admin) */
+        get: operations["listUserAppPasswords"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/users/{id}/app-passwords/{pid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+                pid: number;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Revoke an account's app password (admin, audited) */
+        delete: operations["deleteUserAppPassword"];
         options?: never;
         head?: never;
         patch?: never;
@@ -3400,7 +3738,15 @@ export interface paths {
         };
         /** How an app is published through NetBird */
         get: operations["getAppPublish"];
-        /** Publish an app NetBird-only or publicly, or not at all (job remote.service) */
+        /**
+         * Publish an app NetBird-only or publicly, or not at all (job remote.service)
+         * @description Two-factor sign-in (decision 441): an app is published only with
+         *     HardyOS sign-in in front (`hardyosSignIn`), since its own sign-in
+         *     can't ask for a code (400 `signin_required`), except an app whose
+         *     sign-in is HardyOS's own (Photos with "Sign in with HardyOS" on and
+         *     Immich's passwords off). One published without it before is refused
+         *     at the gateway until it is turned on.
+         */
         put: operations["publishApp"];
         post?: never;
         delete?: never;
@@ -6067,6 +6413,8 @@ export interface components {
             lastLoginAt: string | null;
             /** @description Why a domain account's role isn't what its groups give: its groups couldn't be looked up for over 30 minutes, so it has user rights until the domain answers again. Absent otherwise. */
             roleNote?: string;
+            /** @description Two-factor sign-in state (on sign-in, /auth/me and the users list) */
+            twoFactor?: components["schemas"]["TwoFactorStatus"];
         };
         CreateUserRequest: {
             username: string;
@@ -6082,6 +6430,147 @@ export interface components {
             disabled?: boolean;
         };
         ResetPasswordRequest: {
+            password: string;
+        };
+        TwoFactorStatus: {
+            enabled: boolean;
+            /** Format: date-time */
+            enabledAt: string | null;
+            recoveryCodesLeft: number;
+            /** @description An administrator */
+            required: boolean;
+            /**
+             * Format: date-time
+             * @description An administrator's deadline to set it up (starts at the first sign-in that asks)
+             */
+            graceUntil: string | null;
+            /** @description Too many wrong codes from outside: authenticator codes work only at home (recovery codes everywhere) until the password changes or an administrator resets */
+            locked: boolean;
+            /** @description Wrong authenticator codes from outside in the last 60 days (a right code doesn't reset them) */
+            outsideFailures: number;
+            /** @description What the person should know (wrong codes from outside); absent when there's nothing */
+            notice?: string;
+            /** Format: date-time */
+            noticeAt?: string | null;
+            /**
+             * Format: date-time
+             * @description An administrator's setup code is waiting until then
+             */
+            setupCodeExpires: string | null;
+            /** @description Past the grace period; nothing but enrollment works until it is set up */
+            mustEnroll: boolean;
+        };
+        LoginChallenge: {
+            /** @description Send it with the next step; good for 10 minutes and 5 tries */
+            challenge: string;
+            /** @enum {string} */
+            step: "totp" | "enroll" | "setup_code";
+            /** Format: date-time */
+            expiresAt: string;
+        };
+        SecondFactorRequest: {
+            challenge: string;
+            /** @description A 6-digit authenticator code or a recovery code */
+            code: string;
+        };
+        LoginEnrollRequest: {
+            challenge: string;
+            /** @description Needed for a `setup_code` challenge */
+            setupCode?: string;
+        };
+        QRCode: {
+            /** @description Modules on a side */
+            size: number;
+            /** @description SVG path data of the dark modules (M, h, v, z and numbers only) */
+            path: string;
+        };
+        Enrollment: {
+            /** @description The key in base32 */
+            secret: string;
+            /** @description otpauth://totp/… (what the QR code holds) */
+            uri: string;
+            qr: components["schemas"]["QRCode"];
+        };
+        EnrollResult: {
+            user: components["schemas"]["User"];
+            recoveryCodes: string[];
+        };
+        RecoveryCodes: {
+            /** @description 10 single-use codes, shown once */
+            recoveryCodes: string[];
+        };
+        CodeRequest: {
+            code: string;
+        };
+        ReauthCodeRequest: {
+            password: string;
+            /** @description A current authenticator or recovery code (when one is set up) */
+            code?: string;
+        };
+        TwoFactorPolicy: {
+            adminGraceDays: number;
+            /** @description Always true — everyone needs a second factor from outside */
+            outsideRequired: boolean;
+            /**
+             * Format: date-time
+             * @description When a request last came from the router's own address (hairpin NAT, a port forward or a tunnel on the router look like this; kept across restarts): such requests count as outside unless trustRouter is on
+             */
+            routerSeenAt?: string | null;
+            trustRouter: components["schemas"]["RouterTrust"];
+            /** @description This request is from this server's own network (not the router's address, not outside), where trustRouter may be changed */
+            canChangeTrustRouter: boolean;
+        };
+        /** @description "This server is behind NAT: trust the router's address" (off by default). Bound to the router's IP and MAC when turned on; lapses if the gateway changes. Even on, codes from the router have their own limit and count toward the 60-day outside budget, and own passwords stay refused for WebDAV, mail and calendars from it. */
+        RouterTrust: {
+            on: boolean;
+            /** @description It was turned on for another router (IP or MAC changed) and doesn't apply */
+            lapsed: boolean;
+            /** @description The router it was turned on for */
+            ip?: string;
+            /** Format: date-time */
+            since?: string;
+        };
+        TwoFactorPolicyRequest: {
+            adminGraceDays: number;
+            /** @description Turn "this server is behind NAT: trust the router's address" on (for the router as it is now) or off. Only from this server's own network (403 not_from_home otherwise; hardyctl trust-router works too). Audited, and administrators are notified. */
+            trustRouter?: boolean;
+        };
+        TwoFactorSetupCode: {
+            code: string;
+            /** Format: date-time */
+            expiresAt: string;
+        };
+        ConfirmUsernameRequest: {
+            /** @description The account's username */
+            confirm: string;
+            /**
+             * @description Also revoke the account's app passwords
+             * @default true
+             */
+            revokeAppPasswords: boolean;
+        };
+        /** @enum {string} */
+        AppPasswordScope: "files" | "mail" | "calendars";
+        AppPassword: {
+            /** Format: int64 */
+            id: number;
+            name: string;
+            scopes: components["schemas"]["AppPasswordScope"][];
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            lastUsedAt: string | null;
+            lastUsedIp: string;
+        };
+        AppPasswordRequest: {
+            name: string;
+            scopes: components["schemas"]["AppPasswordScope"][];
+            /** @description Your account password */
+            password: string;
+        };
+        AppPasswordCreated: {
+            appPassword: components["schemas"]["AppPassword"];
+            /** @description xxxx-xxxx-xxxx-xxxx-xxxx, shown once */
             password: string;
         };
         /** @enum {string} */
@@ -7759,6 +8248,8 @@ export interface components {
             redirectUris: string[];
             /** @description Why it's off while the settings ask for it */
             why?: string;
+            /** @description Immich itself said (its server features, at the last sync) that it offers sign-in with HardyOS and not its own passwords. Immich may be published without HardyOS sign-in in front only after a successful sync saw this (decision 441). */
+            passwordLoginOff?: boolean;
         };
         PhotosML: {
             /** @enum {string} */
@@ -10368,6 +10859,15 @@ export interface operations {
                     "application/json": components["schemas"]["User"];
                 };
             };
+            /** @description The password is right; a second step is needed (no session yet) */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoginChallenge"];
+                };
+            };
             401: components["responses"]["Unauthorized"];
             /** @description Too many failed sign-ins; see Retry-After */
             429: {
@@ -10451,6 +10951,368 @@ export interface operations {
             };
             400: components["responses"]["Invalid"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    loginSecondFactor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SecondFactorRequest"];
+            };
+        };
+        responses: {
+            /** @description Signed in; session cookie set */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            /** @description `bad_code`, `code_locked`, `secret_unusable` or `challenge_expired` */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Too many wrong codes; see Retry-After */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    loginEnroll: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LoginEnrollRequest"];
+            };
+        };
+        responses: {
+            /** @description The secret to scan or type */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Enrollment"];
+                };
+            };
+            /** @description `bad_setup_code` or `challenge_expired` */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    loginEnrollConfirm: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SecondFactorRequest"];
+            };
+        };
+        responses: {
+            /** @description Signed in; session cookie set */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrollResult"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description `no_pending`: enrollment wasn't started or expired (15 minutes) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    getTwoFactor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description State */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TwoFactorStatus"];
+                };
+            };
+        };
+    };
+    enrollTwoFactor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReauthCodeRequest"];
+            };
+        };
+        responses: {
+            /** @description The secret to scan or type */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Enrollment"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    confirmTwoFactor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CodeRequest"];
+            };
+        };
+        responses: {
+            /** @description Recovery codes (shown once) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecoveryCodes"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    disableTwoFactor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReauthCodeRequest"];
+            };
+        };
+        responses: {
+            /** @description Turned off */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    regenerateRecoveryCodes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReauthCodeRequest"];
+            };
+        };
+        responses: {
+            /** @description New recovery codes (shown once; the old ones stop working) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecoveryCodes"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    dismissTwoFactorNotice: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Dismissed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getTwoFactorPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TwoFactorPolicy"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    setTwoFactorPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TwoFactorPolicyRequest"];
+            };
+        };
+        responses: {
+            /** @description Settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TwoFactorPolicy"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listAppPasswords: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Newest first (never their values) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppPassword"][];
+                };
+            };
+        };
+    };
+    createAppPassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AppPasswordRequest"];
+            };
+        };
+        responses: {
+            /** @description The password (shown once) */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppPasswordCreated"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    deleteAppPassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Revoked */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: components["responses"]["NotFound"];
         };
     };
     listUsers: {
@@ -10596,6 +11458,103 @@ export interface operations {
                 content?: never;
             };
             400: components["responses"]["Invalid"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    resetUserTwoFactor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConfirmUsernameRequest"];
+            };
+        };
+        responses: {
+            /** @description The account after the reset */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    issueTwoFactorSetupCode: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The code */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TwoFactorSetupCode"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listUserAppPasswords: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppPassword"][];
+                };
+            };
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteUserAppPassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+                pid: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Revoked */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             404: components["responses"]["NotFound"];
         };
     };

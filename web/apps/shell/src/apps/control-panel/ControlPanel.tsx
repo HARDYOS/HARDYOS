@@ -25,7 +25,7 @@ import { Overview } from "./Overview";
 import { Photos } from "./Photos";
 import { RemoteAccess } from "./RemoteAccess";
 import { Updates } from "./Updates";
-import { Users } from "./Users";
+import { TwoFactorPolicyCard, Users } from "./Users";
 
 const SECTIONS = [
   { id: "overview", label: "Overview", icon: <GridIcon size={16} /> },
@@ -101,6 +101,7 @@ export default function ControlPanel({ args }: AppProps) {
       {section === "security" && (
         <>
           <PageHeader title="Security" subtitle="Who can do what, and every sign-in and change to the system, newest first." />
+          <TwoFactorPolicyCard />
           <TerminalSwitch />
           <AuditLog />
         </>

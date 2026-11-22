@@ -37,7 +37,11 @@ export function PublishEditor({
   const [mode, setMode] = useState<Mode>(item.config.default && !desktop ? "" : (item.config.mode as Mode));
   const [auth, setAuth] = useState<Auth>(item.config.auth as Auth);
   const [secret, setSecret] = useState("");
-  const [signin, setSignin] = useState(item.config.hardyosSignIn);
+  // From outside HardyOS asks for a two-factor code before an app's own
+  // sign-in, so it's required; only Photos (whose sign-in is HardyOS's)
+  // is published without it, from Control Panel › Photos.
+  const signinOptional = item.key === "app:immich";
+  const [signin, setSignin] = useState(item.config.hardyosSignIn || !signinOptional);
   const [chosen, setChosen] = useState<string[]>(item.config.groups);
   const [understood, setUnderstood] = useState(false);
   const [openUnderstood, setOpenUnderstood] = useState(false);
@@ -154,12 +158,22 @@ export function PublishEditor({
         </fieldset>
       )}
       {!desktop && effective !== "off" && (
+        <>
         <Toggle
           label="Ask for a HardyOS sign-in too"
-          description="On: the app opens only for people signed in to HardyOS who may use it (Who can use it). Off: anyone who gets past NetBird reaches the app's own sign-in, which apps with phone or TV clients need."
+          description={
+            signinOptional
+              ? "On: the app opens only for people signed in to HardyOS who may use it (Who can use it). Off: anyone who gets past NetBird reaches the app's own sign-in, which apps with phone or TV clients need."
+              : "Required: from outside, HardyOS asks for a two-factor code, which the app's own sign-in can't. The app opens only for people signed in to HardyOS who may use it (Who can use it)."
+          }
           checked={signin}
+          disabled={!signinOptional}
           onChange={setSignin}
         />
+        {!item.config.hardyosSignIn && !signinOptional && item.status && (
+          <Alert tone="warn">Published without HardyOS sign-in before two-factor sign-in: it isn't served from outside until you save this with HardyOS sign-in on.</Alert>
+        )}
+        </>
       )}
       {wideOpen && (
         <Alert tone="bad" title={`${item.name} open to the internet`}>

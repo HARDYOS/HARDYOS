@@ -56,6 +56,51 @@ undo only writes the network files).
 - hardyd serves HTTPS on 443 with a self-signed certificate created on first
   start; port 80 redirects to it.
 
+### Two-factor sign-in (decisions 440-449)
+
+- `internal/auth` holds the factors: `totp.go` (RFC 6238), `mfa.go`
+  (`user_totp`, `user_recovery_codes`; secrets sealed by an `auth.Sealer`,
+  which hardyd backs with secretbox purpose `totp`), `challenge.go` (second
+  steps in memory) and `apppasswords.go` (`app_passwords`). Migration
+  `0090_totp.sql` also adds `mfa` to `sessions` and `oidc_browser_sessions`.
+- `MFA.Requirement(user, outside)` says what a right password still needs:
+  nothing, a code (`totp`), enrollment (`enroll`, an administrator past the
+  grace period) or a setup code (`setup_code`, from outside without 2FA).
+  `api.Server.outside` (`inside.go`) decides "outside": the app gateway, or
+  an address that isn't home: this server itself only for hardyd's own
+  connections (socket owner and inode from `/proc/net/tcp`), a LAN
+  interface's private IPv4 / unique-local IPv6 network (global IPv6 only off
+  the default-route interface), or NetBird's network while it's connected
+  (minus its proxy peers). Docker, libvirt, the DC shim and the router's own
+  address are outside; an administrator may trust the router (bound to its
+  IP and MAC, package `router`), which `Server.notHome` still treats as not
+  home for code buckets, the outside budget and own service passwords.
+  `hardyctl setup-code` and `first-boot-code` (`hardyos-setup-code.service`)
+  issue setup codes from the console. Wrong codes count per account and `auth.Origin` (home, or the
+  outside address / IPv6 /64), with a rolling 60-day budget from outside
+  (`user_totp_failures`) that stops codes from outside at 20 until a new
+  password or a reset; `MFA.Notify` reaches administrators and the person.
+- Grants record `browser_outside`; refresh without a second factor is refused
+  for outside browsers, for public clients refreshing from outside and while
+  enrollment is due. Per-app hosts' bind flow and host sessions
+  (`__Host-hardyos_host`) go through the same session gate. Apps are
+  published only with HardyOS sign-in in front (`signsInWithHardyOS` names
+  the exception, Photos).
+- Desktop: `POST /auth/login` answers 202 with a challenge; `/auth/login/2fa`,
+  `/auth/login/enroll` and `/auth/login/enroll/confirm` finish it. The session
+  gate (`sessionGate`) refuses a session without `mfa` from outside and limits
+  an administrator past the grace period to enrollment; app windows and VM
+  consoles use the same gate.
+- Sign-in provider: after the password, `/login/code`, `/login/setup` and
+  `/login/enroll` (script-free pages, inline SVG QR code from
+  `internal/qrsvg`, forms bound to the browser like the login form).
+- Services without a code step (WebDAV, mail through Dovecot, calendars) go
+  through `servicePassword`: a scoped app password always, the account's own
+  password only from inside and only without 2FA.
+- SMB, Kerberos, LDAP and SFTP check domain passwords in Samba/winbind
+  themselves and are not covered (decision 447).
+- Recovery: recovery codes, an administrator's reset, `hardyctl reset-2fa`.
+
 ## Jobs and events
 
 Long operations run as jobs: queued, persisted in SQLite, run by a worker

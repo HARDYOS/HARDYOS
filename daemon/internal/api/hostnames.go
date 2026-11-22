@@ -552,6 +552,18 @@ func (h *hostRuntime) bind(w http.ResponseWriter, r *http.Request) {
 		proxyPage(w, http.StatusForbidden, "You can't use this app right now", "Your account can't be used right now.")
 		return
 	}
+	// The two-factor rules of the desktop session hold for what it hands
+	// out (decisions 441, 442): no app-host session from a session without
+	// a second factor from outside, nor for an administrator who must set
+	// one up first.
+	switch s.sessionGate(r, info, u) {
+	case gateOutside:
+		proxyPage(w, http.StatusUnauthorized, "Sign in again", "From outside, sign in to the desktop again with two-factor sign-in, then open the app.")
+		return
+	case gateEnroll:
+		proxyPage(w, http.StatusForbidden, "Set up two-factor sign-in first", "Administrators must set up two-factor sign-in on the desktop before opening apps.")
+		return
+	}
 	if appID == hostOfficeID {
 		if s.office == nil || !s.office.enabled(r.Context()) {
 			proxyPage(w, http.StatusNotFound, "The office suite is off", "Turn it on in Control Panel › Office.")

@@ -108,8 +108,16 @@ sign-in.
 | --- | --- | --- |
 | Who can open it | NetBird devices in the chosen groups (All by default) | Anyone on the internet |
 | Sign-in in front (NetBird's) | None: being a NetBird device in the right group is the sign-in | HardyOS sign-in (SSO), a shared password or PIN, or none |
-| HardyOS sign-in (apps) | Yes, unless turned off for the app | Yes, unless turned off for the app |
+| HardyOS sign-in (apps) | Yes, always (two-factor sign-in, decision 441) | Yes, always (Photos may go without: [sign-in.md](sign-in.md)) |
 | Needs | A proxy cluster with the **Private** capability: a NetBird proxy running inside a NetBird client (NetBird's "Bring Your Own Proxy" with the private option). NetBird's shared cloud clusters don't have it | Nothing more |
+
+**Changed with two-factor sign-in**: apps published NetBird-only now need
+HardyOS sign-in in front as well, like public ones. Being a NetBird device in
+the right group used to be enough; now the person signs in to HardyOS too
+(with a code, since that counts as outside). An app published NetBird-only
+without HardyOS sign-in before this release isn't served until you turn
+HardyOS sign-in on for it (Control Panel › Remote Access). Only Photos may go
+without, once Immich signs in through HardyOS with its own passwords off.
 
 Choose **NetBird-only** for things only the family's own devices should
 reach (the desktop, admin tools); it needs the Private capability above. Choose

@@ -110,6 +110,58 @@ describe("App", () => {
     expect(screen.getByRole("region", { name: "Resource Monitor window" })).toBeTruthy();
   });
 
+  it("asks for the authenticator code after the password", async () => {
+    let signedIn = false;
+    const sent: string[] = [];
+    mockServer({
+      "GET /setup": () => ({ body: { needsAdmin: false } }),
+      "GET /auth/me": () => (signedIn ? { body: admin } : { status: 401, body: { code: "unauthenticated", message: "x" } }),
+      "POST /auth/login": () => ({ status: 202, body: { challenge: "chal-123", step: "totp", expiresAt: "2026-11-21T00:10:00Z" } }),
+      "POST /auth/login/2fa": () => {
+        if (sent.length === 1) return { status: 401, body: { code: "bad_code", message: "that code isn't right" } };
+        signedIn = true;
+        return { body: admin };
+      },
+      ...desktopRoutes,
+    });
+    const fetchMock = globalThis.fetch as unknown as { mock: { calls: [Request][] } };
+    renderApp();
+    fireEvent.change(await screen.findByLabelText("Username"), { target: { value: "cade" } });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "supersecret1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    const codeInput = await screen.findByLabelText("Code");
+    expect(screen.getByRole("button", { name: "Continue" }).hasAttribute("disabled")).toBe(true);
+    sent.push("first");
+    fireEvent.change(codeInput, { target: { value: "000 000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(await screen.findByText("that code isn't right")).toBeTruthy();
+    sent.push("second");
+    fireEvent.change(screen.getByLabelText("Code"), { target: { value: "123456" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(await screen.findByRole("navigation", { name: "Dock" })).toBeTruthy();
+    // The challenge, not the password, goes with the code.
+    const last = fetchMock.mock.calls.map((c) => c[0]).filter((r) => r.url.endsWith("/auth/login/2fa")).pop()!;
+    expect(await last.clone().json()).toEqual({ challenge: "chal-123", code: "123456" });
+  });
+
+  it("keeps an administrator past the grace period on the setup screen", async () => {
+    mockServer({
+      "GET /setup": () => ({ body: { needsAdmin: false } }),
+      "GET /auth/me": () => ({
+        body: { ...admin, twoFactor: { enabled: false, enabledAt: null, recoveryCodesLeft: 0, required: true, graceUntil: "2026-11-01T00:00:00Z", locked: false, outsideFailures: 0, setupCodeExpires: null, mustEnroll: true } },
+      }),
+      "POST /auth/2fa/enroll": () => ({ body: { secret: "GEZD GNBV", uri: "otpauth://totp/x", qr: { size: 29, path: "M4 4h7v1h-7z" } } }),
+      ...desktopRoutes,
+    });
+    renderApp();
+    expect(await screen.findByRole("heading", { name: "Set up two-factor sign-in" })).toBeTruthy();
+    expect(screen.queryByRole("navigation", { name: "Dock" })).toBeNull();
+    fireEvent.change(screen.getByLabelText("Your password"), { target: { value: "supersecret1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(await screen.findByRole("img", { name: "QR code to scan with your authenticator app" })).toBeTruthy();
+    expect(screen.getByText("GEZD GNBV")).toBeTruthy();
+  });
+
   it("shows the sign-in error and hides admin apps from regular users", async () => {
     let signedIn = false;
     mockServer({
