@@ -522,6 +522,8 @@ const MaxTasks = 4
 type taskTable struct {
 	mu sync.Mutex
 	m  map[string]*Task
+	// onFinish runs (tests) just before a task is marked done.
+	onFinish func(x Task)
 }
 
 func (t *taskTable) start(kind, vm, file string) (*Task, error) {
@@ -577,6 +579,9 @@ func (t *taskTable) finish(id string, err error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if x, ok := t.m[id]; ok {
+		if t.onFinish != nil {
+			t.onFinish(*x)
+		}
 		x.Done = true
 		x.Finished = time.Now().UTC()
 		if err != nil {

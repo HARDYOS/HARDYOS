@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,6 +49,10 @@ func (restorer) VMFree(context.Context, string) error              { return nil 
 func (restorer) VMAdopt(context.Context, string) ([]string, error) { return nil, nil }
 func (restorer) AppsPool(context.Context) (string, error)          { return "", replica.ErrNotFound }
 func (restorer) AppAdopt(context.Context, string) error            { return nil }
+func (restorer) MailPool(context.Context) (string, error)          { return "", replica.ErrNotFound }
+func (restorer) MailRestore(context.Context, string, json.RawMessage) (json.RawMessage, []string, error) {
+	return nil, nil, replica.ErrNotFound
+}
 
 // TestZFSReplicationIntegration replicates between two file-backed pools on
 // one machine through two hardyd services talking mutual TLS over

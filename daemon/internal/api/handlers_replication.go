@@ -10,6 +10,7 @@ import (
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
+	"github.com/hardyos/hardyos/daemon/internal/mail"
 	"github.com/hardyos/hardyos/daemon/internal/replica"
 	"github.com/hardyos/hardyos/daemon/internal/replication"
 	"github.com/hardyos/hardyos/daemon/internal/store"
@@ -291,6 +292,8 @@ type replicationRestoreRequest struct {
 	NewID    string `json:"newId"`
 	Name     string `json:"name"`
 	Confirm  bool   `json:"confirm"`
+	// Mail: what of the mail item to restore (kind mail).
+	Mail *mail.RestoreArgs `json:"mail,omitempty"`
 }
 
 func (s *Server) handleReplicationRestore(w http.ResponseWriter, r *http.Request, u *auth.User) {
@@ -322,13 +325,30 @@ func (s *Server) handleReplicationRestore(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusBadRequest, "invalid", "choose the pool the VM was on")
 			return
 		}
+	case replica.KindMail:
+		if req.Mail == nil {
+			writeError(w, http.StatusBadRequest, "invalid", "choose what of the mail to restore")
+			return
+		}
+		if err := req.Mail.Check(); err != nil {
+			code := "invalid"
+			if req.Mail.Mode == mail.RestoreOverwrite || req.Mail.Scope == mail.ScopeAll {
+				code = "confirm_required"
+			}
+			writeError(w, http.StatusBadRequest, code, err.Error())
+			return
+		}
+		req.Pool, req.NewID, req.Name = "", "", ""
+	}
+	if req.Kind != replica.KindMail {
+		req.Mail = nil
 	}
 	if !req.Confirm {
 		writeError(w, http.StatusBadRequest, "confirm_required", "confirm the restore: it copies the replica back onto this server")
 		return
 	}
-	p := replication.RestoreParams{Target: t.ID, Kind: req.Kind, ID: req.ID, Snapshot: req.Snapshot, Pool: req.Pool, NewID: req.NewID, Name: strings.TrimSpace(req.Name)}
-	s.submit(w, r, u, replication.JobRestore, "Restore "+req.ID+" from "+t.Name, p, "replication.restore", t.Name+" "+req.Kind+"/"+req.ID+"@"+req.Snapshot, nil)
+	p := replication.RestoreParams{Target: t.ID, Kind: req.Kind, ID: req.ID, Snapshot: req.Snapshot, Pool: req.Pool, NewID: req.NewID, Name: strings.TrimSpace(req.Name), Mail: req.Mail}
+	s.submit(w, r, u, replication.JobRestore, "Restore "+req.ID+" from "+t.Name, p, "replication.restore", t.Name+" "+req.Kind+"/"+req.ID+"@"+req.Snapshot+describeMailRestore(req.Mail), nil)
 }
 
 type replicationTaskRequest struct {

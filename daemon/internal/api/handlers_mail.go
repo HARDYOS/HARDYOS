@@ -208,6 +208,7 @@ func (s *Server) mailRoutes() {
 	m.Handle("POST /api/v1/mail/mailboxes/sync", s.admin(s.handleMailSync))
 	m.Handle("PATCH /api/v1/mail/mailboxes/{id}", s.admin(s.handleMailMailboxUpdate))
 	m.Handle("DELETE /api/v1/mail/mailboxes/{id}", s.admin(s.handleMailMailboxDelete))
+	m.Handle("GET /api/v1/mail/restore-targets", s.admin(s.handleMailRestoreTargets))
 	m.Handle("GET /api/v1/mail/groups", s.admin(s.handleMailGroups))
 	m.Handle("PUT /api/v1/mail/groups/{address}", s.admin(s.handleMailGroupSet))
 	m.Handle("DELETE /api/v1/mail/groups/{address}", s.admin(s.handleMailGroupDelete))

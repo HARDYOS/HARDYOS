@@ -3,6 +3,7 @@ package replica
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -192,6 +193,10 @@ func (fakeRestorer) VMFree(context.Context, string) error              { return 
 func (fakeRestorer) VMAdopt(context.Context, string) ([]string, error) { return []string{"x"}, nil }
 func (fakeRestorer) AppsPool(context.Context) (string, error)          { return "tank", nil }
 func (fakeRestorer) AppAdopt(context.Context, string) error            { return nil }
+func (fakeRestorer) MailPool(context.Context) (string, error)          { return "tank", nil }
+func (fakeRestorer) MailRestore(context.Context, string, json.RawMessage) (json.RawMessage, []string, error) {
+	return json.RawMessage(`{}`), nil, nil
+}
 
 // A restore whose adoption fails stays marked, so RestoreAbort removes it.
 func TestRestoreMarkerStaysUntilAdopted(t *testing.T) {

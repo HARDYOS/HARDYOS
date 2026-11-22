@@ -1,6 +1,6 @@
 # Cloud backups
 
-HardyOS backs up shared folders, apps, virtual machines and the server's own
+HardyOS backs up shared folders, apps, virtual machines, the mail server and the server's own
 settings to cloud storage, keeps many versions, and restores anything from a
 single file to a whole server. Backups are encrypted on the server before
 they leave it; the bucket only ever holds encrypted data. Architecture and
@@ -67,7 +67,10 @@ run them at once. A failed check is a critical notification.
    and domain** (accounts, network, the HTTPS certificate, encryption keys
    and the domain controller: with the shared folders, apps and VMs in the
    same task, what a dead server needs to be rebuilt; each version also
-   records the shared folders' own settings).
+   records the shared folders' own settings), and **Mail** (every mailbox,
+   calendars and contacts, DKIM keys, the spam filter's learning and
+   webmail settings: [mail.md › Backups](mail.md#backups)). Mail is ticked
+   for a new task once the mail server is set up.
 2. **Where**: a destination.
 3. **When**: every day, some days of the week, every 1-12 hours, or only
    when started by hand (server time). A backup that can't start within 30
@@ -107,6 +110,10 @@ it:
   "Before restoring from a backup" is taken first.
 - **Settings and domain**: **Restore settings** (type `settings`): applied
   at the next restart, like a settings backup.
+- **Mail**: one mailbox (into a new folder "Restored &lt;date&gt;", or over
+  it with its address typed), one domain, one person's calendars and
+  contacts, or everything (type `mail`). See
+  [mail.md › Backups](mail.md#backups).
 
 Owners, permissions (ACLs) and times come back as they were. Links come back
 as links.
@@ -134,7 +141,8 @@ into places they can write today.
    used only if that fails.
 3. Sign in, create a storage pool in Storage Manager, open **Backup** and
    choose **Rebuild…** in the banner: shared folders (with their settings),
-   apps and VMs of that version come back onto the pool.
+   apps, VMs and the mail of that version come back onto the pool. Then
+   turn the mail server on in Control Panel › Mail.
 
 Without HardyOS, the backups are a plain restic repository: with the kit,
 `RESTIC_REPOSITORY=<repository> restic snapshots` (the key as the
@@ -157,6 +165,7 @@ warning or critical).
 | `daemon/internal/cloudbackups` | hardyd: tasks, runs, schedule, upkeep, jobs, the `Notifier` |
 | `daemon/internal/api/handlers_cloudbackup.go` | `/api/v1/backup*`, `/api/v1/files/backups*`, recovery kit |
 | `apps/backup.go`, `vms/backup.go`, `fileworker` `DoIn` | hooks for apps, VMs and people's restores |
+| `cloudbackup/mail.go`, `mail/backup.go` | the mail item: preparing `<pool>/mail`, its webmail part, mail restores and rebuilds (decisions 460-469) |
 | `web/apps/shell/src/apps/backup` | the Backup app (`tabs.ts` for more tabs) |
 | `os/live/config/hooks/normal/0160-restic.hook.chroot`, `scripts/install-restic.sh` | the pinned restic |
 
@@ -171,6 +180,7 @@ warning or critical).
 | `cloudbackup.backup` / `.restore` / `.prune` / `.check` / `.rebuild` | start a task |
 | `cloudbackup.task` / `.cancel` | follow or stop a task |
 | `cloudbackup.versions` / `.browse` | versions of a destination, a folder of a version |
+| `cloudbackup.mail.contents` | the domains and mailboxes of a mail version (its `config.json`, dumped) |
 | `cloudbackup.offer` / `.offer.dismiss` | the rebuild a restored install left |
 | `install.cloud.probe` / `install.cloud.stage` | live installer only |
 
@@ -178,10 +188,15 @@ warning or critical).
 
 - Host name `hardyos` for every snapshot.
 - Tags: `hardyos`, `task=<task id>`, `run=<run id>`, `item=share:<id>` /
-  `app:<id>` / `vm:<id>` / `system` / `manifest`, `server=<install id>`,
-  and `part=files` or `part=disk:<name>` for VMs.
-- Paths: `/run/hardyos-backup/mnt/<kind>/<id>` for folders, and the stdin
-  names `vm-<vm>-<disk>.raw`, `hardyos-settings.hbak`, `hardyos-run.json`.
+  `app:<id>` / `vm:<id>` / `system` / `mail` / `manifest`,
+  `server=<install id>`, and `part=files` or `part=disk:<name>` for VMs,
+  `part=files` or `part=webmail` for mail.
+- Paths: `/run/hardyos-backup/mnt/<kind>/<id>` for folders
+  (`mnt/mail/files`, `mnt/mail/webmail`), and the stdin names
+  `vm-<vm>-<disk>.raw`, `hardyos-settings.hbak`, `hardyos-run.json`.
+- A mail version holds `.hardyos-backup/config.json` (the applied
+  configuration, no secrets) and `.hardyos-backup/rspamd.rdb`; restores
+  download only what they need of it (a mailbox's folder, a domain's).
 - The settings archive is the `.hbak` format of settings backups, sealed
   with the repository key.
 

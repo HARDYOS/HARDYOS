@@ -19,6 +19,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/apps"
 	"github.com/hardyos/hardyos/daemon/internal/backup"
 	"github.com/hardyos/hardyos/daemon/internal/fileworker"
+	"github.com/hardyos/hardyos/daemon/internal/mail"
 	"github.com/hardyos/hardyos/daemon/internal/rootfile"
 	"github.com/hardyos/hardyos/daemon/internal/shares"
 	"github.com/hardyos/hardyos/daemon/internal/vms"
@@ -58,6 +59,19 @@ type System interface {
 	StageContents(c *backup.Contents) (*backup.Staged, error)
 }
 
+// Mail is the mail server's root side (mail.Root): its dataset made
+// ready for a snapshot, and restores from a copy of it.
+type Mail interface {
+	// PrepareBackup returns the mail dataset to snapshot, after writing
+	// the configuration and Rspamd's data into it; mail.ErrNotSetUp when
+	// there's no mail server here.
+	PrepareBackup(ctx context.Context) (*mail.BackupSource, error)
+	// Pool is the mail server's pool (mail.ErrNotSetUp).
+	Pool(ctx context.Context) (string, error)
+	RestoreFrom(ctx context.Context, dir string, a mail.RestoreArgs) (*mail.RestoreResult, error)
+	RebuildFrom(ctx context.Context, pool, dir string) (*mail.RestoreResult, error)
+}
+
 // Files runs file operations as a person (fileworker.Server), for
 // restores people make of their own files.
 type Files interface {
@@ -75,6 +89,7 @@ type Root struct {
 	Apps   Apps   // nil: apps can't be backed up
 	VMs    VMs    // nil: VMs can't be backed up
 	System System // nil: no settings in backups
+	Mail   Mail   // nil: mail can't be backed up
 	Files  Files  // nil: people can't restore their own files
 	// Dir is root's state directory for backups
 	// (rootfile.RootStateDir/cloudbackup).
@@ -370,7 +385,13 @@ const (
 	ItemApp    = "app"
 	ItemVM     = "vm"
 	ItemSystem = "system"
+	// ItemMail is the mail server (decision 460): <pool>/mail and, as its
+	// "webmail" part, the Roundcube app's data.
+	ItemMail = "mail"
 )
+
+// WebmailApp is the catalog app whose data is the mail item's webmail part.
+const WebmailApp = "roundcube"
 
 // Item is one thing a task backs up.
 type Item struct {
@@ -383,9 +404,9 @@ var itemIDRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 // Check validates an item.
 func (it Item) Check() error {
 	switch it.Kind {
-	case ItemSystem:
+	case ItemSystem, ItemMail:
 		if it.ID != "" {
-			return problemf("the system item has no id")
+			return problemf("the %s item has no id", it.Kind)
 		}
 		return nil
 	case ItemShare, ItemApp, ItemVM:
@@ -399,20 +420,20 @@ func (it Item) Check() error {
 
 // Key is the item's tag value: share:media, system.
 func (it Item) Key() string {
-	if it.Kind == ItemSystem {
-		return ItemSystem
+	if it.Kind == ItemSystem || it.Kind == ItemMail {
+		return it.Kind
 	}
 	return it.Kind + ":" + it.ID
 }
 
 // ParseItem reads an item key.
 func ParseItem(key string) (Item, error) {
-	if key == ItemSystem {
-		return Item{Kind: ItemSystem}, nil
+	if key == ItemSystem || key == ItemMail {
+		return Item{Kind: key}, nil
 	}
 	k, id, ok := strings.Cut(key, ":")
 	it := Item{Kind: k, ID: id}
-	if !ok || k == ItemSystem {
+	if !ok || k == ItemSystem || k == ItemMail {
 		return it, problemf("bad item %q", key)
 	}
 	return it, it.Check()

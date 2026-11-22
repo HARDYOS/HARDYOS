@@ -1588,7 +1588,7 @@ and IOMMU flags on real firmware.
 
 Phase 6 part A (decisions 160-172, security review 223-233; user and developer guide
 [backup.md](backup.md)). Versioned, encrypted backups of shared folders,
-apps, VMs and the server's settings to S3-compatible storage or Backblaze
+apps, VMs, the mail server (decisions 460-469) and the server's settings to S3-compatible storage or Backblaze
 B2, with restic doing the storage.
 
 ```
@@ -1702,7 +1702,7 @@ B2, with restic doing the storage.
 
 Phase 6 part B (decisions 180-199; guide `docs/replication.md`, which has
 the threat model). Scheduled
-incremental ZFS replication of chosen shared folders, apps and VMs to
+incremental ZFS replication of chosen shared folders, apps, VMs and the mail server (decisions 460-469) to
 another HardyOS server, over the LAN or NetBird. One way, no promotion yet
 (phase 8).
 
@@ -1930,6 +1930,23 @@ User guide: [mail.md](mail.md); decisions 239-249, security reviews 303-319 and 
   store, account sync, SES and Cloudflare (httptest); an API test with a
   root helper writing into a temp folder; and `scripts/mail-integration.sh`
   (CI job `mail`): the real programs in a Debian 13 container.
+- **Backups and replication** (decisions 460-469, plan
+  `docs/plans/mail-backup.md`). The item `mail` in cloud backups and
+  `mail/mail` in replication, on by default (migration `0110_mail_backup.sql`).
+  `mail.Root.PrepareBackup` writes `.hardyos-backup/config.json` (the
+  applied `RootConfig`) and `rspamd.rdb` (`redis-cli SAVE`, copied) into
+  `<pool>/mail` before its snapshot, the consistency point. Cloud backups
+  add the `roundcube` app's dataset as the `webmail` part. Restores
+  (`mail.Root.RestoreFrom`: mailbox, domain, calendars, all; copy or
+  overwrite) read a staged copy through `os.Root`, match mailboxes by
+  storage key and snapshot `<pool>/mail` before replacing anything; a
+  replica comes back as `<pool>/mail-restores/<id>` (read only, mounted in
+  `/run/hardyos/mail-restore`) and is destroyed after. Mail replicas are
+  never browsable and carry no `org.hardyos:mail`. Rebuild:
+  `mail.Root.RebuildFrom` when no mail server is set up. Ops:
+  `cloudbackup.mail.contents`; restores go through `cloudbackup.restore`
+  (mode `mail`) and `repl.restore.finish` (its `mail` field). API:
+  `GET /api/v1/backup/targets/{id}/mail`, `GET /api/v1/mail/restore-targets`.
 
 ## Office
 
