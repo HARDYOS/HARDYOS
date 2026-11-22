@@ -312,3 +312,7 @@ export type PhotosLibrary = S["PhotosLibrary"];
 export type PhotosFamily = S["PhotosFamily"];
 export type PhotosStatus = S["PhotosStatus"];
 export type PhotosView = S["PhotosView"];
+export type HostnamesStatus = S["HostnamesStatus"];
+export type HostnamesSettings = S["HostnamesSettings"];
+export type HostnameEntry = S["HostnameEntry"];
+export type HostnamesCert = S["HostnamesCert"];

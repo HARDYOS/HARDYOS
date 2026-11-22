@@ -2901,6 +2901,140 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/hostnames": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Control Panel › Hostnames status
+         * @description Whether apps are served at their own names under the base domain,
+         *     the Cloudflare token's state (kept by hardyd-priv; never returned,
+         *     only whether one is set and when it was last verified), the
+         *     wildcard certificate in service, every name and what it serves,
+         *     and how devices at home can find them.
+         */
+        get: operations["getHostnames"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/hostnames/desktop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Where the desktop is at its own hostname ("" while hostnames are off) */
+        get: operations["getHostnamesDesktop"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/hostnames/token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Hand a Cloudflare API token to hardyd-priv (a job, audited)
+         * @description The token (Zone › DNS › Edit on the base domain's zone only) goes
+         *     to the job in memory and on to hardyd-priv, which verifies it with
+         *     Cloudflare, checks the base domain is in a zone it can edit, and
+         *     keeps it encrypted where only root can read it. It is never
+         *     returned. The base domain must be Remote Access's when that has one.
+         */
+        put: operations["setHostnamesToken"];
+        post?: never;
+        /** Forget the Cloudflare token (a job); apps go back to their ports */
+        delete: operations["clearHostnamesToken"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/hostnames/token/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Check the saved token with Cloudflare again (a job) */
+        post: operations["verifyHostnamesToken"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/hostnames/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Turn hostnames on or off (a job; turning on gets the certificate when needed) */
+        put: operations["setHostnamesSettings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/hostnames/certificate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Get (or renew) the wildcard certificate now (a job) */
+        post: operations["issueHostnamesCertificate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/hostnames/lan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Add the names to (or remove them from) this server's own domain controller's DNS (a job) */
+        post: operations["setHostnamesLAN"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/remote": {
         parameters: {
             query?: never;
@@ -5228,6 +5362,89 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        HostnamesSettings: {
+            /** @description Serve apps at their hostnames once the certificate is there (and keep it renewed) */
+            enabled: boolean;
+            /** @description Let's Encrypt's contact for expiry warnings ("" = none) */
+            email: string;
+            /** @description Use Let's Encrypt's staging server (untrusted certificates, for trying the setup) */
+            staging: boolean;
+        };
+        HostnamesTokenRequest: {
+            token: string;
+            /** @description The base domain, e.g. home.example.net */
+            base: string;
+        };
+        HostnamesClearRequest: {
+            /** @description The base domain */
+            confirm: string;
+        };
+        HostnamesLANRequest: {
+            remove?: boolean;
+            /** @description One of this server's addresses (lan.addresses) */
+            address?: string;
+        };
+        HostnamesTokenState: {
+            set: boolean;
+            base: string;
+            zone: string;
+            /** Format: date-time */
+            verifiedAt: string | null;
+            problem?: string;
+            /** @description The base is its Cloudflare zone's apex: this server's domain controller holds the names only when the base is the AD domain or inside it */
+            apex: boolean;
+        };
+        HostnamesCert: {
+            names: string[];
+            issuer: string;
+            /** Format: date-time */
+            notBefore: string;
+            /** Format: date-time */
+            notAfter: string;
+            /** @description SHA-256 of the certificate */
+            fingerprint: string;
+            /** Format: date-time */
+            renewsAt: string;
+        };
+        HostnamesCertAttempt: {
+            names: string;
+            serial?: string;
+            /** Format: date-time */
+            notBefore?: string;
+            /** Format: date-time */
+            notAfter?: string;
+            issuer?: string;
+            error?: string;
+            /** Format: date-time */
+            at: string;
+        };
+        HostnameEntry: {
+            label: string;
+            host: string;
+            what: string;
+        };
+        HostnamesLANState: {
+            addresses: string[];
+            netbirdIp: string;
+            /** @description HardyOS's own domain controller runs and can hold the names */
+            domainDns: boolean;
+            domain: string;
+        };
+        HostnamesStatus: {
+            active: boolean;
+            problem?: string;
+            settings: components["schemas"]["HostnamesSettings"];
+            token: components["schemas"]["HostnamesTokenState"];
+            remoteBase: string;
+            desktopUrl: string;
+            certificate: components["schemas"]["HostnamesCert"] | null;
+            lastError: components["schemas"]["HostnamesCertAttempt"] | null;
+            names: components["schemas"]["HostnameEntry"][];
+            lan: components["schemas"]["HostnamesLANState"];
+        };
+        HostnamesDesktop: {
+            url: string;
+        };
         Health: {
             /** @enum {string} */
             status: "ok";
@@ -7142,6 +7359,8 @@ export interface components {
             proxied: boolean;
             /** @description The app's own published address (https://<app>.<base>, through NetBird's reverse proxy), given when the desktop is used at its published address */
             published?: boolean;
+            /** @description The app's own hostname under the base domain on this server (Control Panel › Hostnames), given when the desktop is used at its hostname */
+            hostname?: boolean;
         };
         AppCatalogApp: {
             id: string;
@@ -14002,6 +14221,161 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getHostnames: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HostnamesStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getHostnamesDesktop: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The address */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HostnamesDesktop"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    setHostnamesToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HostnamesTokenRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    clearHostnamesToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HostnamesClearRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    verifyHostnamesToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    setHostnamesSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HostnamesSettings"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    issueHostnamesCertificate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    setHostnamesLAN: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HostnamesLANRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             503: components["responses"]["Unavailable"];
         };
     };
