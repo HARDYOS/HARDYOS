@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -29,9 +28,11 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/cloudbackups"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/files"
+	"github.com/hardyos/hardyos/daemon/internal/hostnames"
 	"github.com/hardyos/hardyos/daemon/internal/install"
 	"github.com/hardyos/hardyos/daemon/internal/installer"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/mail"
 	"github.com/hardyos/hardyos/daemon/internal/mail/manage"
 	"github.com/hardyos/hardyos/daemon/internal/metrics"
 	"github.com/hardyos/hardyos/daemon/internal/monitor"
@@ -39,6 +40,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/publish"
 	"github.com/hardyos/hardyos/daemon/internal/replication"
+	"github.com/hardyos/hardyos/daemon/internal/sdlisten"
 	"github.com/hardyos/hardyos/daemon/internal/secretbox"
 	"github.com/hardyos/hardyos/daemon/internal/storage"
 	"github.com/hardyos/hardyos/daemon/internal/store"
@@ -46,6 +48,9 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/updates"
 	"github.com/hardyos/hardyos/daemon/internal/version"
 )
+
+// mailOptions is the mail sign-in socket (from systemd, or -mail-auth-socket).
+var mailOptions api.MailOptions
 
 func main() {
 	var (
@@ -57,9 +62,12 @@ func main() {
 		webRoot     = flag.String("web-root", "/usr/share/hardyos/web", "directory holding the built web desktop (empty to disable)")
 		logLevel    = flag.String("log-level", "info", "debug, info, warn or error")
 		showVersion = flag.Bool("version", false, "print version and exit")
+		mailAuth    = flag.String("mail-auth-socket", "", "listen for the mail server's sign-ins on this Unix socket when systemd didn't pass hardyd-mail-auth.socket (development)")
 		proxies     = flag.String("trusted-proxies", "", "reverse proxies (addresses or CIDRs, comma separated) whose X-Forwarded-For is believed; empty for none")
 	)
 	flag.Parse()
+	// Sockets systemd made for hardyd (the mail sign-in socket).
+	sockets, sockErr := sdlisten.Listeners()
 
 	if *showVersion {
 		v := version.Get()
@@ -67,6 +75,10 @@ func main() {
 		return
 	}
 	log := newLogger(*logLevel)
+	if sockErr != nil {
+		log.Warn("sockets from systemd", "err", sockErr)
+	}
+	mailOptions = api.MailOptions{Listener: sockets["mail-auth"], Socket: *mailAuth}
 	slog.SetDefault(log)
 	trusted, err := clientip.ParseTrusted(*proxies)
 	if err != nil {
@@ -235,13 +247,31 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 	}
 	defer func() { cancelJobs(); manager.Wait() }()
 
+	// The desktop's certificate: self-signed, plus Let's Encrypt's
+	// *.<base> for the hostnames once there is one (decision 455).
+	var certs *tlscert.Store
+	if httpsAddr != "" {
+		cert, err := tlscert.LoadOrCreate(tlsDir)
+		if err != nil {
+			return fmt.Errorf("tls certificate: %w", err)
+		}
+		certs = tlscert.NewStore(cert)
+	}
+	// Per-app hostnames (Control Panel › Hostnames): the Cloudflare token
+	// is hardyd-priv's; hardyd speaks ACME and serves the certificate.
+	var hosts *hostnames.Manager
+	if !live && certs != nil {
+		hosts = &hostnames.Manager{Store: &hostnames.Store{DB: db, Keys: secrets}, DNS: hostnames.PrivDNS{Priv: pc},
+			Certs: certs, Dir: tlsDir, Resolver: mail.PublicResolver()}
+	}
+
 	handler := api.New(api.Config{
 		DB: db, Jobs: manager, Events: broker, Priv: pc, Logger: log,
 		Storage: stor, Notify: notifications, Metrics: collector,
 		WebRoot: webRoot, Insecure: httpsAddr == "", Installer: inst, Updates: upd, Backups: bk, CloudBackups: cloud,
 		Apps: appStore, Files: fileAccess, TrustedProxies: trustedProxies, Secrets: secrets, Remote: remote,
 		Replication: repl,
-		Alerts:      alerts, Monitor: mon, Mail: mailSvc,
+		Alerts:      alerts, Monitor: mon, Mail: mailSvc, Hostnames: hosts,
 	})
 
 	go housekeeping(ctx, log, &auth.Sessions{DB: db})
@@ -251,17 +281,19 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		// After an update, confirm the new version once it has stayed up for
 		// a minute and report the result.
 		go upd.ConfirmWhenHealthy(ctx, time.Minute)
-		go upd.RunChecks(ctx)                      // look for new versions on GitHub daily
-		go bk.Run(ctx)                             // nightly settings backup
-		go cloud.Run(ctx)                          // cloud backup schedules, prunes and checks
-		go repl.Run(ctx)                           // replication schedule, stale alerts, receiving from other servers
-		go alerts.Run(ctx)                         // alert delivery and quiet-hours summaries
-		go mon.Run(ctx)                            // checks, self-test schedule, UPS, resource history
-		go handler.RunMail(ctx, api.MailOptions{}) // Dovecot's sign-ins, mailboxes for new accounts, mail alerts
+		go upd.RunChecks(ctx) // look for new versions on GitHub daily
+		go bk.Run(ctx)        // nightly settings backup
+		go cloud.Run(ctx)     // cloud backup schedules, prunes and checks
+		go repl.Run(ctx)      // replication schedule, stale alerts, receiving from other servers
+		go alerts.Run(ctx)    // alert delivery and quiet-hours summaries
+		go mon.Run(ctx)       // checks, self-test schedule, UPS, resource history
+		// Dovecot's sign-ins, mailboxes for new accounts, mail alerts.
+		go handler.RunMail(ctx, mailOptions)
 		if p := handler.OIDC(); p != nil {
 			go p.Start(ctx) // sign-in provider: signing keys on schedule, expired sign-ins removed
 		}
 		go handler.RunPhotos(ctx, api.PhotosOptions{}) // Photos: keeps the Immich app set up
+		go handler.RunHostnames(ctx)                   // per-app hostnames: state and certificate renewals
 	}
 
 	var servers []*http.Server
@@ -284,10 +316,6 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 	}
 
 	if httpsAddr != "" {
-		cert, err := tlscert.LoadOrCreate(tlsDir)
-		if err != nil {
-			return fmt.Errorf("tls certificate: %w", err)
-		}
 		if !live {
 			// App windows: an HTTPS proxy per app with a web page (44300 + n).
 			// They listen where the desktop listens (-https's host), like the
@@ -295,26 +323,26 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 			host, p, _ := net.SplitHostPort(httpsAddr)
 			port, _ := strconv.Atoi(p)
 			go handler.RunAppProxy(ctx, api.AppProxyOptions{
-				TLS:         &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+				TLS:         certs.TLSConfig(),
 				DesktopPort: port,
 				ListenHost:  host,
 			})
 			// The office suite: the editor's own origin (44250) and the
 			// listener the Document Server container calls back on.
 			go handler.RunOffice(ctx, api.OfficeOptions{
-				TLS:        &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+				TLS:        certs.TLSConfig(),
 				ListenHost: host,
 			})
 			// The app gateway on the NetBird address, for NetBird's reverse
 			// proxy, and the publishing sync.
 			go handler.RunRemote(ctx, api.RemoteOptions{
-				TLS: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+				TLS: certs.TLSConfig(),
 			})
 		}
 		serve(&http.Server{
 			Addr:              httpsAddr,
 			Handler:           handler,
-			TLSConfig:         &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+			TLSConfig:         certs.TLSConfig(),
 			ReadHeaderTimeout: 10 * time.Second,
 			IdleTimeout:       120 * time.Second,
 		}, true)

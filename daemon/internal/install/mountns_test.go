@@ -122,9 +122,11 @@ func TestSystemDirsBusyTeardown(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = holder.Process.Kill(); _ = holder.Wait() }()
-	deadline := time.Now().Add(5 * time.Second)
-	for len(Holders("/", target)) == 0 && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
+	// The shell holds the file before it execs sleep, so wait until the
+	// holder is sleep itself (exec has finished: its binary and name are
+	// sleep's) and still holds the file; a holder seen earlier is "sh".
+	if !waitExeced(holder.Process.Pid, "sleep", 10*time.Second, func() bool { return len(Holders("/", target)) > 0 }) {
+		t.Fatalf("the holder didn't become sleep holding %s: %v", filepath.Join(target, "dev/null"), Holders("/", target))
 	}
 	err := unbindSystemDirs(ctx, sysexec.Exec{}, "/", target)
 	var te *TeardownError
@@ -247,6 +249,25 @@ func TestWithSystemDirsLeavesNoCopies(t *testing.T) {
 	_ = svc.Process.Kill()
 	_ = svc.Wait()
 	mustRun(t, "umount", target)
+}
+
+// waitExeced waits until process pid runs the program named prog (its
+// /proc exe link and comm both name it, which is only so once exec has
+// finished) and ready reports true.
+func waitExeced(pid int, prog string, timeout time.Duration, ready func() bool) bool {
+	dir := filepath.Join("/proc", strconv.Itoa(pid))
+	deadline := time.Now().Add(timeout)
+	for {
+		exe, _ := os.Readlink(filepath.Join(dir, "exe"))
+		comm, _ := os.ReadFile(filepath.Join(dir, "comm"))
+		if filepath.Base(exe) == prog && strings.TrimSpace(string(comm)) == prog && ready() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func contains(xs []string, x string) bool {

@@ -102,6 +102,14 @@ func (p *Provider) servePage(w http.ResponseWriter, r *http.Request, rest, base 
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
+	case rest == "/login/code" || rest == "/login/setup" || rest == "/login/enroll":
+		w.Header().Set("Content-Security-Policy", pageCSP)
+		w.Header().Set("Cache-Control", "no-store")
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return true
+		}
+		p.secondFactorPost(w, r, base, strings.TrimPrefix(rest, "/login/"))
 	case rest == "/consent":
 		w.Header().Set("Content-Security-Policy", pageCSP)
 		w.Header().Set("Cache-Control", "no-store")
@@ -185,6 +193,14 @@ type page struct {
 	Exp      string
 	Sig      string
 	Domain   bool
+	// Two-factor pages: the challenge token, an inline QR code (qrsvg's
+	// markup: numbers and fixed tags only), the secret to type, and
+	// recovery codes shown once.
+	Challenge string
+	QR        template.HTML
+	Secret    string
+	Codes     []string
+	SetupCode bool
 }
 
 func (p *Provider) render(w http.ResponseWriter, status int, pg *page) {
@@ -278,26 +294,38 @@ func (p *Provider) bind(ctx context.Context, id, browser, stored string) bool {
 
 // sessionUser is the person signed in to HardyOS sign-in in this browser.
 func (p *Provider) sessionUser(r *http.Request) (*auth.User, time.Time, bool) {
+	u, t, _, ok := p.sessionUserMFA(r)
+	return u, t, ok
+}
+
+// sessionUserMFA is sessionUser saying whether that sign-in used a second
+// factor.
+func (p *Provider) sessionUserMFA(r *http.Request) (*auth.User, time.Time, bool, bool) {
 	tok := p.cookie(r, cookieSession)
 	if tok == "" {
-		return nil, time.Time{}, false
+		return nil, time.Time{}, false, false
 	}
 	var uid int64
 	var authTime, expires string
-	err := p.cfg.DB.QueryRowContext(r.Context(), `SELECT user_id, auth_time, expires_at FROM oidc_browser_sessions WHERE id_hash = ?`, hashHex(tok)).
-		Scan(&uid, &authTime, &expires)
+	var mfa bool
+	err := p.cfg.DB.QueryRowContext(r.Context(), `SELECT user_id, auth_time, expires_at, mfa FROM oidc_browser_sessions WHERE id_hash = ?`, hashHex(tok)).
+		Scan(&uid, &authTime, &expires, &mfa)
 	if err != nil || p.now().After(store.ParseTime(expires)) {
-		return nil, time.Time{}, false
+		return nil, time.Time{}, false, false
 	}
 	u, err := p.cfg.LoadUser(r.Context(), uid)
 	if err != nil || u.Disabled {
 		_, _ = p.cfg.DB.ExecContext(r.Context(), `DELETE FROM oidc_browser_sessions WHERE id_hash = ?`, hashHex(tok))
-		return nil, time.Time{}, false
+		return nil, time.Time{}, false, false
 	}
-	return u, store.ParseTime(authTime), true
+	return u, store.ParseTime(authTime), mfa, true
 }
 
 func (p *Provider) startSession(w http.ResponseWriter, r *http.Request, u *auth.User, authTime time.Time) {
+	p.startSessionMFA(w, r, u, authTime, false)
+}
+
+func (p *Provider) startSessionMFA(w http.ResponseWriter, r *http.Request, u *auth.User, authTime time.Time, mfa bool) {
 	raw := make([]byte, 32)
 	_, _ = rand.Read(raw)
 	tok := base64.RawURLEncoding.EncodeToString(raw)
@@ -309,8 +337,8 @@ func (p *Provider) startSession(w http.ResponseWriter, r *http.Request, u *auth.
 	if old := p.cookie(r, cookieSession); old != "" {
 		_, _ = p.cfg.DB.ExecContext(r.Context(), `DELETE FROM oidc_browser_sessions WHERE id_hash = ?`, hashHex(old))
 	}
-	_, err := p.cfg.DB.ExecContext(r.Context(), `INSERT INTO oidc_browser_sessions (id_hash, user_id, auth_time, created_at, expires_at, ip, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		hashHex(tok), u.ID, store.FormatTime(authTime), store.FormatTime(now), store.FormatTime(now.Add(browserTTL)), p.cfg.ClientIP(r), ua)
+	_, err := p.cfg.DB.ExecContext(r.Context(), `INSERT INTO oidc_browser_sessions (id_hash, user_id, auth_time, created_at, expires_at, ip, user_agent, mfa) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		hashHex(tok), u.ID, store.FormatTime(authTime), store.FormatTime(now), store.FormatTime(now.Add(browserTTL)), p.cfg.ClientIP(r), ua, mfa)
 	if err != nil {
 		p.cfg.Log.Warn("oidc: start session", "err", err)
 		return
@@ -358,9 +386,9 @@ func (p *Provider) loginPage(w http.ResponseWriter, r *http.Request, base string
 		return
 	}
 	if !a.hasPrompt(oidc.PromptLogin) {
-		u, authTime, how, found := p.existingSession(r, base)
+		u, authTime, how, mfa, found := p.existingSession(r, base)
 		if found && fresh(a, authTime, p.now()) {
-			p.proceed(w, r, base, a, c, u, authTime, how, false)
+			p.proceed(w, r, base, a, c, u, authTime, how, mfa, false)
 			return
 		}
 	}
@@ -392,19 +420,32 @@ func loginHint(h string) string {
 
 // existingSession finds someone already signed in in this browser: to
 // HardyOS sign-in, or to the desktop when the provider is on its host.
-func (p *Provider) existingSession(r *http.Request, base string) (*auth.User, time.Time, string, bool) {
+func (p *Provider) existingSession(r *http.Request, base string) (*auth.User, time.Time, string, bool, bool) {
 	local := p.loadSettings(r.Context()).localAccounts
-	if u, t, ok := p.sessionUser(r); ok && (u.IdentitySource() == auth.SourceDomain || local) && !p.adminRefused(r, u) {
-		return u, t, "existing HardyOS sign-in", true
+	if u, t, mfa, ok := p.sessionUserMFA(r); ok && (u.IdentitySource() == auth.SourceDomain || local) && !p.adminRefused(r, u) {
+		// Reused only if it satisfies the two-factor rule for where this
+		// browser is now (an outside browser, an account that has set one
+		// up since, an administrator past the grace period).
+		if mfa {
+			return u, t, "existing HardyOS sign-in, two-factor", true, true
+		}
+		if p.secondFactorNeed(r, u) == auth.NeedNothing {
+			return u, t, "existing HardyOS sign-in", false, true
+		}
 	}
 	if base != "" && p.cfg.DesktopUser != nil {
-		if u, t, ok := p.cfg.DesktopUser(r); ok {
+		if u, t, mfa, ok := p.cfg.DesktopUser(r); ok {
 			if (u.IdentitySource() == auth.SourceDomain || local) && !p.adminRefused(r, u) {
-				return u, t, "desktop session", true
+				if mfa {
+					return u, t, "desktop session, two-factor", true, true
+				}
+				if p.secondFactorNeed(r, u) == auth.NeedNothing {
+					return u, t, "desktop session", false, true
+				}
 			}
 		}
 	}
-	return nil, time.Time{}, "", false
+	return nil, time.Time{}, "", false, false
 }
 
 // fresh applies max_age.
@@ -462,7 +503,11 @@ func (p *Provider) loginPost(w http.ResponseWriter, r *http.Request, base string
 	public := p.cfg.PublicOrigin(r)
 	var lim limiter = p.cfg.Limiter
 	prefix := ""
-	if public {
+	// The buckets follow where the browser is (outside: through the
+	// gateway or from an address that isn't inside), not only public
+	// services: a NetBird-only service, a forwarded port or the router's
+	// address mustn't lock anyone out at home either.
+	if p.notHome(r) {
 		lim, prefix = p.cfg.PublicLimiter, "pub-"
 	}
 	for _, key := range []string{prefix + "ip:" + ip, prefix + userKey} {
@@ -525,9 +570,13 @@ func (p *Provider) loginPost(w http.ResponseWriter, r *http.Request, base string
 	}
 	lim.Succeed(prefix + "ip:" + ip)
 	lim.Succeed(prefix + userKey)
+	if need := p.secondFactorNeed(r, u); need != auth.NeedNothing {
+		p.askSecondFactor(w, r, base, a, c, b, u, need)
+		return
+	}
 	now := p.now()
 	p.startSession(w, r, u, now)
-	p.proceed(w, r, base, a, c, u, now, "password", true)
+	p.proceed(w, r, base, a, c, u, now, "password", false, true)
 }
 
 // limiter is auth.LoginLimiter or, for sign-ins from the internet,
@@ -557,8 +606,9 @@ func sentence(s string) string {
 }
 
 // proceed takes a signed-in person on: access check, subject, consent,
-// then back to the app.
-func (p *Provider) proceed(w http.ResponseWriter, r *http.Request, base string, a *authRequest, c *Client, u *auth.User, authTime time.Time, how string, posted bool) {
+// then back to the app. mfa says whether that sign-in used a second
+// factor (it goes into amr).
+func (p *Provider) proceed(w http.ResponseWriter, r *http.Request, base string, a *authRequest, c *Client, u *auth.User, authTime time.Time, how string, mfa, posted bool) {
 	ctx := r.Context()
 	ip := p.cfg.ClientIP(r)
 	if p.adminRefused(r, u) {
@@ -575,7 +625,7 @@ func (p *Provider) proceed(w http.ResponseWriter, r *http.Request, base string, 
 			Heading: "You can't use " + c.Name, Lead: sentence(err.Error()), Link: back, LinkText: "Back to " + c.Name})
 		return
 	}
-	sub, err := p.subjectFor(ctx, u, how == "password")
+	sub, err := p.subjectFor(ctx, u, strings.HasPrefix(how, "password"))
 	if errors.Is(err, auth.ErrAccountReplaced) {
 		// This browser's sign-in was the previous owner of the name's.
 		p.endSession(w, r)
@@ -587,7 +637,12 @@ func (p *Provider) proceed(w http.ResponseWriter, r *http.Request, base string, 
 		p.problem(w, base, http.StatusServiceUnavailable, "Can't sign you in right now", sentence(ErrNoSubject.Error()))
 		return
 	}
-	a.UserID, a.Subject, a.AuthTime, a.AMR = u.ID, sub, authTime.UTC(), []string{"pwd"}
+	amr := []string{"pwd"}
+	if mfa {
+		amr = append(amr, "otp", "mfa")
+	}
+	a.UserID, a.Subject, a.AuthTime, a.AMR = u.ID, sub, authTime.UTC(), amr
+	a.Outside = p.outside(r)
 	// A sign-in for an app on another device (Immich's phone app, through
 	// its mobile redirect) is always confirmed by the person: a link that
 	// starts one can't finish silently on an existing sign-in.

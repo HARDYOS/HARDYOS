@@ -536,7 +536,7 @@ func TestMediaVerified(t *testing.T) {
 	if _, err := e.m.Start(context.Background(), "game"); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(e.verified, ",") != "Win11_24H2_English_x64.iso,"+VirtioFile {
+	if strings.Join(e.verified, ",") != "Win11_24H2_English_x64.iso" {
 		t.Fatalf("verified %v", e.verified)
 	}
 }

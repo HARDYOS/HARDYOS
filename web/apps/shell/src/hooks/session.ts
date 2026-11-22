@@ -1,6 +1,7 @@
-import type { User } from "@hardy/api-client";
+import type { LoginChallenge, User } from "@hardy/api-client";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiFailure, api, unwrap } from "../api";
+import { isChallenge } from "../auth/twoFactorRules";
 import { useWM } from "../wm/store";
 
 /** The signed-in user, or null when signed out. */
@@ -25,10 +26,23 @@ export function useSetupStatus(enabled = true) {
   return useQuery({ enabled, queryKey: ["setup"], queryFn: () => unwrap(api.GET("/setup")), staleTime: Infinity });
 }
 
+/** Signs in with a password: the user, or a challenge for a second step (two-factor sign-in). */
 export function useLogin() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: { username: string; password: string }) => unwrap(api.POST("/auth/login", { body })),
+    mutationFn: async (body: { username: string; password: string }): Promise<User | LoginChallenge> =>
+      (await unwrap(api.POST("/auth/login", { body }))) as User | LoginChallenge,
+    onSuccess: (r) => {
+      if (!isChallenge(r)) qc.setQueryData(["me"], r);
+    },
+  });
+}
+
+/** Finishes a sign-in with an authenticator or recovery code. */
+export function useLoginCode() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { challenge: string; code: string }) => unwrap(api.POST("/auth/login/2fa", { body })),
     onSuccess: (user) => qc.setQueryData(["me"], user),
   });
 }

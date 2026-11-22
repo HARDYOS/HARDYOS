@@ -122,6 +122,20 @@ func publicOrigin(r *http.Request) bool {
 	return g != nil && g.public
 }
 
+// netbirdNetwork is NetBird's network while NetBird is connected (zero
+// otherwise: then nothing in it counts as home, review M3).
+func (rt *remoteRuntime) netbirdNetwork() netip.Prefix {
+	if rt == nil {
+		return netip.Prefix{}
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if !rt.connected {
+		return netip.Prefix{}
+	}
+	return rt.peers
+}
+
 // publishedHost reports whether host is one the gateway serves.
 func (rt *remoteRuntime) publishedHost(host string) bool {
 	rt.mu.Lock()
@@ -140,15 +154,57 @@ type remoteRuntime struct {
 	routes      map[string]*gwRoute // by host
 	byApp       map[string]*gwRoute
 	network     netip.Prefix
-	secret      string
-	srv         *http.Server
-	addr        string
-	problem     string
-	last        *RemoteSyncInfo
-	kick        chan struct{}
+	// connected: NetBird said it is connected at the last sync; peers is
+	// its network as it said then (home for two-factor sign-in).
+	connected bool
+	peers     netip.Prefix
+	secret    string
+	srv       *http.Server
+	addr      string
+	problem   string
+	last      *RemoteSyncInfo
+	kick      chan struct{}
 	// client is the sign-in provider's client for app hosts.
 	client     *gatewayClient
 	clientURIs []string
+	// proxyPeers are the NetBird addresses requests carrying a valid
+	// service value came from: NetBird's reverse proxy peers (its API
+	// doesn't name them). Game streaming is never forwarded to them
+	// (decision 404).
+	proxyPeers map[netip.Addr]time.Time
+}
+
+// maxProxyPeers bounds the remembered proxy addresses.
+const maxProxyPeers = 64
+
+func (rt *remoteRuntime) sawProxy(a netip.Addr) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.proxyPeers == nil {
+		rt.proxyPeers = map[netip.Addr]time.Time{}
+	}
+	if _, ok := rt.proxyPeers[a]; !ok && len(rt.proxyPeers) >= maxProxyPeers {
+		var oldest netip.Addr
+		var at time.Time
+		for k, v := range rt.proxyPeers {
+			if at.IsZero() || v.Before(at) {
+				oldest, at = k, v
+			}
+		}
+		delete(rt.proxyPeers, oldest)
+	}
+	rt.proxyPeers[a] = time.Now()
+}
+
+// knownProxies lists the NetBird addresses NetBird's proxy came from.
+func (rt *remoteRuntime) knownProxies() map[string]bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	out := map[string]bool{}
+	for a := range rt.proxyPeers {
+		out[a.String()] = true
+	}
+	return out
 }
 
 func (rt *remoteRuntime) info() (*RemoteSyncInfo, RemoteGatewayInfo) {
@@ -399,6 +455,11 @@ func (rt *remoteRuntime) apply(ctx context.Context, in publish.Inputs, st *netbi
 		network = "100.64.0.0/10" // NetBird's default range
 	}
 	rt.network, _ = netip.ParsePrefix(network)
+	rt.connected = st != nil && st.Connected
+	rt.peers = netip.Prefix{}
+	if rt.connected {
+		rt.peers, _ = netip.ParsePrefix(st.Network)
+	}
 	want := ""
 	if len(routes) > 0 && listenHost != "" {
 		want = net.JoinHostPort(listenHost, strconv.Itoa(opts.Port))
@@ -480,7 +541,15 @@ func (rt *remoteRuntime) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"This port only takes requests from NetBird's reverse proxy.")
 		return
 	}
+	if a, err := netip.ParseAddr(clientip.Peer(r)); err == nil {
+		// NetBird's reverse proxy peer: whatever it carries is outside, so
+		// its own address never counts as home (review M3).
+		rt.s.notePeerProxy(a)
+		rt.sawProxy(a.Unmap())
+
+	}
 	client := forwardedClient(r)
+
 	h := r.Header
 	h.Del(publish.GatewayHeader)
 	h.Del("X-Netbird-User")
@@ -570,6 +639,11 @@ func (rt *remoteRuntime) proxyFor(route *gwRoute, desktopHost string) *gwRoute {
 			pr.Out.Header.Set("X-Forwarded-Proto", "https")
 			pr.Out.Header.Set("X-Forwarded-Host", pr.In.Host)
 			gatewayRequestCookies(pr.Out.Header)
+			if route.appID == WebmailAppID {
+				// Only HardyOS's window proxy signs people in to webmail
+				// (decision 305): never credentials from the internet.
+				pr.Out.Header.Del("Authorization")
+			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			gatewayFixResponse(resp, target, host, frame)
@@ -682,6 +756,14 @@ func (rt *remoteRuntime) serveApp(w http.ResponseWriter, r *http.Request, route 
 	}
 	if why := crossSiteRequest(r, "https://"+r.Host); why != "" {
 		proxyPage(w, http.StatusForbidden, "Blocked a request from another page", why)
+		return
+	}
+	if !route.signin && !rt.s.signsInWithHardyOS(r.Context(), route.appID) {
+		// Published before two-factor sign-in: its own sign-in can't ask for
+		// a code, so it isn't served from outside until HardyOS sign-in is
+		// put in front (decision 441).
+		proxyPage(w, http.StatusForbidden, "This app needs HardyOS sign-in",
+			"From outside, HardyOS asks for a two-factor code before an app's own sign-in. An administrator can turn on HardyOS sign-in for it in Remote Access.")
 		return
 	}
 	var ss *proxySession

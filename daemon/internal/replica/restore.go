@@ -3,6 +3,7 @@ package replica
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -38,6 +39,23 @@ type Restorer interface {
 	// AppAdopt marks a restored app's data as kept (reinstall it from
 	// the App Store to use it again).
 	AppAdopt(ctx context.Context, id string) error
+	// MailPool is the pool of this server's mail server (a mail copy
+	// comes back next to it).
+	MailPool(ctx context.Context) (string, error)
+	// MailRestore puts what args (mail.RestoreArgs) says into the mail
+	// server from dir, the copy mounted read-only; it returns what it did.
+	MailRestore(ctx context.Context, dir string, args json.RawMessage) (result json.RawMessage, notes []string, err error)
+}
+
+// MailRestoresDataset holds mail copies while they come back:
+// <pool>/mail-restores/<id>, never mounted but in MailRestoreDir.
+const MailRestoresDataset = "mail-restores"
+
+func (m *Manager) mailRestoreDir() string {
+	if m.MailRestoreDir != "" {
+		return m.MailRestoreDir
+	}
+	return "/run/hardyos/mail-restore"
 }
 
 // RestoreArgs receives one dataset of an item coming back from a
@@ -58,6 +76,11 @@ type RestoreArgs struct {
 }
 
 var fromRE = strings.NewReplacer("\t", " ", "\n", " ", "\r", " ", "\x00", "")
+
+func (m *Manager) existsDS(ctx context.Context, ds string) bool {
+	_, ok := m.exists(ctx, ds)
+	return ok
+}
 
 // restoreDataset is where a restore puts an item's top dataset.
 func (m *Manager) restoreDataset(ctx context.Context, a *RestoreArgs) (string, error) {
@@ -84,6 +107,20 @@ func (m *Manager) restoreDataset(ctx context.Context, a *RestoreArgs) (string, e
 			return "", err
 		}
 		return a.Pool + "/vms/" + a.ID, nil
+	case KindMail:
+		// A copy to put back into the mail server, then destroyed.
+		pool, err := m.Restore.MailPool(ctx)
+		if err != nil {
+			return "", err
+		}
+		if err := ValidItem(a.NewID); err != nil {
+			return "", err
+		}
+		if a.Child != "" {
+			return "", invalid("the mail is one dataset")
+		}
+		a.Pool = pool
+		return pool + "/" + MailRestoresDataset + "/" + a.NewID, nil
 	default:
 		pool, err := m.Restore.AppsPool(ctx)
 		if err != nil {
@@ -123,9 +160,18 @@ func (m *Manager) RestoreRecv(ctx context.Context, a RestoreArgs) (*RecvStart, *
 			props = []string{"org.hardyos:vm=" + a.ID, "canmount=on", "devices=off", "setuid=off", "exec=off"}
 		case KindApp:
 			props = []string{"canmount=on", "devices=off", "setuid=off"}
+		case KindMail:
+			// Read only, mounted by RestoreFinish in a folder only root
+			// may open, never at the pool's mountpoint.
+			props = []string{"canmount=noauto", "readonly=on", "devices=off", "setuid=off", "exec=off",
+				"mountpoint=" + m.mailRestoreDir() + "/" + a.NewID}
 		}
-		if _, ok := m.exists(ctx, top[:strings.LastIndex(top, "/")]); !ok {
-			if _, err := m.zfs(ctx, "create", top[:strings.LastIndex(top, "/")]); err != nil {
+		if parent := top[:strings.LastIndex(top, "/")]; !m.existsDS(ctx, parent) {
+			create := []string{"create", parent}
+			if a.Kind == KindMail {
+				create = []string{"create", "-o", "canmount=off", "-o", "mountpoint=none", parent}
+			}
+			if _, err := m.zfs(ctx, create...); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -191,15 +237,18 @@ func (m *Manager) receiveRestore(r *os.File, s *stream, ds string, a RestoreArgs
 		}
 		args = append(args, "-o", p)
 	}
-	if b.Objset == ObjsetVolume {
-		args = append(args, "-o", "refreservation=none")
-	} else {
-		args = append(args, "-x", "sharenfs", "-x", "sharesmb", "-x", "mountpoint")
-	}
 	set := map[string]bool{}
 	for _, p := range props {
 		k, _, _ := strings.Cut(p, "=")
 		set[k] = true
+	}
+	if b.Objset == ObjsetVolume {
+		args = append(args, "-o", "refreservation=none")
+	} else {
+		args = append(args, "-x", "sharenfs", "-x", "sharesmb")
+		if !set["mountpoint"] {
+			args = append(args, "-x", "mountpoint")
+		}
 	}
 	for _, p := range serviceProps {
 		if !set[p] {
@@ -220,6 +269,8 @@ type RestoreFinishArgs struct {
 	Pool     string `json:"pool"`
 	NewID    string `json:"newId,omitempty"`
 	Snapshot string `json:"snapshot,omitempty"`
+	// Mail says what of a mail copy goes back (mail.RestoreArgs).
+	Mail json.RawMessage `json:"mail,omitempty"`
 }
 
 // RestoreFinishResult says where the copy is.
@@ -229,6 +280,9 @@ type RestoreFinishResult struct {
 	ID string `json:"id"`
 	// Notes say what was changed on the way back (a VM's reset settings).
 	Notes []string `json:"notes"`
+	// Mail is what a mail restore did (mail.RestoreResult); the copy
+	// itself is gone.
+	Mail json.RawMessage `json:"mail,omitempty"`
 }
 
 // RestoreFinish mounts the copy and hands it to its manager: a new shared
@@ -259,6 +313,17 @@ func (m *Manager) RestoreFinish(ctx context.Context, a RestoreFinishArgs) (*Rest
 			}
 		}
 	}
+	if a.Kind == KindMail {
+		if len(kids) != 1 || kids[0].Child != "" || kids[0].Type != "filesystem" {
+			return nil, invalid("the mail copy must be one file system")
+		}
+		if err := os.MkdirAll(m.mailRestoreDir(), 0o700); err != nil {
+			return nil, err
+		}
+		if err := os.Chmod(m.mailRestoreDir(), 0o700); err != nil {
+			return nil, err
+		}
+	}
 	for _, k := range kids {
 		ds := top + childSuffix(k.Child)
 		if k.Type == "volume" && a.Kind != KindVM {
@@ -282,6 +347,8 @@ func (m *Manager) RestoreFinish(ctx context.Context, a RestoreFinishArgs) (*Rest
 		notes = append(notes, n...)
 	case KindApp:
 		err = m.Restore.AppAdopt(ctx, a.ID)
+	case KindMail:
+		return m.finishMail(ctx, top, a)
 	}
 	if err != nil {
 		// Still marked as being restored: RestoreAbort can clean it up.
@@ -295,6 +362,29 @@ func (m *Manager) RestoreFinish(ctx context.Context, a RestoreFinishArgs) (*Rest
 	}
 	m.log().Info("replication: restored", "kind", a.Kind, "dataset", top)
 	return &RestoreFinishResult{Dataset: top, ID: id, Notes: notes}, nil
+}
+
+// finishMail puts the mounted mail copy into the mail server, then
+// destroys it: it was only ever a staging copy.
+func (m *Manager) finishMail(ctx context.Context, top string, a RestoreFinishArgs) (*RestoreFinishResult, error) {
+	want := m.mailRestoreDir() + "/" + a.NewID
+	if mp := m.prop(ctx, top, "mountpoint"); mp != want || m.prop(ctx, top, "mounted") != "yes" || m.prop(ctx, top, "readonly") != "on" {
+		return nil, fmt.Errorf("the mail copy isn't mounted read-only at %s", want)
+	}
+	raw, notes, err := m.Restore.MailRestore(ctx, want, a.Mail)
+	if err != nil {
+		// Still marked as being restored: RestoreAbort removes it.
+		return nil, err
+	}
+	if _, derr := m.zfs(ctx, "destroy", "-r", top); derr != nil {
+		m.log().Warn("replication: removing the mail copy after restoring it", "dataset", top, "err", derr)
+		notes = append(notes, "the copy "+top+" couldn't be removed: "+derr.Error())
+	}
+	if notes == nil {
+		notes = []string{}
+	}
+	m.log().Info("replication: mail restored from a replica", "copy", top)
+	return &RestoreFinishResult{Dataset: "", ID: MailItem, Notes: notes, Mail: raw}, nil
 }
 
 // RestoreAbort removes a restore that didn't finish (only datasets still
@@ -374,6 +464,11 @@ func (m *Manager) Browse(ctx context.Context, a BrowseArgs) (*BrowseResult, erro
 	}
 	if err := ValidSnap(a.Snapshot, ""); err != nil {
 		return nil, err
+	}
+	if a.Kind == KindMail {
+		// DKIM and TLS keys: a mail replica is never mounted here
+		// (decision 465).
+		return nil, invalid("mail replicas can't be browsed")
 	}
 	rel, err := cleanBrowsePath(a.Path)
 	if err != nil {

@@ -26,12 +26,14 @@ type ArchInfo struct {
 	LegacyBIOS bool `json:"legacyBios"`
 	// PIT and RTC timers exist (x86 clock tuning).
 	PIT bool `json:"pit"`
+	// SoundModel is the emulated sound card ("" when VMs get none).
+	SoundModel string `json:"soundModel,omitempty"`
 }
 
 // archTable maps Go's GOARCH to libvirt's view of it.
 var archTable = map[string]ArchInfo{
-	"amd64": {Arch: "x86_64", Machine: "q35", SATA: true, CDBus: "sata", TPMModel: "tpm-crb", HyperV: true, SMM: true, VMPort: true, LegacyBIOS: true, PIT: true},
-	"arm64": {Arch: "aarch64", Machine: "virt", CDBus: "scsi", TPMModel: "tpm-tis-device"},
+	"amd64": {Arch: "x86_64", Machine: "q35", SATA: true, CDBus: "sata", TPMModel: "tpm-crb", HyperV: true, SMM: true, VMPort: true, LegacyBIOS: true, PIT: true, SoundModel: "ich9"},
+	"arm64": {Arch: "aarch64", Machine: "virt", CDBus: "scsi", TPMModel: "tpm-tis-device", SoundModel: "ich9"},
 }
 
 // HostArch is the running server's architecture (false when VMs aren't

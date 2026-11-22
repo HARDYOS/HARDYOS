@@ -21,6 +21,7 @@ import (
 
 	"github.com/hardyos/hardyos/daemon/internal/apps"
 	"github.com/hardyos/hardyos/daemon/internal/appstore"
+	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/netbird"
@@ -89,6 +90,8 @@ type remoteEnv struct {
 	pub    *publish.Publisher
 	gwPort int
 	cert   tls.Certificate
+	// totp: sign-ins from outside need a second factor (decision 441).
+	totp *totpKit
 }
 
 const testToken = "nbp_TestToken0123456789"
@@ -155,7 +158,7 @@ func newRemoteEnv(t *testing.T) *remoteEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &remoteEnv{appsEnv: ae, nb: nb, api: fake, pub: pub, gwPort: gwPort, cert: cert}
+	return &remoteEnv{appsEnv: ae, nb: nb, api: fake, pub: pub, gwPort: gwPort, cert: cert, totp: newTOTPKit(server)}
 }
 
 // jobText is a job as the API shows it, for "does a secret show up" checks.
@@ -293,6 +296,8 @@ type gwBrowser struct {
 	client *http.Client
 	secret string
 	ip     string
+	// totp enrolls people who sign in from outside and gives their codes.
+	totp *totpKit
 }
 
 type proxyHop struct {
@@ -335,7 +340,7 @@ func (e *remoteEnv) browser(t *testing.T, secret string) *gwBrowser {
 			return d.DialContext(ctx, network, "127.0.0.1:"+port)
 		},
 	}
-	b := &gwBrowser{jar: jar, secret: secret, ip: "203.0.113.9"}
+	b := &gwBrowser{jar: jar, secret: secret, ip: "203.0.113.9", totp: e.totp}
 	b.client = &http.Client{Jar: jar, Transport: &proxyHop{next: tr, secret: secret, ip: b.ip}, Timeout: 10 * time.Second}
 	return b
 }
@@ -365,8 +370,22 @@ func (b *gwBrowser) nav(t *testing.T, method, u string, hdr map[string]string) (
 // signIn signs the browser in to the desktop at its published name.
 func (b *gwBrowser) signIn(t *testing.T, user, pw string) {
 	t.Helper()
-	body, _ := json.Marshal(map[string]string{"username": user, "password": pw})
-	req, _ := http.NewRequest("POST", "https://nas.home.example.net/api/v1/auth/login", strings.NewReader(string(body)))
+	// From outside a second factor is required: the person has one.
+	b.totp.enroll(t, user)
+	var ch LoginChallenge
+	if code := b.postJSON(t, "https://nas.home.example.net/api/v1/auth/login", map[string]string{"username": user, "password": pw}, &ch); code != http.StatusAccepted || ch.Step != auth.NeedCode {
+		t.Fatalf("sign in through the gateway = %d %+v", code, ch)
+	}
+	if code := b.postJSON(t, "https://nas.home.example.net/api/v1/auth/login/2fa", map[string]string{"challenge": ch.Challenge, "code": b.totp.code(t, user)}, nil); code != 200 {
+		t.Fatalf("two-factor code through the gateway = %d", code)
+	}
+}
+
+// postJSON posts to the desktop's API at its published name.
+func (b *gwBrowser) postJSON(t *testing.T, u string, in, out any) int {
+	t.Helper()
+	body, _ := json.Marshal(in)
+	req, _ := http.NewRequest("POST", u, strings.NewReader(string(body)))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-HardyOS-Request", "1")
 	req.Header.Set("Origin", "https://nas.home.example.net")
@@ -374,10 +393,11 @@ func (b *gwBrowser) signIn(t *testing.T, user, pw string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res.Body.Close()
-	if res.StatusCode != 200 {
-		t.Fatalf("sign in through the gateway = %d", res.StatusCode)
+	defer res.Body.Close()
+	if out != nil {
+		_ = json.NewDecoder(res.Body).Decode(out)
 	}
+	return res.StatusCode
 }
 
 func (b *gwBrowser) cookies(u string) map[string]string {

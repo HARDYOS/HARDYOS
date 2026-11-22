@@ -6,9 +6,11 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"net"
 	"net/http"
@@ -16,7 +18,6 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -78,11 +79,8 @@ func (m *Manager) ListLibrary(ctx context.Context) (*LibraryView, error) {
 	if l, err := m.all(ctx); err == nil {
 		for _, st := range l {
 			names := st.spec.Files()
-			if st.spec.NeedsVirtio() {
-				names = append(names, VirtioFile)
-			}
 			for _, d := range st.spec.Disks {
-				if d.Import != nil {
+				if d.Import != nil && d.Import.Catalog == "" {
 					names = append(names, d.Import.File)
 				}
 			}
@@ -174,6 +172,9 @@ func (m *Manager) StartDownload(ctx context.Context, a DownloadArgs) (*Task, err
 	if err != nil {
 		return nil, err
 	}
+	if m.catalogNames()[name] {
+		return nil, Problems{fmt.Sprintf("%s is a verified image HardyOS gets itself (pick its template); save the download under another name", name)}
+	}
 	sum := strings.ToLower(strings.TrimSpace(a.SHA256))
 	if sum != "" {
 		if b, err := hex.DecodeString(sum); err != nil || len(b) != sha256.Size {
@@ -206,7 +207,7 @@ func (m *Manager) StartDownload(ctx context.Context, a DownloadArgs) (*Task, err
 	go func() {
 		bg, cancel := context.WithTimeout(context.Background(), 24*time.Hour)
 		defer cancel()
-		err := m.download(bg, t, f, u, name, unpack, sum, 0)
+		err := m.download(bg, t, folderSink{f}, m.client(), u, name, unpack, digest{Algo: "sha256", Hex: sum}, 0)
 		m.tasks.finish(t.ID, err)
 		if err != nil {
 			m.log().Warn("vms: download failed", "file", name, "err", err)
@@ -217,13 +218,45 @@ func (m *Manager) StartDownload(ctx context.Context, a DownloadArgs) (*Task, err
 	return m.tasks.get(t.ID), nil
 }
 
-func (m *Manager) download(ctx context.Context, t *Task, f *Folder, u *url.URL, name, unpack, sum string, wantSize int64) error {
+// digest is a checksum a download must have ("" Hex: none).
+type digest struct {
+	Algo string // sha256 or sha512
+	Hex  string
+}
+
+func (d digest) hash() hash.Hash {
+	if d.Algo == "sha512" {
+		return sha512.New()
+	}
+	return sha256.New()
+}
+
+// sink is where a download is saved: the ISO library, or the catalog's
+// root-only store.
+type sink interface {
+	create(name string) (*os.File, error)
+	rename(from, to string) error
+	remove(name string) error
+}
+
+type folderSink struct{ f *Folder }
+
+func (s folderSink) create(name string) (*os.File, error) { return createTemp(s.f, name) }
+func (s folderSink) rename(from, to string) error         { return renameInto(s.f, from, to) }
+func (s folderSink) remove(name string) error             { return removeFile(s.f, name) }
+
+// checksumError is a download whose bytes didn't match.
+type checksumError struct{ msg string }
+
+func (e *checksumError) Error() string { return e.msg }
+
+func (m *Manager) download(ctx context.Context, t *Task, f sink, client *http.Client, u *url.URL, name, unpack string, want digest, wantSize int64) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("User-Agent", "HardyOS")
-	res, err := m.client().Do(req)
+	res, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("downloading from %s: %w", u.Host, err)
 	}
@@ -236,18 +269,18 @@ func (m *Manager) download(ctx context.Context, t *Task, f *Folder, u *url.URL, 
 		return fmt.Errorf("the file is %d bytes, more than expected", total)
 	}
 	tmpName := "hardyos-download-" + randomHex(8) + ".part"
-	out, err := createTemp(f, tmpName)
+	out, err := f.create(tmpName)
 	if err != nil {
-		return fmt.Errorf("saving into the ISOs shared folder: %w", err)
+		return fmt.Errorf("saving the download: %w", err)
 	}
 	ok := false
 	defer func() {
 		out.Close()
 		if !ok {
-			_ = removeFile(f, tmpName)
+			_ = f.remove(tmpName)
 		}
 	}()
-	h := sha256.New()
+	h := want.hash()
 	limit := int64(MaxDownloadBytes)
 	if wantSize > 0 {
 		limit = wantSize
@@ -284,75 +317,29 @@ func (m *Manager) download(ctx context.Context, t *Task, f *Folder, u *url.URL, 
 	if total > 0 && counted.n.Load() != total {
 		return fmt.Errorf("the download stopped early (%s of %s)", human(counted.n.Load()), human(total))
 	}
-	if sum != "" {
-		if got := hex.EncodeToString(h.Sum(nil)); got != sum {
-			return fmt.Errorf("the file's SHA-256 checksum is %s, not %s; it was damaged or changed, so it was deleted", got, sum)
+	if want.Hex != "" {
+		if got := hex.EncodeToString(h.Sum(nil)); got != want.Hex {
+			return &checksumError{fmt.Sprintf("the file's %s checksum is %s, not %s; it was damaged or changed, so it was deleted", strings.ToUpper(want.Algo), got, want.Hex)}
 		}
 	}
 	if err := out.Sync(); err != nil {
 		return err
 	}
-	if err := renameInto(f, tmpName, name); err != nil {
+	if err := f.rename(tmpName, name); err != nil {
 		return err
 	}
 	ok = true
 	return nil
 }
 
-// EnsureVirtio downloads the VirtIO drivers disc if it isn't in the
-// library; the task is nil when it's already there.
+// EnsureVirtio gets the VirtIO drivers disc into the pool's catalog store
+// (checked against its pinned SHA-256); the task is nil when a verified
+// copy is already there (decision 410).
 func (m *Manager) EnsureVirtio(ctx context.Context, pool string) (*Task, error) {
-	if _, err := m.virtioPath(ctx); err == nil {
+	if _, err := m.virtioPath(ctx, pool); err == nil {
 		return nil, nil
 	}
-	for _, t := range m.tasks.list("download") {
-		if !t.Done && t.File == VirtioFile {
-			return m.tasks.get(t.ID), nil
-		}
-	}
-	f, err := m.folder(ctx, pool, pool != "")
-	if err != nil {
-		return nil, err
-	}
-	if f == nil {
-		return nil, Problems{"choose a pool for the ISOs shared folder"}
-	}
-	u, _ := url.Parse(VirtioURL)
-	t, err := m.tasks.start("download", "", VirtioFile)
-	if err != nil {
-		return nil, err
-	}
-	go func() {
-		bg, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
-		defer cancel()
-		// A file of that name that isn't the real disc (an earlier broken
-		// copy) makes way for it.
-		_ = removeFile(f, VirtioFile)
-		err := m.download(bg, t, f, u, VirtioFile, "", VirtioSHA256, VirtioSize)
-		m.tasks.finish(t.ID, err)
-		if err != nil {
-			m.log().Warn("vms: VirtIO drivers download failed", "err", err)
-		}
-	}()
-	return m.tasks.get(t.ID), nil
-}
-
-// virtioPath is the drivers disc's path, if it's there in full.
-func (m *Manager) virtioPath(ctx context.Context) (string, error) {
-	f, err := m.folder(ctx, "", false)
-	if err != nil || f == nil {
-		return "", errors.New("no ISO library")
-	}
-	file, err := openFile(f, VirtioFile)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-	fi, err := file.Stat()
-	if err != nil || fi.Size() != VirtioSize {
-		return "", errors.New("the VirtIO drivers disc is incomplete")
-	}
-	return filepath.Join(f.Path, VirtioFile), nil
+	return m.FetchCatalog(ctx, FetchArgs{Image: CatalogVirtio, Pool: pool})
 }
 
 func randomHex(n int) string {
@@ -525,6 +512,8 @@ type Task struct {
 	Error    string    `json:"error"`
 	Started  time.Time `json:"started"`
 	Finished time.Time `json:"finished"`
+	// Digest is a catalog image's verified checksum (algo:hex).
+	Digest string `json:"digest,omitempty"`
 }
 
 // MaxTasks bounds downloads and imports running at once.
@@ -533,6 +522,8 @@ const MaxTasks = 4
 type taskTable struct {
 	mu sync.Mutex
 	m  map[string]*Task
+	// onFinish runs (tests) just before a task is marked done.
+	onFinish func(x Task)
 }
 
 func (t *taskTable) start(kind, vm, file string) (*Task, error) {
@@ -568,10 +559,29 @@ func (t *taskTable) progress(id string, pct float64, msg string) {
 	}
 }
 
+func (t *taskTable) setFile(id, f string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if x, ok := t.m[id]; ok {
+		x.File = f
+	}
+}
+
+func (t *taskTable) setDigest(id, d string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if x, ok := t.m[id]; ok {
+		x.Digest = d
+	}
+}
+
 func (t *taskTable) finish(id string, err error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if x, ok := t.m[id]; ok {
+		if t.onFinish != nil {
+			t.onFinish(*x)
+		}
 		x.Done = true
 		x.Finished = time.Now().UTC()
 		if err != nil {

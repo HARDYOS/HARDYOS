@@ -235,6 +235,12 @@ func (s *Server) photosSync(jc *jobs.Context) (*photos.Status, error) {
 	if serr := s.photos.SaveStatus(context.WithoutCancel(jc), st); serr != nil {
 		s.log.Warn("photos: saving the status", "err", serr)
 	}
+	if err == nil {
+		// What this successful sync saw of Immich's sign-in (a failed
+		// one leaves the last; nothing seen means not exempt).
+		s.savePhotosSignIn(context.WithoutCancel(jc), st.SSO.Active && st.SSO.PasswordLoginOff)
+	}
+
 	if len(st.Notes) > 0 {
 		s.recordSystem(context.WithoutCancel(jc), "photos.sync", photos.AppID, strings.Join(st.Notes, "; "))
 	}
@@ -242,7 +248,7 @@ func (s *Server) photosSync(jc *jobs.Context) (*photos.Status, error) {
 		s.recordSystem(context.WithoutCancel(jc), "photos.incident", photos.AppID, st.Incident)
 		if s.cfg.Alerts != nil {
 			s.cfg.Alerts.Notify(context.WithoutCancel(jc), notify.Event{Kind: "security.photos", Severity: notify.SeverityCritical,
-				Title: "Photos: Immich has an administrator HardyOS didn't make", Body: st.Incident, Link: "control-panel/photos"})
+				Title: "Photos: Immich has an administrator HardyOS didn't make", Body: st.Incident, Link: "control/photos"})
 		}
 	}
 	if err != nil && !errors.Is(err, photos.ErrNeedsLink) && !errors.Is(err, errPhotosNotInstalled) && !errors.Is(err, errPhotosNotCatalog) {
@@ -331,6 +337,10 @@ func (s *Server) photosSyncInto(jc *jobs.Context, st *photos.Status) error {
 		}
 	}
 	var others []string
+	if u := s.hosts.hostURL(a.ID); u != "" {
+		// photos.<base> on this server (Control Panel › Hostnames).
+		others = append(others, u)
+	}
 	if ports, err := s.appStore().ProxyPorts(ctx); err == nil && ports[a.ID] > 0 && s.cfg.PublicHost != nil {
 		if h := s.cfg.PublicHost(); h != "" {
 			others = append(others, "https://"+h+":"+strconv.Itoa(ports[a.ID]))

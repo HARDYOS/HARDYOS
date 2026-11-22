@@ -143,6 +143,10 @@ class Directory:
             "created": gen_time(first(m, "whenCreated")),
             "lastLogon": ad_time(first(m, "lastLogonTimestamp", "0")),
             "builtin": name.lower() in PROTECTED_USERS or rid(m) < 1000,
+            # Stay with the account itself (renames keep them; an account
+            # made again under the same name gets new ones).
+            "objectGuid": guid_of(m),
+            "sid": sid_of(m),
         }
 
     # ---- commands ------------------------------------------------------
@@ -375,6 +379,29 @@ class Directory:
         self.db.modify(msg)
         return {"ok": True}
 
+    def names_taken(self, a):
+        """Which of a's short names a computer or service already uses in
+        the directory (sAMAccountName name$, dNSHostName or an SPN's host):
+        HardyOS's hostnames must never shadow them (decision 459)."""
+        want = {str(n).lower() for n in a.get("names", [])}
+        taken = set()
+        for m in self.db.search(base=self.base, scope=ldb.SCOPE_SUBTREE,
+                                expression="(|(objectClass=computer)(servicePrincipalName=*))",
+                                attrs=["sAMAccountName", "dNSHostName", "servicePrincipalName"]):
+            cands = set()
+            sam = first(m, "sAMAccountName").lower()
+            if sam.endswith("$"):
+                cands.add(sam[:-1])
+            host = first(m, "dNSHostName").lower()
+            if host:
+                cands.add(host.split(".")[0])
+            for spn in m.get("servicePrincipalName", []) or []:
+                rest = str(spn).split("/", 1)
+                if len(rest) == 2:
+                    cands.add(rest[1].split("/")[0].split(":")[0].split(".")[0].lower())
+            taken |= cands & want
+        return {"taken": sorted(taken)}
+
 
 def restore_unmark(d, a):
     """A restored copy of this DC's own offline backup: drop the markers that
@@ -414,6 +441,7 @@ COMMANDS = {
     "group.update": Directory.group_update,
     "group.delete": Directory.group_delete,
     "policy": Directory.policy,
+    "names.taken": Directory.names_taken,
     "restore.unmark": restore_unmark,
 }
 

@@ -92,7 +92,7 @@ func (s *Server) handleVMConsoleWS(w http.ResponseWriter, r *http.Request, u *au
 			return false
 		}
 		cur, err := s.sessionUser(r, session, info.UserID)
-		return err == nil && cur.IsAdmin()
+		return err == nil && cur.IsAdmin() && s.sessionGate(r, info, cur) == gateOK
 	}
 	reason := relayVNC(ctx, conn, vnc, still)
 	s.record(r, u, "vms.console.close", id, audit.Success, fmt.Sprintf("%s after %s", reason, time.Since(started).Round(time.Second)))

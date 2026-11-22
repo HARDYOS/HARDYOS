@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
@@ -34,6 +35,9 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request, _ *auth
 	}
 	if list == nil {
 		list = []*auth.User{}
+	}
+	for i, u := range list {
+		list[i] = s.withMFA(r.Context(), u)
 	}
 	writeJSON(w, http.StatusOK, list)
 }
@@ -77,7 +81,7 @@ func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request, _ *auth.U
 		writeUserError(s, w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, u)
+	writeJSON(w, http.StatusOK, s.withMFA(r.Context(), u))
 }
 
 type updateUserRequest struct {
@@ -161,6 +165,10 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request, me 
 	_ = s.sessions.RevokeUser(r.Context(), id)
 	s.proxy.endUser(id)
 	s.endOIDCUser(r.Context(), id)
+	// A new password lifts the stop on two-factor codes from outside.
+	if s.mfa != nil && s.mfa.ClearOutsideLock(r.Context(), id, time.Now()) {
+		s.record(r, me, "auth.2fa.outside_unlock", u.Username, audit.Success, "new password set")
+	}
 	s.record(r, me, "user.password.reset", u.Username, audit.Success, "")
 	w.WriteHeader(http.StatusNoContent)
 }

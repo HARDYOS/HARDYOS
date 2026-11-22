@@ -39,6 +39,10 @@ type sim struct {
 	pvid      map[string]int   // tap -> untagged PVID
 	filtering int              // the bridge's vlan_filtering
 	vlanAdd   string           // a VLAN `bridge vlan add` ignores (fails silently)
+	agent     bool             // the guest agent answers
+	neigh     string           // ip -j -4 neigh show dev br0 (JSON)
+	fdb       string           // bridge -j fdb show br br0 (JSON)
+	nftLive   string           // the loaded game streaming ruleset
 }
 
 type simDomain struct {
@@ -109,7 +113,31 @@ func (s *sim) Run(_ context.Context, stdin []byte, name string, args ...string) 
 		return ok("")
 	case "bridge":
 		return s.bridge(args)
+	case "nft":
+		switch {
+		case len(args) == 2 && args[0] == "-f":
+			b, _ := os.ReadFile(filepath.Join(s.root, args[1]))
+			s.nftLive = string(b)
+		case len(args) >= 2 && args[0] == "list":
+			if s.nftLive == "" {
+				return bad("Error: No such file or directory")
+			}
+			return ok(s.nftLive)
+		case len(args) >= 2 && args[0] == "delete":
+			s.nftLive = ""
+		}
+		return ok("")
 	case "ip":
+		if len(args) > 2 && args[2] == "neigh" {
+			if s.neigh == "" {
+				return ok(`[{"dst":"192.168.1.77","lladdr":"52:54:00:12:34:56","state":["REACHABLE"]}]`)
+			}
+			return ok(s.neigh)
+		}
+		if len(args) > 2 && args[2] == "addr" {
+			// ip -j -4 addr show dev br0
+			return ok(fmt.Sprintf(`[{"ifname":%q,"addr_info":[{"family":"inet","local":"192.168.1.10","prefixlen":24,"scope":"global"}]}]`, args[len(args)-1]))
+		}
 		// ip -j -d link show dev br0
 		return ok(fmt.Sprintf(`[{"ifname":%q,"linkinfo":{"info_kind":"bridge","info_data":{"vlan_filtering":%d}}}]`, args[len(args)-1], s.filtering))
 	}
@@ -118,6 +146,12 @@ func (s *sim) Run(_ context.Context, stdin []byte, name string, args ...string) 
 
 // bridge pretends to be iproute2's bridge vlan.
 func (s *sim) bridge(args []string) (sysexec.Result, error) {
+	if len(args) >= 2 && args[0] == "-j" && args[1] == "fdb" {
+		if s.fdb == "" {
+			return ok("[]")
+		}
+		return ok(s.fdb)
+	}
 	if len(args) >= 5 && args[0] == "-j" && args[1] == "vlan" && args[2] == "show" {
 		tap := args[4]
 		var vl []string
@@ -282,6 +316,14 @@ func (s *sim) zfs(args []string) (sysexec.Result, error) {
 		return ok("")
 	case "rename":
 		from, to := args[1], args[2]
+		if strings.Contains(from, "@") {
+			if p, okp := s.snaps[from]; okp {
+				delete(s.snaps, from)
+				s.snaps[to] = p
+				return ok("")
+			}
+			return bad("no such snapshot")
+		}
 		for k, v := range s.datasets {
 			if k == from || strings.HasPrefix(k, from+"/") {
 				delete(s.datasets, k)
@@ -439,8 +481,19 @@ func (s *sim) virsh(args []string) (sysexec.Result, error) {
 			d.state = "in shutdown"
 		}
 		return ok("")
-	case "reboot", "reset", "domfsfreeze", "domfsthaw":
+	case "reboot", "reset", "domfsfreeze", "domfsthaw", "send-key":
 		return ok("")
+	case "qemu-agent-command":
+		if s.agent {
+			return ok(`{"return":{}}`)
+		}
+		return bad("error: Guest agent is not responding")
+	case "attach-device", "detach-device":
+		b, err := os.ReadFile(filepath.Join(s.root, args[2]))
+		if err != nil || !strings.Contains(string(b), "<hostdev") {
+			return bad("no device file")
+		}
+		return ok("Device attached successfully")
 	case "undefine":
 		delete(s.domains, args[1])
 		delete(s.defined, args[1])
@@ -650,6 +703,30 @@ func write(t *testing.T, p, s string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// seedVirtio puts a sealed (as if verified) VirtIO disc in tank's catalog
+// store.
+func (e *testEnv) seedVirtio(t *testing.T) {
+	t.Helper()
+	c, err := e.m.store(context.Background(), "tank", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := e.m.openStore(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	f, err := r.Create(VirtioFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Truncate(VirtioSize)
+	f.Close()
+	if err := seal(r, VirtioFile, digest{Algo: "sha256", Hex: VirtioSHA256}); err != nil {
 		t.Fatal(err)
 	}
 }

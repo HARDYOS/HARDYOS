@@ -1,4 +1,4 @@
-import type { VMCapabilities, VMCreateRequest, VMDevice, VMLibraryFile, VMNIC, VMTemplate } from "@hardy/api-client";
+import type { VMCapabilities, VMCreateRequest, VMDevice, VMLibraryFile, VMNIC, VMTemplate, VMUserTemplate } from "@hardy/api-client";
 
 /** The New VM wizard's steps, in order. */
 export const STEPS = [
@@ -12,7 +12,8 @@ export const STEPS = [
 ] as const;
 export type StepId = (typeof STEPS)[number]["id"];
 
-export type Source = "library" | "url";
+/** Where the install comes from: the ISO library, a link, the verified catalog or a saved template. */
+export type Source = "library" | "url" | "catalog" | "template";
 
 export interface WizardDisk {
   name: string;
@@ -59,6 +60,23 @@ export interface WizardState {
   autostart: boolean;
   /** Make the VM even if its thin disks are bigger than the pool's free space. */
   allowOvercommit: boolean;
+  /** The verified image (catalog) the template starts from, "" for none. */
+  catalog: string;
+  /** Windows installs by itself (answer file); user and password are the account's. */
+  unattend: boolean;
+  edition: string;
+  /** HardyOS installs Sunshine and a virtual display at the first sign-in (gaming). */
+  streaming: boolean;
+  locale: string;
+  timeZone: string;
+  sound: boolean;
+  clipboard: boolean;
+  /** The saved template the VM is copied from (source "template"). */
+  userTemplate: string;
+  /** Media of the saved template (drivers and cloud-init discs). */
+  templateMedia: ("virtio" | "cloudinit")[];
+  /** The saved template's disks (copied; other disks start empty). */
+  templateDisks: string[];
 }
 
 /** A short name from a display name: "Dad's Windows" -> "dads-windows". */
@@ -76,7 +94,7 @@ export function idFromName(name: string): string {
   return id.length >= 2 ? id : "";
 }
 
-const RESERVED = new Set(["isos", "templates", "capabilities", "bridge", "kept", "new"]);
+const RESERVED = new Set(["isos", "templates", "catalog", "usertemplates", "capabilities", "bridge", "kept", "new"]);
 
 export function idProblem(id: string, taken: string[]): string | null {
   if (!/^[a-z][a-z0-9-]{0,30}[a-z0-9]$/.test(id) || id.includes("--") || id.includes("-kept-")) {
@@ -107,9 +125,20 @@ export const isImage = (name: string) => /\.(qcow2|img|raw|vmdk|vdi|vhdx)(\.xz)?
 /** Whether the template boots an installer (true) or starts from a disk image. */
 export const installsFromISO = (t: VMTemplate) => t.install === "iso";
 
+/** The browser's language as a Windows locale, when it looks like one. */
+export function browserLocale(): string {
+  const l = typeof navigator !== "undefined" ? navigator.language : "";
+  return /^[a-z]{2,3}-[A-Z]{2}$/.test(l) ? l : "en-US";
+}
+
+export const LOCALE_RE = /^[a-z]{2,3}(-[A-Za-z0-9]{2,8}){0,2}$/;
+export const WIN_USER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,19}$/;
+const WIN_RESERVED = new Set(["administrator", "guest", "defaultaccount", "wdagutilityaccount", "system", "none"]);
+
 export function initialState(t: VMTemplate, caps?: VMCapabilities, arch = "x86_64"): WizardState {
   const preset = t.presets.find((p) => p.id === t.defaultPreset) ?? t.presets[0]!;
   const suggested = (t.images ?? []).find((i) => i.urls?.[arch]);
+  const catalog = t.catalog ?? "";
   return {
     templateId: t.id,
     name: "",
@@ -121,7 +150,7 @@ export function initialState(t: VMTemplate, caps?: VMCapabilities, arch = "x86_6
     memoryMB: preset.memoryMB,
     pool: caps?.library || caps?.pools[0] || "",
     disks: [{ name: "disk0", sizeGB: preset.diskGB, bus: t.diskBus as WizardDisk["bus"] }],
-    source: suggested && !installsFromISO(t) ? "url" : "library",
+    source: catalog ? "catalog" : suggested && !installsFromISO(t) ? "url" : "library",
     file: "",
     url: suggested && !installsFromISO(t) ? (suggested.urls?.[arch] ?? "") : "",
     sha256: "",
@@ -139,6 +168,49 @@ export function initialState(t: VMTemplate, caps?: VMCapabilities, arch = "x86_6
     start: true,
     allowOvercommit: false,
     autostart: t.group === "appliance",
+    catalog,
+    unattend: !!t.unattend,
+    edition: t.editions?.[0] ?? "",
+    streaming: !!t.streaming && !!t.unattend,
+    locale: browserLocale(),
+    timeZone: "",
+    sound: !!t.sound,
+    clipboard: !!t.clipboard,
+    userTemplate: "",
+    templateMedia: [],
+    templateDisks: [],
+  };
+}
+
+/** A new VM from a saved template: its built-in template's choices, the saved sizes, disks copied. */
+export function fromUserTemplate(ut: VMUserTemplate, base: VMTemplate, caps?: VMCapabilities, arch = "x86_64"): WizardState {
+  const s = initialState(base, caps, arch);
+  const sp = ut.spec;
+  return {
+    ...s,
+    preset: "custom",
+    cores: sp.cpu.cores,
+    threads: sp.cpu.threads,
+    memoryMB: sp.memory.mb,
+    pool: ut.pool,
+    disks: sp.disks.map((d) => ({ name: d.name, sizeGB: d.sizeGB, bus: d.bus })),
+    source: "template",
+    catalog: "",
+    unattend: false,
+    streaming: false,
+    nics: sp.nics.map((n) => ({ mode: n.mode, vlan: n.vlan ?? 0, allowSpoofing: !!n.allowSpoofing })),
+    nicModel: (sp.nics[0]?.model ?? s.nicModel) as WizardState["nicModel"],
+    firmware: sp.firmware.type,
+    secureBoot: sp.firmware.secureBoot,
+    tpm: sp.firmware.tpm,
+    user: sp.cloudInit?.user ?? s.user,
+    sshKeys: (sp.cloudInit?.sshKeys ?? []).join("\n"),
+    virtio: false,
+    sound: !!sp.sound,
+    clipboard: !!sp.clipboard,
+    userTemplate: ut.id,
+    templateMedia: sp.media.filter((m) => m.kind === "virtio" || m.kind === "cloudinit").map((m) => m.kind as "virtio" | "cloudinit"),
+    templateDisks: sp.disks.map((d) => d.name),
   };
 }
 
@@ -153,8 +225,12 @@ export function applyPreset(s: WizardState, t: VMTemplate, presetId: string): Wi
 
 /** The file the install step names (library pick or download). */
 export function chosenFile(s: WizardState): string {
+  if (s.source === "catalog" || s.source === "template") return "";
   return s.source === "url" ? fileFromURL(s.url) : s.file;
 }
+
+/** Whether the VM gets cloud-init settings. */
+export const usesCloudInit = (s: WizardState, t: VMTemplate) => (s.source === "template" ? s.templateMedia.includes("cloudinit") : t.cloudInit);
 
 export interface StepContext {
   template?: VMTemplate;
@@ -188,18 +264,26 @@ export function stepProblems(s: WizardState, step: StepId, c: StepContext): stri
         if (!(d.sizeGB >= 1)) p.push(`Disk ${i + 1} needs a size`);
       });
       if (t && (s.disks[0]?.sizeGB ?? 0) < t.minDiskGB) p.push(`${t.name} needs a disk of at least ${t.minDiskGB} GB`);
+      if (s.source === "template" && s.templateDisks.some((n) => !s.disks.some((d) => d.name === n))) p.push("Keep the template's disks: they're copied into the new VM");
       break;
     case "media": {
       const f = chosenFile(s);
       const iso = t ? installsFromISO(t) : true;
-      if (s.source === "url") {
+      if (s.source === "catalog" || s.source === "template") {
+        // Nothing to choose: a verified image, or the template's disks.
+      } else if (s.source === "url") {
         if (!/^https:\/\//.test(s.url.trim())) p.push("The link must start with https://");
         else if (!f || !(iso ? isISO(f) : isImage(f))) p.push(iso ? "The link must end in an .iso file" : "The link must end in a disk image (.qcow2, .img, .raw, .vmdk…)");
         if (s.sha256 && !/^[0-9a-fA-F]{64}$/.test(s.sha256.trim())) p.push("The checksum must be 64 hexadecimal characters");
       } else if (!s.file) {
         p.push(iso ? "Choose an installer disc" : "Choose a disk image");
       }
-      if (t?.cloudInit) {
+      if (t && s.unattend && t.unattend && s.source !== "template") {
+        if (!WIN_USER_RE.test(s.user) || WIN_RESERVED.has(s.user.toLowerCase())) p.push("Choose a Windows user name (not Administrator or Guest)");
+        if (s.password.length < 8) p.push("The Windows account needs a password of at least 8 characters");
+        if (!LOCALE_RE.test(s.locale)) p.push("The language must look like en-US");
+      }
+      if (t && usesCloudInit(s, t)) {
         if (!/^[a-z_][a-z0-9_-]{0,30}$/.test(s.user) || s.user === "root") p.push("Choose a user name (lowercase, not root)");
         const keys = sshKeyList(s.sshKeys);
         if (keys.length === 0 && s.password.length === 0) p.push("Add an SSH key or a password to sign in with");
@@ -212,6 +296,9 @@ export function stepProblems(s: WizardState, step: StepId, c: StepContext): stri
       s.nics.forEach((n, i) => {
         if (n.mode === "vlan" && !(n.vlan >= 1 && n.vlan <= 4094)) p.push(`Network card ${i + 1}: the VLAN is 1 to 4094`);
       });
+      if (t && setsUpStreaming(s, t) && (s.nics[0]?.mode !== "bridge" || s.nics[0]?.allowSpoofing)) {
+        p.push("Game streaming needs the first card on the home network, with address spoofing off");
+      }
       break;
   }
   return p;
@@ -224,19 +311,31 @@ export function sshKeyList(text: string): string[] {
     .filter((l) => l !== "");
 }
 
+/** HardyOS sets game streaming up: an unattended install of a template that offers it. */
+export function setsUpStreaming(s: WizardState, t: VMTemplate): boolean {
+  return installsFromISO(t) && s.source !== "template" && s.unattend && !!t.unattend && !!t.streaming && s.streaming;
+}
+
 /** The create request the wizard sends. */
 export function toRequest(s: WizardState, t: VMTemplate): VMCreateRequest {
-  const iso = installsFromISO(t);
+  const fromTemplate = s.source === "template" && s.userTemplate !== "";
+  const iso = installsFromISO(t) && !fromTemplate;
   const file = chosenFile(s);
+  const cloudInit = usesCloudInit(s, t);
+  const unattend = iso && s.unattend && !!t.unattend;
   const media: VMCreateRequest["spec"]["media"] = [];
   if (iso && file) media.push({ kind: "iso", iso: file });
-  if (s.virtio) media.push({ kind: "virtio" });
-  if (t.cloudInit) media.push({ kind: "cloudinit" });
+  if (s.virtio || unattend || (fromTemplate && s.templateMedia.includes("virtio"))) media.push({ kind: "virtio" });
+  if (cloudInit) media.push({ kind: "cloudinit" });
+  if (unattend) media.push({ kind: "unattend" });
+  const streaming = unattend && setsUpStreaming(s, t);
+  if (streaming) media.push({ kind: "streaming" });
   const disks = s.disks.map((d, i) => ({
     name: d.name,
     sizeGB: d.sizeGB,
     bus: d.bus,
-    ...(i === 0 && !iso && file ? { import: { file } } : {}),
+    ...(i === 0 && !iso && file && !fromTemplate ? { import: { file } } : {}),
+    ...(fromTemplate && s.templateDisks.includes(d.name) ? { clone: { template: s.userTemplate } } : {}),
   }));
   const req: VMCreateRequest = {
     spec: {
@@ -261,11 +360,26 @@ export function toRequest(s: WizardState, t: VMTemplate): VMCreateRequest {
       boot: iso ? ["cdrom", "disk"] : ["disk"],
       autostart: { enabled: s.autostart, order: 0, delaySec: 0 },
       devices: s.devices,
+      ...(s.sound ? { sound: true } : {}),
+      ...(s.clipboard ? { clipboard: true } : {}),
+      ...(fromTemplate ? { fromTemplate: s.userTemplate } : {}),
+      ...(streaming ? { streaming: { remote: false, sunshine: true } } : {}),
     },
     start: s.start,
     ...(s.allowOvercommit ? { allowOvercommit: true } : {}),
   };
-  if (t.cloudInit) {
+  if (s.source === "catalog" && s.catalog && !fromTemplate) req.catalog = s.catalog;
+  if (unattend) {
+    req.spec.unattend = {
+      user: s.user,
+      locale: s.locale,
+      pending: true,
+      ...(s.timeZone.trim() ? { timeZone: s.timeZone.trim() } : {}),
+      ...(s.edition.trim() ? { edition: s.edition.trim() } : {}),
+    };
+    req.password = s.password;
+  }
+  if (cloudInit) {
     req.spec.cloudInit = { user: s.user, sshKeys: sshKeyList(s.sshKeys), installAgent: true, ...(s.hostname ? { hostname: s.hostname } : {}) };
     if (s.password) req.password = s.password;
   }

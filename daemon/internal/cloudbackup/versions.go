@@ -21,9 +21,11 @@ type VersionItem struct {
 	Item     string            `json:"item"`
 	Snapshot string            `json:"snapshot"` // folder items: the snapshot to browse
 	Disks    map[string]string `json:"disks,omitempty"`
-	Time     time.Time         `json:"time"`
-	Files    int64             `json:"files"`
-	Bytes    int64             `json:"bytes"`
+	// Webmail is the mail item's webmail part (Roundcube's data).
+	Webmail string    `json:"webmail,omitempty"`
+	Time    time.Time `json:"time"`
+	Files   int64     `json:"files"`
+	Bytes   int64     `json:"bytes"`
 }
 
 // Version is one run.
@@ -128,6 +130,10 @@ func GroupVersions(snaps []Snapshot) []Version {
 			vi.Disks[d] = s.ID
 			continue
 		}
+		if part == MailPartWebmail {
+			vi.Webmail = s.ID
+			continue
+		}
 		vi.Snapshot = s.ID
 	}
 	out := []Version{}
@@ -189,6 +195,9 @@ func (r *Root) snapshotPath(s *Snapshot, it Item) string {
 	}
 	if it.Kind == ItemSystem {
 		return "/" + SettingsName
+	}
+	if it.Kind == ItemMail && s.Tag("part") == MailPartWebmail {
+		return r.mountDir(Item{Kind: ItemMail, ID: MailPartWebmail})
 	}
 	return r.mountDir(it)
 }

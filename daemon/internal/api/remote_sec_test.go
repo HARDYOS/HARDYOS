@@ -221,7 +221,10 @@ func TestPublicSSOFailuresDontLockTheLANAndAdminsAreRefused(t *testing.T) {
 	}
 	// kid signs in at home all the same.
 	home := e.client(t)
-	if code := home.do("POST", "/api/v1/auth/login", map[string]string{"username": "kid", "password": "kidpassword1"}, nil); code != 200 {
+	// (kid has two-factor sign-in now, so the password is answered with
+	// the code step: it wasn't locked out.)
+	var ch LoginChallenge
+	if code := home.do("POST", "/api/v1/auth/login", map[string]string{"username": "kid", "password": "kidpassword1"}, &ch); code != 202 || ch.Step != "totp" {
 		t.Fatalf("kid at home after public failures = %d", code)
 	}
 	// Administrators: the uniform answer from the internet by default.
@@ -319,9 +322,11 @@ func TestGatewayClientKeptAndAudited(t *testing.T) {
 	if !created {
 		t.Fatalf("the gateway's client wasn't audited as HardyOS's: %+v", list)
 	}
-	// No app asks for HardyOS sign-in any more: no redirect URI is left.
-	e.submit(t, "PUT", "/api/v1/apps/notes/publish", PublishRequest{Mode: publish.ModeNetBird, Auth: publish.AuthNone})
-	e.submit(t, "PUT", "/api/v1/apps/board/publish", PublishRequest{Mode: publish.ModePublic, Auth: publish.AuthSSO})
+	// No app asks for HardyOS sign-in any more (both unpublished; apps
+	// with their own sign-in can't be published without it): no redirect
+	// URI is left.
+	e.submit(t, "PUT", "/api/v1/apps/notes/publish", PublishRequest{Mode: publish.ModeOff, Auth: publish.AuthNone})
+	e.submit(t, "PUT", "/api/v1/apps/board/publish", PublishRequest{Mode: publish.ModeOff, Auth: publish.AuthSSO})
 	waitFor(t, "the redirect URIs to go", func() bool {
 		c, err := e.server.OIDC().Clients.Managed(e.ctx, gatewayClientKey)
 		return err == nil && len(c.RedirectURIs) == 0

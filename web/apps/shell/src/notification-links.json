@@ -1,0 +1,23 @@
+{
+  "comment": "Every notification Link hardyd can emit. {name} marks a part filled in at run time. Checked from both sides: daemon/internal/notify/links_test.go (each Link in the daemon's source matches an entry here, and each entry is used) and src/links.test.ts (each entry opens a real app and Control Panel section).",
+  "links": [
+    "apps",
+    "apps/{id}",
+    "backup/replication",
+    "backup/targets/{id}",
+    "backup/tasks/{id}",
+    "control/domain",
+    "control/hostnames",
+    "control/mail",
+    "control/notifications",
+    "control/photos",
+    "control/remote",
+    "control/security",
+    "logs",
+    "monitor",
+    "storage/disks/{name}",
+    "storage/pool/{name}",
+    "ups",
+    "vms/{id}"
+  ]
+}

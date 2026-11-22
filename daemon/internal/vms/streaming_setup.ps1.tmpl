@@ -1,0 +1,191 @@
+# HardyOS game streaming setup (decisions 400-403). Made by
+# HardyOS and run once, at Windows' first sign-in, from the read-only
+# HARDYOS_STREAM disc; the first-logon command checked this script's SHA-256
+# before running it. Everything it installs is on that disc and checked by
+# SHA-256 here again (root checked it when it downloaded it); nothing is
+# downloaded in Windows. The Sunshine password is read from the disc and
+# never written to the log.
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+
+$state = Join-Path $env:ProgramData 'HardyOS'
+New-Item -ItemType Directory -Force -Path $state | Out-Null
+$log = Join-Path $state 'streaming-setup.log'
+function Say([string]$msg) { Add-Content -LiteralPath $log -Value ((Get-Date -Format s) + ' ' + $msg) }
+
+# The Virtual Display Driver's signer (SignPath Foundation), pinned.
+$vddSigner = '{{.VDDSigner}}'
+$untrustMarker = Join-Path $state 'vdd-trusted-publisher'
+$untrustTask = 'HardyOS-VDD-Untrust'
+function Untrust {
+  $s = New-Object System.Security.Cryptography.X509Certificates.X509Store('TrustedPublisher', 'LocalMachine')
+  $s.Open('ReadWrite')
+  try { @($s.Certificates | Where-Object { $_.Thumbprint -eq $vddSigner }) | ForEach-Object { $s.Remove($_) } } finally { $s.Close() }
+  Remove-Item -LiteralPath $untrustMarker -Force -ErrorAction SilentlyContinue
+  & schtasks.exe /Delete /TN $untrustTask /F 2>$null | Out-Null
+}
+# A run that stopped half-way left the signer trusted: take it out first.
+if (Test-Path -LiteralPath $untrustMarker) { Untrust; Say 'removed the driver signer a stopped run had trusted' }
+
+$vols = @(Get-Volume | Where-Object { $_.DriveType -eq 'CD-ROM' -and $_.FileSystemLabel -eq '{{.Label}}' })
+if ($vols.Count -ne 1) { Say "expected one HardyOS streaming disc, found $($vols.Count)"; exit 1 }
+$disc = $vols[0].DriveLetter + ':\'
+
+function Checked([string]$name, [string]$sha) {
+  $p = Join-Path $disc $name
+  $h = (Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash
+  if ($h -ne $sha) { throw "$name has SHA-256 $h, not $sha; nothing from it was installed" }
+  return $p
+}
+
+try {
+  # Per-VM values, checked before use.
+  $vm = Get-Content -Raw -LiteralPath (Join-Path $disc 'hardyos-streaming.json') | ConvertFrom-Json
+  if ($vm.name -notmatch '^[a-z][a-z0-9-]{0,31}$') { throw 'bad VM name on the disc' }
+  $server = $null
+  if (-not [System.Net.IPAddress]::TryParse([string]$vm.server, [ref]$server) -or $server.AddressFamily -ne 'InterNetwork' -or $server.ToString() -ne [string]$vm.server) { throw 'bad server address on the disc' }
+
+  # 1. Sunshine {{.SunshineVersion}} (LizardByte's own Windows installer).
+  Say 'installing Sunshine {{.SunshineVersion}}'
+  $msi = Checked '{{.SunshineFile}}' '{{.SunshineSHA256}}'
+  $p = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', ('"' + $msi + '"'), '/qn', '/norestart') -Wait -PassThru
+  if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "the Sunshine installer stopped with code $($p.ExitCode)" }
+
+  $sun = Join-Path $env:ProgramFiles 'Sunshine'
+  $exe = Join-Path $sun 'sunshine.exe'
+  $cfg = Join-Path $sun 'config'
+  New-Item -ItemType Directory -Force -Path $cfg | Out-Null
+  Get-Service -Name 'Sunshine*' -ErrorAction SilentlyContinue | Stop-Service -Force -ErrorAction SilentlyContinue
+
+  # HardyOS's key and certificate, so HardyOS knows it talks to this
+  # Sunshine (it pins the certificate). The key file is made empty, limited
+  # to Administrators and SYSTEM, and only then written.
+  Copy-Item -LiteralPath (Join-Path $disc 'sunshine-cert.pem') -Destination (Join-Path $cfg 'hardyos-cert.pem') -Force
+  $key = Join-Path $cfg 'hardyos-key.pem'
+  if (Test-Path -LiteralPath $key) { Remove-Item -LiteralPath $key -Force }
+  New-Item -ItemType File -Path $key | Out-Null
+  & icacls.exe $key /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "limiting the key file failed (icacls $LASTEXITCODE)" }
+  [System.IO.File]::WriteAllBytes($key, [System.IO.File]::ReadAllBytes((Join-Path $disc 'sunshine-key.pem')))
+
+  # The configuration HardyOS sets: the web UI answers the local network
+  # only, no UPnP (nothing is opened on the router), IPv4, the standard
+  # ports (HardyOS forwards those). Lines that would change any of it go.
+  $conf = Join-Path $cfg 'sunshine.conf'
+  $keep = @()
+  if (Test-Path -LiteralPath $conf) {
+    $keep = Get-Content -LiteralPath $conf | Where-Object { $_ -notmatch '^\s*(sunshine_name|origin_web_ui_allowed|origin_pin_allowed|upnp|address_family|pkey|cert|port|credentials_file|csrf_allowed_origins|external_ip)\s*=' -and $_ -notmatch '^# Set by HardyOS' }
+  }
+  $lines = $keep + @(
+    '# Set by HardyOS (decision 401); change them here only if you know why.',
+    ('sunshine_name = ' + $vm.name),
+    'origin_web_ui_allowed = lan',
+    'upnp = disabled',
+    'address_family = ipv4',
+    ('pkey = ' + $key.Replace('\', '/')),
+    ('cert = ' + (Join-Path $cfg 'hardyos-cert.pem').Replace('\', '/'))
+  )
+  Set-Content -LiteralPath $conf -Value $lines -Encoding ASCII
+
+  # Sunshine's web page and API (47990) only for this PC and the HardyOS
+  # server: a block rule wins over the installer's allow rules.
+  $s = $server.GetAddressBytes(); [Array]::Reverse($s); $n = [BitConverter]::ToUInt32($s, 0)
+  function Ip([uint32]$v) { $b = [BitConverter]::GetBytes($v); [Array]::Reverse($b); return ([System.Net.IPAddress]$b).ToString() }
+  $ranges = @()
+  if ($n -gt 0) { $ranges += ('0.0.0.0-' + (Ip ($n - 1))) }
+  if ($n -lt [uint32]::MaxValue) { $ranges += ((Ip ($n + 1)) + '-255.255.255.255') }
+  Get-NetFirewallRule -Name 'HardyOS-Sunshine-WebUI' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+  New-NetFirewallRule -Name 'HardyOS-Sunshine-WebUI' -DisplayName 'Sunshine web UI: HardyOS server only (HardyOS)' -Direction Inbound -Protocol TCP -LocalPort 47990 -RemoteAddress $ranges -Action Block -Profile Any | Out-Null
+
+  # The web UI's account (random, kept sealed by HardyOS), set before the
+  # service runs, so nobody on the network can take Sunshine's first-run page.
+  $creds = Get-Content -Raw -LiteralPath (Join-Path $disc 'sunshine-account.json') | ConvertFrom-Json
+  $c = Start-Process -FilePath $exe -ArgumentList @('--creds', $creds.user, $creds.password) -WorkingDirectory $sun -Wait -PassThru -WindowStyle Hidden
+  $creds = $null
+  if ($c.ExitCode -ne 0) { throw "setting Sunshine's account stopped with code $($c.ExitCode)" }
+  Get-Service -Name 'Sunshine*' -ErrorAction SilentlyContinue | Set-Service -StartupType Automatic -PassThru | Start-Service
+  Say 'Sunshine is installed and set up'
+
+  # 2. Virtual Display Driver {{.VDDVersion}} (an IddCx virtual monitor, so
+  # no dummy HDMI plug is needed).
+  Say 'installing the Virtual Display Driver {{.VDDVersion}}'
+  $zip = Checked '{{.VDDFile}}' '{{.VDDSHA256}}'
+  $vdd = Join-Path $state 'vdd'
+  if (Test-Path -LiteralPath $vdd) { Remove-Item -LiteralPath $vdd -Recurse -Force }
+  Expand-Archive -LiteralPath $zip -DestinationPath $vdd -Force
+  $inf = Get-ChildItem -LiteralPath $vdd -Recurse -Filter 'MttVDD.inf' | Select-Object -First 1
+  if (-not $inf) { throw 'MttVDD.inf is not in the driver package' }
+  $cat = Get-ChildItem -LiteralPath $inf.DirectoryName -Filter '*.cat' | Select-Object -First 1
+  if (-not $cat) { throw 'the driver package has no signed catalog' }
+
+  # The driver is signed (SignPath Foundation), not by Microsoft: Windows
+  # installs it without a question only while its signer is a trusted
+  # publisher. HardyOS trusts exactly the pinned signer for the install and
+  # takes it out again afterwards (a marker and a task at the next start
+  # make sure, even if this run stops half-way).
+  $sig = Get-AuthenticodeSignature -LiteralPath $cat.FullName
+  if ($sig.Status -ne 'Valid') { throw "the driver's catalog signature is $($sig.Status)" }
+  $signer = $sig.SignerCertificate
+  if (-not $signer -or $signer.Thumbprint -ne $vddSigner) { throw "the driver catalog isn't signed by the pinned signer" }
+  $store = New-Object System.Security.Cryptography.X509Certificates.X509Store('TrustedPublisher', 'LocalMachine')
+  $store.Open('ReadWrite')
+  $had = @($store.Certificates | Where-Object { $_.Thumbprint -eq $vddSigner }).Count -gt 0
+  if (-not $had) {
+    Set-Content -LiteralPath $untrustMarker -Value $vddSigner -Encoding ASCII
+    & schtasks.exe /Create /TN $untrustTask /SC ONSTART /RU SYSTEM /RL HIGHEST /F /TR ("powershell -NoProfile -Command `"`$s = New-Object System.Security.Cryptography.X509Certificates.X509Store('TrustedPublisher','LocalMachine'); `$s.Open('ReadWrite'); @(`$s.Certificates | Where-Object { `$_.Thumbprint -eq '" + $vddSigner + "' }) | ForEach-Object { `$s.Remove(`$_) }; `$s.Close(); Remove-Item -LiteralPath '" + $untrustMarker + "' -Force -ErrorAction SilentlyContinue; schtasks /Delete /TN " + $untrustTask + " /F`"") | Out-Null
+    $store.Add($signer)
+  }
+  $store.Close()
+  try {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class HardyVdd {
+  [StructLayout(LayoutKind.Sequential)]
+  struct SP_DEVINFO_DATA { public int cbSize; public Guid ClassGuid; public int DevInst; public IntPtr Reserved; }
+  [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  static extern bool SetupDiGetINFClass(string inf, out Guid guid, StringBuilder name, int size, out int req);
+  [DllImport("setupapi.dll", SetLastError = true)]
+  static extern IntPtr SetupDiCreateDeviceInfoList(ref Guid guid, IntPtr parent);
+  [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  static extern bool SetupDiCreateDeviceInfo(IntPtr set, string name, ref Guid guid, string desc, IntPtr parent, int flags, ref SP_DEVINFO_DATA data);
+  [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  static extern bool SetupDiSetDeviceRegistryProperty(IntPtr set, ref SP_DEVINFO_DATA data, int prop, byte[] buf, int size);
+  [DllImport("setupapi.dll", SetLastError = true)]
+  static extern bool SetupDiCallClassInstaller(int fn, IntPtr set, ref SP_DEVINFO_DATA data);
+  [DllImport("setupapi.dll", SetLastError = true)]
+  static extern bool SetupDiDestroyDeviceInfoList(IntPtr set);
+  [DllImport("newdev.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  static extern bool UpdateDriverForPlugAndPlayDevices(IntPtr hwnd, string hwid, string inf, int flags, out bool reboot);
+  const int DICD_GENERATE_ID = 1, SPDRP_HARDWAREID = 1, DIF_REGISTERDEVICE = 0x19, INSTALLFLAG_FORCE = 1;
+  public static void Install(string inf, string hwid, bool create) {
+    if (create) {
+      Guid g; int req; var name = new StringBuilder(256);
+      if (!SetupDiGetINFClass(inf, out g, name, 256, out req)) throw new Exception("SetupDiGetINFClass " + Marshal.GetLastWin32Error());
+      IntPtr set = SetupDiCreateDeviceInfoList(ref g, IntPtr.Zero);
+      if (set == new IntPtr(-1)) throw new Exception("SetupDiCreateDeviceInfoList " + Marshal.GetLastWin32Error());
+      try {
+        var d = new SP_DEVINFO_DATA(); d.cbSize = Marshal.SizeOf(d);
+        if (!SetupDiCreateDeviceInfo(set, name.ToString(), ref g, null, IntPtr.Zero, DICD_GENERATE_ID, ref d)) throw new Exception("SetupDiCreateDeviceInfo " + Marshal.GetLastWin32Error());
+        byte[] id = Encoding.Unicode.GetBytes(hwid + "\0\0");
+        if (!SetupDiSetDeviceRegistryProperty(set, ref d, SPDRP_HARDWAREID, id, id.Length)) throw new Exception("SetupDiSetDeviceRegistryProperty " + Marshal.GetLastWin32Error());
+        if (!SetupDiCallClassInstaller(DIF_REGISTERDEVICE, set, ref d)) throw new Exception("DIF_REGISTERDEVICE " + Marshal.GetLastWin32Error());
+      } finally { SetupDiDestroyDeviceInfoList(set); }
+    }
+    bool reboot;
+    if (!UpdateDriverForPlugAndPlayDevices(IntPtr.Zero, hwid, inf, INSTALLFLAG_FORCE, out reboot)) throw new Exception("UpdateDriverForPlugAndPlayDevices " + Marshal.GetLastWin32Error());
+  }
+}
+'@
+    $exists = @(Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.HardwareID -contains 'Root\MttVDD' }).Count -gt 0
+    [HardyVdd]::Install($inf.FullName, 'Root\MttVDD', -not $exists)
+  } finally {
+    if (-not $had) { Untrust }
+  }
+  Say 'the Virtual Display Driver is installed'
+  Set-Content -LiteralPath (Join-Path $state 'streaming-ready') -Value '{{.SunshineVersion}} {{.VDDVersion}}' -Encoding ASCII
+} catch {
+  Say ('setup stopped: ' + $_.Exception.Message)
+  exit 1
+}

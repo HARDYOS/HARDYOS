@@ -21,6 +21,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/cloudbackups"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/files"
+	"github.com/hardyos/hardyos/daemon/internal/hostnames"
 	"github.com/hardyos/hardyos/daemon/internal/installer"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/mail/manage"
@@ -36,6 +37,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/sharelinks"
 	"github.com/hardyos/hardyos/daemon/internal/storage"
 	"github.com/hardyos/hardyos/daemon/internal/store"
+	"github.com/hardyos/hardyos/daemon/internal/streaming"
 	"github.com/hardyos/hardyos/daemon/internal/updates"
 )
 
@@ -121,18 +123,28 @@ type Config struct {
 	// out.
 	Mail *manage.Service
 
+	// Hostnames gives apps their own names under the base domain with a
+	// trusted wildcard certificate (Control Panel › Hostnames); nil leaves
+	// it out (everything on ports and the self-signed certificate).
+	Hostnames *hostnames.Manager
+
 	// OfficeInternal replaces looking the Document Server up among the
 	// apps (tests, the office integration job): its http://127.0.0.1:port.
 	OfficeInternal func() (*url.URL, error)
 	// OfficeCallbackBase replaces http://host.docker.internal:44251, how
 	// the Document Server reaches hardyd (tests, the integration job).
 	OfficeCallbackBase string
+
+	// StreamingClient replaces the client for Sunshine's API in game
+	// streaming VMs (tests).
+	StreamingClient *streaming.Client
 }
 
 // Server is hardyd's HTTP handler.
 type Server struct {
 	cfg      Config
 	users    *auth.Users
+	stream   *vmStreaming
 	sessions *auth.Sessions
 	signin   *auth.SignIn
 	audit    *audit.Log
@@ -140,6 +152,7 @@ type Server struct {
 	tickets  terminalTickets
 	proxy    *appProxy
 	remote   *remoteRuntime
+	hosts    *hostRuntime
 	links    *sharelinks.Store
 	uploads  uploads
 	dav      davState
@@ -159,6 +172,14 @@ type Server struct {
 	// a database or the sign-in provider.
 	photos    *photos.Store
 	photosRun photosState
+	// mfa, appPw and challenges are two-factor sign-in (decisions
+	// 440-449): second factors, app passwords, and sign-ins waiting for a
+	// code.
+	mfa        *auth.MFA
+	appPw      *auth.AppPasswords
+	challenges *auth.Challenges
+	// inside knows this server's LAN networks and router (inside.go).
+	inside insideNets
 }
 
 // New builds the API server and registers its routes.
@@ -179,6 +200,7 @@ func New(cfg Config) *Server {
 		ips: &clientip.Resolver{Trusted: cfg.TrustedProxies}, pubLimiter: auth.NewDelayLimiter()}
 	s.proxy = &appProxy{s: s}
 	s.remote = &remoteRuntime{s: s}
+	s.hosts = &hostRuntime{s: s}
 	if cfg.DB != nil {
 		s.users = &auth.Users{DB: cfg.DB}
 		s.sessions = &auth.Sessions{DB: cfg.DB}
@@ -188,6 +210,7 @@ func New(cfg Config) *Server {
 			s.signin.Domain = &privDirectory{pc: cfg.Priv, ttl: cfg.DomainInfoTTL}
 		}
 		if cfg.Installer == nil {
+			s.newMFA()
 			if s.cfg.PublicHost == nil {
 				s.cfg.PublicHost = func() string { h, _ := os.Hostname(); return strings.ToLower(h) }
 			}
@@ -244,6 +267,7 @@ func (s *Server) routes() {
 		// Signed in
 		m.Handle("GET /api/v1/auth/me", s.authed(s.handleMe))
 		m.Handle("POST /api/v1/auth/password", s.authed(s.handleChangePassword))
+		s.mfaRoutes() // two-factor sign-in and app passwords
 		m.Handle("GET /api/v1/jobs", s.authed(s.handleListJobs))
 		m.Handle("GET /api/v1/jobs/{id}", s.authed(s.handleGetJob))
 		m.Handle("POST /api/v1/jobs/{id}/cancel", s.authed(s.handleCancelJob))
@@ -274,11 +298,15 @@ func (s *Server) routes() {
 			s.domainRoutes()
 			s.appRoutes()
 			s.remoteRoutes()
+			s.hostnamesRoutes()
 			s.photosRoutes()
 			s.shareRoutes()
 			s.fileServiceRoutes()
 			s.snapshotRoutes()
 			s.vmRoutes()
+			s.vmPolishRoutes()
+			s.newVMStreaming()
+			s.vmStreamingRoutes()
 			s.deviceRoutes()
 			s.replicationRoutes()
 		}
@@ -308,6 +336,11 @@ func (s *Server) routes() {
 // headers and CSRF protection for state-changing API calls.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	if !viaGateway(r) && r.Context().Value(hostsDoneKey{}) == nil && s.hosts.serve(w, r) {
+		// A hostname under the base: its own app, the provider, the office
+		// editor (hostnames.go).
+		return
+	}
 	if s.oidc != nil && s.oidc.Owns(r) {
 		s.serveProvider(w, r, start)
 		return
@@ -316,7 +349,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Frame-Options", "SAMEORIGIN")
 	h.Set("Referrer-Policy", "same-origin")
-	h.Set("Content-Security-Policy", "default-src 'self'; font-src 'self' data:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; frame-src "+frameSrc(r)+s.remote.frameSrc()+"; frame-ancestors 'self'")
+	h.Set("Content-Security-Policy", "default-src 'self'; font-src 'self' data:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:"+s.hosts.connectSrc()+"; frame-src "+frameSrc(r)+s.remote.frameSrc()+s.hosts.frameSrc()+"; frame-ancestors 'self'")
 
 	rw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 	if strings.HasPrefix(r.URL.Path, "/api/") && !csrfSafe(r) {

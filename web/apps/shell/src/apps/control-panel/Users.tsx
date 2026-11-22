@@ -3,9 +3,11 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, errorMessage, unwrap } from "../../api";
 import { dateTime, initials, relativeTime } from "../../format";
-import { EditIcon, KeyIcon, PlusIcon, TrashIcon } from "../../icons";
+import { EditIcon, KeyIcon, PlusIcon, ShieldIcon, TrashIcon } from "../../icons";
+import { routerTrustText, twoFactorLabel } from "../../auth/twoFactorRules";
+
 import { useShell } from "../../shell";
-import { Alert, Badge, Button, ErrorBox, Field, IconButton, Loading, PageHeader, Select, TextInput, Toggle } from "../../ui";
+import { Alert, Badge, Button, Card, ErrorBox, Field, IconButton, Loading, PageHeader, Select, TextInput, Toggle } from "../../ui";
 import { ConfirmDialog, Dialog } from "../../ui/Dialog";
 import { toast } from "../../ui/toasts";
 
@@ -18,6 +20,9 @@ export function Users() {
   const [editing, setEditing] = useState<User | null>(null);
   const [resetting, setResetting] = useState<User | null>(null);
   const [deleting, setDeleting] = useState<User | null>(null);
+  const [resetting2FA, setResetting2FA] = useState<User | null>(null);
+  const [setupFor, setSetupFor] = useState<User | null>(null);
+  const [revokeAppPw, setRevokeAppPw] = useState(true);
   const qc = useQueryClient();
 
   return (
@@ -71,7 +76,12 @@ export function Users() {
                       {u.source === "domain" && <Badge tone="neutral">Domain</Badge>}
                     </div>
                   </td>
-                  <td>{u.disabled ? <Badge tone="warn">Disabled</Badge> : <Badge tone="good">Active</Badge>}</td>
+                  <td>
+                    <div className="row">
+                      {u.disabled ? <Badge tone="warn">Disabled</Badge> : <Badge tone="good">Active</Badge>}
+                      <Badge tone={twoFactorLabel(u.twoFactor).tone}>{twoFactorLabel(u.twoFactor).text}</Badge>
+                    </div>
+                  </td>
                   <td title={dateTime(u.lastLoginAt)}>{relativeTime(u.lastLoginAt)}</td>
                   <td className="actions">
                     <IconButton label={`Edit ${u.username}`} onClick={() => setEditing(u)}>
@@ -84,6 +94,15 @@ export function Users() {
                     ) : (
                       <IconButton label={`Set a new password for ${u.username}`} onClick={() => setResetting(u)}>
                         <KeyIcon size={16} />
+                      </IconButton>
+                    )}
+                    {u.twoFactor?.enabled ? (
+                      <IconButton label={`Reset two-factor sign-in for ${u.username}`} onClick={() => setResetting2FA(u)}>
+                        <ShieldIcon size={16} />
+                      </IconButton>
+                    ) : (
+                      <IconButton label={`One-time setup code for ${u.username} (two-factor sign-in from outside)`} onClick={() => setSetupFor(u)} disabled={u.disabled}>
+                        <ShieldIcon size={16} />
                       </IconButton>
                     )}
                     <IconButton label={`Delete ${u.username}`} onClick={() => setDeleting(u)} disabled={u.id === me.id}>
@@ -100,6 +119,37 @@ export function Users() {
       {creating && <UserDialog onClose={() => setCreating(false)} />}
       {editing && <UserDialog user={editing} onClose={() => setEditing(null)} />}
       {resetting && <ResetPasswordDialog user={resetting} onClose={() => setResetting(null)} />}
+      {setupFor && <SetupCodeDialog user={setupFor} onClose={() => setSetupFor(null)} />}
+      {resetting2FA && (
+        <ConfirmDialog
+          title={`Reset two-factor sign-in for ${resetting2FA.username}?`}
+          confirmLabel="Reset two-factor sign-in"
+          typeToConfirm={resetting2FA.username}
+          onClose={() => setResetting2FA(null)}
+          onConfirm={async () => {
+            await unwrap(
+              api.POST("/users/{id}/2fa/reset", {
+                params: { path: { id: resetting2FA.id } },
+                body: { confirm: resetting2FA.username, revokeAppPasswords: revokeAppPw },
+              }),
+            );
+            await qc.invalidateQueries({ queryKey: ["users"] });
+            toast("success", `Two-factor sign-in reset for ${resetting2FA.username}`, "They were signed out everywhere.");
+          }}
+        >
+          <p>
+            Their authenticator and recovery codes stop working and they're signed out everywhere.{" "}
+            {resetting2FA.role === "admin"
+              ? "As an administrator they set up a new authenticator at their next sign-in, from home."
+              : "They can set it up again from home, or from outside with a setup code from you."}{" "}
+            Every app sign-in is revoked too. Type the username to confirm.
+          </p>
+          <label className="row small" style={{ gap: 6 }}>
+            <input type="checkbox" checked={revokeAppPw} onChange={(e) => setRevokeAppPw(e.target.checked)} /> Also revoke their app passwords (mail,
+            WebDAV, calendars)
+          </label>
+        </ConfirmDialog>
+      )}
       {deleting && (
         <ConfirmDialog
           title={`Delete ${deleting.username}?`}
@@ -222,6 +272,135 @@ function UserDialog({ user, onClose }: { user?: User; onClose: () => void }) {
     </Dialog>
   );
 }
+
+/** A one-time code that lets someone set up two-factor sign-in from outside. */
+function SetupCodeDialog({ user, onClose }: { user: User; onClose: () => void }) {
+  const qc = useQueryClient();
+  const issue = useMutation({
+    mutationFn: () => unwrap(api.POST("/users/{id}/2fa/setup-code", { params: { path: { id: user.id } } })),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["users"] }),
+  });
+  return (
+    <Dialog
+      title={`Setup code for ${user.username}`}
+      description="Signing in from outside needs two-factor sign-in. Someone who can't get home to set it up can use this code once, with their password, to set it up from outside."
+      onClose={onClose}
+      footer={
+        issue.data ? (
+          <Button variant="primary" onClick={onClose}>
+            Done
+          </Button>
+        ) : (
+          <>
+            <Button onClick={onClose}>Cancel</Button>
+            <Button variant="primary" busy={issue.isPending} onClick={() => issue.mutate()}>
+              Make a code
+            </Button>
+          </>
+        )
+      }
+    >
+      <div className="stack">
+        {issue.data ? (
+          <>
+            <p className="tfa-secret tfa-secret--big">{issue.data.code}</p>
+            <p className="small muted" style={{ margin: 0 }}>
+              Give it to {user.displayName || user.username} in person or by phone, not by email. It works once, until {dateTime(issue.data.expiresAt)}, and
+              isn't shown again.
+            </p>
+          </>
+        ) : (
+          <Alert tone="warn">Anyone with this code and the password can set up their own authenticator for this account. A new code replaces an earlier one.</Alert>
+        )}
+        {issue.error && <Alert tone="bad">{errorMessage(issue.error)}</Alert>}
+      </div>
+    </Dialog>
+  );
+}
+
+/** Control Panel › Security: the administrators' grace period. */
+export function TwoFactorPolicyCard() {
+  const qc = useQueryClient();
+  const policy = useQuery({ queryKey: ["2fa-policy"], queryFn: () => unwrap(api.GET("/auth/2fa/policy")) });
+  const [days, setDays] = useState<string | null>(null);
+  const save = useMutation({
+    mutationFn: (body: { adminGraceDays: number; trustRouter?: boolean }) => unwrap(api.PUT("/auth/2fa/policy", { body })),
+    onSuccess: () => {
+      setDays(null);
+      void qc.invalidateQueries({ queryKey: ["2fa-policy"] });
+      void qc.invalidateQueries({ queryKey: ["me"] });
+      toast("success", "Saved");
+    },
+  });
+  const [confirmTrust, setConfirmTrust] = useState(false);
+  if (policy.isPending) return <Loading />;
+  if (policy.isError) return <ErrorBox error={policy.error} onRetry={() => policy.refetch()} />;
+  const routerSeen = policy.data.routerSeenAt;
+  const trust = policy.data.trustRouter;
+  const value = days ?? String(policy.data.adminGraceDays);
+  const n = Number(value);
+  const valid = Number.isInteger(n) && n >= 0 && n <= 30;
+  return (
+    <Card title="Two-factor sign-in">
+      <p className="small muted" style={{ margin: 0 }}>
+        Everyone needs an authenticator code to sign in from outside your home network (published desktop, published apps, HardyOS sign-in); mail, WebDAV and
+        calendar apps need app passwords there. Administrators must always use it. Shared folders over SMB and SFTP, and Kerberos, keep checking the domain
+        password only.
+      </p>
+      <form
+        className="row"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (valid) save.mutate({ adminGraceDays: n });
+        }}
+      >
+        <Field label="Administrators may sign in without it for" hint="Days after the first sign-in that asks (0-30). Users and Groups shows each deadline.">
+          {(id) => <TextInput id={id} type="number" min={0} max={30} value={value} onChange={(e) => setDays(e.target.value)} className="input num" style={{ width: 90 }} />}
+        </Field>
+        <Button type="submit" busy={save.isPending} disabled={!valid || days === null}>
+          Save
+        </Button>
+      </form>
+      {routerSeen && !trust.on && (
+        <Alert tone="warn" title="Requests through the router's own address">
+          On {dateTime(routerSeen)} a request reached HardyOS from your router&apos;s address. That happens with hairpin NAT (a device at home using
+          the public address), a port forward that hides where visitors come from, or a VPN or tunnel on the router, and HardyOS can&apos;t tell those
+          from the internet: they count as outside and need two-factor sign-in. Use the server&apos;s local address at home, and don&apos;t forward ports
+          to HardyOS (Remote Access publishes through NetBird instead).
+        </Alert>
+      )}
+      <Toggle
+        label="This server is behind NAT: trust the router's address"
+        description={routerTrustText(trust, dateTime)}
+        checked={trust.on}
+        disabled={!policy.data.canChangeTrustRouter || save.isPending}
+        onChange={(on) => (on ? setConfirmTrust(true) : save.mutate({ adminGraceDays: policy.data.adminGraceDays, trustRouter: false }))}
+      />
+      {!policy.data.canChangeTrustRouter && (
+        <p className="small muted" style={{ margin: 0 }}>
+          Changed only from this server&apos;s own network (not through the router or from outside), or with <span className="mono">hardyctl trust-router</span>.
+        </p>
+      )}
+      {save.error && <Alert tone="bad">{errorMessage(save.error)}</Alert>}
+      {confirmTrust && (
+        <ConfirmDialog
+          title="Trust the router's address?"
+          confirmLabel="Trust the router"
+          onClose={() => setConfirmTrust(false)}
+          onConfirm={async () => {
+            await save.mutateAsync({ adminGraceDays: policy.data.adminGraceDays, trustRouter: true });
+          }}
+        >
+          Requests from your router&apos;s address will count as home for two-factor sign-in. If the router forwards anything from the internet to this
+          server (a port forward, NAT reflection, a VPN or tunnel on the router), those visitors won&apos;t be asked for a code. It applies only to this
+          router (its address and hardware address), lapses if the router changes, and administrators see a banner while it&apos;s on. WebDAV, mail and
+          calendars still need app passwords from it.
+        </ConfirmDialog>
+      )}
+    </Card>
+  );
+}
+
 
 function ResetPasswordDialog({ user, onClose }: { user: User; onClose: () => void }) {
   const [password, setPassword] = useState("");

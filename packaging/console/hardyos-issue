@@ -10,6 +10,9 @@
 set -u
 DIR=/etc/issue.d
 OUT=$DIR/40-hardyos-address.issue
+# A new server's one-time two-factor setup code, while there is one
+# (hardyos-setup-code.service; 0600, only agetty, as root, reads it).
+CODE=/run/hardyos-setup-code/code.issue
 
 write() {
 	addrs=$(ip -4 -o addr show scope global 2>/dev/null | awk '{ split($4, a, "/"); print a[1] }')
@@ -25,6 +28,10 @@ write() {
 			echo
 			echo "  Your browser will warn about the certificate the first time;"
 			echo "  that is expected for a new server."
+			if [ -s "$CODE" ]; then
+				echo
+				cat "$CODE"
+			fi
 		else
 			echo "  Waiting for a network address..."
 			echo
@@ -33,6 +40,8 @@ write() {
 		fi
 		echo
 	} > "$tmp" || return 1
+	chmod 0600 "$tmp"
+
 	# Only touch the file and redraw the prompt when something changed.
 	if cmp -s "$tmp" "$OUT"; then
 		rm -f "$tmp"

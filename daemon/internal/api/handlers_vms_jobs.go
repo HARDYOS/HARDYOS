@@ -3,11 +3,13 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
+	"github.com/hardyos/hardyos/daemon/internal/streaming"
 	"github.com/hardyos/hardyos/daemon/internal/vms"
 )
 
@@ -36,6 +38,7 @@ type vmCreateParams struct {
 	Spec            vms.Spec           `json:"spec"`
 	Start           bool               `json:"start"`
 	Downloads       []vms.DownloadArgs `json:"downloads,omitempty"`
+	Catalog         string             `json:"catalog,omitempty"`
 	PasswordRef     string             `json:"passwordRef,omitempty"`
 	AllowOvercommit bool               `json:"allowOvercommit,omitempty"`
 }
@@ -73,29 +76,36 @@ func call(jc *jobs.Context, pc *priv.Client, d time.Duration, op string, args, o
 // followVMTask reports a download or import running in hardyd-priv until
 // it's over, scaled into from..to percent.
 func followVMTask(jc *jobs.Context, pc *priv.Client, t *vms.Task, from, to float64) error {
+	_, err := followVMTaskResult(jc, pc, t, from, to)
+	return err
+}
+
+// followVMTaskResult is followVMTask that also returns the finished task
+// (a catalog image's verified checksum is on it).
+func followVMTaskResult(jc *jobs.Context, pc *priv.Client, t *vms.Task, from, to float64) (*vms.Task, error) {
 	if t == nil {
-		return nil
+		return nil, nil
 	}
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
 	for {
 		var res priv.VMTaskResult
 		if err := call(jc, pc, 15*time.Second, priv.OpVMsTask, vms.TaskArgs{ID: t.ID}, &res); err != nil {
-			return err
+			return nil, err
 		}
 		if res.Task == nil {
-			return fmt.Errorf("lost track of %s", t.File)
+			return nil, fmt.Errorf("lost track of %s", t.File)
 		}
 		jc.Progress(from+(to-from)*res.Task.Progress/100, res.Task.Message)
 		if res.Task.Done {
 			if res.Task.Error != "" {
-				return fmt.Errorf("%s", res.Task.Error)
+				return res.Task, fmt.Errorf("%s", res.Task.Error)
 			}
-			return nil
+			return res.Task, nil
 		}
 		select {
 		case <-jc.Done():
-			return jc.Err()
+			return nil, jc.Err()
 		case <-tick.C:
 		}
 	}
@@ -149,84 +159,8 @@ func registerVMJobs(m *jobs.Manager, pc *priv.Client) {
 		m.Register(k)
 	}
 
-	reg(JobKindVMCreate, true, func(jc *jobs.Context) (any, error) {
-		var p vmCreateParams
-		if err := jc.Params(&p); err != nil {
-			return nil, err
-		}
-		password := ""
-		if p.PasswordRef != "" {
-			pw, ok := jobSecrets.take(p.PasswordRef)
-			if !ok {
-				return nil, fmt.Errorf("the password for this VM was lost (HardyOS restarted); start again")
-			}
-			password = pw
-		}
-		s := p.Spec
-		// 1. Downloads into the ISO library (made on the VM's pool if
-		// there's none yet).
-		for i, d := range p.Downloads {
-			d.Pool = s.Pool
-			jc.Progress(2, "Starting the download of "+lastSegment(d.URL))
-			var res priv.VMTaskResult
-			if err := call(jc, pc, time.Minute, priv.OpVMsISODownload, d, &res); err != nil {
-				return nil, err
-			}
-			step := 50.0 / float64(len(p.Downloads))
-			if err := followVMTask(jc, pc, res.Task, 2+step*float64(i), 2+step*float64(i+1)); err != nil {
-				return nil, err
-			}
-		}
-		// 2. The home network's bridge, the first time a VM needs it.
-		if s.NeedsBridge() {
-			if err := ensureVMBridge(jc, pc, 52); err != nil {
-				return nil, err
-			}
-		}
-		// 3. The VirtIO drivers disc for Windows.
-		if s.NeedsVirtio() {
-			jc.Progress(55, "Getting the VirtIO drivers disc")
-			var res priv.VMTaskResult
-			if err := call(jc, pc, time.Minute, priv.OpVMsISOVirtio, priv.VMVirtioArgs{Pool: s.Pool}, &res); err != nil {
-				return nil, err
-			}
-			if err := followVMTask(jc, pc, res.Task, 55, 75); err != nil {
-				return nil, fmt.Errorf("downloading the VirtIO drivers disc: %w", err)
-			}
-		}
-		// 4. The VM itself.
-		jc.Progress(76, "Creating "+s.Name)
-		var created vms.Result
-		if err := call(jc, pc, 5*time.Minute, priv.OpVMsCreate, vms.CreateArgs{Spec: s, Password: password, AllowOvercommit: p.AllowOvercommit}, &created); err != nil {
-			return nil, err
-		}
-		// 5. Disk images.
-		for _, d := range s.Disks {
-			if d.Import == nil {
-				continue
-			}
-			jc.Progress(80, "Copying "+d.Import.File+" into "+d.Name)
-			var res priv.VMTaskResult
-			if err := call(jc, pc, time.Minute, priv.OpVMsImport, vms.ImportArgs{ID: s.ID, Disk: d.Name}, &res); err != nil {
-				return nil, err
-			}
-			if err := followVMTask(jc, pc, res.Task, 80, 97); err != nil {
-				return nil, &jobs.FailedWith{Err: fmt.Errorf("the VM was created, but importing its disk failed: %w", err), Result: VMJobResult{VM: created.VM, Warnings: created.Warnings}}
-			}
-		}
-		out := VMJobResult{VM: created.VM, Warnings: created.Warnings}
-		if p.Start {
-			jc.Progress(98, "Starting "+s.Name)
-			var started vms.Result
-			if err := call(jc, pc, 5*time.Minute, priv.OpVMsStart, priv.VMRef{ID: s.ID}, &started); err != nil {
-				return nil, &jobs.FailedWith{Err: fmt.Errorf("the VM was created but didn't start: %w", err), Result: out}
-			}
-			out.VM = started.VM
-			out.Warnings = append(out.Warnings, started.Warnings...)
-		}
-		return out, nil
-	})
-
+	reg(JobKindVMCreate, true, vmCreateJob(pc, nil))
+	reg(JobKindVMDelete, true, vmDeleteJob(pc, nil))
 	reg(JobKindVMUpdate, true, func(jc *jobs.Context) (any, error) {
 		var p vmUpdateParams
 		if err := jc.Params(&p); err != nil {
@@ -266,6 +200,18 @@ func registerVMJobs(m *jobs.Manager, pc *priv.Client) {
 		var p priv.VMRef
 		if err := jc.Params(&p); err != nil {
 			return nil, err
+		}
+		// The VirtIO disc lives (checked) on the VM's pool: get it there
+		// first if it isn't (a VM from before, or a pool it moved to).
+		var cur vms.VM
+		if err := call(jc, pc, 30*time.Second, priv.OpVMsGet, p, &cur); err == nil && cur.NeedsVirtio() {
+			var res priv.VMTaskResult
+			if err := call(jc, pc, time.Minute, priv.OpVMsISOVirtio, priv.VMVirtioArgs{Pool: cur.Pool}, &res); err != nil {
+				return nil, err
+			}
+			if err := followVMTask(jc, pc, res.Task, 2, 28); err != nil {
+				return nil, fmt.Errorf("getting the VirtIO drivers disc: %w", err)
+			}
 		}
 		jc.Progress(30, "Starting")
 		var r vms.Result
@@ -317,17 +263,6 @@ func registerVMJobs(m *jobs.Manager, pc *priv.Client) {
 	simple(JobKindVMRestart, priv.OpVMsRestart, func(id string) any { return vms.RestartArgs{ID: id} }, "Restarting")
 	simple(JobKindVMReset, priv.OpVMsRestart, func(id string) any { return vms.RestartArgs{ID: id, Force: true} }, "Resetting")
 
-	reg(JobKindVMDelete, true, func(jc *jobs.Context) (any, error) {
-		var p vms.DeleteArgs
-		if err := jc.Params(&p); err != nil {
-			return nil, err
-		}
-		jc.Progress(30, "Deleting")
-		if err := call(jc, pc, 10*time.Minute, priv.OpVMsDelete, p, nil); err != nil {
-			return nil, err
-		}
-		return VMJobResult{Warnings: []string{}}, nil
-	})
 	reg(JobKindVMKeptDelete, false, func(jc *jobs.Context) (any, error) {
 		var p vms.DeleteKeptArgs
 		if err := jc.Params(&p); err != nil {
@@ -404,4 +339,170 @@ func registerVMJobs(m *jobs.Manager, pc *priv.Client) {
 			}
 			return res, nil
 		}})
+}
+
+// vmCreateJob makes a VM. accounts keeps the Sunshine account of a VM
+// with game streaming set up by HardyOS (nil: such VMs can't be made).
+func vmCreateJob(pc *priv.Client, accounts *streaming.Store) jobs.RunFunc {
+	return func(jc *jobs.Context) (any, error) {
+		var p vmCreateParams
+		if err := jc.Params(&p); err != nil {
+			return nil, err
+		}
+		password := ""
+		if p.PasswordRef != "" {
+			pw, ok := jobSecrets.take(p.PasswordRef)
+			if !ok {
+				return nil, fmt.Errorf("the password for this VM was lost (HardyOS restarted); start again")
+			}
+			password = pw
+		}
+		s := p.Spec
+		// 1. Downloads into the ISO library (made on the VM's pool if
+		// there's none yet).
+		for i, d := range p.Downloads {
+			d.Pool = s.Pool
+			jc.Progress(2, "Starting the download of "+lastSegment(d.URL))
+			var res priv.VMTaskResult
+			if err := call(jc, pc, time.Minute, priv.OpVMsISODownload, d, &res); err != nil {
+				return nil, err
+			}
+			step := 50.0 / float64(len(p.Downloads))
+			if err := followVMTask(jc, pc, res.Task, 2+step*float64(i), 2+step*float64(i+1)); err != nil {
+				return nil, err
+			}
+		}
+		// 1b. A verified catalog image, checked against its publisher's
+		// checksums by root; the import checks it again as it reads it.
+		if p.Catalog != "" {
+			jc.Progress(2, "Getting the verified image "+p.Catalog)
+			var res priv.VMTaskResult
+			if err := call(jc, pc, time.Minute, priv.OpVMsCatalogFetch, vms.FetchArgs{Image: p.Catalog, Pool: s.Pool}, &res); err != nil {
+				return nil, err
+			}
+			done, err := followVMTaskResult(jc, pc, res.Task, 2, 50)
+			if err != nil {
+				return nil, err
+			}
+			if done == nil || done.File == "" || done.Digest == "" || len(s.Disks) == 0 {
+				return nil, fmt.Errorf("the verified image %s isn't ready", p.Catalog)
+			}
+			s.Disks[0].Import = &vms.Import{File: done.File, Digest: done.Digest, Catalog: p.Catalog}
+		}
+		// 2. The home network's bridge, the first time a VM needs it.
+		if s.NeedsBridge() {
+			if err := ensureVMBridge(jc, pc, 52); err != nil {
+				return nil, err
+			}
+		}
+		// 3. The VirtIO drivers disc for Windows.
+		if s.NeedsVirtio() {
+			jc.Progress(55, "Getting the VirtIO drivers disc")
+			var res priv.VMTaskResult
+			if err := call(jc, pc, time.Minute, priv.OpVMsISOVirtio, priv.VMVirtioArgs{Pool: s.Pool}, &res); err != nil {
+				return nil, err
+			}
+			if err := followVMTask(jc, pc, res.Task, 55, 75); err != nil {
+				return nil, fmt.Errorf("downloading the VirtIO drivers disc: %w", err)
+			}
+		}
+		// 3b. Game streaming: Sunshine and the virtual display driver,
+		// pinned and checked by root, and the Sunshine account (made here,
+		// sealed before the VM exists; never in the job's parameters).
+		streamPW := ""
+		if s.StreamingSetUp() {
+			if accounts == nil {
+				return nil, fmt.Errorf("game streaming can't be set up on this server")
+			}
+			// The account is kept by the VM's name: never replace the
+			// account of a VM that exists (the job holds the name's lock).
+			var existing vms.VM
+			if err := call(jc, pc, 30*time.Second, priv.OpVMsGet, priv.VMRef{ID: s.ID}, &existing); err == nil {
+				return nil, fmt.Errorf("there's already a VM called %s", s.ID)
+			} else if pe := (*priv.Error)(nil); !errors.As(err, &pe) || pe.Code != priv.CodeBadArgs {
+				return nil, err
+			}
+			for i, img := range []string{vms.CatalogSunshine, vms.CatalogVDD} {
+				jc.Progress(66+float64(i)*5, "Getting "+img+" (checked against its pinned SHA-256)")
+				var res priv.VMTaskResult
+				if err := call(jc, pc, time.Minute, priv.OpVMsCatalogFetch, vms.FetchArgs{Image: img, Pool: s.Pool}, &res); err != nil {
+					return nil, err
+				}
+				if _, err := followVMTaskResult(jc, pc, res.Task, 66+float64(i)*5, 70+float64(i)*5); err != nil {
+					return nil, fmt.Errorf("getting %s: %w", img, err)
+				}
+			}
+			pw, err := streaming.NewPassword()
+			if err != nil {
+				return nil, err
+			}
+			if err := accounts.Save(jc, s.ID, vms.SunshineUser, pw); err != nil {
+				return nil, fmt.Errorf("keeping the Sunshine account: %w", err)
+			}
+			streamPW = pw
+		}
+		// 4. The VM itself.
+		jc.Progress(76, "Creating "+s.Name)
+		var created vms.Result
+		if err := call(jc, pc, 5*time.Minute, priv.OpVMsCreate, vms.CreateArgs{Spec: s, Password: password, StreamingPassword: streamPW, AllowOvercommit: p.AllowOvercommit}, &created); err != nil {
+			if streamPW != "" {
+				_ = accounts.Delete(jc, s.ID)
+			}
+			return nil, err
+		}
+		// 5. Disk images, and disks copied from a saved template.
+		for _, d := range s.Disks {
+			if d.Clone != nil {
+				jc.Progress(80, "Copying "+d.Name+" from the template "+d.Clone.Template)
+				var res priv.VMTaskResult
+				if err := call(jc, pc, time.Minute, priv.OpVMsClone, vms.ImportArgs{ID: s.ID, Disk: d.Name}, &res); err != nil {
+					return nil, err
+				}
+				if err := followVMTask(jc, pc, res.Task, 80, 97); err != nil {
+					return nil, &jobs.FailedWith{Err: fmt.Errorf("the VM was created, but copying its disk from the template failed: %w", err), Result: VMJobResult{VM: created.VM, Warnings: created.Warnings}}
+				}
+				continue
+			}
+			if d.Import == nil {
+				continue
+			}
+			jc.Progress(80, "Copying "+d.Import.File+" into "+d.Name)
+			var res priv.VMTaskResult
+			if err := call(jc, pc, time.Minute, priv.OpVMsImport, vms.ImportArgs{ID: s.ID, Disk: d.Name}, &res); err != nil {
+				return nil, err
+			}
+			if err := followVMTask(jc, pc, res.Task, 80, 97); err != nil {
+				return nil, &jobs.FailedWith{Err: fmt.Errorf("the VM was created, but importing its disk failed: %w", err), Result: VMJobResult{VM: created.VM, Warnings: created.Warnings}}
+			}
+		}
+		out := VMJobResult{VM: created.VM, Warnings: created.Warnings}
+		if p.Start {
+			jc.Progress(98, "Starting "+s.Name)
+			var started vms.Result
+			if err := call(jc, pc, 5*time.Minute, priv.OpVMsStart, priv.VMRef{ID: s.ID}, &started); err != nil {
+				return nil, &jobs.FailedWith{Err: fmt.Errorf("the VM was created but didn't start: %w", err), Result: out}
+			}
+			out.VM = started.VM
+			out.Warnings = append(out.Warnings, started.Warnings...)
+		}
+		return out, nil
+	}
+}
+
+// vmDeleteJob deletes a VM (and forgets its Sunshine account).
+func vmDeleteJob(pc *priv.Client, accounts *streaming.Store) jobs.RunFunc {
+	return func(jc *jobs.Context) (any, error) {
+		var p vms.DeleteArgs
+		if err := jc.Params(&p); err != nil {
+			return nil, err
+		}
+		jc.Progress(30, "Deleting")
+		if err := call(jc, pc, 10*time.Minute, priv.OpVMsDelete, p, nil); err != nil {
+			return nil, err
+		}
+		if accounts != nil {
+			_ = accounts.Delete(jc, p.ID)
+		}
+		return VMJobResult{Warnings: []string{}}, nil
+	}
 }

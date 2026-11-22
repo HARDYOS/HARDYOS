@@ -56,6 +56,10 @@ func RegisterMail(s *Server, r *mail.Root) {
 	s.Handle(mail.OpDelete, typed(func(ctx context.Context, a mail.DeleteArgs) (any, error) {
 		return map[string]bool{"deleted": true}, mailErr(r.DeleteMailbox(ctx, a))
 	}))
+	s.Handle(mail.OpSpace, func(ctx context.Context, _ json.RawMessage) (any, error) {
+		res, err := r.Space(ctx)
+		return res, mailErr(err)
+	})
 	s.Handle(mail.OpUsage, typed(func(ctx context.Context, a mail.UsageArgs) (any, error) {
 		res, err := r.Usage(ctx, a)
 		return res, mailErr(err)

@@ -1,4 +1,4 @@
-import type { Job, VM, VMCapabilities, VMLibrary, VMOverview, VMSnapshot, VMTemplate } from "@hardy/api-client";
+import type { Job, VM, VMCapabilities, VMCatalogImage, VMLibrary, VMOverview, VMSnapshot, VMTemplate, VMUserTemplate } from "@hardy/api-client";
 import { useQuery } from "@tanstack/react-query";
 import { api, unwrap } from "../../api";
 import type { Tone } from "../../ui";
@@ -11,7 +11,15 @@ export const vmKeys = {
   templates: ["vms-templates"] as const,
   caps: ["vms-caps"] as const,
   library: ["vms-library"] as const,
+  catalog: ["vms-catalog"] as const,
+  userTemplates: ["vms-usertemplates"] as const,
 };
+
+export const useCatalog = () =>
+  useQuery<VMCatalogImage[]>({ queryKey: vmKeys.catalog, queryFn: () => unwrap(api.GET("/vms/catalog")), staleTime: Infinity });
+
+export const useUserTemplates = () =>
+  useQuery<VMUserTemplate[]>({ queryKey: vmKeys.userTemplates, queryFn: () => unwrap(api.GET("/vms/usertemplates")), staleTime: 10_000 });
 
 export const useVMs = () =>
   useQuery<VMOverview>({ queryKey: vmKeys.all, queryFn: () => unwrap(api.GET("/vms")), refetchInterval: 3_000 });
