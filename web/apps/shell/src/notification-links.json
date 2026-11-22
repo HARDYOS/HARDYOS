@@ -9,6 +9,7 @@
     "control/domain",
     "control/hostnames",
     "control/mail",
+    "control/netbird-standby",
     "control/notifications",
     "control/photos",
     "control/remote",

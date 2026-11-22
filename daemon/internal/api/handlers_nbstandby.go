@@ -121,7 +121,7 @@ func (s *Server) nbs() *nbstandby.Service {
 			lv = notify.Error
 		}
 		_ = s.cfg.Notify.Send(ctx, notify.Notification{Level: lv, Title: title, Body: body, Source: "netbird-standby", AdminOnly: true,
-			Kind: "netbird.standby", Link: "control-panel/netbird-standby"})
+			Kind: "netbird.standby", Link: "control/netbird-standby"})
 	}}
 }
 
