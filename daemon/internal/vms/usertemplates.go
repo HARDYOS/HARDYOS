@@ -242,11 +242,15 @@ func (m *Manager) MakeTemplate(ctx context.Context, a MakeTemplateArgs) (*Task, 
 	}
 	spec := st.spec
 	go func() {
-		defer unlock() // the VM stays off and unchanged while it's copied
-		defer unlockTpl()
 		bg, cancel := context.WithTimeout(context.Background(), 24*time.Hour)
 		defer cancel()
+		// The VM stays off and unchanged while it's copied. Its lock and
+		// the template's are given back before the task says it's done,
+		// so whatever follows "done" (deleting the template, starting
+		// the VM) never finds them still held.
 		err := m.copyToTemplate(bg, t, st, spec, a)
+		unlockTpl()
+		unlock()
 		m.tasks.finish(t.ID, err)
 		if err != nil {
 			m.log().Warn("vms: making a template failed", "vm", a.VM, "template", a.ID, "err", err)
@@ -434,13 +438,14 @@ func (m *Manager) StartClone(ctx context.Context, a ImportArgs) (*Task, error) {
 	}
 	d := *disk
 	go func() {
-		defer unlockTpl()
 		bg, cancel := context.WithTimeout(context.Background(), 24*time.Hour)
 		defer cancel()
 		unlock := m.lock(a.ID)
-		defer unlock()
 		m.tasks.progress(t.ID, 5, fmt.Sprintf("Copying %s from the template", d.Name))
 		err := m.cloneDisk(bg, &st.spec, d, ds)
+		// Locks first, then "done" (see MakeTemplate).
+		unlock()
+		unlockTpl()
 		m.tasks.finish(t.ID, err)
 		if err != nil {
 			m.log().Warn("vms: copying a disk from a template failed", "id", a.ID, "disk", d.Name, "err", err)
