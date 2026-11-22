@@ -132,6 +132,22 @@ or containers.
   userland-proxy check, a pinned subnet dropped outside a take-over,
   upload cap and backup rotation, stricter public addresses.
 
+## Second review changes (PR #44)
+
+- N1: the from= list never takes an IPv6 zone, is stored canonical, and
+  the key line is checked again where the script is made.
+- N2: the adopted name is bound to the public addresses and the VPS (host,
+  port, host-key fingerprint); DNS moves and `stage` runs only while they
+  match; `dns.standby.rebind` (token again) or `hardyctl netbird-standby
+  rebind` on the console allows new values.
+- N3: hand-back compares row contents (users' role/blocked/service flag,
+  tokens' user and hash, idp.db's password/keys/connector/client tables),
+  checks every query's exit status and requires the tables and columns.
+- L-a..L-g: exact rollback (fenced stays stopped, added databases go),
+  storage snapshots and destroys keep the standby out, empty acme.json
+  skipped, sqlite3 3.37 required, a dedicated checker user with hash-checked
+  copies, console commands, and 2-hour fences renewed while taken over.
+
 ## Not covered
 
 NetBird's reverse proxy (published apps on the VPS) isn't part of the

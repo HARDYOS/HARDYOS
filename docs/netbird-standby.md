@@ -77,6 +77,22 @@ Control Panel › **NetBird Standby**, administrators only.
    zone, and it changes this one only during a take-over, only to this
    server's public address.
 
+   Allowing the name also records the public address and the VPS (address,
+   port, host key) as they are then. If any of them changes later, a
+   take-over is refused until you confirm the new values: **Confirm the new
+   values** with the Cloudflare token pasted again, or on this server's
+   console:
+
+   ```
+   sudo hardyctl netbird-standby rebind
+   ```
+
+   The console has the other steps too, for when you don't trust the web
+   page: `address <ipv4> [ipv6]`, `dns-preview <name>`, `adopt <name> <id>...`
+   and `forget-dns`. Pasting the token into the page proves you hold it,
+   but a compromised HardyOS could read it as you paste; after a suspected
+   compromise use the console and replace the token in Cloudflare.
+
 From then on HardyOS copies the VPS on schedule: the management database,
 the embedded sign-in provider's database, activity events, `config.yaml`
 (with its encryption key, relay secret and setup keys inside the database)
@@ -96,7 +112,12 @@ critical alert.
    the VPS answers, the take-over stops unless you ticked that you mean it.
 2. HardyOS **fences** the VPS: it stops its NetBird server (needs
    `--allow-handback`). That must work when the VPS answers; when it's down
-   it's tried anyway.
+   it's tried anyway. A fence lasts 2 hours: HardyOS renews it every 20
+   minutes while it has taken over, and a timer on the VPS starts its
+   server again once a fence runs out (if this server is offline that long,
+   the VPS serves again on its old copy). Each fence is logged on the VPS
+   and raises a notification here; at most 3 fences a day are allowed
+   without a take-over.
 3. The copy goes into the stopped standby, which starts.
 4. Its ports open, and this server itself is pointed at the local standby
    (the name resolves to a local address and is forwarded to the standby),
@@ -114,8 +135,9 @@ if the VPS is unreachable they reconnect when their connection times out.
 
 If a step fails before DNS changed, everything is undone (and the VPS
 unfenced). The certificate
-comes from the VPS's Traefik store; without one, Traefik gets a new one
-once the name points here (TCP 443 must be forwarded).
+comes from the VPS's Traefik store; without one (or with an empty or
+unreadable store), Traefik gets a new one once the name points here (TCP 443
+must be forwarded).
 
 If the VPS runs a newer NetBird than the standby, the page warns, and a
 take-over needs an extra tick: the newer database may not open with the
@@ -129,7 +151,9 @@ While taken over:
 - If the VPS couldn't be fenced and comes back on its own, peers still
   connected to it stay there. **Split brain**: changes made on the VPS in
   that time are lost on hand-back.
-- The standby's data isn't in cloud backups, replicas or app snapshots.
+- The standby's data isn't in cloud backups, replicas, app snapshots or
+  Storage snapshots (its part of a recursive snapshot is removed), and
+  Storage refuses rolling it back or destroying it, its pool or a parent.
 - Published apps through NetBird's reverse proxy are not part of the
   standby (that proxy runs on the VPS); access over NetBird itself works.
 
@@ -142,7 +166,9 @@ hardyos-netbird-standby-root arm-restore 2h
 ```
 
 (one hand-back within that time; add `--allow-new-admins` if the take-over
-added owners, admins or access tokens on purpose). Then **Hand back** (type
+changed owners, admins, access tokens or sign-in settings on purpose; the
+sign-in provider rotates its signing keys every few hours, so after a long
+take-over this is usually needed: read the summary first). Then **Hand back** (type
 the name, tick that the standby's state replaces the VPS's):
 
 1. HardyOS asks the VPS for its status; it must answer, be armed and run at
@@ -150,12 +176,16 @@ the name, tick that the standby's state replaces the VPS's):
 2. The standby stops.
 3. Its databases go to the VPS's `restore` verb, which checks them (types,
    checksums, that they descend from a snapshot the VPS served, SQLite
-   integrity, run as nobody on copies), refuses other NetBird accounts and
-   (unless armed with `--allow-new-admins`) new owners, admins or access
-   tokens, prints what's new, keeps a backup of its own databases in
+   integrity, run on copies as the unprivileged user `hardyos-sqlcheck`,
+   with the tables and columns it reads required), refuses other NetBird
+   accounts and, unless armed with `--allow-new-admins`, any new or changed
+   owner or admin (role, blocked, service user), any new, moved or rehashed
+   access token and any change to the sign-in provider's passwords, keys,
+   connectors or clients, prints what's new, keeps a backup of its own databases in
    `/var/lib/hardyos-standby/root/before-handback-<time>` (newest 5), puts
-   them in place and starts netbird-server. If the server doesn't stay up,
-   it puts its own databases back by itself. HardyOS keeps an encrypted
+   them in place (checked again against what was checked) and starts
+   netbird-server. If the server doesn't stay up, it puts its own databases
+   back by itself (and leaves the server stopped if it was fenced). HardyOS keeps an encrypted
    copy of what it sent until the next good copy.
 4. The name's records go back to exactly what they were (records someone
    changed by hand meanwhile are left alone).
@@ -181,9 +211,12 @@ the take-over is lost.
   files, size limits, SQLite headers, checksums, the expected hostname)
   before anything is kept or staged, and encrypted at rest.
 - DNS: only the one adopted name (adopting needs the token pasted again),
-  only A/AAAA records, only during a take-over, only this server's public
-  address kept by the root helper; every other record in Cloudflare is out
-  of reach.
+  only A/AAAA records, only during a take-over, only the public address
+  allowed with the name (and only while the VPS is the one allowed then);
+  every other record in Cloudflare is out of reach.
+- The VPS script is built only from checked values: the from= addresses
+  are plain addresses or prefixes (never an IPv6 zone), and the key line is
+  checked again before the script is made.
 - Every change is an administrator's job and in the audit log
   (`netbird.standby.*`).
 
@@ -195,9 +228,19 @@ the take-over is lost.
 - **"refused"** from the VPS: run the script again (after a new key, or to
   add `--allow-handback`).
 - **"isn't armed"** on hand-back: run `arm-restore` on the VPS (above).
-- **Hand back refused for new admins/tokens**: check the summary in the
-  error (also in the VPS's log, `journalctl -t hardyos-standby`), then arm
-  with `--allow-new-admins`.
+- **Hand back refused for new admins/tokens/sign-in tables**: check the
+  summary in the error (also in the VPS's log, `journalctl -t hardyos-standby`),
+  then arm with `--allow-new-admins`.
+- **"has no table" / "has no column"** on hand-back: the standby's NetBird
+  database doesn't have what the VPS checks; the VPS refuses rather than
+  guess. Update both sides to the same NetBird version.
+- **Take over refused, "confirm again with the Cloudflare token"**: the
+  public address or the VPS changed since the name was allowed (above).
+- **"sqlite3 ... is too old"** when running the script: the VPS needs
+  sqlite3 3.37 or newer (Debian 12, Ubuntu 22.04 and later have it).
+- **The VPS's server started by itself during a take-over**: HardyOS
+  couldn't renew the fence for 2 hours (see its notifications); take over
+  again or hand back.
 - **Peers don't reconnect**: check the router forwards from outside
   (`nc -vz <public ip> 443`), that the name resolves to this server
   (`dig +short vpn.example.net`), and the app's logs in the App Store.

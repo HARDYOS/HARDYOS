@@ -2319,16 +2319,23 @@ User guide: [netbird-standby.md](netbird-standby.md); plan
 - **DNS** (`priv/dns_ops.go`): `dns.record.set` registered; one adopted
   standby name (`dns.standby.preview|adopt|restore|forget`) inside the
   token's zone (adopted with the token pasted again), A/AAAA only during a
-  take-over and only to the public address root keeps, originals restored
-  on hand-back.
+  take-over and only to the address bound when the name was adopted (with
+  the VPS bound then; `dns.standby.rebind` with the token or `hardyctl
+  netbird-standby rebind` on the console allows new values), originals
+  restored on hand-back.
+- **Storage** (`priv/storage_standby.go`): `<pool>/apps/netbird-standby` is
+  never snapshotted (its part of a recursive snapshot is destroyed) and,
+  while taken over, never rolled back or destroyed with a parent or pool.
 - **hardyd** (`internal/nbstandby/service.go`, `api/handlers_nbstandby.go`):
   settings and history (`nbstandby_syncs`, migration 0130), the schedule
-  and stale alerts (`RunNetBirdStandby`), take-over and hand-back as jobs
+  and stale alerts (`RunNetBirdStandby`, which also renews the VPS's 2-hour
+  fence every 20 minutes while taken over), take-over and hand-back as jobs
   over a `Backend` of root operations, undone step by step on failure.
 - **VPS side** (`internal/nbstandby/script.go`): the script the
   administrator runs once; it never changes NetBird, only adds the user, its
-  one key, the forced command, the root script and a sudo rule naming the
-  exact verbs.
+  one key, the forced command, the root script, a sudo rule naming the
+  exact verbs, the SQLite checker user `hardyos-sqlcheck` and a timer that
+  ends expired fences.
 
 ## Data and state
 
