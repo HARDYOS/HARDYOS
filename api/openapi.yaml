@@ -38,6 +38,7 @@ tags:
   - name: office
   - name: files
   - name: remote
+  - name: hostnames
   - name: photos
   - name: oidc
   - name: vms
@@ -3437,6 +3438,128 @@ paths:
         "503": { $ref: "#/components/responses/Unavailable" }
   # ---- end of App Store v2 apps API ----
   # ---- Remote access: NetBird client and publishing (docs/remote-access.md, part A) ----
+  /hostnames:
+    get:
+      operationId: getHostnames
+      summary: Control Panel › Hostnames status
+      description: |
+        Whether apps are served at their own names under the base domain,
+        the Cloudflare token's state (kept by hardyd-priv; never returned,
+        only whether one is set and when it was last verified), the
+        wildcard certificate in service, every name and what it serves,
+        and how devices at home can find them.
+      tags: [hostnames]
+      responses:
+        "200":
+          description: The status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HostnamesStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /hostnames/desktop:
+    get:
+      operationId: getHostnamesDesktop
+      summary: Where the desktop is at its own hostname ("" while hostnames are off)
+      tags: [hostnames]
+      responses:
+        "200":
+          description: The address
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HostnamesDesktop" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /hostnames/token:
+    put:
+      operationId: setHostnamesToken
+      summary: Hand a Cloudflare API token to hardyd-priv (a job, audited)
+      description: |
+        The token (Zone › DNS › Edit on the base domain's zone only) goes
+        to the job in memory and on to hardyd-priv, which verifies it with
+        Cloudflare, checks the base domain is in a zone it can edit, and
+        keeps it encrypted where only root can read it. It is never
+        returned. The base domain must be Remote Access's when that has one.
+      tags: [hostnames]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HostnamesTokenRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    delete:
+      operationId: clearHostnamesToken
+      summary: Forget the Cloudflare token (a job); apps go back to their ports
+      tags: [hostnames]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HostnamesClearRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /hostnames/token/verify:
+    post:
+      operationId: verifyHostnamesToken
+      summary: Check the saved token with Cloudflare again (a job)
+      tags: [hostnames]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /hostnames/settings:
+    put:
+      operationId: setHostnamesSettings
+      summary: Turn hostnames on or off (a job; turning on gets the certificate when needed)
+      tags: [hostnames]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HostnamesSettings" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /hostnames/certificate:
+    post:
+      operationId: issueHostnamesCertificate
+      summary: Get (or renew) the wildcard certificate now (a job)
+      tags: [hostnames]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /hostnames/lan:
+    post:
+      operationId: setHostnamesLAN
+      summary: Add the names to (or remove them from) this server's own domain controller's DNS (a job)
+      tags: [hostnames]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HostnamesLANRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
   /remote:
     get:
       operationId: getRemote
@@ -5913,6 +6036,100 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
+    HostnamesSettings:
+      type: object
+      required: [enabled, email, staging]
+      properties:
+        enabled: { type: boolean, description: Serve apps at their hostnames once the certificate is there (and keep it renewed) }
+        email: { type: string, description: "Let's Encrypt's contact for expiry warnings (\"\" = none)" }
+        staging: { type: boolean, description: "Use Let's Encrypt's staging server (untrusted certificates, for trying the setup)" }
+    HostnamesTokenRequest:
+      type: object
+      required: [token, base]
+      properties:
+        token: { type: string, writeOnly: true }
+        base: { type: string, description: "The base domain, e.g. home.example.net" }
+    HostnamesClearRequest:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: string, description: The base domain, typed }
+    HostnamesLANRequest:
+      type: object
+      properties:
+        remove: { type: boolean }
+        address: { type: string, description: One of this server's addresses (lan.addresses) }
+    HostnamesTokenState:
+      type: object
+      required: [set, base, zone, verifiedAt, apex]
+      properties:
+        set: { type: boolean }
+        base: { type: string }
+        zone: { type: string }
+        verifiedAt: { type: [string, "null"], format: date-time }
+        problem: { type: string }
+        apex: { type: boolean, description: "The base is its Cloudflare zone's apex: this server's domain controller holds the names only when the base is the AD domain or inside it" }
+    HostnamesCert:
+      type: object
+      required: [names, issuer, notBefore, notAfter, fingerprint, renewsAt]
+      properties:
+        names: { type: array, items: { type: string } }
+        issuer: { type: string }
+        notBefore: { type: string, format: date-time }
+        notAfter: { type: string, format: date-time }
+        fingerprint: { type: string, description: SHA-256 of the certificate }
+        renewsAt: { type: string, format: date-time }
+    HostnamesCertAttempt:
+      type: object
+      required: [names, at]
+      properties:
+        names: { type: string }
+        serial: { type: string }
+        notBefore: { type: string, format: date-time }
+        notAfter: { type: string, format: date-time }
+        issuer: { type: string }
+        error: { type: string }
+        at: { type: string, format: date-time }
+    HostnameEntry:
+      type: object
+      required: [label, host, what]
+      properties:
+        label: { type: string }
+        host: { type: string }
+        what: { type: string }
+    HostnamesLANState:
+      type: object
+      required: [addresses, netbirdIp, domainDns, domain]
+      properties:
+        addresses: { type: array, items: { type: string } }
+        netbirdIp: { type: string }
+        domainDns: { type: boolean, description: "HardyOS's own domain controller runs and can hold the names" }
+        domain: { type: string }
+    HostnamesStatus:
+      type: object
+      required: [active, settings, token, remoteBase, desktopUrl, certificate, lastError, names, lan]
+      properties:
+        active: { type: boolean }
+        problem: { type: string }
+        settings: { $ref: "#/components/schemas/HostnamesSettings" }
+        token: { $ref: "#/components/schemas/HostnamesTokenState" }
+        remoteBase: { type: string }
+        desktopUrl: { type: string }
+        certificate:
+          oneOf:
+            - { $ref: "#/components/schemas/HostnamesCert" }
+            - { type: "null" }
+        lastError:
+          oneOf:
+            - { $ref: "#/components/schemas/HostnamesCertAttempt" }
+            - { type: "null" }
+        names: { type: array, items: { $ref: "#/components/schemas/HostnameEntry" } }
+        lan: { $ref: "#/components/schemas/HostnamesLANState" }
+    HostnamesDesktop:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string }
     Health:
       type: object
       required: [status, uptimeSeconds]
@@ -7873,6 +8090,7 @@ components:
         url: { type: string }
         proxied: { type: boolean, description: Through HardyOS's HTTPS window proxy (can be shown in a desktop window) }
         published: { type: boolean, description: "The app's own published address (https://<app>.<base>, through NetBird's reverse proxy), given when the desktop is used at its published address" }
+        hostname: { type: boolean, description: "The app's own hostname under the base domain on this server (Control Panel › Hostnames), given when the desktop is used at its hostname" }
     AppCatalogApp:
       type: object
       required: [id, name, version, summary, url, sha256, icon]

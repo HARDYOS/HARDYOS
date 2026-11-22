@@ -1,5 +1,7 @@
 import type { User } from "@hardy/api-client";
-import { useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { api, unwrap } from "../api";
 import { PendingNetwork, useNetworkStatus } from "../apps/control-panel/Network";
 import { useEvents } from "../hooks/useEvents";
 import { openLinkFromHash } from "../links";
@@ -41,6 +43,7 @@ export function Desktop({ user }: { user: User }) {
         ))}
       </div>
       {user.role === "admin" && <NetworkBanner />}
+      <HostnameBanner />
       <Widgets user={user} />
       <WindowLayer user={user} />
       <Dock user={user} />
@@ -59,6 +62,40 @@ function NetworkBanner() {
   return (
     <div className="desktop-banner">
       <PendingNetwork pending={net.data.pending} />
+    </div>
+  );
+}
+
+/** With hostnames on (Control Panel › Hostnames), apps open on their own
+ * origins only when the desktop is used at its own name: offer to move there
+ * when that address answers from this device. */
+function HostnameBanner() {
+  const q = useQuery({ queryKey: ["hostnames", "desktop"], queryFn: () => unwrap(api.GET("/hostnames/desktop")), staleTime: 300_000, retry: false });
+  const target = q.data?.url ?? "";
+  const [reachable, setReachable] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
+  useEffect(() => {
+    if (!target || window.location.origin === target) return;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 4000);
+    fetch(`${target}/api/v1/health`, { mode: "no-cors", signal: ctl.signal, credentials: "omit" })
+      .then(() => setReachable(true))
+      .catch(() => setReachable(false))
+      .finally(() => clearTimeout(timer));
+    return () => ctl.abort();
+  }, [target]);
+  if (!reachable || dismissed || !target) return null;
+  return (
+    <div className="desktop-banner" role="status">
+      <span className="small">
+        This server has its own address: at <span className="mono">{target.replace("https://", "")}</span> every app opens in its own, separate origin.
+      </span>
+      <a className="btn btn--primary btn--sm" href={target + "/"}>
+        Switch
+      </a>
+      <button type="button" className="btn btn--ghost btn--sm" onClick={() => setDismissed(true)}>
+        Not now
+      </button>
     </div>
   );
 }

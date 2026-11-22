@@ -160,6 +160,9 @@ func main() {
 		priv.RegisterTerminal(s)
 		// Keys hardyd encrypts its own secrets with (sign-in provider keys).
 		priv.RegisterSecrets(s, zfs.KeyDir)
+		// The Cloudflare token for hostnames (decision 451): root's alone,
+		// used only for named DNS operations.
+		priv.RegisterDNS(s, priv.DNSEnv{KeyDir: zfs.KeyDir})
 		// Kept attached to the LAN and running through network changes and
 		// crashes.
 		priv.RegisterDomain(s, dc)
@@ -183,6 +186,21 @@ func main() {
 		go snaps.Run(ctx)
 		am := &apps.Manager{Runner: sysexec.Exec{}, Root: "/", Log: log, Shares: shm}
 		priv.RegisterApps(s, am)
+		// The hostnames' records in the DC's DNS (decision 459): the apps
+		// that may have a name come from root's own apps state.
+		priv.RegisterHostRecords(s, dc, zfs.KeyDir, func(ctx context.Context) ([]string, error) {
+			o, err := am.Status(ctx)
+			if err != nil {
+				return nil, err
+			}
+			var ids []string
+			for _, a := range o.Apps {
+				if a.Web != nil {
+					ids = append(ids, a.ID)
+				}
+			}
+			return ids, nil
+		})
 		// The office suite's Document Server: its address and firewall rules.
 		priv.RegisterOffice(s, &dsnet.Manager{Runner: sysexec.Exec{}, HardydUID: func() (int, error) {
 			if hardydUID < 0 {
