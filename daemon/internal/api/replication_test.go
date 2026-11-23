@@ -162,6 +162,19 @@ func TestReplicationAPI(t *testing.T) {
 	if code := admin.do("POST", "/api/v1/replication/targets/"+tgt.ID+"/restore", restore, &e); code != 400 {
 		t.Fatalf("restore of a user snapshot %d", code)
 	}
+	// The mail comes back only as a mail restore (decision 466).
+	mailRestore := map[string]any{"kind": "mail", "id": "mail", "snapshot": "hardyos-repl-abcdef1234-20261027T101500Z", "confirm": true}
+	if code := admin.do("POST", "/api/v1/replication/targets/"+tgt.ID+"/restore", mailRestore, &e); code != 400 || e.Code != "invalid" {
+		t.Fatalf("mail restore without what %d %+v", code, e)
+	}
+	mailRestore["mail"] = map[string]any{"scope": "mailbox", "key": "a11ce0000000000000000001", "mode": "overwrite"}
+	if code := admin.do("POST", "/api/v1/replication/targets/"+tgt.ID+"/restore", mailRestore, &e); code != 400 || e.Code != "confirm_required" {
+		t.Fatalf("mail overwrite without the address %d %+v", code, e)
+	}
+	mailRestore["id"] = "tank"
+	if code := admin.do("POST", "/api/v1/replication/targets/"+tgt.ID+"/restore", mailRestore, &e); code != 400 {
+		t.Fatalf("mail item with another id %d", code)
+	}
 	if code := admin.do("GET", "/api/v1/replication/targets/"+tgt.ID+"/replicas/pool/x/snapshots", nil, &e); code != 400 {
 		t.Fatalf("bad kind %d", code)
 	}

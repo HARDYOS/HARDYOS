@@ -108,8 +108,16 @@ sign-in.
 | --- | --- | --- |
 | Who can open it | NetBird devices in the chosen groups (All by default) | Anyone on the internet |
 | Sign-in in front (NetBird's) | None: being a NetBird device in the right group is the sign-in | HardyOS sign-in (SSO), a shared password or PIN, or none |
-| HardyOS sign-in (apps) | Yes, unless turned off for the app | Yes, unless turned off for the app |
+| HardyOS sign-in (apps) | Yes, always (two-factor sign-in, decision 441) | Yes, always (Photos may go without: [sign-in.md](sign-in.md)) |
 | Needs | A proxy cluster with the **Private** capability: a NetBird proxy running inside a NetBird client (NetBird's "Bring Your Own Proxy" with the private option). NetBird's shared cloud clusters don't have it | Nothing more |
+
+**Changed with two-factor sign-in**: apps published NetBird-only now need
+HardyOS sign-in in front as well, like public ones. Being a NetBird device in
+the right group used to be enough; now the person signs in to HardyOS too
+(with a code, since that counts as outside). An app published NetBird-only
+without HardyOS sign-in before this release isn't served until you turn
+HardyOS sign-in on for it (Control Panel › Remote Access). Only Photos may go
+without, once Immich signs in through HardyOS with its own passwords off.
 
 Choose **NetBird-only** for things only the family's own devices should
 reach (the desktop, admin tools); it needs the Private capability above. Choose
@@ -264,6 +272,16 @@ port forward at home isn't needed, and HardyOS doesn't set one up.)
   `https://100.x.y.z` like on the LAN, with the desktop's own sign-in. To
   keep the desktop to some devices, restrict TCP 443 to this server in
   NetBird's policies as above.
+- **Game streaming is an exception to NetBird's policies.** When a gaming
+  VM's streaming is published over NetBird (the VM's page, *Play away from
+  home*), HardyOS forwards Sunshine's streaming ports from this server's
+  NetBird address to the VM. In NetBird's kernel mode those forwarded
+  packets never pass NetBird's own access rules (they apply to traffic for
+  the server itself), so the port lists of your NetBird policies **don't
+  limit them**. That's why HardyOS forwards them only from the NetBird
+  devices you tick in the VM's Streaming panel (none until you do), never
+  from NetBird's reverse proxy, and never from anywhere but the NetBird
+  interface. See [Game streaming](vms.md#game-streaming).
 - **Desktop cookie**: over HTTPS the desktop's session cookie is
   `__Host-hardyos_session`, which no app on a sibling address can set.
   The old `hardyos_session` still works for one release at the desktop's
@@ -290,3 +308,8 @@ port forward at home isn't needed, and HardyOS doesn't set one up.)
   on a service user with the Network Admin role.
 - **NetBird-only greyed out**: your proxy cluster has no Private
   capability (see the table above).
+
+## If the VPS goes down
+
+HardyOS can keep a stopped copy of the VPS's NetBird server and take over
+by hand: see [netbird-standby.md](netbird-standby.md).

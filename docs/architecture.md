@@ -56,6 +56,51 @@ undo only writes the network files).
 - hardyd serves HTTPS on 443 with a self-signed certificate created on first
   start; port 80 redirects to it.
 
+### Two-factor sign-in (decisions 440-449)
+
+- `internal/auth` holds the factors: `totp.go` (RFC 6238), `mfa.go`
+  (`user_totp`, `user_recovery_codes`; secrets sealed by an `auth.Sealer`,
+  which hardyd backs with secretbox purpose `totp`), `challenge.go` (second
+  steps in memory) and `apppasswords.go` (`app_passwords`). Migration
+  `0090_totp.sql` also adds `mfa` to `sessions` and `oidc_browser_sessions`.
+- `MFA.Requirement(user, outside)` says what a right password still needs:
+  nothing, a code (`totp`), enrollment (`enroll`, an administrator past the
+  grace period) or a setup code (`setup_code`, from outside without 2FA).
+  `api.Server.outside` (`inside.go`) decides "outside": the app gateway, or
+  an address that isn't home: this server itself only for hardyd's own
+  connections (socket owner and inode from `/proc/net/tcp`), a LAN
+  interface's private IPv4 / unique-local IPv6 network (global IPv6 only off
+  the default-route interface), or NetBird's network while it's connected
+  (minus its proxy peers). Docker, libvirt, the DC shim and the router's own
+  address are outside; an administrator may trust the router (bound to its
+  IP and MAC, package `router`), which `Server.notHome` still treats as not
+  home for code buckets, the outside budget and own service passwords.
+  `hardyctl setup-code` and `first-boot-code` (`hardyos-setup-code.service`)
+  issue setup codes from the console. Wrong codes count per account and `auth.Origin` (home, or the
+  outside address / IPv6 /64), with a rolling 60-day budget from outside
+  (`user_totp_failures`) that stops codes from outside at 20 until a new
+  password or a reset; `MFA.Notify` reaches administrators and the person.
+- Grants record `browser_outside`; refresh without a second factor is refused
+  for outside browsers, for public clients refreshing from outside and while
+  enrollment is due. Per-app hosts' bind flow and host sessions
+  (`__Host-hardyos_host`) go through the same session gate. Apps are
+  published only with HardyOS sign-in in front (`signsInWithHardyOS` names
+  the exception, Photos).
+- Desktop: `POST /auth/login` answers 202 with a challenge; `/auth/login/2fa`,
+  `/auth/login/enroll` and `/auth/login/enroll/confirm` finish it. The session
+  gate (`sessionGate`) refuses a session without `mfa` from outside and limits
+  an administrator past the grace period to enrollment; app windows and VM
+  consoles use the same gate.
+- Sign-in provider: after the password, `/login/code`, `/login/setup` and
+  `/login/enroll` (script-free pages, inline SVG QR code from
+  `internal/qrsvg`, forms bound to the browser like the login form).
+- Services without a code step (WebDAV, mail through Dovecot, calendars) go
+  through `servicePassword`: a scoped app password always, the account's own
+  password only from inside and only without 2FA.
+- SMB, Kerberos, LDAP and SFTP check domain passwords in Samba/winbind
+  themselves and are not covered (decision 447).
+- Recovery: recovery codes, an administrator's reset, `hardyctl reset-2fa`.
+
 ## Jobs and events
 
 Long operations run as jobs: queued, persisted in SQLite, run by a worker
@@ -1424,6 +1469,81 @@ Phase 5 part C (decisions 120-125; user guide `docs/vms.md`; plan
   `TestLibvirtIntegration` (real ZFS, libvirt and KVM; CI job "Virtual
   machines (KVM)").
 
+### VM polish (phase 9, decisions 410-419; plan `docs/plans/vm-polish.md`)
+
+- **Verified catalog** (`vms/catalog.go`): `vms.catalog.fetch {image}`
+  takes a name only. Each image lists its URLs and hosts; the client's
+  redirects must stay on them. Checksums: Ubuntu `SHA256SUMS` + detached
+  signature against the pinned key (`ubuntu-cloud-images.asc`,
+  `golang.org/x/crypto/openpgp` detached checks only), Debian
+  `SHA512SUMS` over TLS, HAOS and virtio-win pinned. Files go to the pool's
+  root-only `<pool>/vm-catalog` (`vms/catalogstore.go`: `os.Root`, files
+  0444, a `.verified` record per file checked at every use), never the ISOs
+  share; the VirtIO disc is attached from there. The task's `digest`
+  goes into `Disk.Import.Digest`; `stageImport` hashes what it copies and
+  refuses a mismatch. The create job's order: catalog fetch, bridge,
+  VirtIO disc, `vms.create`, import or `vms.clone`, start.
+- **Unattended Windows** (`vms/unattend.go`): `AnswerFile` renders
+  autounattend.xml with `xml.EscapeText` on every value (all of them are
+  pattern-checked too); `writeUnattend` makes the answer disc with xorriso
+  in `/run/hardyos-unattend/<uuid>.iso` (QEMU-owned 0600, made in a 0700
+  staging folder). `RegisterFirstLogonHook(name, fn)` is how other features
+  add first-logon commands (Go only, given `HookVM`). `Start` answers the
+  boot prompt once and leaves devices out while `Unattend.Pending`; the
+  watcher's `checkInstalled` ends the install when `guest-ping` answers.
+- **Saved templates** (`vms/usertemplates.go`): `MakeTemplate` holds the
+  VM's lock while a background task snapshots it, `zfs send | zfs receive`s
+  each disk to `<pool>/vm-templates/<id>/diskN@template` and writes
+  `template.json` with `Generalize(spec)`; `StartClone` copies a template
+  disk into a new VM's disk after `vms.create` (which skips creating
+  `Clone` disks).
+- **Schedules** (`vms/schedule.go`): `RunSchedules` (hardyd-priv, every
+  minute, `TryLock` per VM) takes `vm-auto-<kind>-<slot>` snapshots with `takeSnapshot`
+  (freeze/thaw as for manual ones) and prunes each kind; `Update` keeps
+  `Schedule`, `vms.schedule.set` changes it.
+- **USB hot-plug** (`vms/usb.go`, `devices/hotplug.go`): `devices.HotPlugger`
+  checks and records the device as the running VM's; the fragment is
+  re-checked by `checkFragment` and attached with `virsh attach-device
+  --live` from a private file in the VM's folder.
+- **Console**: `qemu-vdagent` channel (clipboard), `ich9` sound card with a
+  `none` audiodev wired to the VNC display; the web client wraps noVNC's
+  RFB (`apps/vms/qemuAudio.ts`) to add pseudo-encoding -259 and parse
+  QEMU audio messages, played with Web Audio.
+
+### Game streaming (phase 9, decisions 400-409; plan `docs/plans/streaming.md`)
+
+- **Root** (`vms/streaming.go`): `prepareStreaming` (in `Create`, before
+  validation) checks the unattended install, the bridged first card and the
+  password, adds the `streaming` disc and the `sunshine` hook, makes the RSA
+  key and self-signed certificate and sets `Spec.Streaming{Sunshine, User,
+  CertSHA256}`; `writeStreaming` builds the `HARDYOS_STREAM` disc with
+  xorriso (`-graft-points`: the staged files at the top, the two catalog files
+  from `<pool>/vm-catalog` after `checkStamp`). `setup.ps1` comes from
+  `streaming_setup.ps1.tmpl` (`text/template`, values pattern-checked, CRLF).
+  `checkInstalled`, `Delete`, `afterStop` and `Update` delete the disc as they
+  do the answer disc.
+- **Forwarding** (`vms/streamfwd.go`): `syncStreaming` (Watch, every 30 s;
+  after publish, stop, delete) computes the one wanted forward
+  (`desiredForward`: published, running, NetBird connected via
+  `Manager.NetBird` = `priv.VMNetBird`, address from `vmAddress`), renders
+  `RenderStreamingNFT` and `StreamingIPTables` (every value checked by
+  `StreamForward.check`, sources = the chosen `streaming.peers`) and loads
+  them only when they change, else checks the live table and chain
+  (`liveStreamingOK`); `StopStreaming` runs when hardyd-priv exits.
+  `vmAddress` uses `ip -j neigh` (one REACHABLE entry), the guest's
+  addresses and `bridge -j fdb` (the MAC on the VM's tap only). The app
+  gateway records the addresses NetBird's proxy came from
+  (`remoteRuntime.sawProxy`) so they can't be chosen. Ops
+  `vms.streaming.info` (address, pin, forwarding, NetBird address) and
+  `vms.streaming.publish`.
+- **hardyd** (`internal/streaming`, `api/handlers_vms_streaming.go`): the
+  sealed account store (`vm_streaming`), the pinned Sunshine client, the
+  panel/reveal/pair/unpair/remote endpoints; `registerVMStreamingJobs`
+  re-registers `vms.create`/`vms.delete` with the account store (fetch the
+  two catalog files, make and seal the password, pass it to `vms.create`;
+  forget it on delete). Web: `apps/vms/Streaming.tsx`, the wizard's
+  `setsUpStreaming`.
+
 ## Devices and GPUs
 
 Phase 5 part D (decisions 126-130; user guide `docs/gpus.md`). Two packages
@@ -1502,7 +1622,7 @@ and IOMMU flags on real firmware.
 
 Phase 6 part A (decisions 160-172, security review 223-233; user and developer guide
 [backup.md](backup.md)). Versioned, encrypted backups of shared folders,
-apps, VMs and the server's settings to S3-compatible storage or Backblaze
+apps, VMs, the mail server (decisions 460-469) and the server's settings to S3-compatible storage or Backblaze
 B2, with restic doing the storage.
 
 ```
@@ -1616,7 +1736,7 @@ B2, with restic doing the storage.
 
 Phase 6 part B (decisions 180-199; guide `docs/replication.md`, which has
 the threat model). Scheduled
-incremental ZFS replication of chosen shared folders, apps and VMs to
+incremental ZFS replication of chosen shared folders, apps, VMs and the mail server (decisions 460-469) to
 another HardyOS server, over the LAN or NetBird. One way, no promotion yet
 (phase 8).
 
@@ -1844,6 +1964,23 @@ User guide: [mail.md](mail.md); decisions 239-249, security reviews 303-319 and 
   store, account sync, SES and Cloudflare (httptest); an API test with a
   root helper writing into a temp folder; and `scripts/mail-integration.sh`
   (CI job `mail`): the real programs in a Debian 13 container.
+- **Backups and replication** (decisions 460-469, plan
+  `docs/plans/mail-backup.md`). The item `mail` in cloud backups and
+  `mail/mail` in replication, on by default (migration `0110_mail_backup.sql`).
+  `mail.Root.PrepareBackup` writes `.hardyos-backup/config.json` (the
+  applied `RootConfig`) and `rspamd.rdb` (`redis-cli SAVE`, copied) into
+  `<pool>/mail` before its snapshot, the consistency point. Cloud backups
+  add the `roundcube` app's dataset as the `webmail` part. Restores
+  (`mail.Root.RestoreFrom`: mailbox, domain, calendars, all; copy or
+  overwrite) read a staged copy through `os.Root`, match mailboxes by
+  storage key and snapshot `<pool>/mail` before replacing anything; a
+  replica comes back as `<pool>/mail-restores/<id>` (read only, mounted in
+  `/run/hardyos/mail-restore`) and is destroyed after. Mail replicas are
+  never browsable and carry no `org.hardyos:mail`. Rebuild:
+  `mail.Root.RebuildFrom` when no mail server is set up. Ops:
+  `cloudbackup.mail.contents`; restores go through `cloudbackup.restore`
+  (mode `mail`) and `repl.restore.finish` (its `mail` field). API:
+  `GET /api/v1/backup/targets/{id}/mail`, `GET /api/v1/mail/restore-targets`.
 
 ## Office
 
@@ -2414,6 +2551,126 @@ The plan is `docs/plans/cluster.md` sections 6.3-7.6; decisions 350-359.
   never a LUN in two targets and never a start while another node can reach
   the disk.
 
+### The cluster and Phase 9 (decisions 470-475)
+
+- **VMs**: a live move is refused while an unattended install is pending,
+  game streaming is published or a USB device was plugged in by hand; root
+  refuses snapshot schedules, saved templates, streaming publishing and
+  persisted USB hot-plug for VMs on cluster storage (`vms.perServer`).
+- **Storage**: `san.NodeLocalApps` (`netbird-standby`, `roundcube`) are never
+  cluster storage.
+- **Cluster desktop**: streaming publishing and its password reveal are
+  refused to administrators of other members; 2FA, hostnames and the NetBird
+  standby were never in the allowlist. Relayed requests skip host routing
+  and are never "home" for two-factor sign-in; the entry node's 2FA gate is
+  re-applied to long relays.
+
+## Hostnames (per-app origins)
+
+User guide: [hostnames.md](hostnames.md); plan `docs/plans/hostnames.md`;
+decisions 450-459.
+
+```
+ Browser ──https (SNI photos.<base>)──► hardyd :443 (every address)
+              wildcard *.<base> from Let's Encrypt, self-signed for the rest
+                 ├─ <desktop>.<base>  desktop, /__hardyos/bind
+                 ├─ sso.<base>        sign-in provider only
+                 ├─ files.<base>      /s/ share links only
+                 ├─ office.<base>     office origin (was :44250)
+                 ├─ mail.<base>       mail-app paths → hardyd, else webmail
+                 ├─ photos.<base>     Immich
+                 └─ <app>.<base>      127.0.0.1:<app's web port>
+ hardyd ──ACME (x/crypto/acme)──► Let's Encrypt
+ hardyd ──dns.acme.present/cleanup──► hardyd-priv ──► api.cloudflare.com
+```
+
+- **Token** (`priv/dns_ops.go`, `internal/cfdns`): root's only, sealed in
+  `_hardyos-dns.json` in the keys folder with a root-only key; operations
+  `dns.status`, `dns.token.set|verify|clear`, `dns.acme.present|cleanup`,
+  `dns.record.set` (registered for the NetBird standby, decision 424). Fake Cloudflare
+  for tests: `internal/cfdns/cftest`.
+- **Certificate** (`internal/hostnames`): hardyd makes the key and CSR,
+  answers DNS-01 through root, keeps `wildcard.pem` (key and chain, one
+  atomically replaced file) in the TLS folder; `tlscert.Store.GetCertificate`
+  serves it, only while the hostnames are active, for names one label
+  under the base on the desktop listener, the window proxies, the office
+  port and the app gateway. `RunHostnames` refreshes the state every 30 s
+  and checks renewal every 12 h (30 days before expiry). Fake ACME server
+  for tests: `internal/hostnames/acmetest`; both wired with real root ops in
+  `internal/hostnames/hosttest`.
+- **Routing** (`api/hostnames.go`): in `Server.ServeHTTP` before anything
+  else, for requests that didn't come through the app gateway, only while
+  hostnames are active (token, certificate, turned on, same base as Remote
+  Access).
+- **Sign-in**: the desktop-host bounce (`/__hardyos/bind` → app host
+  `/__hardyos/callback`), sessions in the window proxy's table marked
+  `host` (`__Host-hardyos_host`), rechecked like window sessions. The office
+  editor's host session (`.office`) has no access list; the editor ticket
+  must match its desktop session.
+- **Old addresses**: window proxy ports and the office port redirect when
+  reached by a name under the base; `/oidc/*` on the desktop host redirects
+  to `sso.<base>`. Photos adds `https://photos.<base>` to Immich's redirect
+  URIs.
+- **Off**: names under the last known base other than the desktop's get
+  "Hostnames are off" with `Clear-Site-Data`, never the desktop.
+- **Cookies**: per app host, the cookie names its responses set are learned;
+  request cookies another app host set (and this one never did) and names
+  sent twice are dropped (cookie tossing, decision 450).
+- **LAN DNS**: `domain.dns.hostnames` (root) keeps A records in the DC's DNS
+  for the names root allows (HardyOS's, the desktop's, apps with a web
+  page in root's apps state; not wpad, isatap or directory computer/SPN
+  names, checked with the directory helper's `names.taken`), its own list
+  of records and zones in `hardyos-hostnames.json` in the DC's data folder.
+
+## NetBird standby server
+
+User guide: [netbird-standby.md](netbird-standby.md); plan
+`docs/plans/netbird-standby.md`; decisions 420-429.
+
+```
+ VPS (vpn.<domain>)                          HardyOS
+ netbird-server + dashboard + traefik        hardyd-priv ── ssh (pinned host key, root's ed25519 key)
+   ▲ forced command, user hardyos-standby  ◄──┘  verbs: status | snapshot | fence | unfence | restore (opt-in; restore armed on the VPS)
+   │ sudo <root script> <verb> only               ▼
+   │                                        keys/netbird-standby/snap-*.sealed (AES-256-GCM chunks)
+   │                                              │ take-over: stage into the stopped app
+ Cloudflare ◄── dns.record.set / dns.standby.restore (adopted name only)
+                                            netbird-standby app :44620/:44621/:44622udp
+                                            hardyos_nbstandby nft table: closed | open + output DNAT
+                                            /etc/hosts: <name> → 127.0.77.1 while taken over
+```
+
+- **Root** (`internal/nbstandby/root.go`, ops `netbird.standby.*` in
+  `priv/nbstandby_ops.go`): the VPS connection and the SSH key (seed sealed
+  with `RootKeyFor(keys, "netbird-standby")`), up to 3 sealed snapshots,
+  the take-over mode. `sync` pulls the snapshot tar through `Check` (entry
+  allowlist, sizes, SQLite headers, manifest hashes, hostname, SQLite store)
+  while sealing it; `stage` re-checks the sealed copy while writing it into
+  the stopped catalog app's data folder (secrets folded into config.yaml,
+  Traefik routes written for the hostname); `handback` sends the stopped
+  standby's databases with their checksums to the restore verb; `network`
+  opens the ports only while taken over.
+- **DNS** (`priv/dns_ops.go`): `dns.record.set` registered; one adopted
+  standby name (`dns.standby.preview|adopt|restore|forget`) inside the
+  token's zone (adopted with the token pasted again), A/AAAA only during a
+  take-over and only to the address bound when the name was adopted (with
+  the VPS bound then; `dns.standby.rebind` with the token or `hardyctl
+  netbird-standby rebind` on the console allows new values), originals
+  restored on hand-back.
+- **Storage** (`priv/storage_standby.go`): `<pool>/apps/netbird-standby` is
+  never snapshotted (its part of a recursive snapshot is destroyed) and,
+  while taken over, never rolled back or destroyed with a parent or pool.
+- **hardyd** (`internal/nbstandby/service.go`, `api/handlers_nbstandby.go`):
+  settings and history (`nbstandby_syncs`, migration 0130), the schedule
+  and stale alerts (`RunNetBirdStandby`, which also renews the VPS's 2-hour
+  fence every 20 minutes while taken over), take-over and hand-back as jobs
+  over a `Backend` of root operations, undone step by step on failure.
+- **VPS side** (`internal/nbstandby/script.go`): the script the
+  administrator runs once; it never changes NetBird, only adds the user, its
+  one key, the forced command, the root script, a sudo rule naming the
+  exact verbs, the SQLite checker user `hardyos-sqlcheck` and a timer that
+  ends expired fences.
+
 ## Data and state
 
 - Control-plane state: SQLite on the pool (`tank/system`), with a nightly
@@ -2425,6 +2682,13 @@ The plan is `docs/plans/cluster.md` sections 6.3-7.6; decisions 350-359.
   tasks and runs in hardyd's database, restic's cache in
   `/var/cache/hardyos-restic`, snapshots mounted and restores staged under
   `/run/hardyos-backup` and `<pool>/hardyos-restore`.
+- Hostnames: the Cloudflare token sealed in
+  `/var/lib/hardyos/keys/_hardyos-dns.json` (root's), the wildcard
+  certificate in the TLS folder, issuance history in `hostname_certs`.
+- NetBird standby: root's VPS key and sealed copies in
+  `/var/lib/hardyos/keys/netbird-standby/` (not in settings backups), the
+  staged state only in the app's data folder while taken over, sync
+  history in `nbstandby_syncs`.
 - OS: ZFS root with boot environments; each update installs into a new boot
   environment and falls back automatically if the health check fails.
 

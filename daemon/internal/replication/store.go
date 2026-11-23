@@ -41,8 +41,12 @@ type Task struct {
 	LastError       string         `json:"lastError"`
 	LastBytes       int64          `json:"lastBytes"`
 	Alert           string         `json:"alert"` // '', failed, stale
-	CreatedAt       time.Time      `json:"createdAt"`
-	UpdatedAt       time.Time      `json:"updatedAt"`
+	// MailAuto: "pending" (Mail is added once the server accepts mail
+	// replicas, decision 469) or "added" (it was, and the administrator
+	// hasn't looked at the task since); "" otherwise.
+	MailAuto  string    `json:"mailAuto"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // Run is one replication or restore in a task's history.
@@ -257,7 +261,7 @@ func oneRow(res sql.Result, err error) error {
 // ---- tasks -------------------------------------------------------------------
 
 const taskCols = `id, name, target_id, items, interval_minutes, bwlimit_kbps, keep_local, keep_remote, enabled,
-	last_run_at, last_success_at, last_error, last_bytes, alert, created_at, updated_at`
+	last_run_at, last_success_at, last_error, last_bytes, alert, mail_auto, created_at, updated_at`
 
 func scanTask(row interface{ Scan(...any) error }) (*Task, error) {
 	var t Task
@@ -265,7 +269,7 @@ func scanTask(row interface{ Scan(...any) error }) (*Task, error) {
 	var enabled int
 	var lastRun, lastOK sql.NullString
 	if err := row.Scan(&t.ID, &t.Name, &t.TargetID, &items, &t.IntervalMinutes, &t.BandwidthKBps, &t.KeepLocal, &t.KeepRemote, &enabled,
-		&lastRun, &lastOK, &t.LastError, &t.LastBytes, &t.Alert, &created, &updated); err != nil {
+		&lastRun, &lastOK, &t.LastError, &t.LastBytes, &t.Alert, &t.MailAuto, &created, &updated); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, store.ErrNotFound
 		}
@@ -316,9 +320,30 @@ func (s *Store) SaveTask(ctx context.Context, t *Task) error {
 			store.FormatTime(now), store.FormatTime(now))
 		return err
 	}
-	res, err := s.DB.ExecContext(ctx, `UPDATE repl_tasks SET name = ?, items = ?, interval_minutes = ?, bwlimit_kbps = ?, keep_local = ?, keep_remote = ?, enabled = ?, updated_at = ? WHERE id = ?`,
+	// A change by the administrator acknowledges a Mail that was added
+	// ("added" clears); one still waiting for the other server stays.
+	res, err := s.DB.ExecContext(ctx, `UPDATE repl_tasks SET name = ?, items = ?, interval_minutes = ?, bwlimit_kbps = ?, keep_local = ?, keep_remote = ?, enabled = ?, updated_at = ?,
+		mail_auto = CASE WHEN mail_auto = 'pending' THEN 'pending' ELSE '' END WHERE id = ?`,
 		t.Name, string(items), t.IntervalMinutes, t.BandwidthKBps, t.KeepLocal, t.KeepRemote, boolInt(t.Enabled), store.FormatTime(now), t.ID)
 	return oneRow(res, err)
+}
+
+// addMail adds the mail item to a task waiting for it (mail_auto pending)
+// and marks it added; false when it wasn't waiting any more.
+func (s *Store) addMail(ctx context.Context, id string, items []replica.Item) (bool, error) {
+	b, _ := json.Marshal(items)
+	res, err := s.DB.ExecContext(ctx, `UPDATE repl_tasks SET items = ?, mail_auto = 'added' WHERE id = ? AND mail_auto = 'pending'`, string(b), id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// dropMailAuto stops waiting to add Mail to a task.
+func (s *Store) dropMailAuto(ctx context.Context, id string) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE repl_tasks SET mail_auto = '' WHERE id = ? AND mail_auto = 'pending'`, id)
+	return err
 }
 
 // DeleteTask removes a task and its history.

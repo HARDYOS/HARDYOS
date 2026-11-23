@@ -40,7 +40,32 @@ const (
 	OpVMsTask           = "vms.task"
 	OpVMsCapabilities   = "vms.capabilities"
 	OpVMsBridge         = "vms.bridge"
+
+	// Phase 9 (decisions 410-419).
+	OpVMsCatalogList        = "vms.catalog.list"
+	OpVMsCatalogFetch       = "vms.catalog.fetch"
+	OpVMsUserTemplates      = "vms.usertemplates.list"
+	OpVMsUserTemplateCreate = "vms.usertemplates.create"
+	OpVMsUserTemplateDelete = "vms.usertemplates.delete"
+	OpVMsClone              = "vms.clone"
+	OpVMsScheduleSet        = "vms.schedule.set"
+	OpVMsUSBAttach          = "vms.usb.attach"
+	OpVMsUSBDetach          = "vms.usb.detach"
+
+	// Game streaming (decisions 400-409).
+	OpVMsStreamingInfo    = "vms.streaming.info"
+	OpVMsStreamingPublish = "vms.streaming.publish"
 )
+
+// VMCatalogResult lists the verified images.
+type VMCatalogResult struct {
+	Images []vms.CatalogView `json:"images"`
+}
+
+// VMUserTemplatesResult lists saved templates.
+type VMUserTemplatesResult struct {
+	Templates []vms.UserTemplate `json:"templates"`
+}
 
 // VMRef names a VM.
 type VMRef struct {
@@ -174,6 +199,50 @@ func RegisterVMs(s *Server, m *vms.Manager) {
 	s.Handle(OpVMsCapabilities, func(ctx context.Context, _ json.RawMessage) (any, error) {
 		return m.Capabilities(ctx), nil
 	})
+	// The catalog: hardyd names an image, root knows where it comes from
+	// and how it's checked (decision 410).
+	s.Handle(OpVMsCatalogList, func(ctx context.Context, _ json.RawMessage) (any, error) {
+		return VMCatalogResult{Images: m.CatalogList()}, nil
+	})
+	s.Handle(OpVMsCatalogFetch, typed(func(ctx context.Context, a vms.FetchArgs) (any, error) {
+		t, err := m.FetchCatalog(ctx, a)
+		return VMTaskResult{Task: t}, vmsErr(err)
+	}))
+	s.Handle(OpVMsUserTemplates, func(ctx context.Context, _ json.RawMessage) (any, error) {
+		l, err := m.UserTemplates(ctx)
+		return VMUserTemplatesResult{Templates: l}, vmsErr(err)
+	})
+	s.Handle(OpVMsUserTemplateCreate, typed(func(ctx context.Context, a vms.MakeTemplateArgs) (any, error) {
+		t, err := m.MakeTemplate(ctx, a)
+		return VMTaskResult{Task: t}, vmsErr(err)
+	}))
+	s.Handle(OpVMsUserTemplateDelete, typed(func(ctx context.Context, a vms.DeleteTemplateArgs) (any, error) {
+		return vmDone(vmsErr(m.DeleteTemplate(ctx, a)))
+	}))
+	s.Handle(OpVMsClone, typed(func(ctx context.Context, a vms.ImportArgs) (any, error) {
+		t, err := m.StartClone(ctx, a)
+		return VMTaskResult{Task: t}, vmsErr(err)
+	}))
+	s.Handle(OpVMsScheduleSet, typed(func(ctx context.Context, a vms.SetScheduleArgs) (any, error) {
+		v, err := m.SetSchedule(ctx, a)
+		return v, vmsErr(err)
+	}))
+	s.Handle(OpVMsStreamingInfo, typed(func(ctx context.Context, a VMRef) (any, error) {
+		v, err := m.StreamingInfo(ctx, a.ID)
+		return v, vmsErr(err)
+	}))
+	s.Handle(OpVMsStreamingPublish, typed(func(ctx context.Context, a vms.StreamingPublishArgs) (any, error) {
+		v, err := m.SetStreamingRemote(ctx, a)
+		return v, vmsErr(err)
+	}))
+	s.Handle(OpVMsUSBAttach, typed(func(ctx context.Context, a vms.USBArgs) (any, error) {
+		v, err := m.AttachUSB(ctx, a)
+		return v, vmsErr(err)
+	}))
+	s.Handle(OpVMsUSBDetach, typed(func(ctx context.Context, a vms.USBArgs) (any, error) {
+		v, err := m.DetachUSB(ctx, a)
+		return v, vmsErr(err)
+	}))
 	s.Handle(OpVMsBridge, func(ctx context.Context, _ json.RawMessage) (any, error) {
 		if m.Network == nil {
 			return nil, Errorf(CodeBadArgs, "this server can't make a network bridge")

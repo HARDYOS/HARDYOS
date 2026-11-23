@@ -52,6 +52,33 @@ func TestClusterAdminMay(t *testing.T) {
 		{"PUT", "/api/v1/cluster/admin-trust", false},
 		{"GET", "/api/v1/auth/me", false},
 		{"GET", "/somewhere", false},
+		// Phase 9 (decision 473): VM polish is the cluster desktop's,
+		// streaming's publishing and password, 2FA, hostnames and the
+		// NetBird standby are each server's own.
+		{"GET", "/api/v1/vms/catalog", true},
+		{"POST", "/api/v1/vms/web/template", true},
+		{"PUT", "/api/v1/vms/web/schedule", true},
+		{"POST", "/api/v1/vms/web/usb", true},
+		{"POST", "/api/v1/vms/web/usb/detach", true},
+		{"GET", "/api/v1/vms/web/streaming", true},
+		{"POST", "/api/v1/vms/web/streaming/pair", true},
+		{"PUT", "/api/v1/vms/web/streaming/remote", false},
+		{"POST", "/api/v1/vms/web/streaming/reveal", false},
+		{"GET", "/api/v1/mail/restore-targets", true},
+		{"GET", "/api/v1/backup/targets/t1/mail", true},
+		{"GET", "/api/v1/auth/2fa", false},
+		{"PUT", "/api/v1/auth/2fa/policy", false},
+		{"POST", "/api/v1/auth/app-passwords", false},
+		{"POST", "/api/v1/users/3/2fa/reset", false},
+		{"POST", "/api/v1/users/3/2fa/setup-code", false},
+		{"DELETE", "/api/v1/users/3/app-passwords/1", false},
+		{"GET", "/api/v1/hostnames", false},
+		{"PUT", "/api/v1/hostnames/token", false},
+		{"PUT", "/api/v1/hostnames/settings", false},
+		{"GET", "/api/v1/netbird-standby", false},
+		{"POST", "/api/v1/netbird-standby/takeover", false},
+		{"POST", "/api/v1/netbird-standby/handback", false},
+		{"PUT", "/api/v1/netbird-standby/settings", false},
 	} {
 		if got := clusterAdminMay(tc.method, tc.path); got != tc.want {
 			t.Errorf("%s %s = %v", tc.method, tc.path, got)

@@ -287,6 +287,8 @@ func (r *Root) rebuild(ctx context.Context, tc taskCtx, repo *Repo, a RebuildArg
 			ierr = r.rebuildApp(ctx, sub, repo, snap, it, a.Pool)
 		case ItemVM:
 			_, ierr = r.restoreVM(ctx, sub, repo, snap, it, "", a.Pool)
+		case ItemMail:
+			ierr = r.rebuildMail(ctx, sub, repo, snap, a.Pool, res)
 		}
 		var p *Problem
 		switch {

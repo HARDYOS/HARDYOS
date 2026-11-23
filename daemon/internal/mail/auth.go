@@ -69,6 +69,33 @@ func From(a netip.Addr, forced bool) Source {
 	return Source{Addr: a, Internet: forced || (a.IsValid() && !Inside(a)), Forced: forced}
 }
 
+// Scopes of a sign-in, for app passwords (auth.ScopeMail and
+// auth.ScopeCalendars).
+const (
+	SignInMail      = "mail"
+	SignInCalendars = "calendars"
+)
+
+type signInKey struct{}
+
+type signInInfo struct {
+	src   Source
+	scope string
+}
+
+// WithSignIn tells the password check behind CheckLogin where a sign-in
+// comes from and what it is for (two-factor sign-in, decision 446: only
+// app passwords from the internet).
+func WithSignIn(ctx context.Context, src Source, scope string) context.Context {
+	return context.WithValue(ctx, signInKey{}, signInInfo{src: src, scope: scope})
+}
+
+// SignInFrom is what WithSignIn recorded; ok is false when nothing was.
+func SignInFrom(ctx context.Context) (src Source, scope string, ok bool) {
+	i, ok := ctx.Value(signInKey{}).(signInInfo)
+	return i.src, i.scope, ok
+}
+
 // ipKey is the address a limit counts by: an IPv4 address, or an IPv6
 // address's /64 (one home or one server gets a /64, so counting single
 // IPv6 addresses would give an attacker billions of fresh ones).
@@ -542,12 +569,13 @@ func (s *AuthServer) token(w http.ResponseWriter, r *http.Request) {
 	}
 	// Dovecot names the client in a header (send_auth_headers).
 	remote := parseRemote(r.Header.Get("X-Dovecot-Auth-Remote"))
-	if !s.secretAllowed(login, pw, remote, s.wasForced(login, remote)) {
+	forced := s.wasForced(login, remote)
+	if !s.secretAllowed(login, pw, remote, forced) {
 		s.log().Info("mail sign-in refused: not allowed from there", "login", login, "remote", remote)
 		bad()
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(WithSignIn(r.Context(), From(remote, forced), SignInMail), 20*time.Second)
 	defer cancel()
 	if err := s.Checker.CheckLogin(ctx, login, pw); err != nil {
 		if !errors.Is(err, ErrBadLogin) {

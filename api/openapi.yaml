@@ -38,6 +38,8 @@ tags:
   - name: office
   - name: files
   - name: remote
+  - name: hostnames
+  - name: netbird-standby
   - name: photos
   - name: oidc
   - name: vms
@@ -122,6 +124,16 @@ paths:
         401 codes: `bad_credentials` (wrong password or unknown name),
         `unknown_domain`, `account_disabled`, `account_locked`,
         `account_expired`, `account_unavailable`, `password_expired`.
+
+        Two-factor sign-in (decisions 440-449): when the password is right
+        but a second step is needed, the answer is 202 with a challenge:
+        `totp` (an authenticator or recovery code, `POST /auth/login/2fa`),
+        `enroll` (an administrator past the grace period at home sets one
+        up now, `POST /auth/login/enroll`), or `setup_code` (from outside
+        without two-factor sign-in: only an administrator's one-time setup
+        code leads to enrollment). From outside (through the app gateway,
+        or from an address that isn't private, link-local or NetBird's)
+        everyone needs a second factor.
       tags: [auth]
       security: []
       requestBody:
@@ -135,6 +147,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/User" }
+        "202":
+          description: The password is right; a second step is needed (no session yet)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoginChallenge" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "503":
           description: This server's own domain controller isn't answering (`domain_unavailable`), its clock is too far off (`clock_skew`), or this server runs no domain controller of its own (`no_local_dc`)
@@ -183,6 +200,253 @@ paths:
         "204": { description: Password changed }
         "400": { $ref: "#/components/responses/Invalid" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /auth/login/2fa:
+    post:
+      operationId: loginSecondFactor
+      summary: Finish a sign-in with an authenticator or recovery code
+      description: |
+        A 6-digit code (the current 30-second step or one either side, never
+        one already used) or a recovery code (`xxxx-xxxx-xxxx-xxxx`, single
+        use). A challenge allows 5 tries in 10 minutes. Wrong codes count
+        per account and origin (at home; from outside per address, IPv6 per
+        /64): 5 in 15 minutes pause code entry from there for 15 minutes
+        (429), and recovery codes have a bucket of their own. Wrong codes
+        from outside also count in a rolling 60-day budget that a right
+        code doesn't reset: at 20, authenticator codes stop working from
+        outside (`code_locked`; at home they still do) until the password
+        changes or an administrator resets two-factor sign-in.
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SecondFactorRequest" }
+      responses:
+        "200":
+          description: Signed in; session cookie set
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401":
+          description: "`bad_code`, `code_locked`, `secret_unusable` or `challenge_expired`"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Too many wrong codes; see Retry-After
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /auth/login/enroll:
+    post:
+      operationId: loginEnroll
+      summary: Start setting up an authenticator during sign-in
+      description: For an `enroll` challenge, or a `setup_code` challenge with the administrator's one-time code (`bad_setup_code` otherwise).
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginEnrollRequest" }
+      responses:
+        "200":
+          description: The secret to scan or type
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Enrollment" }
+        "401":
+          description: "`bad_setup_code` or `challenge_expired`"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /auth/login/enroll/confirm:
+    post:
+      operationId: loginEnrollConfirm
+      summary: Turn on two-factor sign-in with the first code and sign in
+      description: Every other session of the account ends. The recovery codes are shown only here.
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SecondFactorRequest" }
+      responses:
+        "200":
+          description: Signed in; session cookie set
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnrollResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: "`no_pending`: enrollment wasn't started or expired (15 minutes)"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /auth/2fa:
+    get:
+      operationId: getTwoFactor
+      summary: Your two-factor sign-in
+      tags: [auth]
+      responses:
+        "200":
+          description: State
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TwoFactorStatus" }
+  /auth/2fa/enroll:
+    post:
+      operationId: enrollTwoFactor
+      summary: Start setting up (or replacing) your authenticator
+      description: Needs your password; replacing one that is set up also needs a current code. The old one keeps working until `POST /auth/2fa/confirm`.
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReauthCodeRequest" }
+      responses:
+        "200":
+          description: The secret to scan or type
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Enrollment" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /auth/2fa/confirm:
+    post:
+      operationId: confirmTwoFactor
+      summary: Turn on the new authenticator with its first code
+      description: This browser counts as signed in with two factors; every other session of the account ends.
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CodeRequest" }
+      responses:
+        "200":
+          description: Recovery codes (shown once)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecoveryCodes" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /auth/2fa/disable:
+    post:
+      operationId: disableTwoFactor
+      summary: Turn your two-factor sign-in off (not for administrators)
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReauthCodeRequest" }
+      responses:
+        "204": { description: Turned off }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /auth/2fa/recovery-codes:
+    post:
+      operationId: regenerateRecoveryCodes
+      summary: Replace your recovery codes
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReauthCodeRequest" }
+      responses:
+        "200":
+          description: New recovery codes (shown once; the old ones stop working)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecoveryCodes" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /auth/2fa/notice/dismiss:
+    post:
+      operationId: dismissTwoFactorNotice
+      summary: Dismiss the notice about wrong codes from outside
+      tags: [auth]
+      responses:
+        "204": { description: Dismissed }
+  /auth/2fa/policy:
+    get:
+      operationId: getTwoFactorPolicy
+      summary: Two-factor settings (admin)
+      tags: [auth]
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TwoFactorPolicy" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    put:
+      operationId: setTwoFactorPolicy
+      summary: Change the administrators' grace period or trusting the router's address (admin, audited)
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TwoFactorPolicyRequest" }
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TwoFactorPolicy" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /auth/app-passwords:
+    get:
+      operationId: listAppPasswords
+      summary: Your app passwords
+      tags: [auth]
+      responses:
+        "200":
+          description: Newest first (never their values)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AppPassword" }
+    post:
+      operationId: createAppPassword
+      summary: Make an app password for one device (domain accounts; needs your password)
+      description: |
+        For services that can't ask for a code: `files` (WebDAV), `mail`
+        (IMAP and SMTP), `calendars` (CalDAV and CardDAV). From outside only
+        app passwords work there, and once you have two-factor sign-in your
+        own password stops working there too. Removed when the domain
+        password changes.
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppPasswordRequest" }
+      responses:
+        "201":
+          description: The password (shown once)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppPasswordCreated" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /auth/app-passwords/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+    delete:
+      operationId: deleteAppPassword
+      summary: Revoke one of your app passwords
+      tags: [auth]
+      responses:
+        "204": { description: Revoked }
+        "404": { $ref: "#/components/responses/NotFound" }
   /users:
     get:
       operationId: listUsers
@@ -269,6 +533,77 @@ paths:
       responses:
         "204": { description: Password set }
         "400": { $ref: "#/components/responses/Invalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /users/{id}/2fa/reset:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+    post:
+      operationId: resetUserTwoFactor
+      summary: Remove an account's authenticator and recovery codes (admin; lost phone)
+      description: |
+        Needs `confirm` set to the account's username (400 `confirm_required`
+        otherwise). Signs the account out everywhere, revokes every app
+        sign-in and refresh token, removes the stop on codes from outside
+        and the record of wrong codes, revokes the app passwords unless
+        `revokeAppPasswords` is false, and is audited (`users.2fa.reset`).
+        An administrator sets up a new authenticator at the next sign-in,
+        with no new grace period.
+      tags: [users]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ConfirmUsernameRequest" }
+      responses:
+        "200":
+          description: The account after the reset
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /users/{id}/2fa/setup-code:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+    post:
+      operationId: issueTwoFactorSetupCode
+      summary: A one-time code that lets the account set up two-factor sign-in from outside (admin)
+      description: Good for 24 hours, single use, replaces an earlier one, shown once and audited. 409 `already_enrolled` when the account has two-factor sign-in.
+      tags: [users]
+      responses:
+        "200":
+          description: The code
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TwoFactorSetupCode" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /users/{id}/app-passwords:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+    get:
+      operationId: listUserAppPasswords
+      summary: An account's app passwords (admin)
+      tags: [users]
+      responses:
+        "200":
+          description: Newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AppPassword" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /users/{id}/app-passwords/{pid}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+      - { name: pid, in: path, required: true, schema: { type: integer, format: int64 } }
+    delete:
+      operationId: deleteUserAppPassword
+      summary: Revoke an account's app password (admin, audited)
+      tags: [users]
+      responses:
+        "204": { description: Revoked }
         "404": { $ref: "#/components/responses/NotFound" }
   /jobs:
     get:
@@ -3440,6 +3775,365 @@ paths:
         "503": { $ref: "#/components/responses/Unavailable" }
   # ---- end of App Store v2 apps API ----
   # ---- Remote access: NetBird client and publishing (docs/remote-access.md, part A) ----
+  /hostnames:
+    get:
+      operationId: getHostnames
+      summary: Control Panel › Hostnames status
+      description: |
+        Whether apps are served at their own names under the base domain,
+        the Cloudflare token's state (kept by hardyd-priv; never returned,
+        only whether one is set and when it was last verified), the
+        wildcard certificate in service, every name and what it serves,
+        and how devices at home can find them.
+      tags: [hostnames]
+      responses:
+        "200":
+          description: The status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HostnamesStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /hostnames/desktop:
+    get:
+      operationId: getHostnamesDesktop
+      summary: Where the desktop is at its own hostname ("" while hostnames are off)
+      tags: [hostnames]
+      responses:
+        "200":
+          description: The address
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HostnamesDesktop" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /hostnames/token:
+    put:
+      operationId: setHostnamesToken
+      summary: Hand a Cloudflare API token to hardyd-priv (a job, audited)
+      description: |
+        The token (Zone › DNS › Edit on the base domain's zone only) goes
+        to the job in memory and on to hardyd-priv, which verifies it with
+        Cloudflare, checks the base domain is in a zone it can edit, and
+        keeps it encrypted where only root can read it. It is never
+        returned. The base domain must be Remote Access's when that has one.
+      tags: [hostnames]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HostnamesTokenRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    delete:
+      operationId: clearHostnamesToken
+      summary: Forget the Cloudflare token (a job); apps go back to their ports
+      tags: [hostnames]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HostnamesClearRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /hostnames/token/verify:
+    post:
+      operationId: verifyHostnamesToken
+      summary: Check the saved token with Cloudflare again (a job)
+      tags: [hostnames]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /hostnames/settings:
+    put:
+      operationId: setHostnamesSettings
+      summary: Turn hostnames on or off (a job; turning on gets the certificate when needed)
+      tags: [hostnames]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HostnamesSettings" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /hostnames/certificate:
+    post:
+      operationId: issueHostnamesCertificate
+      summary: Get (or renew) the wildcard certificate now (a job)
+      tags: [hostnames]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /hostnames/lan:
+    post:
+      operationId: setHostnamesLAN
+      summary: Add the names to (or remove them from) this server's own domain controller's DNS (a job)
+      tags: [hostnames]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HostnamesLANRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /netbird-standby:
+    get:
+      operationId: getNetBirdStandby
+      summary: Control Panel › NetBird Standby status
+      description: |
+        The VPS connection hardyd-priv keeps (address, user, pinned host
+        key, HardyOS's public key; never the private key), the sealed
+        copies of the VPS's NetBird server (time, size, hash, version; never
+        their contents), sync health and history, the app, the standby
+        name's DNS records, the current take-over, and the router port
+        forwards the standby needs. Administrators only.
+      tags: [netbird-standby]
+      responses:
+        "200":
+          description: The status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NBStandbyStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    delete:
+      operationId: forgetNetBirdStandby
+      summary: Forget the VPS connection, HardyOS's key and every copy (a job; not while taken over)
+      tags: [netbird-standby]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NBStandbyConfirm" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /netbird-standby/settings:
+    put:
+      operationId: setNetBirdStandbySettings
+      summary: Save the VPS connection, the schedule and this server's public address (a job, audited)
+      description: |
+        hardyd-priv checks and keeps the connection and makes HardyOS's own
+        ed25519 key the first time (or with newKey); the VPS script then
+        installs its public half with a forced command.
+      tags: [netbird-standby]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NBStandbySettingsRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /netbird-standby/script:
+    get:
+      operationId: getNetBirdStandbyScript
+      summary: The script to run once on the VPS as root
+      tags: [netbird-standby]
+      responses:
+        "200":
+          description: The script
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NBStandbyScript" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /netbird-standby/vps:
+    get:
+      operationId: getNetBirdStandbyVPS
+      summary: Ask the VPS how its NetBird server is (the status verb; changes nothing)
+      tags: [netbird-standby]
+      responses:
+        "200":
+          description: What the VPS said
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NBStandbyVPSStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502":
+          description: The VPS didn't answer
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /netbird-standby/install:
+    post:
+      operationId: installNetBirdStandby
+      summary: Install the standby app, stopped (a job)
+      tags: [netbird-standby]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NBStandbyInstallRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /netbird-standby/sync:
+    post:
+      operationId: syncNetBirdStandby
+      summary: Copy the VPS's NetBird server now (a job; not while taken over)
+      tags: [netbird-standby]
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /netbird-standby/dns:
+    get:
+      operationId: previewNetBirdStandbyDNS
+      summary: The records that hold the NetBird server's name in Cloudflare now
+      tags: [netbird-standby]
+      parameters:
+        - { name: name, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: The records
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NBStandbyDNSPreview" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    post:
+      operationId: adoptNetBirdStandbyDNS
+      summary: Let HardyOS change exactly these records of the name on a take-over (a job; the name typed)
+      tags: [netbird-standby]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NBStandbyDNSRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    delete:
+      operationId: forgetNetBirdStandbyDNS
+      summary: Stop HardyOS managing the name (a job; the name typed; not while taken over)
+      tags: [netbird-standby]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NBStandbyDNSForgetRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /netbird-standby/dns/rebind:
+    post:
+      operationId: rebindNetBirdStandbyDNS
+      summary: Allow the standby's current public address and VPS for the adopted name (a job; the Cloudflare token pasted again; not while taken over)
+      description: |
+        The adopted name is bound to this server's public addresses and the
+        VPS (host, port, host key) as they were when it was adopted
+        (decision 424). After any of them changes, a take-over refuses until
+        this runs with the token, or `hardyctl netbird-standby rebind` runs
+        as root on the console.
+      tags: [netbird-standby]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NBStandbyDNSRebindRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /netbird-standby/takeover:
+    post:
+      operationId: takeOverNetBird
+      summary: Take over the NetBird server (a job; the hostname typed)
+      description: |
+        A last copy if the VPS still answers, then the newest copy goes into
+        the standby, which starts; its ports open and this server reaches
+        it locally; the name's A (and AAAA) record points at this server's
+        public address with TTL 60; peers are watched reconnecting. 400
+        `version_newer` when the VPS runs a newer NetBird than the standby
+        (send acceptVersion to go on anyway), `confirm_required` without
+        the typed name.
+      tags: [netbird-standby]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NBStandbyTakeoverRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+  /netbird-standby/handback:
+    post:
+      operationId: handBackNetBird
+      summary: Give the NetBird server back to the VPS (a job; the hostname typed and the split-brain warning acknowledged)
+      description: |
+        The VPS must answer and allow hand-back. The standby stops, its
+        databases go to the VPS (which keeps a copy of its own first), the
+        name's records go back to what they were, the ports close and the
+        staged state is removed. With discard, nothing is sent to the VPS.
+      tags: [netbird-standby]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NBStandbyHandbackRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/Unavailable" }
   /remote:
     get:
       operationId: getRemote
@@ -3598,6 +4292,13 @@ paths:
     put:
       operationId: publishApp
       summary: Publish an app NetBird-only or publicly, or not at all (job remote.service)
+      description: |
+        Two-factor sign-in (decision 441): an app is published only with
+        HardyOS sign-in in front (`hardyosSignIn`), since its own sign-in
+        can't ask for a code (400 `signin_required`), except an app whose
+        sign-in is HardyOS's own (Photos with "Sign in with HardyOS" on and
+        Immich's passwords off). One published without it before is refused
+        at the gateway until it is turned on.
       tags: [remote, apps]
       requestBody:
         required: true
@@ -4542,6 +5243,225 @@ paths:
         "400": { $ref: "#/components/responses/Invalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+  # ---- VM polish (phase 9, decisions 410-419) ----
+  /vms/catalog:
+    get:
+      operationId: listVMCatalog
+      summary: The verified images (Debian, Ubuntu, Home Assistant OS, VirtIO drivers) this server can fetch by name
+      description: |
+        A create request names one in `catalog`; the root helper downloads it
+        only from the image's own hosts and checks it against its publisher's
+        checksums (Ubuntu's are signature-checked).
+      tags: [vms]
+      responses:
+        "200":
+          description: Images
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/VMCatalogImage" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /vms/usertemplates:
+    get:
+      operationId: listVMUserTemplates
+      summary: Templates saved from VMs ("Make template")
+      tags: [vms]
+      responses:
+        "200":
+          description: Saved templates
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/VMUserTemplate" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /vms/usertemplates/{tid}:
+    parameters:
+      - { name: tid, in: path, required: true, schema: { type: string } }
+    delete:
+      operationId: deleteVMUserTemplate
+      summary: Delete a saved template (a job; its name typed to confirm). VMs made from it keep their disks
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMTemplateDeleteRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /vms/{id}/template:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: makeVMTemplate
+      summary: Save a stopped VM as a template (a job; its disks are copied, its identity left out)
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMMakeTemplateRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: The VM is running }
+  /vms/{id}/schedule:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    put:
+      operationId: setVMSchedule
+      summary: Set how many automatic snapshots of each kind the VM keeps (a job; all zero turns it off)
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMScheduleRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /vms/{id}/usb:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: attachVMUSB
+      summary: Plug a USB device (vendor:product) into the running VM (a job)
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMUSBRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: The VM isn't running }
+  /vms/{id}/usb/detach:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: detachVMUSB
+      summary: Take a USB device out of the running VM (a job)
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMUSBRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: The VM isn't running }
+  /vms/{id}/streaming:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getVMStreaming
+      summary: "Game streaming: Sunshine reachable, paired and waiting Moonlight devices, NetBird address"
+      tags: [vms]
+      responses:
+        "200":
+          description: The Streaming panel
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VMStreamingStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /vms/{id}/streaming/reveal:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: revealVMStreamingAccount
+      summary: "Show the Sunshine web UI account (your password again; rate-limited and audited)"
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMStreamingRevealRequest" }
+      responses:
+        "200":
+          description: The account
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VMStreamingAccount" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { description: Too many wrong passwords }
+  /vms/{id}/streaming/pair:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: pairVMStreamingDevice
+      summary: "Give Sunshine the PIN a waiting Moonlight device shows (a job, audited)"
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMStreamingPairRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: HardyOS didn't set up game streaming in this VM }
+  /vms/{id}/streaming/unpair:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      operationId: unpairVMStreamingDevice
+      summary: "Remove a paired Moonlight device (a job, audited)"
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMStreamingUnpairRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: HardyOS didn't set up game streaming in this VM }
+  /vms/{id}/streaming/remote:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    put:
+      operationId: setVMStreamingRemote
+      summary: "Publish the VM's streaming ports to NetBird peers only, or stop (a job; one VM at a time)"
+      tags: [vms]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VMStreamingRemoteRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: HardyOS didn't set up game streaming in this VM }
   # ---- end of virtual machines API ----
   # ---- versioned cloud backups (Phase 6 part A, docs/backup.md) ----
   /backup:
@@ -4717,6 +5637,23 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BackupEntries" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /backup/targets/{id}/mail:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: snapshot, in: query, required: true, schema: { type: string } }
+    get:
+      operationId: backupMailContents
+      summary: The domains and mailboxes in a version of the mail
+      tags: [cloudbackup]
+      responses:
+        "200":
+          description: Contents
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackupMailContents" }
         "400": { $ref: "#/components/responses/Invalid" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -5349,6 +6286,19 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/MailOverview" }
+  /mail/restore-targets:
+    get:
+      operationId: getMailRestoreTargets
+      summary: This server's mailboxes by storage key, for restoring mail from a backup or replica (admin)
+      tags: [mail]
+      responses:
+        "200":
+          description: Domains and mailboxes (webmail is always false here)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BackupMailContents" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /mail/settings:
     put:
       operationId: saveMailSettings
@@ -6409,6 +7359,362 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
+    HostnamesSettings:
+      type: object
+      required: [enabled, email, staging]
+      properties:
+        enabled: { type: boolean, description: Serve apps at their hostnames once the certificate is there (and keep it renewed) }
+        email: { type: string, description: "Let's Encrypt's contact for expiry warnings (\"\" = none)" }
+        staging: { type: boolean, description: "Use Let's Encrypt's staging server (untrusted certificates, for trying the setup)" }
+    HostnamesTokenRequest:
+      type: object
+      required: [token, base]
+      properties:
+        token: { type: string, writeOnly: true }
+        base: { type: string, description: "The base domain, e.g. home.example.net" }
+    HostnamesClearRequest:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: string, description: The base domain, typed }
+    HostnamesLANRequest:
+      type: object
+      properties:
+        remove: { type: boolean }
+        address: { type: string, description: One of this server's addresses (lan.addresses) }
+    HostnamesTokenState:
+      type: object
+      required: [set, base, zone, verifiedAt, apex]
+      properties:
+        set: { type: boolean }
+        base: { type: string }
+        zone: { type: string }
+        verifiedAt: { type: [string, "null"], format: date-time }
+        problem: { type: string }
+        apex: { type: boolean, description: "The base is its Cloudflare zone's apex: this server's domain controller holds the names only when the base is the AD domain or inside it" }
+    HostnamesCert:
+      type: object
+      required: [names, issuer, notBefore, notAfter, fingerprint, renewsAt]
+      properties:
+        names: { type: array, items: { type: string } }
+        issuer: { type: string }
+        notBefore: { type: string, format: date-time }
+        notAfter: { type: string, format: date-time }
+        fingerprint: { type: string, description: SHA-256 of the certificate }
+        renewsAt: { type: string, format: date-time }
+    HostnamesCertAttempt:
+      type: object
+      required: [names, at]
+      properties:
+        names: { type: string }
+        serial: { type: string }
+        notBefore: { type: string, format: date-time }
+        notAfter: { type: string, format: date-time }
+        issuer: { type: string }
+        error: { type: string }
+        at: { type: string, format: date-time }
+    HostnameEntry:
+      type: object
+      required: [label, host, what]
+      properties:
+        label: { type: string }
+        host: { type: string }
+        what: { type: string }
+    HostnamesLANState:
+      type: object
+      required: [addresses, netbirdIp, domainDns, domain]
+      properties:
+        addresses: { type: array, items: { type: string } }
+        netbirdIp: { type: string }
+        domainDns: { type: boolean, description: "HardyOS's own domain controller runs and can hold the names" }
+        domain: { type: string }
+    HostnamesStatus:
+      type: object
+      required: [active, settings, token, remoteBase, desktopUrl, certificate, lastError, names, lan]
+      properties:
+        active: { type: boolean }
+        problem: { type: string }
+        settings: { $ref: "#/components/schemas/HostnamesSettings" }
+        token: { $ref: "#/components/schemas/HostnamesTokenState" }
+        remoteBase: { type: string }
+        desktopUrl: { type: string }
+        certificate:
+          oneOf:
+            - { $ref: "#/components/schemas/HostnamesCert" }
+            - { type: "null" }
+        lastError:
+          oneOf:
+            - { $ref: "#/components/schemas/HostnamesCertAttempt" }
+            - { type: "null" }
+        names: { type: array, items: { $ref: "#/components/schemas/HostnameEntry" } }
+        lan: { $ref: "#/components/schemas/HostnamesLANState" }
+    NBStandbyStatus:
+      type: object
+      required: [connection, settings, health, history, app, dns, takeover, standbyVersion, versionNewer, portForwards, clientConnected, clientIp, managementUrl]
+      properties:
+        connection:
+          oneOf:
+            - { $ref: "#/components/schemas/NBStandbyConnection" }
+            - { type: "null" }
+        problem: { type: string }
+        settings: { $ref: "#/components/schemas/NBStandbySettings" }
+        health: { $ref: "#/components/schemas/NBStandbyHealth" }
+        history: { type: array, items: { $ref: "#/components/schemas/NBStandbySyncRow" } }
+        app: { $ref: "#/components/schemas/NBStandbyApp" }
+        dns: { $ref: "#/components/schemas/NBStandbyDNS" }
+        takeover:
+          oneOf:
+            - { $ref: "#/components/schemas/NBStandbyTakeover" }
+            - { type: "null" }
+        standbyVersion: { type: string, description: The netbird-server version the standby app pins }
+        versionNote: { type: string }
+        versionNewer: { type: boolean, description: The VPS runs a newer NetBird than the standby }
+        portForwards: { type: array, items: { $ref: "#/components/schemas/NBPortForward" } }
+        clientConnected: { type: boolean }
+        clientIp: { type: string }
+        managementUrl: { type: string }
+    NBStandbyConnection:
+      type: object
+      description: hardyd-priv's side; never the private key or a copy's contents
+      required: [configured, vpsHost, vpsPort, vpsUser, hostKey, hostKeyFingerprint, hostname, publicKey, snapshots, mode, networkOpen, publicIPv4, publicIPv6, from, handbackCopy]
+      properties:
+        configured: { type: boolean }
+        vpsHost: { type: string }
+        vpsPort: { type: integer }
+        vpsUser: { type: string }
+        hostKey: { type: string, description: The VPS's pinned SSH host key }
+        hostKeyFingerprint: { type: string }
+        hostname: { type: string, description: The NetBird server's name }
+        publicKey: { type: string, description: HardyOS's public key for the VPS's authorized_keys }
+        keyCreated: { type: string, format: date-time }
+        snapshots: { type: array, items: { $ref: "#/components/schemas/NBStandbySnapshot" } }
+        lastTry: { type: string, format: date-time }
+        lastOk: { type: string, format: date-time }
+        lastError: { type: string }
+        mode: { type: string, enum: [standby, takenover] }
+        staged: { type: string }
+        takenOverAt: { type: string, format: date-time }
+        networkOpen: { type: boolean }
+        publicIPv4: { type: string, description: The only IPv4 address DNS may point the name at (root's) }
+        publicIPv6: { type: string }
+        from: { type: array, items: { type: string } }
+        handbackCopy: { type: boolean, description: A sealed copy of the last hand-back is kept until the next good sync }
+    NBStandbySnapshot:
+      type: object
+      required: [id, at, sealedBytes, info]
+      properties:
+        id: { type: string }
+        at: { type: string, format: date-time }
+        sealedBytes: { type: integer }
+        info: { $ref: "#/components/schemas/NBStandbySnapshotInfo" }
+    NBStandbySnapshotInfo:
+      type: object
+      required: [created, hostname, image, digest, version, peers, setupKeys, files, bytes, sha256, warnings, generation]
+      properties:
+        created: { type: string, format: date-time }
+        hostname: { type: string }
+        image: { type: string }
+        digest: { type: string }
+        version: { type: string }
+        peers: { type: integer }
+        setupKeys: { type: integer }
+        files: { type: array, items: { type: string } }
+        generation: { type: string, description: The VPS's id for this snapshot; a hand-back must name it }
+        bytes: { type: integer }
+        sha256: { type: string }
+        certNotAfter: { type: string, format: date-time }
+        warnings: { type: array, items: { type: string } }
+    NBStandbySettings:
+      type: object
+      required: [intervalMinutes, autoSync, publicIPv4, publicIPv6, connectFrom]
+      properties:
+        intervalMinutes: { type: integer, minimum: 5, maximum: 1440 }
+        autoSync: { type: boolean }
+        publicIPv4: { type: string, description: This server's public IPv4 address (where the router forwards the NetBird ports) }
+        publicIPv6: { type: string }
+        connectFrom: { type: array, items: { type: string }, description: Addresses HardyOS reaches the VPS from (the key's from= restriction) }
+    NBStandbyHealth:
+      type: object
+      required: [state, stale, staleAfterMinutes]
+      properties:
+        state: { type: string, enum: [unconfigured, waiting, ok, failing, stale, takenover] }
+        stale: { type: boolean }
+        staleAfterMinutes: { type: integer }
+        nextSync: { type: string, format: date-time }
+        problem: { type: string }
+    NBStandbySyncRow:
+      type: object
+      required: [startedAt, finishedAt, ok, auto, bytes, sha256, version, peers, error]
+      properties:
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+        ok: { type: boolean }
+        auto: { type: boolean }
+        bytes: { type: integer }
+        sha256: { type: string }
+        version: { type: string }
+        peers: { type: integer }
+        error: { type: string }
+    NBStandbyApp:
+      type: object
+      required: [installed, state, version]
+      properties:
+        installed: { type: boolean }
+        state: { type: string }
+        version: { type: string }
+    NBStandbyDNS:
+      type: object
+      required: [tokenSet, base, zone, name, adopted, inBase, inZone, needsRebind]
+      properties:
+        tokenSet: { type: boolean }
+        base: { type: string }
+        zone: { type: string }
+        name: { type: string, description: The adopted standby name ("" when none) }
+        adopted: { type: array, items: { $ref: "#/components/schemas/NBStandbyDNSRecord" } }
+        inBase: { type: boolean }
+        inZone: { type: boolean }
+        bound: { $ref: "#/components/schemas/NBStandbyBinding" }
+        needsRebind: { type: boolean, description: "The public address or the VPS changed since the name was allowed: confirm with the token (rebind) before a take-over" }
+    NBStandbyBinding:
+      type: object
+      required: [host, ipv4, ipv6, vpsHost, vpsPort, hostKeyFingerprint]
+      properties:
+        host: { type: string }
+        ipv4: { type: string }
+        ipv6: { type: string }
+        vpsHost: { type: string }
+        vpsPort: { type: integer }
+        hostKeyFingerprint: { type: string }
+    NBStandbyDNSRebindRequest:
+      type: object
+      required: [token]
+      properties:
+        token: { type: string, writeOnly: true, description: The Cloudflare token pasted again }
+    NBStandbyDNSRecord:
+      type: object
+      required: [id, type, content, ttl, proxied]
+      properties:
+        id: { type: string }
+        type: { type: string }
+        content: { type: string }
+        ttl: { type: integer }
+        proxied: { type: boolean }
+        comment: { type: string }
+    NBStandbyDNSPreview:
+      type: object
+      required: [name, zone, records, adoptable]
+      properties:
+        name: { type: string }
+        zone: { type: string }
+        records: { type: array, items: { $ref: "#/components/schemas/NBStandbyDNSRecord" } }
+        adoptable: { type: boolean }
+        problem: { type: string }
+    NBStandbyDNSRequest:
+      type: object
+      required: [name, confirm, ids, token]
+      properties:
+        name: { type: string }
+        confirm: { type: string, description: The name, typed }
+        ids: { type: array, items: { type: string }, description: Exactly the record ids the preview showed }
+        token: { type: string, writeOnly: true, description: "The Cloudflare token pasted again (compared by hardyd-priv with the saved one)" }
+    NBStandbyTakeover:
+      type: object
+      required: [at, by, snapshotAt, finalSync, dnsChanged, fenced, ipv4, peersTotal, peersConnected, notes]
+      properties:
+        at: { type: string, format: date-time }
+        by: { type: string }
+        snapshotAt: { type: string, format: date-time }
+        finalSync: { type: boolean }
+        finalSyncError: { type: string }
+        dnsChanged: { type: boolean }
+        fenced: { type: boolean, description: The VPS's server was stopped for the take-over }
+        handedBack: { type: boolean }
+        discarded: { type: boolean }
+        fenceRenewed: { type: string, format: date-time, description: "When HardyOS last made or renewed the VPS's fence (it lasts 2 hours unless renewed)" }
+        ipv4: { type: string }
+        ipv6: { type: string }
+        peersTotal: { type: integer }
+        peersConnected: { type: integer }
+        peersCheckedAt: { type: string, format: date-time }
+        peersProblem: { type: string }
+        notes: { type: array, items: { type: string } }
+    NBPortForward:
+      type: object
+      required: [protocol, public, internal, purpose]
+      properties:
+        protocol: { type: string, enum: [TCP, UDP] }
+        public: { type: integer }
+        internal: { type: integer }
+        purpose: { type: string }
+    NBStandbySettingsRequest:
+      type: object
+      required: [vpsHost, hostKey, hostname, settings]
+      properties:
+        vpsHost: { type: string }
+        vpsPort: { type: integer, description: "SSH port (default 22)" }
+        vpsUser: { type: string, description: "Default hardyos-standby" }
+        hostKey: { type: string, description: "The VPS's SSH host key (ssh-ed25519 AAAA…)" }
+        hostname: { type: string, description: The NetBird server's name }
+        newKey: { type: boolean, description: Make a new SSH key (run the VPS script again) }
+        settings: { $ref: "#/components/schemas/NBStandbySettings" }
+        addressConfirm: { type: string, description: "The NetBird name, typed, when the public address changes (400 confirm_required otherwise)" }
+    NBStandbyScript:
+      type: object
+      required: [script, fileName, fingerprint]
+      properties:
+        script: { type: string }
+        fileName: { type: string }
+        fingerprint: { type: string, description: "HardyOS's key fingerprint, to compare with the VPS script's output and hardyctl netbird-standby fingerprint" }
+    NBStandbyVPSStatus:
+      type: object
+      required: [running, version, digest, image, hostname, restoreAllowed, restoreArmedUntil, handbackInstalled, fenced, time]
+      properties:
+        running: { type: boolean }
+        version: { type: string }
+        digest: { type: string }
+        image: { type: string }
+        hostname: { type: string }
+        restoreAllowed: { type: boolean, description: Hand-back installed and armed on the VPS now }
+        restoreArmedUntil: { type: string }
+        handbackInstalled: { type: boolean }
+        fenced: { type: boolean }
+        fencedUntil: { type: string, description: "When the fence ends unless HardyOS renews it (the VPS then starts its server again)" }
+        time: { type: string }
+    NBStandbyInstallRequest:
+      type: object
+      properties:
+        pool: { type: string, description: The pool apps go on, when no app is installed yet }
+    NBStandbyDNSForgetRequest:
+      type: object
+      required: [confirm, token]
+      properties:
+        confirm: { type: string, description: The adopted name, typed }
+        token: { type: string, writeOnly: true, description: The Cloudflare token pasted again }
+    NBStandbyConfirm:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: string, description: The NetBird server's name (or the adopted name), typed }
+    NBStandbyTakeoverRequest:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: string, description: The NetBird server's name, typed }
+        acceptVersion: { type: boolean, description: Go on although the VPS runs a newer NetBird }
+        skipFinalSync: { type: boolean, description: "Don't try a last copy first" }
+        acceptVpsAlive: { type: boolean, description: "Take over although the VPS still answers (its server is stopped first)" }
+    NBStandbyHandbackRequest:
+      type: object
+      required: [confirm, acceptSplitBrain]
+      properties:
+        confirm: { type: string, description: The NetBird server's name, typed }
+        acceptSplitBrain: { type: boolean, description: "The standby's state replaces whatever the VPS changed since the take-over" }
+        discard: { type: boolean, description: "Don't send the standby's state; the VPS keeps its own" }
+    HostnamesDesktop:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string }
     Health:
       type: object
       required: [status, uptimeSeconds]
@@ -6488,6 +7794,9 @@ components:
             Why a domain account's role isn't what its groups give: its groups
             couldn't be looked up for over 30 minutes, so it has user rights
             until the domain answers again. Absent otherwise.
+        twoFactor:
+          $ref: "#/components/schemas/TwoFactorStatus"
+          description: Two-factor sign-in state (on sign-in, /auth/me and the users list)
     CreateUserRequest:
       type: object
       required: [username, password]
@@ -6512,6 +7821,153 @@ components:
       additionalProperties: false
       properties:
         password: { type: string, minLength: 10 }
+    TwoFactorStatus:
+      type: object
+      required: [enabled, enabledAt, recoveryCodesLeft, required, graceUntil, locked, outsideFailures, setupCodeExpires, mustEnroll]
+      properties:
+        enabled: { type: boolean }
+        enabledAt: { type: [string, "null"], format: date-time }
+        recoveryCodesLeft: { type: integer }
+        required: { type: boolean, description: An administrator, who must have it }
+        graceUntil:
+          type: [string, "null"]
+          format: date-time
+          description: An administrator's deadline to set it up (starts at the first sign-in that asks)
+        locked: { type: boolean, description: "Too many wrong codes from outside: authenticator codes work only at home (recovery codes everywhere) until the password changes or an administrator resets" }
+        outsideFailures: { type: integer, description: Wrong authenticator codes from outside in the last 60 days (a right code doesn't reset them) }
+        notice: { type: string, description: What the person should know (wrong codes from outside); absent when there's nothing }
+        noticeAt: { type: [string, "null"], format: date-time }
+        setupCodeExpires: { type: [string, "null"], format: date-time, description: An administrator's setup code is waiting until then }
+        mustEnroll: { type: boolean, description: Past the grace period; nothing but enrollment works until it is set up }
+    LoginChallenge:
+      type: object
+      required: [challenge, step, expiresAt]
+      properties:
+        challenge: { type: string, description: Send it with the next step; good for 10 minutes and 5 tries }
+        step: { type: string, enum: [totp, enroll, setup_code] }
+        expiresAt: { type: string, format: date-time }
+    SecondFactorRequest:
+      type: object
+      required: [challenge, code]
+      additionalProperties: false
+      properties:
+        challenge: { type: string }
+        code: { type: string, description: A 6-digit authenticator code or a recovery code }
+    LoginEnrollRequest:
+      type: object
+      required: [challenge]
+      additionalProperties: false
+      properties:
+        challenge: { type: string }
+        setupCode: { type: string, description: Needed for a `setup_code` challenge }
+    QRCode:
+      type: object
+      required: [size, path]
+      properties:
+        size: { type: integer, description: Modules on a side, quiet zone included }
+        path: { type: string, description: "SVG path data of the dark modules (M, h, v, z and numbers only)" }
+    Enrollment:
+      type: object
+      required: [secret, uri, qr]
+      properties:
+        secret: { type: string, description: The key in base32, in groups of four, to type into an app }
+        uri: { type: string, description: "otpauth://totp/… (what the QR code holds)" }
+        qr: { $ref: "#/components/schemas/QRCode" }
+    EnrollResult:
+      type: object
+      required: [user, recoveryCodes]
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        recoveryCodes: { type: array, items: { type: string } }
+    RecoveryCodes:
+      type: object
+      required: [recoveryCodes]
+      properties:
+        recoveryCodes: { type: array, items: { type: string }, description: "10 single-use codes, shown once" }
+    CodeRequest:
+      type: object
+      required: [code]
+      additionalProperties: false
+      properties:
+        code: { type: string }
+    ReauthCodeRequest:
+      type: object
+      required: [password]
+      additionalProperties: false
+      properties:
+        password: { type: string }
+        code: { type: string, description: A current authenticator or recovery code (when one is set up) }
+    TwoFactorPolicy:
+      type: object
+      required: [adminGraceDays, outsideRequired, trustRouter, canChangeTrustRouter]
+      properties:
+        adminGraceDays: { type: integer, minimum: 0, maximum: 30 }
+        outsideRequired: { type: boolean, description: Always true — everyone needs a second factor from outside }
+        routerSeenAt:
+          type: [string, "null"]
+          format: date-time
+          description: "When a request last came from the router's own address (hairpin NAT, a port forward or a tunnel on the router look like this; kept across restarts): such requests count as outside unless trustRouter is on"
+        trustRouter: { $ref: "#/components/schemas/RouterTrust" }
+        canChangeTrustRouter: { type: boolean, description: "This request is from this server's own network (not the router's address, not outside), where trustRouter may be changed" }
+    RouterTrust:
+      type: object
+      required: [on, lapsed]
+      description: "\"This server is behind NAT: trust the router's address\" (off by default). Bound to the router's IP and MAC when turned on; lapses if the gateway changes. Even on, codes from the router have their own limit and count toward the 60-day outside budget, and own passwords stay refused for WebDAV, mail and calendars from it."
+      properties:
+        on: { type: boolean }
+        lapsed: { type: boolean, description: It was turned on for another router (IP or MAC changed) and doesn't apply }
+        ip: { type: string, description: The router it was turned on for }
+        since: { type: string, format: date-time }
+    TwoFactorPolicyRequest:
+      type: object
+      required: [adminGraceDays]
+      additionalProperties: false
+      properties:
+        adminGraceDays: { type: integer, minimum: 0, maximum: 30 }
+        trustRouter:
+          type: boolean
+          description: "Turn \"this server is behind NAT: trust the router's address\" on (for the router as it is now) or off. Only from this server's own network (403 not_from_home otherwise; hardyctl trust-router works too). Audited, and administrators are notified."
+
+    TwoFactorSetupCode:
+      type: object
+      required: [code, expiresAt]
+      properties:
+        code: { type: string }
+        expiresAt: { type: string, format: date-time }
+    ConfirmUsernameRequest:
+      type: object
+      required: [confirm]
+      additionalProperties: false
+      properties:
+        confirm: { type: string, description: The account's username }
+        revokeAppPasswords: { type: boolean, default: true, description: Also revoke the account's app passwords }
+    AppPasswordScope:
+      type: string
+      enum: [files, mail, calendars]
+    AppPassword:
+      type: object
+      required: [id, name, scopes, createdAt, lastUsedAt, lastUsedIp]
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        scopes: { type: array, items: { $ref: "#/components/schemas/AppPasswordScope" } }
+        createdAt: { type: string, format: date-time }
+        lastUsedAt: { type: [string, "null"], format: date-time }
+        lastUsedIp: { type: string }
+    AppPasswordRequest:
+      type: object
+      required: [name, scopes, password]
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 64 }
+        scopes: { type: array, items: { $ref: "#/components/schemas/AppPasswordScope" }, minItems: 1 }
+        password: { type: string, description: Your account password, checked again }
+    AppPasswordCreated:
+      type: object
+      required: [appPassword, password]
+      properties:
+        appPassword: { $ref: "#/components/schemas/AppPassword" }
+        password: { type: string, description: "xxxx-xxxx-xxxx-xxxx-xxxx, shown once" }
     JobState:
       type: string
       enum: [queued, running, succeeded, failed, cancelled]
@@ -8208,6 +9664,9 @@ components:
         clientId: { type: string }
         redirectUris: { type: array, items: { type: string } }
         why: { type: string, description: Why it's off while the settings ask for it }
+        passwordLoginOff:
+          type: boolean
+          description: "Immich itself said (its server features, at the last sync) that it offers sign-in with HardyOS and not its own passwords. Immich may be published without HardyOS sign-in in front only after a successful sync saw this (decision 441)."
     PhotosML:
       type: object
       required: [mode, reason, lent]
@@ -8369,6 +9828,7 @@ components:
         url: { type: string }
         proxied: { type: boolean, description: Through HardyOS's HTTPS window proxy (can be shown in a desktop window) }
         published: { type: boolean, description: "The app's own published address (https://<app>.<base>, through NetBird's reverse proxy), given when the desktop is used at its published address" }
+        hostname: { type: boolean, description: "The app's own hostname under the base domain on this server (Control Panel › Hostnames), given when the desktop is used at its hostname" }
     AppCatalogApp:
       type: object
       required: [id, name, version, summary, url, sha256, icon]
@@ -9082,6 +10542,8 @@ components:
         critical: { type: string }
         owner: { type: string }
         assigned: { type: array, items: { type: string } }
+        controller: { type: string, description: "PCI address of the USB controller it's on (a whole controller can go to a VM as a PCI device)" }
+        input: { type: boolean, description: "It has a keyboard, mouse or other HID interface" }
     GPUInfo:
       type: object
       required: [address, vendor, vendorName, model, vramBytes, sharedMemory, functions, driver, bootVga, iommuGroup, owner, users, assigned, problem, hints, vgpu]
@@ -9339,12 +10801,41 @@ components:
           required: [file]
           properties:
             file: { type: string, description: A disk image in the ISO library, copied into the disk when the VM is created }
+            digest: { type: string, description: "sha256:<hex> or sha512:<hex>, checked again while the image is read (set by the server for catalog images)" }
+            catalog: { type: string, description: "The verified image (set by the server): file is in the pool's root-only catalog store, not the ISOs shared folder" }
+        clone:
+          type: object
+          required: [template]
+          properties:
+            template: { type: string, description: "A saved template whose disk of the same name is copied into this one" }
     VMMedia:
       type: object
       required: [kind]
       properties:
-        kind: { type: string, enum: [iso, virtio, cloudinit, empty], description: "iso: a file from the ISO library; virtio: the VirtIO drivers disc; cloudinit: the generated cloud-init disc" }
+        kind: { type: string, enum: [iso, virtio, cloudinit, unattend, streaming, empty], description: "iso: a file from the ISO library; virtio: the VirtIO drivers disc; cloudinit: the generated cloud-init disc; unattend: the generated Windows answer disc (new VMs only); streaming: the generated game streaming disc (new VMs with streaming.sunshine only)" }
         iso: { type: string }
+    VMUnattend:
+      type: object
+      required: [user, locale, pending]
+      properties:
+        user: { type: string, description: The local administrator account Windows Setup makes }
+        computerName: { type: string, maxLength: 15 }
+        locale: { type: string, description: "Language and formats, like en-US" }
+        keyboard: { type: string, description: "Input locale (default the same as locale), or a layout like 0409:00000409" }
+        timeZone: { type: string, description: "A Windows time zone name, like W. Europe Standard Time" }
+        edition: { type: string, description: "The edition to install, as the ISO names it (Windows 11 Pro)" }
+        imageIndex: { type: integer, minimum: 0, maximum: 64, description: "Or its number in install.wim" }
+        hooks: { type: array, items: { type: string }, description: First-logon steps HardyOS ships (by name) }
+        pending: { type: boolean, description: "Windows isn't installed yet (set by the server); passed-through devices and USB hot-plug wait until it is" }
+        started: { type: boolean, description: "The install has started (the first start happened)" }
+    VMSchedule:
+      type: object
+      required: [hourly, daily, weekly, monthly]
+      properties:
+        hourly: { type: integer, minimum: 0, maximum: 48 }
+        daily: { type: integer, minimum: 0, maximum: 62 }
+        weekly: { type: integer, minimum: 0, maximum: 52 }
+        monthly: { type: integer, minimum: 0, maximum: 36 }
     VMNIC:
       type: object
       required: [mode, model]
@@ -9393,18 +10884,19 @@ components:
         boot: { type: array, items: { type: string, enum: [disk, cdrom, network] } }
         autostart: { $ref: "#/components/schemas/VMAutostart" }
         devices: { type: array, items: { $ref: "#/components/schemas/VMDevice" } }
-        streaming:
-          type: object
-          required: [remote]
-          properties:
-            remote: { type: boolean, description: Publish Sunshine through the VPN for play away from home }
+        streaming: { $ref: "#/components/schemas/VMStreaming" }
         labels: { type: object, additionalProperties: { type: string } }
         cpuModel: { type: string, description: "A named libvirt CPU model (the cluster's baseline) instead of the host's CPU; empty: host-passthrough" }
+        sound: { type: boolean, description: "An HD audio card, heard through the web console" }
+        clipboard: { type: boolean, description: "Copy and paste with the web console (the guest needs spice-vdagent)" }
+        unattend: { $ref: "#/components/schemas/VMUnattend" }
+        schedule: { $ref: "#/components/schemas/VMSchedule" }
+        fromTemplate: { type: string, description: The saved template the VM was made from }
     VM:
       allOf:
         - $ref: "#/components/schemas/VMSpec"
         - type: object
-          required: [dataset, state, cpuPercent, memoryUsedMB, addresses, passwordSet, restartNeeded, diskUsage]
+          required: [dataset, state, cpuPercent, memoryUsedMB, addresses, passwordSet, restartNeeded, diskUsage, liveUSB, snapshotsBehind]
           properties:
             dataset: { type: string }
             state: { type: string, enum: [running, stopped, paused, shutting-down, crashed, suspended, unknown] }
@@ -9416,6 +10908,8 @@ components:
             diskUsage: { type: object, additionalProperties: { type: integer, format: int64 }, description: Bytes each disk uses on the pool }
             backend: { type: string, enum: [local, cluster], description: "cluster: on the storage server (moves and HA from Cluster)" }
             generation: { type: integer, description: The cluster placement generation its storage was attached under }
+            liveUSB: { type: array, items: { type: string }, description: USB devices plugged into the running VM by hand }
+            snapshotsBehind: { type: boolean, description: "A scheduled snapshot has been waiting for a while (the VM is busy or snapshots fail)" }
     VMKeptDisk:
       type: object
       required: [dataset, vm, pool, bytes]
@@ -9475,6 +10969,12 @@ components:
         minDiskGB: { type: integer }
         images: { type: [array, "null"], items: { $ref: "#/components/schemas/VMImage" } }
         notes: { type: [array, "null"], items: { type: string } }
+        catalog: { type: string, description: The verified image (/vms/catalog) the template starts from }
+        unattend: { type: boolean, description: Windows can install by itself }
+        editions: { type: array, items: { type: string }, description: Usual edition names; the first is the default }
+        sound: { type: boolean }
+        clipboard: { type: boolean }
+        streaming: { type: boolean, description: "HardyOS can set up game streaming (Sunshine and a virtual display) during the unattended install" }
     VMArch:
       type: object
       required: [arch, machine]
@@ -9489,6 +10989,7 @@ components:
         vmport: { type: boolean }
         legacyBios: { type: boolean }
         pit: { type: boolean }
+        soundModel: { type: string }
     VMCapabilities:
       type: object
       required: [supported, problem, kvm, arch, cpus, memoryMB, pools, uefi, secureBoot, tpm, libvirt, bridge, library, virtio, devices, committedMB, security, spoofingFilter]
@@ -9516,9 +11017,10 @@ components:
       required: [id, kind, vm, file, progress, message, done, error, started, finished]
       properties:
         id: { type: string }
-        kind: { type: string, enum: [download, import] }
+        kind: { type: string, enum: [download, import, template, clone] }
         vm: { type: string }
         file: { type: string }
+        digest: { type: string, description: "A catalog image's verified checksum (algo:hex)" }
         progress: { type: number }
         message: { type: string }
         done: { type: boolean }
@@ -9558,6 +11060,7 @@ components:
         password: { type: string, description: The cloud-init user's password (never stored as typed) }
         start: { type: boolean }
         downloads: { type: array, items: { $ref: "#/components/schemas/VMDownload" }, maxItems: 4, description: Files to download into the ISO library first }
+        catalog: { type: string, description: "A verified image (/vms/catalog) for the first disk, fetched and checked by the server" }
         allowOvercommit: { type: boolean, description: "Create the VM even when its (thin) disks are bigger than the pool's free space" }
     VMUpdateRequest:
       type: object
@@ -9582,13 +11085,153 @@ components:
         confirm: { type: string, description: The deleted VM's name }
     VMSnapshot:
       type: object
-      required: [name, label, created, bytes, consistent]
+      required: [name, label, created, bytes, consistent, kind]
       properties:
         name: { type: string }
         label: { type: string }
         created: { type: string, format: date-time }
         bytes: { type: integer, format: int64 }
         consistent: { type: boolean, description: The guest's file systems were frozen first (or it was off) }
+        kind: { type: string, enum: [manual, hourly, daily, weekly, monthly] }
+    VMCatalogImage:
+      type: object
+      required: [id, name, kind, file, verified]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        kind: { type: string, enum: [disk, iso] }
+        file: { type: string, description: Its name in the ISO library }
+        verified: { type: string, description: How it's checked, in plain words }
+    VMUserTemplate:
+      type: object
+      required: [id, name, description, pool, created, from, spec, bytes]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        pool: { type: string }
+        created: { type: string, format: date-time }
+        from: { type: string, description: The VM it was made from }
+        spec: { $ref: "#/components/schemas/VMSpec" }
+        bytes: { type: integer, format: int64 }
+    VMMakeTemplateRequest:
+      type: object
+      required: [templateId, name]
+      properties:
+        templateId: { type: string, description: "Short name: 2-32 lowercase letters, digits and dashes" }
+        name: { type: string, maxLength: 64 }
+        description: { type: string }
+    VMTemplateDeleteRequest:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: string, description: "The template's name or display name" }
+    VMScheduleRequest:
+      type: object
+      required: [schedule]
+      properties:
+        schedule: { $ref: "#/components/schemas/VMSchedule" }
+        confirm: { type: string, description: "The VM's name, needed (400 confirm_required otherwise) when the counts delete automatic snapshots it has now" }
+    VMStreaming:
+      type: object
+      description: "Game streaming (decisions 400-409). Root sets everything but sunshine when the VM is made; updates keep it; remote changes only with PUT /vms/{id}/streaming/remote."
+      required: [remote]
+      properties:
+        remote: { type: boolean, description: "Sunshine's streaming ports are published to NetBird peers" }
+        sunshine: { type: boolean, description: "HardyOS installs and sets up Sunshine and a virtual display at the first sign-in (with an unattended install)" }
+        user: { type: string, description: "The Sunshine web UI account HardyOS made" }
+        certSHA256: { type: string, description: "SHA-256 of the certificate HardyOS made for the VM's Sunshine (pinned)" }
+        peers: { type: array, items: { type: string }, description: "NetBird devices (addresses) the streaming ports are forwarded from; none until chosen" }
+        webUIFrom: { type: string, description: "The server's home network address the VM's firewall lets reach Sunshine's web UI" }
+    VMStreamingStatus:
+      type: object
+      required: [setUp, installPending, running, hasGPU, address, reachable, user, accountKept, devices, waiting, remote, forwarding, ports, peers, netbirdPeers, netbirdKernel]
+      properties:
+        setUp: { type: boolean, description: HardyOS set Sunshine up in this VM }
+        installPending: { type: boolean }
+        running: { type: boolean }
+        hasGPU: { type: boolean }
+        address: { type: string, description: "The VM's verified address on the home network" }
+        reachable: { type: boolean, description: "Sunshine answered with its pinned certificate" }
+        problem: { type: string }
+        user: { type: string }
+        accountKept: { type: boolean, description: HardyOS has the Sunshine password (sealed) }
+        revealedAt: { type: string }
+        devices: { type: array, items: { $ref: "#/components/schemas/VMStreamingDevice" } }
+        waiting: { type: array, items: { $ref: "#/components/schemas/VMStreamingPending" } }
+        peers: { type: array, items: { type: string }, description: "The NetBird devices streaming is forwarded from" }
+        netbirdPeers: { type: array, items: { $ref: "#/components/schemas/VMStreamingNetBirdPeer" }, description: "NetBird devices this server sees, to choose from" }
+        netbirdKernel: { type: boolean, description: "NetBird runs on kernel WireGuard: its access policies don't cover the forwarded ports" }
+        bridgeAddress: { type: string, description: "This server's home network address (what Sunshine sees for devices forwarded from NetBird)" }
+        remote: { type: boolean }
+        forwarding: { type: boolean, description: "The NetBird forwarding rules are in place now" }
+        netbirdAddress: { type: string, description: "This server's NetBird address: add it in Moonlight away from home" }
+        ports:
+          type: object
+          required: [tcp, udp]
+          properties:
+            tcp: { type: array, items: { type: integer } }
+            udp: { type: array, items: { type: integer } }
+    VMStreamingDevice:
+      type: object
+      required: [name, uuid, enabled]
+      properties:
+        name: { type: string }
+        uuid: { type: string }
+        enabled: { type: boolean }
+    VMStreamingPending:
+      type: object
+      required: [id, name, address, viaNetBird]
+      properties:
+        id: { type: string, description: "Sunshine's pairing id (32 hex digits)" }
+        name: { type: string }
+        address: { type: string }
+        viaNetBird: { type: boolean, description: "It came through the NetBird forwarding, so HardyOS can't tell which device it is; pairing needs confirmRemote" }
+    VMStreamingNetBirdPeer:
+      type: object
+      required: [ip, name, connected, proxy]
+      properties:
+        ip: { type: string }
+        name: { type: string }
+        connected: { type: boolean }
+        proxy: { type: boolean, description: "NetBird's reverse proxy came from this address; it can't be chosen" }
+    VMStreamingRevealRequest:
+      type: object
+      required: [password]
+      properties:
+        password: { type: string, description: "Your own HardyOS password, asked again" }
+    VMStreamingAccount:
+      type: object
+      required: [user, password]
+      properties:
+        user: { type: string }
+        password: { type: string }
+    VMStreamingPairRequest:
+      type: object
+      required: [pairingId, pin, name]
+      properties:
+        pairingId: { type: string, pattern: "^[0-9a-f]{32}$" }
+        pin: { type: string, pattern: "^[0-9]{4}$", description: "The 4 digits Moonlight shows (kept out of the job's parameters)" }
+        name: { type: string, maxLength: 64 }
+        confirmRemote: { type: boolean, description: "Pair a device that came through NetBird (HardyOS can't tell it apart)" }
+    VMStreamingUnpairRequest:
+      type: object
+      required: [uuid]
+      properties:
+        uuid: { type: string }
+    VMStreamingRemoteRequest:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean }
+        peers: { type: array, items: { type: string }, maxItems: 32, description: "The NetBird devices (addresses) to forward from; at least one when enabled" }
+    VMUSBRequest:
+      type: object
+      required: [device]
+      properties:
+        device: { type: string, description: "vendor:product, like 046d:c52b" }
+        persist: { type: boolean, description: "Also add it to (or remove it from) the VM's devices for its next start" }
+        allowInput: { type: boolean, description: "Confirms giving a keyboard or mouse to the VM (refused otherwise)" }
     VMSnapshotDeleteRequest:
       type: object
       required: [confirm]
@@ -9632,8 +11275,8 @@ components:
       type: object
       required: [kind]
       properties:
-        kind: { type: string, enum: [share, app, vm, system] }
-        id: { type: string, description: The shared folder's, app's or VM's id (none for system) }
+        kind: { type: string, enum: [share, app, vm, system, mail] }
+        id: { type: string, description: "The shared folder's, app's or VM's id (none for system and mail)" }
     BackupSchedule:
       type: object
       required: [frequency]
@@ -9770,9 +11413,10 @@ components:
       type: object
       required: [item, snapshot, time, files, bytes]
       properties:
-        item: { type: string, description: "share:<id>, app:<id>, vm:<id> or system" }
+        item: { type: string, description: "share:<id>, app:<id>, vm:<id>, system or mail" }
         snapshot: { type: string, description: The snapshot to browse and restore }
         disks: { type: object, additionalProperties: { type: string } }
+        webmail: { type: string, description: "mail: the webmail part (Roundcube's data), restored with everything" }
         time: { type: string, format: date-time }
         files: { type: integer, format: int64 }
         bytes: { type: integer, format: int64 }
@@ -9809,9 +11453,10 @@ components:
         target: { type: string }
         snapshot: { type: string }
         paths: { type: array, items: { type: string }, description: Inside the item; none = all }
-        mode: { type: string, enum: [copy, in_place, rollback] }
+        mode: { type: string, enum: [copy, in_place, rollback, mail] }
         folder: { type: string, description: "copy: the new folder's name" }
         confirm: { type: string, description: "rollback: the shared folder's, app's or VM's name (settings: \"settings\")" }
+        mail: { $ref: "#/components/schemas/MailRestoreArgs" }
     BackupRebuildRequest:
       type: object
       required: [target, run, pool, confirm]
@@ -9857,11 +11502,56 @@ components:
         hostname: { type: string }
         items: { type: array, items: { type: string } }
         target: { type: string }
+    MailRestoreArgs:
+      type: object
+      description: >-
+        What of the mail item to restore (mode mail; replication: kind mail).
+        Mailboxes are matched by storage key: key is the version's mailbox,
+        into the one it goes into here (default the same; another needs that
+        mailbox's address typed in confirm).
+      required: [scope]
+      properties:
+        scope: { type: string, enum: [mailbox, domain, calendars, all] }
+        key: { type: string, description: "mailbox, calendars: the version's mailbox key" }
+        into: { type: string, description: "mailbox, calendars: the mailbox key here" }
+        domain: { type: string, description: "domain: the domain" }
+        mode: { type: string, enum: [copy, overwrite], description: "copy: a new folder \"Restored <date>\" (calendars: new collections); overwrite: replaces what's there (all: always)" }
+        confirm: { type: string, description: "overwrite: the mailbox's address (domain: the domain); all: \"mail\"" }
+    MailRestoreResult:
+      type: object
+      required: [scope, mailboxes, messages, collections, bytes, dkim, bayes, notes]
+      properties:
+        scope: { type: string }
+        mailboxes: { type: integer }
+        messages: { type: integer }
+        collections: { type: integer }
+        bytes: { type: integer, format: int64 }
+        folder: { type: string, description: The new folder (copy) }
+        safety: { type: string, description: The snapshot of <pool>/mail taken first }
+        dkim: { type: array, items: { type: string } }
+        bayes: { type: boolean }
+        notes: { type: array, items: { type: string } }
+    BackupMailContents:
+      type: object
+      required: [hostname, domains, mailboxes, webmail]
+      properties:
+        hostname: { type: string }
+        domains: { type: array, items: { type: string } }
+        mailboxes:
+          type: array
+          items:
+            type: object
+            required: [key, address]
+            properties:
+              key: { type: string }
+              address: { type: string }
+        webmail: { type: boolean, description: "The version has Roundcube's data" }
+        freeBytes: { type: integer, format: int64, description: "Free space on the mail storage now (a restore needs about the version's size; it's refused when clearly too little)" }
     # ---- end of cloud backup API schemas ----
     # ---- replication API schemas ----
     ReplicationKind:
       type: string
-      enum: [share, app, vm]
+      enum: [share, app, vm, mail]
     ReplicationItem:
       type: object
       required: [kind, id]
@@ -9896,6 +11586,7 @@ components:
         name: { type: string }
         targetId: { type: string }
         items: { type: array, items: { $ref: "#/components/schemas/ReplicationItem" } }
+        mailAuto: { type: string, enum: ["", pending, added], description: "pending: Mail is added once the other server accepts mail replicas; added: it was (shown until the task is changed)" }
         intervalMinutes: { type: integer, minimum: 5, maximum: 10080 }
         bandwidthKBps: { type: integer, minimum: 0, description: KiB per second; 0 for no limit }
         keepLocal: { type: integer, minimum: 1 }
@@ -9991,6 +11682,7 @@ components:
         newId: { type: string, description: "Shared folders: the new folder's id" }
         name: { type: string, description: "Shared folders: the new folder's name" }
         confirm: { type: boolean }
+        mail: { $ref: "#/components/schemas/MailRestoreArgs" }
     ReplicationRun:
       type: object
       required: [id, taskId, jobId, kind, startedAt, finishedAt, state, bytes, message]

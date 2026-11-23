@@ -250,13 +250,15 @@ func RegisterAppJobs(m *jobs.Manager, pc *priv.Client, store *appstore.Store) {
 		if err != nil {
 			return nil, err
 		}
-		jc.Progress(2, "Taking a snapshot of "+p.Name+" first")
-		ctx, cancel := context.WithTimeout(jc, 2*time.Minute)
 		var snap priv.AppSnapshotResult
-		err = pc.Call(ctx, priv.OpAppsSnapshot, apps.SnapshotArgs{ID: p.ID, Reason: "update"}, &snap)
-		cancel()
-		if err != nil {
-			return nil, fmt.Errorf("couldn't take a snapshot before updating, so nothing was changed: %w", err)
+		if !apps.Excluded(p.ID) {
+			jc.Progress(2, "Taking a snapshot of "+p.Name+" first")
+			ctx, cancel := context.WithTimeout(jc, 2*time.Minute)
+			err = pc.Call(ctx, priv.OpAppsSnapshot, apps.SnapshotArgs{ID: p.ID, Reason: "update"}, &snap)
+			cancel()
+			if err != nil {
+				return nil, fmt.Errorf("couldn't take a snapshot before updating, so nothing was changed: %w", err)
+			}
 		}
 		failed := func(err error) error {
 			return &jobs.FailedWith{
@@ -265,7 +267,7 @@ func RegisterAppJobs(m *jobs.Manager, pc *priv.Client, store *appstore.Store) {
 			}
 		}
 		jc.Progress(6, "Checking the new package")
-		ctx, cancel = context.WithTimeout(jc, 5*time.Minute)
+		ctx, cancel := context.WithTimeout(jc, 5*time.Minute)
 		var prep apps.PrepareResult
 		// No host, ports, settings, shares or limits: the update keeps the
 		// app's own. Grants only when an administrator allowed new ones.

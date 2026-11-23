@@ -355,6 +355,9 @@ type AppOpen struct {
 	// Published: URL is the app's own published address
 	// (https://<app>.<base>, through NetBird's reverse proxy).
 	Published bool `json:"published,omitempty"`
+	// Hostname: URL is the app's own hostname under the base domain
+	// (https://<app>.<base> on this server, Control Panel › Hostnames).
+	Hostname bool `json:"hostname,omitempty"`
 }
 
 func (s *Server) handleAppOpen(w http.ResponseWriter, r *http.Request, u *auth.User) {
@@ -375,6 +378,11 @@ func (s *Server) handleAppOpen(w http.ResponseWriter, r *http.Request, u *auth.U
 	}
 	if a.Web == nil {
 		writeError(w, http.StatusBadRequest, "invalid", a.Name+" has no web page")
+		return
+	}
+	// Used by its hostname, the desktop opens apps at theirs (decision 456).
+	if u, ok := s.hosts.appOpenURL(r, *a); ok {
+		writeJSON(w, http.StatusOK, AppOpen{URL: u, Proxied: true, Hostname: true})
 		return
 	}
 	// Through the desktop's published address, published apps open at

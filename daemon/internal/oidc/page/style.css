@@ -92,3 +92,8 @@ input:focus-visible, .btn:focus-visible, a:focus-visible {
 .scopes { padding-left: 20px; margin: 8px 0 14px; }
 .scopes li { margin: 4px 0; }
 @media (prefers-reduced-transparency: reduce) { .card { backdrop-filter: none; background: #111520; } }
+.qr { display: flex; justify-content: center; margin: 8px 0 12px; }
+.qr svg { border-radius: 10px; background: #fff; padding: 6px; max-width: 100%; height: auto; }
+.secret { text-align: center; letter-spacing: 0.06em; word-break: break-all; user-select: all; margin: 4px 0 12px; }
+.codes { columns: 2; padding-left: 24px; margin: 8px 0 14px; font-size: 15px; }
+.codes li { margin: 4px 0; }

@@ -1,0 +1,34 @@
+{
+  "format": 1,
+  "id": "netbird-standby",
+  "name": "NetBird Standby",
+  "version": "0.83.1",
+  "summary": "A stopped copy of your NetBird server that HardyOS can take over with one click.",
+  "description": "A standby for the self-hosted NetBird server on your VPS: NetBird's combined server (management, signal, relay and STUN), its dashboard and Traefik for HTTPS. HardyOS keeps it stopped and copies the VPS's NetBird state to itself every few minutes. If the VPS goes down, Control Panel › NetBird Standby starts it with the latest copy and points your NetBird name at this server.\n\nInstall and manage it from Control Panel › NetBird Standby, not from here: starting it by hand does nothing useful (it has no state until a take-over), and nothing reaches it from outside until HardyOS takes over. Your router must forward TCP 80, TCP 443 and UDP 3478 to this server's ports 44620, 44621 and 44622 (see the Control Panel page).",
+  "publisher": "NetBird GmbH (packaged by HardyOS)",
+  "website": "https://docs.netbird.io/selfhosted/selfhosted-quickstart",
+  "icon": "icon.svg",
+  "arch": ["amd64", "arm64"],
+  "minMemoryMB": 512,
+  "ports": [
+    { "name": "HTTP", "label": "HTTP (router forwards TCP 80 here)", "default": 44620 },
+    { "name": "HTTPS", "label": "HTTPS, gRPC and relay (router forwards TCP 443 here)", "default": 44621 },
+    { "name": "STUN", "label": "STUN (router forwards UDP 3478 here)", "default": 44622, "protocol": "udp" }
+  ],
+  "settings": [
+    {
+      "env": "NB_DOMAIN",
+      "label": "NetBird server name",
+      "help": "Set by Control Panel › NetBird Standby: the NetBird server's own name, for example vpn.example.net.",
+      "type": "text",
+      "required": true,
+      "managed": true
+    }
+  ],
+  "folders": [
+    { "path": "data", "owner": "0:0", "mode": "0700" },
+    { "path": "config", "owner": "0:0", "mode": "0700" },
+    { "path": "traefik", "owner": "0:0", "mode": "0700" },
+    { "path": "letsencrypt", "owner": "0:0", "mode": "0700" }
+  ]
+}

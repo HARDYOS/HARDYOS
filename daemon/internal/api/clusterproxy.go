@@ -378,6 +378,12 @@ func (c *clusterAPI) samePerson(r *http.Request, token string, u *auth.User, p c
 	if err != nil {
 		return false
 	}
+	// The entry node's two-factor rules still hold for the session (an
+	// administrator's grace period can end while a console is open;
+	// decision 475): a relayed person has met them here, never there.
+	if c.s.sessionGate(r, info, cur) != gateOK {
+		return false
+	}
 	p2, err := c.principal(r.Context(), cur)
 	return err == nil && p2 == p
 }

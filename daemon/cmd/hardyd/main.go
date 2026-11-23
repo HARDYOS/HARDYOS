@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -30,9 +29,11 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/cluster/ha"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/files"
+	"github.com/hardyos/hardyos/daemon/internal/hostnames"
 	"github.com/hardyos/hardyos/daemon/internal/install"
 	"github.com/hardyos/hardyos/daemon/internal/installer"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/mail"
 	"github.com/hardyos/hardyos/daemon/internal/mail/manage"
 	"github.com/hardyos/hardyos/daemon/internal/metrics"
 	"github.com/hardyos/hardyos/daemon/internal/monitor"
@@ -262,13 +263,31 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 	}
 	defer func() { cancelJobs(); manager.Wait() }()
 
+	// The desktop's certificate: self-signed, plus Let's Encrypt's
+	// *.<base> for the hostnames once there is one (decision 455).
+	var certs *tlscert.Store
+	if httpsAddr != "" {
+		cert, err := tlscert.LoadOrCreate(tlsDir)
+		if err != nil {
+			return fmt.Errorf("tls certificate: %w", err)
+		}
+		certs = tlscert.NewStore(cert)
+	}
+	// Per-app hostnames (Control Panel › Hostnames): the Cloudflare token
+	// is hardyd-priv's; hardyd speaks ACME and serves the certificate.
+	var hosts *hostnames.Manager
+	if !live && certs != nil {
+		hosts = &hostnames.Manager{Store: &hostnames.Store{DB: db, Keys: secrets}, DNS: hostnames.PrivDNS{Priv: pc},
+			Certs: certs, Dir: tlsDir, Resolver: mail.PublicResolver()}
+	}
+
 	handler := api.New(api.Config{
 		DB: db, Jobs: manager, Events: broker, Priv: pc, Logger: log,
 		Storage: stor, Notify: notifications, Metrics: collector,
 		WebRoot: webRoot, Insecure: httpsAddr == "", Installer: inst, Updates: upd, Backups: bk, CloudBackups: cloud,
 		Apps: appStore, Files: fileAccess, TrustedProxies: trustedProxies, Secrets: secrets, Remote: remote,
 		Replication: repl,
-		Alerts:      alerts, Monitor: mon, Mail: mailSvc, ClusterHA: clusterHA,
+		Alerts:      alerts, Monitor: mon, Mail: mailSvc, ClusterHA: clusterHA, Hostnames: hosts,
 	})
 
 	clusterCore.attach(handler)    // /cluster routes and the per-node API proxy (cluster_a.go)
@@ -294,6 +313,8 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		}
 		go handler.RunPhotos(ctx, api.PhotosOptions{}) // Photos: keeps the Immich app set up
 		go clusterHA.Start(ctx)                        // cluster: reconciler, fence agent, HA coordinator, image pre-pull
+		go handler.RunHostnames(ctx)                   // per-app hostnames: state and certificate renewals
+		go handler.RunNetBirdStandby(ctx)              // NetBird standby: sync schedule and stale alerts
 	}
 
 	var servers []*http.Server
@@ -316,10 +337,6 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 	}
 
 	if httpsAddr != "" {
-		cert, err := tlscert.LoadOrCreate(tlsDir)
-		if err != nil {
-			return fmt.Errorf("tls certificate: %w", err)
-		}
 		if !live {
 			// App windows: an HTTPS proxy per app with a web page (44300 + n).
 			// They listen where the desktop listens (-https's host), like the
@@ -327,26 +344,26 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 			host, p, _ := net.SplitHostPort(httpsAddr)
 			port, _ := strconv.Atoi(p)
 			go handler.RunAppProxy(ctx, api.AppProxyOptions{
-				TLS:         &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+				TLS:         certs.TLSConfig(),
 				DesktopPort: port,
 				ListenHost:  host,
 			})
 			// The office suite: the editor's own origin (44250) and the
 			// listener the Document Server container calls back on.
 			go handler.RunOffice(ctx, api.OfficeOptions{
-				TLS:        &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+				TLS:        certs.TLSConfig(),
 				ListenHost: host,
 			})
 			// The app gateway on the NetBird address, for NetBird's reverse
 			// proxy, and the publishing sync.
 			go handler.RunRemote(ctx, api.RemoteOptions{
-				TLS: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+				TLS: certs.TLSConfig(),
 			})
 		}
 		serve(&http.Server{
 			Addr:              httpsAddr,
 			Handler:           handler,
-			TLSConfig:         &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+			TLSConfig:         certs.TLSConfig(),
 			ReadHeaderTimeout: 10 * time.Second,
 			IdleTimeout:       120 * time.Second,
 		}, true)

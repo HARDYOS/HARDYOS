@@ -150,6 +150,10 @@ type proxySession struct {
 	// through HardyOS's sign-in provider (sso: no desktop session behind it).
 	gateway bool
 	sso     bool
+	// host: an app hostname's session (hostnames.go), bound through the
+	// desktop host to a desktop session; never good on a window proxy
+	// port or the gateway.
+	host bool
 	// grant is the provider's access token id (jti) the sign-in got: the
 	// session lasts while its grant does (revoked by an administrator,
 	// signing out of HardyOS sign-in, a new password, the account replaced).
@@ -422,7 +426,7 @@ func (p *appProxy) reconcile(ctx context.Context) {
 	}
 	var conns []*trackedConn
 	for k, ss := range p.sessions {
-		if now.After(ss.expires) || !want[ss.appID] {
+		if now.After(ss.expires) || (!want[ss.appID] && !(ss.host && ss.appID == hostOfficeID)) {
 			conns = append(conns, p.endLocked(k, ss)...)
 		}
 	}
@@ -543,6 +547,10 @@ func (p *appProxy) handler(l *proxyListener) http.Handler {
 		rp.Transport = l.remote
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if p.s.hosts.redirectOld(w, r, l.appID) {
+			// Reached by a name under the base: the app's own hostname.
+			return
+		}
 		if why := p.crossAppRequest(r); why != "" {
 			proxyPage(w, http.StatusForbidden, "Blocked a request from another page", why)
 			return
@@ -727,7 +735,7 @@ func (p *appProxy) session(r *http.Request, l *proxyListener) (*proxySession, st
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	ss := p.sessions[c.Value]
-	if ss == nil || ss.gateway || ss.appID != l.appID || time.Now().After(ss.expires) || !sameSecret(desk, ss.desktopToken) {
+	if ss == nil || ss.gateway || ss.host || ss.appID != l.appID || time.Now().After(ss.expires) || !sameSecret(desk, ss.desktopToken) {
 		return nil, ""
 	}
 	return ss, c.Value
@@ -777,12 +785,14 @@ func (p *appProxy) verify(r *http.Request, ss *proxySession) bool {
 		return false
 	}
 	u, err := s.sessionUser(r, ss.desktopToken, info.UserID)
-	if err != nil {
+	// The sweep's request has no client address (RemoteAddr empty).
+	if err != nil || s.sessionGateAt(r, info, u, r.RemoteAddr != "" && s.outside(r)) != gateOK {
 		return false
 	}
 	// A remote app's access list is its owner's, checked there on every
-	// relayed request.
-	if !isRemoteWindow(ss.appID) {
+	// relayed request. The office editor's host session has no access
+	// list: what a person may open is checked per file.
+	if !isRemoteWindow(ss.appID) && !(ss.host && ss.appID == hostOfficeID) {
 		may, err := s.mayUse(ctx, ss.desktopToken, u, ss.appID)
 		if err != nil || !may {
 			return false

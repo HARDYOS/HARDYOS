@@ -1,27 +1,44 @@
-import type { Job, VMCapabilities, VMDevice, VMLibraryFile, VMTemplate } from "@hardy/api-client";
+import type { Job, VMCapabilities, VMCatalogImage, VMDevice, VMLibraryFile, VMTemplate, VMUserTemplate } from "@hardy/api-client";
 import { useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 import { api, errorMessage, unwrap } from "../../api";
 import { bytes } from "../../format";
-import { CheckIcon, CpuIcon, DiscIcon, DownloadIcon, ExternalIcon, FolderIcon, MemoryIcon, NetworkIcon, PlusIcon, StorageIcon, TrashIcon } from "../../icons";
+import {
+  CheckIcon,
+  CpuIcon,
+  DiscIcon,
+  DownloadIcon,
+  ExternalIcon,
+  FolderIcon,
+  MemoryIcon,
+  NetworkIcon,
+  PlusIcon,
+  ShieldIcon,
+  StorageIcon,
+  TemplateIcon,
+  TrashIcon,
+} from "../../icons";
 import { Alert, Button, Card, EmptyState, ErrorBox, Field, IconButton, Loading, Select, TextInput, Toggle } from "../../ui";
 import { JobProgress } from "../shared";
 import { DevicesStep } from "./DevicesStep";
 import { templateGlyph } from "./parts";
-import { diskSize, memory, useCapabilities, useLibrary, useTemplates, useVMs, vmKeys } from "./vmApi";
+import { diskSize, memory, useCapabilities, useCatalog, useLibrary, useTemplates, useUserTemplates, useVMs, vmKeys } from "./vmApi";
 import {
   STEPS,
   type StepId,
   type WizardState,
   applyPreset,
   chosenFile,
+  fromUserTemplate,
   idFromName,
   initialState,
   installsFromISO,
   isISO,
   isImage,
+  setsUpStreaming,
   stepProblems,
   toRequest,
+  usesCloudInit,
 } from "./wizard";
 
 const GROUPS: { id: VMTemplate["group"]; label: string }[] = [
@@ -32,6 +49,9 @@ const GROUPS: { id: VMTemplate["group"]; label: string }[] = [
   { id: "other", label: "Something else" },
 ];
 
+/** The Sunshine release HardyOS pins (daemon/internal/vms/streaming.go). */
+const SUNSHINE_LABEL = "LizardByte's official installer";
+
 const MEMORY_STEPS = [512, 1024, 2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072];
 
 /** The New VM wizard: seven short steps with sensible choices made. */
@@ -39,6 +59,8 @@ export function NewVM({ onCancel, onCreated, openFiles }: { onCancel: () => void
   const templates = useTemplates();
   const caps = useCapabilities();
   const library = useLibrary();
+  const saved = useUserTemplates();
+  const catalog = useCatalog();
   const list = useVMs();
   const [state, setState] = useState<WizardState | null>(null);
   const [step, setStep] = useState<StepId>("template");
@@ -124,19 +146,37 @@ export function NewVM({ onCancel, onCreated, openFiles }: { onCancel: () => void
         {step === "template" && (
           <TemplateStep
             templates={all}
-            selected={state?.templateId}
+            saved={saved.data ?? []}
+            selected={state?.userTemplate || state?.templateId}
             onPick={(tp) => {
               setState(initialState(tp, c, c.arch.arch));
+              setStep("resources");
+            }}
+            onPickSaved={(ut) => {
+              const base = all.find((x) => x.id === ut.spec.template);
+              if (!base) return;
+              setState(fromUserTemplate(ut, base, c, c.arch.arch));
               setStep("resources");
             }}
           />
         )}
         {state && t && step === "resources" && <ResourcesStep s={state} t={t} caps={c} set={set} setState={setState} />}
         {state && t && step === "disks" && <DisksStep s={state} t={t} caps={c} set={set} />}
-        {state && t && step === "media" && <MediaStep s={state} t={t} arch={c.arch.arch} files={library.data?.files ?? []} set={set} openFiles={openFiles} />}
+        {state && t && step === "media" && (
+          <MediaStep
+            s={state}
+            t={t}
+            arch={c.arch.arch}
+            files={library.data?.files ?? []}
+            catalog={catalog.data ?? []}
+            saved={(saved.data ?? []).find((x) => x.id === state.userTemplate)}
+            set={set}
+            openFiles={openFiles}
+          />
+        )}
         {state && t && step === "network" && <NetworkStep s={state} caps={c} set={set} />}
         {state && t && step === "devices" && <DevicesStep vm={state.id} gpu={t.gpu} devices={state.devices} onChange={(devices: VMDevice[]) => set({ devices })} />}
-        {state && t && step === "review" && <ReviewStep s={state} t={t} caps={c} set={set} />}
+        {state && t && step === "review" && <ReviewStep s={state} t={t} caps={c} catalog={catalog.data ?? []} set={set} />}
         {error && (
           <Alert tone="bad" title="The VM couldn't be created">
             {error}
@@ -182,10 +222,40 @@ function StepHead({ title, lead }: { title: string; lead?: ReactNode }) {
   );
 }
 
-function TemplateStep({ templates, selected, onPick }: { templates: VMTemplate[]; selected?: string; onPick: (t: VMTemplate) => void }) {
+function TemplateStep({
+  templates,
+  saved,
+  selected,
+  onPick,
+  onPickSaved,
+}: {
+  templates: VMTemplate[];
+  saved: VMUserTemplate[];
+  selected?: string;
+  onPick: (t: VMTemplate) => void;
+  onPickSaved: (t: VMUserTemplate) => void;
+}) {
   return (
     <>
       <StepHead title="What would you like to run?" lead="Pick a starting point. Everything can be changed later." />
+      {saved.length > 0 && (
+        <section className="stack" style={{ gap: 10 }}>
+          <div className="tmpl-group">Your templates</div>
+          <div className="tmpl-grid">
+            {saved.map((ut) => (
+              <button key={ut.id} type="button" className={`choice ${selected === ut.id ? "is-selected" : ""}`} onClick={() => onPickSaved(ut)} aria-label={ut.name}>
+                <span className="vm-glyph">
+                  <TemplateIcon size={20} />
+                </span>
+                <span className="stack" style={{ gap: 3 }}>
+                  <span className="choice__title">{ut.name}</span>
+                  <span className="choice__desc">{ut.description || `Made from ${ut.from} · on ${ut.pool}`}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
       {GROUPS.map((g) => {
         const items = templates.filter((t) => t.group === g.id);
         if (items.length === 0) return null;
@@ -450,6 +520,8 @@ function MediaStep({
   t,
   arch,
   files,
+  catalog,
+  saved,
   set,
   openFiles,
 }: {
@@ -457,6 +529,8 @@ function MediaStep({
   t: VMTemplate;
   arch: string;
   files: VMLibraryFile[];
+  catalog: VMCatalogImage[];
+  saved?: VMUserTemplate;
   set: (p: Partial<WizardState>) => void;
   openFiles?: () => void;
 }) {
@@ -464,6 +538,24 @@ function MediaStep({
   const usable = files.filter((f) => (iso ? isISO(f.name) : isImage(f.name)));
   const suggestions = (t.images ?? []).filter((i) => (iso ? i.kind === "iso" : i.kind === "disk"));
   const file = chosenFile(s);
+  const image = catalog.find((c) => c.id === t.catalog);
+  if (s.source === "template") {
+    return (
+      <>
+        <StepHead title="From your template" lead="The template's disks are copied into the new VM; nothing to download." />
+        <Card>
+          <div className="row" style={{ gap: 10 }}>
+            <TemplateIcon size={20} />
+            <span className="stack" style={{ gap: 2 }}>
+              <strong>{saved?.name ?? s.userTemplate}</strong>
+              <span className="small muted">{saved ? `Made from ${saved.from}` : null}</span>
+            </span>
+          </div>
+        </Card>
+        {usesCloudInit(s, t) && <CloudInitCard s={s} set={set} />}
+      </>
+    );
+  }
   return (
     <>
       <StepHead
@@ -471,10 +563,17 @@ function MediaStep({
         lead={
           iso
             ? "The VM starts from this disc to install the system."
-            : "The image is copied into the system disk. Images come from the ISO library or a download link."
+            : t.catalog
+              ? "HardyOS downloads the official image, checks it against its publisher's checksums and copies it into the system disk."
+              : "The image is copied into the system disk. Images come from the ISO library or a download link."
         }
       />
       <div className="seg" role="group" aria-label="Where it comes from">
+        {t.catalog && (
+          <button type="button" aria-pressed={s.source === "catalog"} onClick={() => set({ source: "catalog" })}>
+            <ShieldIcon size={14} /> Verified official image
+          </button>
+        )}
         <button type="button" aria-pressed={s.source === "library"} onClick={() => set({ source: "library" })}>
           <FolderIcon size={14} /> From the ISO library
         </button>
@@ -482,7 +581,17 @@ function MediaStep({
           <DownloadIcon size={14} /> Download by link
         </button>
       </div>
-      {s.source === "library" ? (
+      {s.source === "catalog" ? (
+        <Card>
+          <div className="row" style={{ gap: 10 }}>
+            <ShieldIcon size={20} />
+            <span className="stack" style={{ gap: 2 }}>
+              <strong>{image?.name ?? t.name}</strong>
+              <span className="small muted">{image ? `${image.verified}. Kept in the ISO library as ${image.file} and reused while it's current.` : "Checked before it's used."}</span>
+            </span>
+          </div>
+        </Card>
+      ) : s.source === "library" ? (
         usable.length === 0 ? (
           <EmptyState
             icon={<DiscIcon size={28} />}
@@ -544,7 +653,8 @@ function MediaStep({
           </div>
         </div>
       )}
-      {t.virtio && (
+      {t.unattend && iso && <UnattendCard s={s} t={t} set={set} />}
+      {t.virtio && !(t.unattend && s.unattend) && (
         <Toggle
           label="Add the VirtIO drivers disc"
           description="Drivers for fast disks and networking in Windows. Downloaded once from Fedora and checked."
@@ -552,29 +662,88 @@ function MediaStep({
           onChange={(v) => set({ virtio: v })}
         />
       )}
-      {t.cloudInit && (
-        <Card title="Sign-in">
-          <div className="stack">
-            <div className="grid-2">
-              <Field label="User name">{(id) => <TextInput id={id} value={s.user} className="input mono" onChange={(e) => set({ user: e.target.value })} />}</Field>
-              <Field label="Password (optional)" hint="At least 8 characters. An SSH key is safer.">
-                {(id) => <TextInput id={id} type="password" autoComplete="new-password" value={s.password} onChange={(e) => set({ password: e.target.value })} />}
-              </Field>
-            </div>
-            <Field label="SSH public keys" hint="One per line, like ssh-ed25519 AAAA… you@laptop">
-              {(id) => (
-                <textarea id={id} className="input mono" rows={3} value={s.sshKeys} spellCheck={false} onChange={(e) => set({ sshKeys: e.target.value })} />
-              )}
-            </Field>
-          </div>
-        </Card>
-      )}
+      {t.cloudInit && <CloudInitCard s={s} set={set} />}
       {(t.notes ?? []).map((n) => (
         <div key={n} className="tip">
           <span>{n}</span>
         </div>
       ))}
     </>
+  );
+}
+
+function CloudInitCard({ s, set }: { s: WizardState; set: (p: Partial<WizardState>) => void }) {
+  return (
+    <Card title="Sign-in">
+      <div className="stack">
+        <div className="grid-2">
+          <Field label="User name">{(id) => <TextInput id={id} value={s.user} className="input mono" onChange={(e) => set({ user: e.target.value })} />}</Field>
+          <Field label="Password (optional)" hint="At least 8 characters. An SSH key is safer.">
+            {(id) => <TextInput id={id} type="password" autoComplete="new-password" value={s.password} onChange={(e) => set({ password: e.target.value })} />}
+          </Field>
+        </div>
+        <Field label="SSH public keys" hint="One per line, like ssh-ed25519 AAAA… you@laptop">
+          {(id) => <textarea id={id} className="input mono" rows={3} value={s.sshKeys} spellCheck={false} onChange={(e) => set({ sshKeys: e.target.value })} />}
+        </Field>
+        <Field label="Host name (optional)" hint="Lowercase letters, digits and dashes. Default: the VM's short name.">
+          {(id) => <TextInput id={id} className="input mono" value={s.hostname} spellCheck={false} onChange={(e) => set({ hostname: e.target.value.toLowerCase() })} />}
+        </Field>
+      </div>
+    </Card>
+  );
+}
+
+function UnattendCard({ s, t, set }: { s: WizardState; t: VMTemplate; set: (p: Partial<WizardState>) => void }) {
+  const listId = `editions-${t.id}`;
+  return (
+    <Card title="Windows setup">
+      <div className="stack">
+        <Toggle
+          label="Install by itself"
+          description="Setup runs without questions: it wipes the VM's new disk, loads the VirtIO drivers, makes your account and installs the guest tools. Devices you pass through join only once Windows is installed, so Setup can never see (or wipe) them. Your ISO, your licence."
+          checked={s.unattend}
+          onChange={(v) => set({ unattend: v, virtio: v || s.virtio })}
+        />
+        {s.unattend && (
+          <>
+            <div className="grid-2">
+              <Field label="Account name">{(id) => <TextInput id={id} value={s.user} autoComplete="off" onChange={(e) => set({ user: e.target.value })} />}</Field>
+              <Field label="Password" hint="At least 8 characters. Only on the setup disc, which is deleted when you take it out.">
+                {(id) => <TextInput id={id} type="password" autoComplete="new-password" value={s.password} onChange={(e) => set({ password: e.target.value })} />}
+              </Field>
+            </div>
+            <div className="grid-2">
+              <Field label="Edition" hint="As your ISO names it; leave empty for the first one.">
+                {(id) => (
+                  <>
+                    <TextInput id={id} list={listId} value={s.edition} onChange={(e) => set({ edition: e.target.value })} />
+                    <datalist id={listId}>
+                      {(t.editions ?? []).map((e) => (
+                        <option key={e} value={e} />
+                      ))}
+                    </datalist>
+                  </>
+                )}
+              </Field>
+              <Field label="Language and keyboard" hint="Like en-US or de-DE.">
+                {(id) => <TextInput id={id} className="input mono" value={s.locale} onChange={(e) => set({ locale: e.target.value })} />}
+              </Field>
+            </div>
+            <Field label="Time zone (optional)" hint="Windows' name, like W. Europe Standard Time or Pacific Standard Time.">
+              {(id) => <TextInput id={id} value={s.timeZone} onChange={(e) => set({ timeZone: e.target.value })} />}
+            </Field>
+            {t.streaming && (
+              <Toggle
+                label="Set up game streaming"
+                description={`At the first sign-in HardyOS installs Sunshine (${SUNSHINE_LABEL}) and a virtual display, so no dummy HDMI plug is needed, from its own checked copies; nothing is downloaded inside Windows. You install your graphics card's driver; then pair Moonlight on the VM's page.`}
+                checked={s.streaming}
+                onChange={(v) => set({ streaming: v })}
+              />
+            )}
+          </>
+        )}
+      </div>
+    </Card>
   );
 }
 
@@ -644,9 +813,14 @@ function NetworkStep({ s, caps, set }: { s: WizardState; caps: VMCapabilities; s
   );
 }
 
-function ReviewStep({ s, t, caps, set }: { s: WizardState; t: VMTemplate; caps: VMCapabilities; set: (p: Partial<WizardState>) => void }) {
-  const file = chosenFile(s);
-  const iso = installsFromISO(t);
+function ReviewStep({ s, t, caps, catalog, set }: { s: WizardState; t: VMTemplate; caps: VMCapabilities; catalog: VMCatalogImage[]; set: (p: Partial<WizardState>) => void }) {
+  const file =
+    s.source === "catalog"
+      ? `${catalog.find((c) => c.id === s.catalog)?.name ?? s.catalog} (verified, downloaded first)`
+      : s.source === "template"
+        ? `Copied from your template ${s.userTemplate}`
+        : chosenFile(s);
+  const iso = installsFromISO(t) && s.source !== "template";
   const nets = s.nics.map((n) => (n.mode === "bridge" ? "Home network" : n.mode === "nat" ? "Private (NAT)" : `VLAN ${n.vlan}`)).join(", ");
   const total = s.disks.reduce((a, d) => a + d.sizeGB, 0);
   const rows: [string, ReactNode][] = [
@@ -657,6 +831,8 @@ function ReviewStep({ s, t, caps, set }: { s: WizardState; t: VMTemplate; caps: 
     ["Firmware", `${s.firmware === "uefi" ? "UEFI" : "BIOS"}${s.secureBoot && s.firmware === "uefi" ? " · Secure Boot" : ""}${s.tpm ? " · TPM 2.0" : ""}`],
     ["Disks", `${s.disks.length} on ${s.pool}, ${diskSize(total)} in all (thin)`],
     [iso ? "Installer" : "Image", `${file || "none"}${s.source === "url" ? " (downloaded first)" : ""}`],
+    ...(iso && s.unattend && t.unattend ? ([["Windows setup", `By itself, as ${s.user}${s.edition ? ` · ${s.edition}` : ""}`]] as [string, ReactNode][]) : []),
+    ...(setsUpStreaming(s, t) ? ([["Game streaming", "Sunshine and a virtual display, set up by HardyOS"]] as [string, ReactNode][]) : []),
     ["Network", nets],
     ["Devices", s.devices.length === 0 ? "None" : s.devices.map((d) => `${d.kind.toUpperCase()} ${d.id}`).join(", ")],
   ];
@@ -676,6 +852,16 @@ function ReviewStep({ s, t, caps, set }: { s: WizardState; t: VMTemplate; caps: 
       <div className="stack">
         <Toggle label="Start it when it's ready" description={iso ? "Then open its screen to install the system." : undefined} checked={s.start} onChange={(v) => set({ start: v })} />
         <Toggle label="Start with the server" description="After a power cut or restart, the VM starts by itself." checked={s.autostart} onChange={(v) => set({ autostart: v })} />
+        <Toggle label="Sound" description="Heard in the VM's screen window." checked={s.sound} onChange={(v) => set({ sound: v })} />
+        <Toggle
+          label="Clipboard"
+          description="Copy and paste with the VM's screen; everyone with its screen open shares it (the guest needs spice-vdagent or the VirtIO guest tools)."
+          checked={s.clipboard}
+          onChange={(v) => set({ clipboard: v })}
+        />
+        {s.unattend && t.unattend && s.devices.length > 0 && (
+          <Alert tone="info">The devices you chose join the VM after Windows has installed itself (restart it then); until then Setup only sees the VM's own new disk.</Alert>
+        )}
       </div>
       {!caps.kvm && <Alert tone="warn">Hardware virtualization is off: the VM won't start until it's turned on in the server's BIOS.</Alert>}
     </>

@@ -96,6 +96,16 @@ export interface paths {
          *     401 codes: `bad_credentials` (wrong password or unknown name),
          *     `unknown_domain`, `account_disabled`, `account_locked`,
          *     `account_expired`, `account_unavailable`, `password_expired`.
+         *
+         *     Two-factor sign-in (decisions 440-449): when the password is right
+         *     but a second step is needed, the answer is 202 with a challenge:
+         *     `totp` (an authenticator or recovery code, `POST /auth/login/2fa`),
+         *     `enroll` (an administrator past the grace period at home sets one
+         *     up now, `POST /auth/login/enroll`), or `setup_code` (from outside
+         *     without two-factor sign-in: only an administrator's one-time setup
+         *     code leads to enrollment). From outside (through the app gateway,
+         *     or from an address that isn't private, link-local or NetBird's)
+         *     everyone needs a second factor.
          */
         post: operations["login"];
         delete?: never;
@@ -150,6 +160,245 @@ export interface paths {
         /** Change your own password (signs out your other sessions) */
         post: operations["changePassword"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/login/2fa": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Finish a sign-in with an authenticator or recovery code
+         * @description A 6-digit code (the current 30-second step or one either side, never
+         *     one already used) or a recovery code (`xxxx-xxxx-xxxx-xxxx`, single
+         *     use). A challenge allows 5 tries in 10 minutes. Wrong codes count
+         *     per account and origin (at home; from outside per address, IPv6 per
+         *     /64): 5 in 15 minutes pause code entry from there for 15 minutes
+         *     (429), and recovery codes have a bucket of their own. Wrong codes
+         *     from outside also count in a rolling 60-day budget that a right
+         *     code doesn't reset: at 20, authenticator codes stop working from
+         *     outside (`code_locked`; at home they still do) until the password
+         *     changes or an administrator resets two-factor sign-in.
+         */
+        post: operations["loginSecondFactor"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/login/enroll": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start setting up an authenticator during sign-in
+         * @description For an `enroll` challenge, or a `setup_code` challenge with the administrator's one-time code (`bad_setup_code` otherwise).
+         */
+        post: operations["loginEnroll"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/login/enroll/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Turn on two-factor sign-in with the first code and sign in
+         * @description Every other session of the account ends. The recovery codes are shown only here.
+         */
+        post: operations["loginEnrollConfirm"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/2fa": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Your two-factor sign-in */
+        get: operations["getTwoFactor"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/2fa/enroll": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start setting up (or replacing) your authenticator
+         * @description Needs your password; replacing one that is set up also needs a current code. The old one keeps working until `POST /auth/2fa/confirm`.
+         */
+        post: operations["enrollTwoFactor"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/2fa/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Turn on the new authenticator with its first code
+         * @description This browser counts as signed in with two factors; every other session of the account ends.
+         */
+        post: operations["confirmTwoFactor"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/2fa/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Turn your two-factor sign-in off (not for administrators) */
+        post: operations["disableTwoFactor"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/2fa/recovery-codes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Replace your recovery codes */
+        post: operations["regenerateRecoveryCodes"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/2fa/notice/dismiss": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Dismiss the notice about wrong codes from outside */
+        post: operations["dismissTwoFactorNotice"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/2fa/policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Two-factor settings (admin) */
+        get: operations["getTwoFactorPolicy"];
+        /** Change the administrators' grace period or trusting the router's address (admin, audited) */
+        put: operations["setTwoFactorPolicy"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/app-passwords": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Your app passwords */
+        get: operations["listAppPasswords"];
+        put?: never;
+        /**
+         * Make an app password for one device (domain accounts; needs your password)
+         * @description For services that can't ask for a code: `files` (WebDAV), `mail`
+         *     (IMAP and SMTP), `calendars` (CalDAV and CardDAV). From outside only
+         *     app passwords work there, and once you have two-factor sign-in your
+         *     own password stops working there too. Removed when the domain
+         *     password changes.
+         */
+        post: operations["createAppPassword"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/app-passwords/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Revoke one of your app passwords */
+        delete: operations["deleteAppPassword"];
         options?: never;
         head?: never;
         patch?: never;
@@ -211,6 +460,95 @@ export interface paths {
         /** Set another user's password (admin; signs them out) */
         post: operations["resetUserPassword"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/users/{id}/2fa/reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Remove an account's authenticator and recovery codes (admin; lost phone)
+         * @description Needs `confirm` set to the account's username (400 `confirm_required`
+         *     otherwise). Signs the account out everywhere, revokes every app
+         *     sign-in and refresh token, removes the stop on codes from outside
+         *     and the record of wrong codes, revokes the app passwords unless
+         *     `revokeAppPasswords` is false, and is audited (`users.2fa.reset`).
+         *     An administrator sets up a new authenticator at the next sign-in,
+         *     with no new grace period.
+         */
+        post: operations["resetUserTwoFactor"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/users/{id}/2fa/setup-code": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * A one-time code that lets the account set up two-factor sign-in from outside (admin)
+         * @description Good for 24 hours, single use, replaces an earlier one, shown once and audited. 409 `already_enrolled` when the account has two-factor sign-in.
+         */
+        post: operations["issueTwoFactorSetupCode"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/users/{id}/app-passwords": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        /** An account's app passwords (admin) */
+        get: operations["listUserAppPasswords"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/users/{id}/app-passwords/{pid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+                pid: number;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Revoke an account's app password (admin, audited) */
+        delete: operations["deleteUserAppPassword"];
         options?: never;
         head?: never;
         patch?: never;
@@ -2901,6 +3239,348 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/hostnames": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Control Panel › Hostnames status
+         * @description Whether apps are served at their own names under the base domain,
+         *     the Cloudflare token's state (kept by hardyd-priv; never returned,
+         *     only whether one is set and when it was last verified), the
+         *     wildcard certificate in service, every name and what it serves,
+         *     and how devices at home can find them.
+         */
+        get: operations["getHostnames"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/hostnames/desktop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Where the desktop is at its own hostname ("" while hostnames are off) */
+        get: operations["getHostnamesDesktop"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/hostnames/token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Hand a Cloudflare API token to hardyd-priv (a job, audited)
+         * @description The token (Zone › DNS › Edit on the base domain's zone only) goes
+         *     to the job in memory and on to hardyd-priv, which verifies it with
+         *     Cloudflare, checks the base domain is in a zone it can edit, and
+         *     keeps it encrypted where only root can read it. It is never
+         *     returned. The base domain must be Remote Access's when that has one.
+         */
+        put: operations["setHostnamesToken"];
+        post?: never;
+        /** Forget the Cloudflare token (a job); apps go back to their ports */
+        delete: operations["clearHostnamesToken"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/hostnames/token/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Check the saved token with Cloudflare again (a job) */
+        post: operations["verifyHostnamesToken"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/hostnames/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Turn hostnames on or off (a job; turning on gets the certificate when needed) */
+        put: operations["setHostnamesSettings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/hostnames/certificate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Get (or renew) the wildcard certificate now (a job) */
+        post: operations["issueHostnamesCertificate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/hostnames/lan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Add the names to (or remove them from) this server's own domain controller's DNS (a job) */
+        post: operations["setHostnamesLAN"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/netbird-standby": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Control Panel › NetBird Standby status
+         * @description The VPS connection hardyd-priv keeps (address, user, pinned host
+         *     key, HardyOS's public key; never the private key), the sealed
+         *     copies of the VPS's NetBird server (time, size, hash, version; never
+         *     their contents), sync health and history, the app, the standby
+         *     name's DNS records, the current take-over, and the router port
+         *     forwards the standby needs. Administrators only.
+         */
+        get: operations["getNetBirdStandby"];
+        put?: never;
+        post?: never;
+        /** Forget the VPS connection, HardyOS's key and every copy (a job; not while taken over) */
+        delete: operations["forgetNetBirdStandby"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/netbird-standby/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Save the VPS connection, the schedule and this server's public address (a job, audited)
+         * @description hardyd-priv checks and keeps the connection and makes HardyOS's own
+         *     ed25519 key the first time (or with newKey); the VPS script then
+         *     installs its public half with a forced command.
+         */
+        put: operations["setNetBirdStandbySettings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/netbird-standby/script": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The script to run once on the VPS as root */
+        get: operations["getNetBirdStandbyScript"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/netbird-standby/vps": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Ask the VPS how its NetBird server is (the status verb; changes nothing) */
+        get: operations["getNetBirdStandbyVPS"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/netbird-standby/install": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Install the standby app, stopped (a job) */
+        post: operations["installNetBirdStandby"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/netbird-standby/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Copy the VPS's NetBird server now (a job; not while taken over) */
+        post: operations["syncNetBirdStandby"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/netbird-standby/dns": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The records that hold the NetBird server's name in Cloudflare now */
+        get: operations["previewNetBirdStandbyDNS"];
+        put?: never;
+        /** Let HardyOS change exactly these records of the name on a take-over (a job; the name typed) */
+        post: operations["adoptNetBirdStandbyDNS"];
+        /** Stop HardyOS managing the name (a job; the name typed; not while taken over) */
+        delete: operations["forgetNetBirdStandbyDNS"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/netbird-standby/dns/rebind": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Allow the standby's current public address and VPS for the adopted name (a job; the Cloudflare token pasted again; not while taken over)
+         * @description The adopted name is bound to this server's public addresses and the
+         *     VPS (host, port, host key) as they were when it was adopted
+         *     (decision 424). After any of them changes, a take-over refuses until
+         *     this runs with the token, or `hardyctl netbird-standby rebind` runs
+         *     as root on the console.
+         */
+        post: operations["rebindNetBirdStandbyDNS"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/netbird-standby/takeover": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Take over the NetBird server (a job; the hostname typed)
+         * @description A last copy if the VPS still answers, then the newest copy goes into
+         *     the standby, which starts; its ports open and this server reaches
+         *     it locally; the name's A (and AAAA) record points at this server's
+         *     public address with TTL 60; peers are watched reconnecting. 400
+         *     `version_newer` when the VPS runs a newer NetBird than the standby
+         *     (send acceptVersion to go on anyway), `confirm_required` without
+         *     the typed name.
+         */
+        post: operations["takeOverNetBird"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/netbird-standby/handback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Give the NetBird server back to the VPS (a job; the hostname typed and the split-brain warning acknowledged)
+         * @description The VPS must answer and allow hand-back. The standby stops, its
+         *     databases go to the VPS (which keeps a copy of its own first), the
+         *     name's records go back to what they were, the ports close and the
+         *     staged state is removed. With discard, nothing is sent to the VPS.
+         */
+        post: operations["handBackNetBird"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/remote": {
         parameters: {
             query?: never;
@@ -3082,7 +3762,15 @@ export interface paths {
         };
         /** How an app is published through NetBird */
         get: operations["getAppPublish"];
-        /** Publish an app NetBird-only or publicly, or not at all (job remote.service) */
+        /**
+         * Publish an app NetBird-only or publicly, or not at all (job remote.service)
+         * @description Two-factor sign-in (decision 441): an app is published only with
+         *     HardyOS sign-in in front (`hardyosSignIn`), since its own sign-in
+         *     can't ask for a code (400 `signin_required`), except an app whose
+         *     sign-in is HardyOS's own (Photos with "Sign in with HardyOS" on and
+         *     Immich's passwords off). One published without it before is refused
+         *     at the gateway until it is turned on.
+         */
         put: operations["publishApp"];
         post?: never;
         delete?: never;
@@ -3994,6 +4682,235 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/vms/catalog": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The verified images (Debian, Ubuntu, Home Assistant OS, VirtIO drivers) this server can fetch by name
+         * @description A create request names one in `catalog`; the root helper downloads it
+         *     only from the image's own hosts and checks it against its publisher's
+         *     checksums (Ubuntu's are signature-checked).
+         */
+        get: operations["listVMCatalog"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/usertemplates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Templates saved from VMs ("Make template") */
+        get: operations["listVMUserTemplates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/usertemplates/{tid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tid: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete a saved template (a job; its name typed to confirm). VMs made from it keep their disks */
+        delete: operations["deleteVMUserTemplate"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/template": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Save a stopped VM as a template (a job; its disks are copied, its identity left out) */
+        post: operations["makeVMTemplate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/schedule": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /** Set how many automatic snapshots of each kind the VM keeps (a job; all zero turns it off) */
+        put: operations["setVMSchedule"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/usb": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Plug a USB device (vendor:product) into the running VM (a job) */
+        post: operations["attachVMUSB"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/usb/detach": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Take a USB device out of the running VM (a job) */
+        post: operations["detachVMUSB"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/streaming": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** Game streaming: Sunshine reachable, paired and waiting Moonlight devices, NetBird address */
+        get: operations["getVMStreaming"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/streaming/reveal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Show the Sunshine web UI account (your password again; rate-limited and audited) */
+        post: operations["revealVMStreamingAccount"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/streaming/pair": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Give Sunshine the PIN a waiting Moonlight device shows (a job, audited) */
+        post: operations["pairVMStreamingDevice"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/streaming/unpair": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Remove a paired Moonlight device (a job, audited) */
+        post: operations["unpairVMStreamingDevice"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/vms/{id}/streaming/remote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /** Publish the VM's streaming ports to NetBird peers only, or stop (a job; one VM at a time) */
+        put: operations["setVMStreamingRemote"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/backup": {
         parameters: {
             query?: never;
@@ -4168,6 +5085,27 @@ export interface paths {
         };
         /** One folder of a shared folder's or app's version */
         get: operations["browseBackupVersion"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/backup/targets/{id}/mail": {
+        parameters: {
+            query: {
+                snapshot: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** The domains and mailboxes in a version of the mail */
+        get: operations["backupMailContents"];
         put?: never;
         post?: never;
         delete?: never;
@@ -4706,6 +5644,23 @@ export interface paths {
          *     person's mail address and password, then Radicale).
          */
         get: operations["getMail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/mail/restore-targets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** This server's mailboxes by storage key, for restoring mail from a backup or replica (admin) */
+        get: operations["getMailRestoreTargets"];
         put?: never;
         post?: never;
         delete?: never;
@@ -5625,6 +6580,355 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        HostnamesSettings: {
+            /** @description Serve apps at their hostnames once the certificate is there (and keep it renewed) */
+            enabled: boolean;
+            /** @description Let's Encrypt's contact for expiry warnings ("" = none) */
+            email: string;
+            /** @description Use Let's Encrypt's staging server (untrusted certificates, for trying the setup) */
+            staging: boolean;
+        };
+        HostnamesTokenRequest: {
+            token: string;
+            /** @description The base domain, e.g. home.example.net */
+            base: string;
+        };
+        HostnamesClearRequest: {
+            /** @description The base domain */
+            confirm: string;
+        };
+        HostnamesLANRequest: {
+            remove?: boolean;
+            /** @description One of this server's addresses (lan.addresses) */
+            address?: string;
+        };
+        HostnamesTokenState: {
+            set: boolean;
+            base: string;
+            zone: string;
+            /** Format: date-time */
+            verifiedAt: string | null;
+            problem?: string;
+            /** @description The base is its Cloudflare zone's apex: this server's domain controller holds the names only when the base is the AD domain or inside it */
+            apex: boolean;
+        };
+        HostnamesCert: {
+            names: string[];
+            issuer: string;
+            /** Format: date-time */
+            notBefore: string;
+            /** Format: date-time */
+            notAfter: string;
+            /** @description SHA-256 of the certificate */
+            fingerprint: string;
+            /** Format: date-time */
+            renewsAt: string;
+        };
+        HostnamesCertAttempt: {
+            names: string;
+            serial?: string;
+            /** Format: date-time */
+            notBefore?: string;
+            /** Format: date-time */
+            notAfter?: string;
+            issuer?: string;
+            error?: string;
+            /** Format: date-time */
+            at: string;
+        };
+        HostnameEntry: {
+            label: string;
+            host: string;
+            what: string;
+        };
+        HostnamesLANState: {
+            addresses: string[];
+            netbirdIp: string;
+            /** @description HardyOS's own domain controller runs and can hold the names */
+            domainDns: boolean;
+            domain: string;
+        };
+        HostnamesStatus: {
+            active: boolean;
+            problem?: string;
+            settings: components["schemas"]["HostnamesSettings"];
+            token: components["schemas"]["HostnamesTokenState"];
+            remoteBase: string;
+            desktopUrl: string;
+            certificate: components["schemas"]["HostnamesCert"] | null;
+            lastError: components["schemas"]["HostnamesCertAttempt"] | null;
+            names: components["schemas"]["HostnameEntry"][];
+            lan: components["schemas"]["HostnamesLANState"];
+        };
+        NBStandbyStatus: {
+            connection: components["schemas"]["NBStandbyConnection"] | null;
+            problem?: string;
+            settings: components["schemas"]["NBStandbySettings"];
+            health: components["schemas"]["NBStandbyHealth"];
+            history: components["schemas"]["NBStandbySyncRow"][];
+            app: components["schemas"]["NBStandbyApp"];
+            dns: components["schemas"]["NBStandbyDNS"];
+            takeover: components["schemas"]["NBStandbyTakeover"] | null;
+            /** @description The netbird-server version the standby app pins */
+            standbyVersion: string;
+            versionNote?: string;
+            /** @description The VPS runs a newer NetBird than the standby */
+            versionNewer: boolean;
+            portForwards: components["schemas"]["NBPortForward"][];
+            clientConnected: boolean;
+            clientIp: string;
+            managementUrl: string;
+        };
+        /** @description hardyd-priv's side; never the private key or a copy's contents */
+        NBStandbyConnection: {
+            configured: boolean;
+            vpsHost: string;
+            vpsPort: number;
+            vpsUser: string;
+            /** @description The VPS's pinned SSH host key */
+            hostKey: string;
+            hostKeyFingerprint: string;
+            /** @description The NetBird server's name */
+            hostname: string;
+            /** @description HardyOS's public key for the VPS's authorized_keys */
+            publicKey: string;
+            /** Format: date-time */
+            keyCreated?: string;
+            snapshots: components["schemas"]["NBStandbySnapshot"][];
+            /** Format: date-time */
+            lastTry?: string;
+            /** Format: date-time */
+            lastOk?: string;
+            lastError?: string;
+            /** @enum {string} */
+            mode: "standby" | "takenover";
+            staged?: string;
+            /** Format: date-time */
+            takenOverAt?: string;
+            networkOpen: boolean;
+            /** @description The only IPv4 address DNS may point the name at (root's) */
+            publicIPv4: string;
+            publicIPv6: string;
+            from: string[];
+            /** @description A sealed copy of the last hand-back is kept until the next good sync */
+            handbackCopy: boolean;
+        };
+        NBStandbySnapshot: {
+            id: string;
+            /** Format: date-time */
+            at: string;
+            sealedBytes: number;
+            info: components["schemas"]["NBStandbySnapshotInfo"];
+        };
+        NBStandbySnapshotInfo: {
+            /** Format: date-time */
+            created: string;
+            hostname: string;
+            image: string;
+            digest: string;
+            version: string;
+            peers: number;
+            setupKeys: number;
+            files: string[];
+            /** @description The VPS's id for this snapshot; a hand-back must name it */
+            generation: string;
+            bytes: number;
+            sha256: string;
+            /** Format: date-time */
+            certNotAfter?: string;
+            warnings: string[];
+        };
+        NBStandbySettings: {
+            intervalMinutes: number;
+            autoSync: boolean;
+            /** @description This server's public IPv4 address (where the router forwards the NetBird ports) */
+            publicIPv4: string;
+            publicIPv6: string;
+            /** @description Addresses HardyOS reaches the VPS from (the key's from= restriction) */
+            connectFrom: string[];
+        };
+        NBStandbyHealth: {
+            /** @enum {string} */
+            state: "unconfigured" | "waiting" | "ok" | "failing" | "stale" | "takenover";
+            stale: boolean;
+            staleAfterMinutes: number;
+            /** Format: date-time */
+            nextSync?: string;
+            problem?: string;
+        };
+        NBStandbySyncRow: {
+            /** Format: date-time */
+            startedAt: string;
+            /** Format: date-time */
+            finishedAt: string;
+            ok: boolean;
+            auto: boolean;
+            bytes: number;
+            sha256: string;
+            version: string;
+            peers: number;
+            error: string;
+        };
+        NBStandbyApp: {
+            installed: boolean;
+            state: string;
+            version: string;
+        };
+        NBStandbyDNS: {
+            tokenSet: boolean;
+            base: string;
+            zone: string;
+            /** @description The adopted standby name ("" when none) */
+            name: string;
+            adopted: components["schemas"]["NBStandbyDNSRecord"][];
+            inBase: boolean;
+            inZone: boolean;
+            bound?: components["schemas"]["NBStandbyBinding"];
+            /** @description The public address or the VPS changed since the name was allowed: confirm with the token (rebind) before a take-over */
+            needsRebind: boolean;
+        };
+        NBStandbyBinding: {
+            host: string;
+            ipv4: string;
+            ipv6: string;
+            vpsHost: string;
+            vpsPort: number;
+            hostKeyFingerprint: string;
+        };
+        NBStandbyDNSRebindRequest: {
+            /** @description The Cloudflare token pasted again */
+            token: string;
+        };
+        NBStandbyDNSRecord: {
+            id: string;
+            type: string;
+            content: string;
+            ttl: number;
+            proxied: boolean;
+            comment?: string;
+        };
+        NBStandbyDNSPreview: {
+            name: string;
+            zone: string;
+            records: components["schemas"]["NBStandbyDNSRecord"][];
+            adoptable: boolean;
+            problem?: string;
+        };
+        NBStandbyDNSRequest: {
+            name: string;
+            /** @description The name */
+            confirm: string;
+            /** @description Exactly the record ids the preview showed */
+            ids: string[];
+            /** @description The Cloudflare token pasted again (compared by hardyd-priv with the saved one) */
+            token: string;
+        };
+        NBStandbyTakeover: {
+            /** Format: date-time */
+            at: string;
+            by: string;
+            /** Format: date-time */
+            snapshotAt: string;
+            finalSync: boolean;
+            finalSyncError?: string;
+            dnsChanged: boolean;
+            /** @description The VPS's server was stopped for the take-over */
+            fenced: boolean;
+            handedBack?: boolean;
+            discarded?: boolean;
+            /**
+             * Format: date-time
+             * @description When HardyOS last made or renewed the VPS's fence (it lasts 2 hours unless renewed)
+             */
+            fenceRenewed?: string;
+            ipv4: string;
+            ipv6?: string;
+            peersTotal: number;
+            peersConnected: number;
+            /** Format: date-time */
+            peersCheckedAt?: string;
+            peersProblem?: string;
+            notes: string[];
+        };
+        NBPortForward: {
+            /** @enum {string} */
+            protocol: "TCP" | "UDP";
+            public: number;
+            internal: number;
+            purpose: string;
+        };
+        NBStandbySettingsRequest: {
+            vpsHost: string;
+            /** @description SSH port (default 22) */
+            vpsPort?: number;
+            /** @description Default hardyos-standby */
+            vpsUser?: string;
+            /** @description The VPS's SSH host key (ssh-ed25519 AAAA…) */
+            hostKey: string;
+            /** @description The NetBird server's name */
+            hostname: string;
+            /** @description Make a new SSH key (run the VPS script again) */
+            newKey?: boolean;
+            settings: components["schemas"]["NBStandbySettings"];
+            /** @description The NetBird name, typed, when the public address changes (400 confirm_required otherwise) */
+            addressConfirm?: string;
+        };
+        NBStandbyScript: {
+            script: string;
+            fileName: string;
+            /** @description HardyOS's key fingerprint, to compare with the VPS script's output and hardyctl netbird-standby fingerprint */
+            fingerprint: string;
+        };
+        NBStandbyVPSStatus: {
+            running: boolean;
+            version: string;
+            digest: string;
+            image: string;
+            hostname: string;
+            /** @description Hand-back installed and armed on the VPS now */
+            restoreAllowed: boolean;
+            restoreArmedUntil: string;
+            handbackInstalled: boolean;
+            fenced: boolean;
+            /** @description When the fence ends unless HardyOS renews it (the VPS then starts its server again) */
+            fencedUntil?: string;
+            time: string;
+        };
+        NBStandbyInstallRequest: {
+            /** @description The pool apps go on */
+            pool?: string;
+        };
+        NBStandbyDNSForgetRequest: {
+            /** @description The adopted name */
+            confirm: string;
+            /** @description The Cloudflare token pasted again */
+            token: string;
+        };
+        NBStandbyConfirm: {
+            /** @description The NetBird server's name (or the adopted name) */
+            confirm: string;
+        };
+        NBStandbyTakeoverRequest: {
+            /** @description The NetBird server's name */
+            confirm: string;
+            /** @description Go on although the VPS runs a newer NetBird */
+            acceptVersion?: boolean;
+            /** @description Don't try a last copy first */
+            skipFinalSync?: boolean;
+            /** @description Take over although the VPS still answers (its server is stopped first) */
+            acceptVpsAlive?: boolean;
+        };
+        NBStandbyHandbackRequest: {
+            /** @description The NetBird server's name */
+            confirm: string;
+            /** @description The standby's state replaces whatever the VPS changed since the take-over */
+            acceptSplitBrain: boolean;
+            /** @description Don't send the standby's state; the VPS keeps its own */
+            discard?: boolean;
+        };
+        HostnamesDesktop: {
+            url: string;
+        };
         Health: {
             /** @enum {string} */
             status: "ok";
@@ -5686,6 +6990,8 @@ export interface components {
             lastLoginAt: string | null;
             /** @description Why a domain account's role isn't what its groups give: its groups couldn't be looked up for over 30 minutes, so it has user rights until the domain answers again. Absent otherwise. */
             roleNote?: string;
+            /** @description Two-factor sign-in state (on sign-in, /auth/me and the users list) */
+            twoFactor?: components["schemas"]["TwoFactorStatus"];
         };
         CreateUserRequest: {
             username: string;
@@ -5701,6 +7007,147 @@ export interface components {
             disabled?: boolean;
         };
         ResetPasswordRequest: {
+            password: string;
+        };
+        TwoFactorStatus: {
+            enabled: boolean;
+            /** Format: date-time */
+            enabledAt: string | null;
+            recoveryCodesLeft: number;
+            /** @description An administrator */
+            required: boolean;
+            /**
+             * Format: date-time
+             * @description An administrator's deadline to set it up (starts at the first sign-in that asks)
+             */
+            graceUntil: string | null;
+            /** @description Too many wrong codes from outside: authenticator codes work only at home (recovery codes everywhere) until the password changes or an administrator resets */
+            locked: boolean;
+            /** @description Wrong authenticator codes from outside in the last 60 days (a right code doesn't reset them) */
+            outsideFailures: number;
+            /** @description What the person should know (wrong codes from outside); absent when there's nothing */
+            notice?: string;
+            /** Format: date-time */
+            noticeAt?: string | null;
+            /**
+             * Format: date-time
+             * @description An administrator's setup code is waiting until then
+             */
+            setupCodeExpires: string | null;
+            /** @description Past the grace period; nothing but enrollment works until it is set up */
+            mustEnroll: boolean;
+        };
+        LoginChallenge: {
+            /** @description Send it with the next step; good for 10 minutes and 5 tries */
+            challenge: string;
+            /** @enum {string} */
+            step: "totp" | "enroll" | "setup_code";
+            /** Format: date-time */
+            expiresAt: string;
+        };
+        SecondFactorRequest: {
+            challenge: string;
+            /** @description A 6-digit authenticator code or a recovery code */
+            code: string;
+        };
+        LoginEnrollRequest: {
+            challenge: string;
+            /** @description Needed for a `setup_code` challenge */
+            setupCode?: string;
+        };
+        QRCode: {
+            /** @description Modules on a side */
+            size: number;
+            /** @description SVG path data of the dark modules (M, h, v, z and numbers only) */
+            path: string;
+        };
+        Enrollment: {
+            /** @description The key in base32 */
+            secret: string;
+            /** @description otpauth://totp/… (what the QR code holds) */
+            uri: string;
+            qr: components["schemas"]["QRCode"];
+        };
+        EnrollResult: {
+            user: components["schemas"]["User"];
+            recoveryCodes: string[];
+        };
+        RecoveryCodes: {
+            /** @description 10 single-use codes, shown once */
+            recoveryCodes: string[];
+        };
+        CodeRequest: {
+            code: string;
+        };
+        ReauthCodeRequest: {
+            password: string;
+            /** @description A current authenticator or recovery code (when one is set up) */
+            code?: string;
+        };
+        TwoFactorPolicy: {
+            adminGraceDays: number;
+            /** @description Always true — everyone needs a second factor from outside */
+            outsideRequired: boolean;
+            /**
+             * Format: date-time
+             * @description When a request last came from the router's own address (hairpin NAT, a port forward or a tunnel on the router look like this; kept across restarts): such requests count as outside unless trustRouter is on
+             */
+            routerSeenAt?: string | null;
+            trustRouter: components["schemas"]["RouterTrust"];
+            /** @description This request is from this server's own network (not the router's address, not outside), where trustRouter may be changed */
+            canChangeTrustRouter: boolean;
+        };
+        /** @description "This server is behind NAT: trust the router's address" (off by default). Bound to the router's IP and MAC when turned on; lapses if the gateway changes. Even on, codes from the router have their own limit and count toward the 60-day outside budget, and own passwords stay refused for WebDAV, mail and calendars from it. */
+        RouterTrust: {
+            on: boolean;
+            /** @description It was turned on for another router (IP or MAC changed) and doesn't apply */
+            lapsed: boolean;
+            /** @description The router it was turned on for */
+            ip?: string;
+            /** Format: date-time */
+            since?: string;
+        };
+        TwoFactorPolicyRequest: {
+            adminGraceDays: number;
+            /** @description Turn "this server is behind NAT: trust the router's address" on (for the router as it is now) or off. Only from this server's own network (403 not_from_home otherwise; hardyctl trust-router works too). Audited, and administrators are notified. */
+            trustRouter?: boolean;
+        };
+        TwoFactorSetupCode: {
+            code: string;
+            /** Format: date-time */
+            expiresAt: string;
+        };
+        ConfirmUsernameRequest: {
+            /** @description The account's username */
+            confirm: string;
+            /**
+             * @description Also revoke the account's app passwords
+             * @default true
+             */
+            revokeAppPasswords: boolean;
+        };
+        /** @enum {string} */
+        AppPasswordScope: "files" | "mail" | "calendars";
+        AppPassword: {
+            /** Format: int64 */
+            id: number;
+            name: string;
+            scopes: components["schemas"]["AppPasswordScope"][];
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            lastUsedAt: string | null;
+            lastUsedIp: string;
+        };
+        AppPasswordRequest: {
+            name: string;
+            scopes: components["schemas"]["AppPasswordScope"][];
+            /** @description Your account password */
+            password: string;
+        };
+        AppPasswordCreated: {
+            appPassword: components["schemas"]["AppPassword"];
+            /** @description xxxx-xxxx-xxxx-xxxx-xxxx, shown once */
             password: string;
         };
         /** @enum {string} */
@@ -7378,6 +8825,8 @@ export interface components {
             redirectUris: string[];
             /** @description Why it's off while the settings ask for it */
             why?: string;
+            /** @description Immich itself said (its server features, at the last sync) that it offers sign-in with HardyOS and not its own passwords. Immich may be published without HardyOS sign-in in front only after a successful sync saw this (decision 441). */
+            passwordLoginOff?: boolean;
         };
         PhotosML: {
             /** @enum {string} */
@@ -7539,6 +8988,8 @@ export interface components {
             proxied: boolean;
             /** @description The app's own published address (https://<app>.<base>, through NetBird's reverse proxy), given when the desktop is used at its published address */
             published?: boolean;
+            /** @description The app's own hostname under the base domain on this server (Control Panel › Hostnames), given when the desktop is used at its hostname */
+            hostname?: boolean;
         };
         AppCatalogApp: {
             id: string;
@@ -8289,6 +9740,10 @@ export interface components {
             critical: string;
             owner: string;
             assigned: string[];
+            /** @description PCI address of the USB controller it's on (a whole controller can go to a VM as a PCI device) */
+            controller?: string;
+            /** @description It has a keyboard, mouse or other HID interface */
+            input?: boolean;
         };
         GPUInfo: {
             address: string;
@@ -8520,15 +9975,50 @@ export interface components {
             import?: {
                 /** @description A disk image in the ISO library */
                 file: string;
+                /** @description sha256:<hex> or sha512:<hex>, checked again while the image is read (set by the server for catalog images) */
+                digest?: string;
+                /** @description The verified image (set by the server): file is in the pool's root-only catalog store, not the ISOs shared folder */
+                catalog?: string;
+            };
+            clone?: {
+                /** @description A saved template whose disk of the same name is copied into this one */
+                template: string;
             };
         };
         VMMedia: {
             /**
-             * @description iso: a file from the ISO library; virtio: the VirtIO drivers disc; cloudinit: the generated cloud-init disc
+             * @description iso: a file from the ISO library; virtio: the VirtIO drivers disc; cloudinit: the generated cloud-init disc; unattend: the generated Windows answer disc (new VMs only); streaming: the generated game streaming disc (new VMs with streaming.sunshine only)
              * @enum {string}
              */
-            kind: "iso" | "virtio" | "cloudinit" | "empty";
+            kind: "iso" | "virtio" | "cloudinit" | "unattend" | "streaming" | "empty";
             iso?: string;
+        };
+        VMUnattend: {
+            /** @description The local administrator account Windows Setup makes */
+            user: string;
+            computerName?: string;
+            /** @description Language and formats, like en-US */
+            locale: string;
+            /** @description Input locale (default the same as locale), or a layout like 0409:00000409 */
+            keyboard?: string;
+            /** @description A Windows time zone name, like W. Europe Standard Time */
+            timeZone?: string;
+            /** @description The edition to install, as the ISO names it (Windows 11 Pro) */
+            edition?: string;
+            /** @description Or its number in install.wim */
+            imageIndex?: number;
+            /** @description First-logon steps HardyOS ships (by name) */
+            hooks?: string[];
+            /** @description Windows isn't installed yet (set by the server); passed-through devices and USB hot-plug wait until it is */
+            pending: boolean;
+            /** @description The install has started (the first start happened) */
+            started?: boolean;
+        };
+        VMSchedule: {
+            hourly: number;
+            daily: number;
+            weekly: number;
+            monthly: number;
         };
         VMNIC: {
             /**
@@ -8582,15 +10072,20 @@ export interface components {
             boot: ("disk" | "cdrom" | "network")[];
             autostart: components["schemas"]["VMAutostart"];
             devices: components["schemas"]["VMDevice"][];
-            streaming?: {
-                /** @description Publish Sunshine through the VPN for play away from home */
-                remote: boolean;
-            };
+            streaming?: components["schemas"]["VMStreaming"];
             labels?: {
                 [key: string]: string;
             };
             /** @description A named libvirt CPU model (the cluster's baseline) instead of the host's CPU; empty: host-passthrough */
             cpuModel?: string;
+            /** @description An HD audio card, heard through the web console */
+            sound?: boolean;
+            /** @description Copy and paste with the web console (the guest needs spice-vdagent) */
+            clipboard?: boolean;
+            unattend?: components["schemas"]["VMUnattend"];
+            schedule?: components["schemas"]["VMSchedule"];
+            /** @description The saved template the VM was made from */
+            fromTemplate?: string;
         };
         VM: components["schemas"]["VMSpec"] & {
             dataset: string;
@@ -8613,6 +10108,10 @@ export interface components {
             backend?: "local" | "cluster";
             /** @description The cluster placement generation its storage was attached under */
             generation?: number;
+            /** @description USB devices plugged into the running VM by hand */
+            liveUSB: string[];
+            /** @description A scheduled snapshot has been waiting for a while (the VM is busy or snapshots fail) */
+            snapshotsBehind: boolean;
         };
         VMKeptDisk: {
             dataset: string;
@@ -8671,6 +10170,16 @@ export interface components {
             minDiskGB: number;
             images: components["schemas"]["VMImage"][] | null;
             notes: string[] | null;
+            /** @description The verified image (/vms/catalog) the template starts from */
+            catalog?: string;
+            /** @description Windows can install by itself */
+            unattend?: boolean;
+            /** @description Usual edition names; the first is the default */
+            editions?: string[];
+            sound?: boolean;
+            clipboard?: boolean;
+            /** @description HardyOS can set up game streaming (Sunshine and a virtual display) during the unattended install */
+            streaming?: boolean;
         };
         VMArch: {
             arch: string;
@@ -8683,6 +10192,7 @@ export interface components {
             vmport?: boolean;
             legacyBios?: boolean;
             pit?: boolean;
+            soundModel?: string;
         };
         VMCapabilities: {
             supported: boolean;
@@ -8715,9 +10225,11 @@ export interface components {
         VMTask: {
             id: string;
             /** @enum {string} */
-            kind: "download" | "import";
+            kind: "download" | "import" | "template" | "clone";
             vm: string;
             file: string;
+            /** @description A catalog image's verified checksum (algo:hex) */
+            digest?: string;
             progress: number;
             message: string;
             done: boolean;
@@ -8761,6 +10273,8 @@ export interface components {
             start?: boolean;
             /** @description Files to download into the ISO library first */
             downloads?: components["schemas"]["VMDownload"][];
+            /** @description A verified image (/vms/catalog) for the first disk, fetched and checked by the server */
+            catalog?: string;
             /** @description Create the VM even when its (thin) disks are bigger than the pool's free space */
             allowOvercommit?: boolean;
         };
@@ -8793,6 +10307,148 @@ export interface components {
             bytes: number;
             /** @description The guest's file systems were frozen first (or it was off) */
             consistent: boolean;
+            /** @enum {string} */
+            kind: "manual" | "hourly" | "daily" | "weekly" | "monthly";
+        };
+        VMCatalogImage: {
+            id: string;
+            name: string;
+            /** @enum {string} */
+            kind: "disk" | "iso";
+            /** @description Its name in the ISO library */
+            file: string;
+            /** @description How it's checked */
+            verified: string;
+        };
+        VMUserTemplate: {
+            id: string;
+            name: string;
+            description: string;
+            pool: string;
+            /** Format: date-time */
+            created: string;
+            /** @description The VM it was made from */
+            from: string;
+            spec: components["schemas"]["VMSpec"];
+            /** Format: int64 */
+            bytes: number;
+        };
+        VMMakeTemplateRequest: {
+            /** @description Short name: 2-32 lowercase letters, digits and dashes */
+            templateId: string;
+            name: string;
+            description?: string;
+        };
+        VMTemplateDeleteRequest: {
+            /** @description The template's name or display name */
+            confirm: string;
+        };
+        VMScheduleRequest: {
+            schedule: components["schemas"]["VMSchedule"];
+            /** @description The VM's name, needed (400 confirm_required otherwise) when the counts delete automatic snapshots it has now */
+            confirm?: string;
+        };
+        /** @description Game streaming (decisions 400-409). Root sets everything but sunshine when the VM is made; updates keep it; remote changes only with PUT /vms/{id}/streaming/remote. */
+        VMStreaming: {
+            /** @description Sunshine's streaming ports are published to NetBird peers */
+            remote: boolean;
+            /** @description HardyOS installs and sets up Sunshine and a virtual display at the first sign-in (with an unattended install) */
+            sunshine?: boolean;
+            /** @description The Sunshine web UI account HardyOS made */
+            user?: string;
+            /** @description SHA-256 of the certificate HardyOS made for the VM's Sunshine (pinned) */
+            certSHA256?: string;
+            /** @description NetBird devices (addresses) the streaming ports are forwarded from; none until chosen */
+            peers?: string[];
+            /** @description The server's home network address the VM's firewall lets reach Sunshine's web UI */
+            webUIFrom?: string;
+        };
+        VMStreamingStatus: {
+            /** @description HardyOS set Sunshine up in this VM */
+            setUp: boolean;
+            installPending: boolean;
+            running: boolean;
+            hasGPU: boolean;
+            /** @description The VM's verified address on the home network */
+            address: string;
+            /** @description Sunshine answered with its pinned certificate */
+            reachable: boolean;
+            problem?: string;
+            user: string;
+            /** @description HardyOS has the Sunshine password (sealed) */
+            accountKept: boolean;
+            revealedAt?: string;
+            devices: components["schemas"]["VMStreamingDevice"][];
+            waiting: components["schemas"]["VMStreamingPending"][];
+            /** @description The NetBird devices streaming is forwarded from */
+            peers: string[];
+            /** @description NetBird devices this server sees, to choose from */
+            netbirdPeers: components["schemas"]["VMStreamingNetBirdPeer"][];
+            /** @description NetBird runs on kernel WireGuard: its access policies don't cover the forwarded ports */
+            netbirdKernel: boolean;
+            /** @description This server's home network address (what Sunshine sees for devices forwarded from NetBird) */
+            bridgeAddress?: string;
+            remote: boolean;
+            /** @description The NetBird forwarding rules are in place now */
+            forwarding: boolean;
+            /** @description This server's NetBird address: add it in Moonlight away from home */
+            netbirdAddress?: string;
+            ports: {
+                tcp: number[];
+                udp: number[];
+            };
+        };
+        VMStreamingDevice: {
+            name: string;
+            uuid: string;
+            enabled: boolean;
+        };
+        VMStreamingPending: {
+            /** @description Sunshine's pairing id (32 hex digits) */
+            id: string;
+            name: string;
+            address: string;
+            /** @description It came through the NetBird forwarding, so HardyOS can't tell which device it is; pairing needs confirmRemote */
+            viaNetBird: boolean;
+        };
+        VMStreamingNetBirdPeer: {
+            ip: string;
+            name: string;
+            connected: boolean;
+            /** @description NetBird's reverse proxy came from this address; it can't be chosen */
+            proxy: boolean;
+        };
+        VMStreamingRevealRequest: {
+            /** @description Your own HardyOS password, asked again */
+            password: string;
+        };
+        VMStreamingAccount: {
+            user: string;
+            password: string;
+        };
+        VMStreamingPairRequest: {
+            pairingId: string;
+            /** @description The 4 digits Moonlight shows (kept out of the job's parameters) */
+            pin: string;
+            name: string;
+            /** @description Pair a device that came through NetBird (HardyOS can't tell it apart) */
+            confirmRemote?: boolean;
+        };
+        VMStreamingUnpairRequest: {
+            uuid: string;
+        };
+        VMStreamingRemoteRequest: {
+            enabled: boolean;
+            /** @description The NetBird devices (addresses) to forward from; at least one when enabled */
+            peers?: string[];
+        };
+        VMUSBRequest: {
+            /** @description vendor:product, like 046d:c52b */
+            device: string;
+            /** @description Also add it to (or remove it from) the VM's devices for its next start */
+            persist?: boolean;
+            /** @description Confirms giving a keyboard or mouse to the VM (refused otherwise) */
+            allowInput?: boolean;
         };
         VMSnapshotDeleteRequest: {
             /** @description The VM's name or display name */
@@ -8825,8 +10481,8 @@ export interface components {
         };
         BackupItem: {
             /** @enum {string} */
-            kind: "share" | "app" | "vm" | "system";
-            /** @description The shared folder's */
+            kind: "share" | "app" | "vm" | "system" | "mail";
+            /** @description The shared folder's, app's or VM's id (none for system and mail) */
             id?: string;
         };
         BackupSchedule: {
@@ -8964,13 +10620,15 @@ export interface components {
             text: string;
         };
         BackupVersionItem: {
-            /** @description share:<id>, app:<id>, vm:<id> or system */
+            /** @description share:<id>, app:<id>, vm:<id>, system or mail */
             item: string;
             /** @description The snapshot to browse and restore */
             snapshot: string;
             disks?: {
                 [key: string]: string;
             };
+            /** @description mail: the webmail part (Roundcube's data), restored with everything */
+            webmail?: string;
             /** Format: date-time */
             time: string;
             /** Format: int64 */
@@ -9009,11 +10667,12 @@ export interface components {
             /** @description Inside the item; none = all */
             paths?: string[];
             /** @enum {string} */
-            mode: "copy" | "in_place" | "rollback";
+            mode: "copy" | "in_place" | "rollback" | "mail";
             /** @description copy: the new folder's name */
             folder?: string;
             /** @description rollback: the shared folder's, app's or VM's name (settings: "settings") */
             confirm?: string;
+            mail?: components["schemas"]["MailRestoreArgs"];
         };
         BackupRebuildRequest: {
             target: string;
@@ -9055,8 +10714,56 @@ export interface components {
             items: string[];
             target: string;
         };
+        /** @description What of the mail item to restore (mode mail; replication: kind mail). Mailboxes are matched by storage key: key is the version's mailbox, into the one it goes into here (default the same; another needs that mailbox's address typed in confirm). */
+        MailRestoreArgs: {
+            /** @enum {string} */
+            scope: "mailbox" | "domain" | "calendars" | "all";
+            /** @description mailbox, calendars: the version's mailbox key */
+            key?: string;
+            /** @description mailbox, calendars: the mailbox key here */
+            into?: string;
+            /** @description domain: the domain */
+            domain?: string;
+            /**
+             * @description copy: a new folder "Restored <date>" (calendars: new collections); overwrite: replaces what's there (all: always)
+             * @enum {string}
+             */
+            mode?: "copy" | "overwrite";
+            /** @description overwrite: the mailbox's address (domain: the domain); all: "mail" */
+            confirm?: string;
+        };
+        MailRestoreResult: {
+            scope: string;
+            mailboxes: number;
+            messages: number;
+            collections: number;
+            /** Format: int64 */
+            bytes: number;
+            /** @description The new folder (copy) */
+            folder?: string;
+            /** @description The snapshot of <pool>/mail taken first */
+            safety?: string;
+            dkim: string[];
+            bayes: boolean;
+            notes: string[];
+        };
+        BackupMailContents: {
+            hostname: string;
+            domains: string[];
+            mailboxes: {
+                key: string;
+                address: string;
+            }[];
+            /** @description The version has Roundcube's data */
+            webmail: boolean;
+            /**
+             * Format: int64
+             * @description Free space on the mail storage now (a restore needs about the version's size; it's refused when clearly too little)
+             */
+            freeBytes?: number;
+        };
         /** @enum {string} */
-        ReplicationKind: "share" | "app" | "vm";
+        ReplicationKind: "share" | "app" | "vm" | "mail";
         ReplicationItem: {
             kind: components["schemas"]["ReplicationKind"];
             id: string;
@@ -9088,6 +10795,11 @@ export interface components {
             name: string;
             targetId: string;
             items: components["schemas"]["ReplicationItem"][];
+            /**
+             * @description pending: Mail is added once the other server accepts mail replicas; added: it was (shown until the task is changed)
+             * @enum {string}
+             */
+            mailAuto?: "" | "pending" | "added";
             intervalMinutes: number;
             /** @description KiB per second; 0 for no limit */
             bandwidthKBps: number;
@@ -9188,6 +10900,7 @@ export interface components {
             /** @description Shared folders: the new folder's name */
             name?: string;
             confirm: boolean;
+            mail?: components["schemas"]["MailRestoreArgs"];
         };
         ReplicationRun: {
             /** Format: int64 */
@@ -10287,6 +12000,15 @@ export interface operations {
                     "application/json": components["schemas"]["User"];
                 };
             };
+            /** @description The password is right; a second step is needed (no session yet) */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoginChallenge"];
+                };
+            };
             401: components["responses"]["Unauthorized"];
             /** @description Too many failed sign-ins; see Retry-After */
             429: {
@@ -10370,6 +12092,368 @@ export interface operations {
             };
             400: components["responses"]["Invalid"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    loginSecondFactor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SecondFactorRequest"];
+            };
+        };
+        responses: {
+            /** @description Signed in; session cookie set */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            /** @description `bad_code`, `code_locked`, `secret_unusable` or `challenge_expired` */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Too many wrong codes; see Retry-After */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    loginEnroll: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LoginEnrollRequest"];
+            };
+        };
+        responses: {
+            /** @description The secret to scan or type */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Enrollment"];
+                };
+            };
+            /** @description `bad_setup_code` or `challenge_expired` */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    loginEnrollConfirm: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SecondFactorRequest"];
+            };
+        };
+        responses: {
+            /** @description Signed in; session cookie set */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnrollResult"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description `no_pending`: enrollment wasn't started or expired (15 minutes) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    getTwoFactor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description State */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TwoFactorStatus"];
+                };
+            };
+        };
+    };
+    enrollTwoFactor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReauthCodeRequest"];
+            };
+        };
+        responses: {
+            /** @description The secret to scan or type */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Enrollment"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    confirmTwoFactor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CodeRequest"];
+            };
+        };
+        responses: {
+            /** @description Recovery codes (shown once) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecoveryCodes"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    disableTwoFactor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReauthCodeRequest"];
+            };
+        };
+        responses: {
+            /** @description Turned off */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    regenerateRecoveryCodes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReauthCodeRequest"];
+            };
+        };
+        responses: {
+            /** @description New recovery codes (shown once; the old ones stop working) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecoveryCodes"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    dismissTwoFactorNotice: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Dismissed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getTwoFactorPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TwoFactorPolicy"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    setTwoFactorPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TwoFactorPolicyRequest"];
+            };
+        };
+        responses: {
+            /** @description Settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TwoFactorPolicy"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listAppPasswords: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Newest first (never their values) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppPassword"][];
+                };
+            };
+        };
+    };
+    createAppPassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AppPasswordRequest"];
+            };
+        };
+        responses: {
+            /** @description The password (shown once) */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppPasswordCreated"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    deleteAppPassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Revoked */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: components["responses"]["NotFound"];
         };
     };
     listUsers: {
@@ -10515,6 +12599,103 @@ export interface operations {
                 content?: never;
             };
             400: components["responses"]["Invalid"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    resetUserTwoFactor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConfirmUsernameRequest"];
+            };
+        };
+        responses: {
+            /** @description The account after the reset */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    issueTwoFactorSetupCode: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The code */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TwoFactorSetupCode"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listUserAppPasswords: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppPassword"][];
+                };
+            };
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteUserAppPassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+                pid: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Revoked */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             404: components["responses"]["NotFound"];
         };
     };
@@ -14854,6 +17035,448 @@ export interface operations {
             503: components["responses"]["Unavailable"];
         };
     };
+    getHostnames: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HostnamesStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getHostnamesDesktop: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The address */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HostnamesDesktop"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    setHostnamesToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HostnamesTokenRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    clearHostnamesToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HostnamesClearRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    verifyHostnamesToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    setHostnamesSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HostnamesSettings"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    issueHostnamesCertificate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    setHostnamesLAN: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HostnamesLANRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getNetBirdStandby: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NBStandbyStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    forgetNetBirdStandby: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NBStandbyConfirm"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    setNetBirdStandbySettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NBStandbySettingsRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getNetBirdStandbyScript: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The script */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NBStandbyScript"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getNetBirdStandbyVPS: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description What the VPS said */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NBStandbyVPSStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description The VPS didn't answer */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    installNetBirdStandby: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NBStandbyInstallRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    syncNetBirdStandby: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    previewNetBirdStandbyDNS: {
+        parameters: {
+            query: {
+                name: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The records */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NBStandbyDNSPreview"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    adoptNetBirdStandbyDNS: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NBStandbyDNSRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    forgetNetBirdStandbyDNS: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NBStandbyDNSForgetRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    rebindNetBirdStandbyDNS: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NBStandbyDNSRebindRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    takeOverNetBird: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NBStandbyTakeoverRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    handBackNetBird: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NBStandbyHandbackRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
     getRemote: {
         parameters: {
             query?: never;
@@ -16392,6 +19015,329 @@ export interface operations {
             403: components["responses"]["Forbidden"];
         };
     };
+    listVMCatalog: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Images */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VMCatalogImage"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    listVMUserTemplates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Saved templates */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VMUserTemplate"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    deleteVMUserTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tid: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMTemplateDeleteRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    makeVMTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMMakeTemplateRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description The VM is running */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    setVMSchedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMScheduleRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    attachVMUSB: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMUSBRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description The VM isn't running */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    detachVMUSB: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMUSBRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description The VM isn't running */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getVMStreaming: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The Streaming panel */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VMStreamingStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    revealVMStreamingAccount: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMStreamingRevealRequest"];
+            };
+        };
+        responses: {
+            /** @description The account */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VMStreamingAccount"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Too many wrong passwords */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    pairVMStreamingDevice: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMStreamingPairRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description HardyOS didn't set up game streaming in this VM */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    unpairVMStreamingDevice: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMStreamingUnpairRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description HardyOS didn't set up game streaming in this VM */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    setVMStreamingRemote: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VMStreamingRemoteRequest"];
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description HardyOS didn't set up game streaming in this VM */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     getCloudBackup: {
         parameters: {
             query?: never;
@@ -16619,6 +19565,33 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BackupEntries"];
+                };
+            };
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    backupMailContents: {
+        parameters: {
+            query: {
+                snapshot: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Contents */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupMailContents"];
                 };
             };
             400: components["responses"]["Invalid"];
@@ -17475,6 +20448,28 @@ export interface operations {
                     "application/json": components["schemas"]["MailOverview"];
                 };
             };
+        };
+    };
+    getMailRestoreTargets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Domains and mailboxes (webmail is always false here) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupMailContents"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     saveMailSettings: {

@@ -102,6 +102,7 @@ export function ConfirmDialog({
   confirmLabel,
   typeToConfirm,
   danger = true,
+  canConfirm = true,
   onConfirm,
   onClose,
 }: {
@@ -110,13 +111,15 @@ export function ConfirmDialog({
   confirmLabel: string;
   typeToConfirm?: string;
   danger?: boolean;
+  /** Extra condition for the confirm button (a ticked acknowledgement). */
+  canConfirm?: boolean;
   onConfirm: () => Promise<unknown> | void;
   onClose: () => void;
 }) {
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const ready = !typeToConfirm || typed === typeToConfirm;
+  const ready = canConfirm && (!typeToConfirm || typed === typeToConfirm);
 
   async function run() {
     if (!ready) return;

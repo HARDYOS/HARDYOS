@@ -115,6 +115,20 @@ func localOnly(st *stored) error {
 	return nil
 }
 
+// perServer refuses, for a cluster VM, a Phase 9 VM feature that belongs
+// to one server or changes the VM's settings outside the approved update
+// path (decision 471): snapshot schedules (its snapshots are the storage
+// server's), saved templates (a zfs send of a local dataset), publishing
+// game streaming (forwarded from this server's NetBird address) and
+// keeping a hot-plugged USB device in its settings. A changed spec on
+// cluster storage that the cluster didn't approve would stop it starting.
+func perServer(st *stored, what string) error {
+	if st.cluster != nil {
+		return Problems{what + " isn't available for a VM on cluster storage: it moves between servers and starts only with the settings the cluster approved"}
+	}
+	return nil
+}
+
 // clusterUpdate checks a settings change of a cluster VM: disks and pool
 // are the storage server's.
 func clusterUpdate(st *stored, prev, next *Spec) error {

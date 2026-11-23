@@ -62,6 +62,21 @@ type Spec struct {
 	// of the host's own CPU: the VM can then migrate live between servers
 	// with different CPUs. Empty: host-passthrough.
 	CPUModel string `json:"cpuModel,omitempty"`
+
+	// Sound adds an HD audio card, heard through the web console
+	// (decision 418).
+	Sound bool `json:"sound,omitempty"`
+	// Clipboard adds QEMU's clipboard channel (qemu-vdagent): copy and
+	// paste between the web console and a guest running spice-vdagent.
+	Clipboard bool `json:"clipboard,omitempty"`
+	// Unattend installs Windows by itself (unattend.go); only for new VMs.
+	Unattend *Unattend `json:"unattend,omitempty"`
+	// Schedule takes snapshots by itself (schedule.go). It's changed with
+	// vms.schedule.set only; updates keep it.
+	Schedule *Schedule `json:"schedule,omitempty"`
+	// FromTemplate is the saved template the VM was made from
+	// (usertemplates.go), for the record.
+	FromTemplate string `json:"fromTemplate,omitempty"`
 }
 
 // CPU is the VM's processor.
@@ -99,6 +114,8 @@ type Disk struct {
 	Bus string `json:"bus"`
 	// Import fills the disk from an image when the VM is created.
 	Import *Import `json:"import,omitempty"`
+	// Clone fills it from a saved template's disk (usertemplates.go).
+	Clone *Clone `json:"clone,omitempty"`
 }
 
 // Import names a disk image to copy into a new disk: a file in the ISOs
@@ -106,13 +123,32 @@ type Disk struct {
 // compressed).
 type Import struct {
 	File string `json:"file"`
+	// Digest ("sha256:<hex>" or "sha512:<hex>") is checked while the image
+	// is read for the import: the catalog's verified checksum (decision
+	// 410). Empty: not checked (a file the person put there).
+	Digest string `json:"digest,omitempty"`
+	// Catalog: File is that verified image in the pool's catalog store,
+	// not a file in the ISOs shared folder.
+	Catalog string `json:"catalog,omitempty"`
+}
+
+func (i *Import) digest() digest {
+	if i == nil {
+		return digest{}
+	}
+	algo, hx, ok := strings.Cut(i.Digest, ":")
+	if !ok {
+		return digest{}
+	}
+	return digest{Algo: algo, Hex: hx}
 }
 
 // Media is a CD/DVD drive.
 type Media struct {
 	// Kind: iso (a file in the ISOs shared folder), virtio (the VirtIO
-	// drivers disc for Windows), cloudinit (the generated seed) or empty
-	// (a drive with nothing in it).
+	// drivers disc for Windows), cloudinit (the generated seed), unattend
+	// (the generated Windows answer disc), streaming (the generated game
+	// streaming disc, streaming.go) or empty (a drive with nothing in it).
 	Kind string `json:"kind"`
 	ISO  string `json:"iso,omitempty"`
 }
@@ -153,13 +189,6 @@ type Autostart struct {
 	DelaySec int `json:"delaySec"`
 }
 
-// Streaming is the game streaming (Moonlight/Sunshine) panel's settings.
-type Streaming struct {
-	// Remote publishes Sunshine's ports through the VPN (needs the remote
-	// access part; recorded here, applied by it).
-	Remote bool `json:"remote"`
-}
-
 // Limits.
 const (
 	MaxDisks      = 8
@@ -181,7 +210,7 @@ var (
 	NICModels    = []string{"virtio", "e1000e"}
 	NICModes     = []string{NICBridge, NICNAT, NICVLAN}
 	VideoModels  = []string{"virtio", "vga", "bochs", "none"}
-	MediaKinds   = []string{MediaISO, MediaVirtio, MediaCloudInit, MediaEmpty}
+	MediaKinds   = []string{MediaISO, MediaVirtio, MediaCloudInit, MediaUnattend, MediaStreaming, MediaEmpty}
 	BootDevices  = []string{"disk", "cdrom", "network"}
 	FirmwareKind = []string{FirmwareUEFI, FirmwareBIOS}
 )
@@ -197,6 +226,7 @@ const (
 	MediaISO       = "iso"
 	MediaVirtio    = "virtio"
 	MediaCloudInit = "cloudinit"
+	MediaUnattend  = "unattend"
 	MediaEmpty     = "empty"
 	FirmwareUEFI   = "uefi"
 	FirmwareBIOS   = "bios"
@@ -214,13 +244,15 @@ var (
 	fileRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 ._()+,-]{0,199}$`)
 	sshRE  = regexp.MustCompile(`^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com) [A-Za-z0-9+/=]{16,}( [^\x00-\x1f\x7f]{0,200})?$`)
 	// cryptRE: SHA-512 crypt only.
-	cryptRE    = regexp.MustCompile(`^\$6\$(rounds=[0-9]{4,9}\$)?[./A-Za-z0-9]{1,16}\$[./A-Za-z0-9]{86}$`)
-	labelKeyRE = regexp.MustCompile(`^[a-z][a-z0-9.-]{0,30}$`)
-	pciRE      = regexp.MustCompile(`^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$`)
-	usbIDRE    = regexp.MustCompile(`^([0-9a-f]{4}:[0-9a-f]{4}|[0-9]{1,3}-[0-9]{1,3}(\.[0-9]{1,3}){0,6})$`)
-	vgpuTypeRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
-	romRE      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.(rom|bin)$`)
-	ifnameRE   = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
+	cryptRE     = regexp.MustCompile(`^\$6\$(rounds=[0-9]{4,9}\$)?[./A-Za-z0-9]{1,16}\$[./A-Za-z0-9]{86}$`)
+	labelKeyRE  = regexp.MustCompile(`^[a-z][a-z0-9.-]{0,30}$`)
+	pciRE       = regexp.MustCompile(`^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$`)
+	usbIDRE     = regexp.MustCompile(`^([0-9a-f]{4}:[0-9a-f]{4}|[0-9]{1,3}-[0-9]{1,3}(\.[0-9]{1,3}){0,6})$`)
+	vgpuTypeRE  = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	romRE       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.(rom|bin)$`)
+	digestRE    = regexp.MustCompile(`^(sha256:[0-9a-f]{64}|sha512:[0-9a-f]{128})$`)
+	catalogIDRE = regexp.MustCompile(`^[a-z][a-z0-9.-]{1,31}$`)
+	ifnameRE    = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
 )
 
 // ImageExtensions are the disk image formats an import accepts.
@@ -231,7 +263,7 @@ var ISOExtensions = []string{".iso"}
 
 // reservedIDs are names the API uses for other things (/vms/isos…), and
 // what kept disks look like.
-var reservedIDs = map[string]bool{"isos": true, "templates": true, "capabilities": true, "bridge": true, "kept": true, "new": true}
+var reservedIDs = map[string]bool{"isos": true, "templates": true, "catalog": true, "usertemplates": true, "capabilities": true, "bridge": true, "kept": true, "new": true}
 
 // ValidID checks a VM id.
 func ValidID(id string) error {
@@ -341,6 +373,9 @@ func (s *Spec) Normalize() {
 	if s.NICs == nil {
 		s.NICs = []NIC{}
 	}
+	if s.Unattend != nil {
+		s.Unattend.normalize(s)
+	}
 	if s.CloudInit != nil {
 		ci := s.CloudInit
 		ci.User = strings.TrimSpace(ci.User)
@@ -447,6 +482,20 @@ func (s *Spec) Validate(h Host) error {
 			} else if !IsDiskImage(d.Import.File) {
 				add("%s: %s isn't a disk image (qcow2, raw, img, vmdk, vdi or vhdx)", d.Name, d.Import.File)
 			}
+			if d.Import.Digest != "" && !digestRE.MatchString(d.Import.Digest) {
+				add("%s: the image's checksum must be sha256:<64 hex> or sha512:<128 hex>", d.Name)
+			}
+			if d.Import.Catalog != "" && (!catalogIDRE.MatchString(d.Import.Catalog) || d.Import.Digest == "") {
+				add("%s: a verified image needs its name and checksum", d.Name)
+			}
+		}
+		if d.Clone != nil {
+			if d.Import != nil {
+				add("%s: a disk comes from an image or a template, not both", d.Name)
+			}
+			if !userTemplateRE.MatchString(d.Clone.Template) {
+				add("%s: %q isn't a saved template's name", d.Name, d.Clone.Template)
+			}
 		}
 	}
 
@@ -464,19 +513,46 @@ func (s *Spec) Validate(h Host) error {
 			} else if !IsISO(m.ISO) {
 				add("CD/DVD %d: %s isn't an .iso file", i+1, m.ISO)
 			}
-		case MediaVirtio, MediaCloudInit, MediaEmpty:
+		case MediaVirtio, MediaCloudInit, MediaUnattend, MediaStreaming, MediaEmpty:
 			if m.ISO != "" {
 				add("CD/DVD %d: a %s drive can't name a file", i+1, m.Kind)
 			}
 		default:
-			add("CD/DVD %d: the kind must be iso, virtio, cloudinit or empty", i+1)
+			add("CD/DVD %d: the kind must be iso, virtio, cloudinit, unattend, streaming or empty", i+1)
 		}
 	}
-	if kinds[MediaVirtio] > 1 || kinds[MediaCloudInit] > 1 {
-		add("the drivers disc and the cloud-init disc can each be attached once")
+	if kinds[MediaVirtio] > 1 || kinds[MediaCloudInit] > 1 || kinds[MediaUnattend] > 1 || kinds[MediaStreaming] > 1 {
+		add("the drivers disc, the cloud-init disc, the Windows answer disc and the game streaming disc can each be attached once")
+	}
+	if kinds[MediaStreaming] > 0 && (!s.StreamingSetUp() || s.Unattend == nil) {
+		add("the game streaming disc goes with an unattended Windows install that sets up game streaming")
+	}
+	if s.Unattend != nil && slices.Contains(s.Unattend.Hooks, StreamingHook) && kinds[MediaStreaming] == 0 {
+		add("the Sunshine first-logon step needs the game streaming disc")
+	}
+	if st := s.Streaming; st != nil {
+		for _, msg := range st.problems(s) {
+			add("%s", msg)
+		}
 	}
 	if (kinds[MediaCloudInit] > 0) != (s.CloudInit != nil) {
 		add("cloud-init settings and the cloud-init disc go together")
+	}
+	if kinds[MediaUnattend] > 0 && s.Unattend == nil {
+		add("the Windows answer disc needs the unattended install settings")
+	}
+	if u := s.Unattend; u != nil {
+		for _, msg := range u.problems(s) {
+			add("%s", msg)
+		}
+	}
+	if sc := s.Schedule; sc != nil {
+		for _, msg := range sc.problems() {
+			add("%s", msg)
+		}
+	}
+	if s.FromTemplate != "" && !userTemplateRE.MatchString(s.FromTemplate) {
+		add("%q isn't a saved template's name", s.FromTemplate)
 	}
 
 	// Network.

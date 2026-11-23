@@ -52,6 +52,12 @@ var clusterAdminDenied = []struct{ method, path string }{
 	// Network changes and remote access.
 	{"POST", "/api/v1/vms/bridge"},
 	{"PUT", "/api/v1/apps/*/publish"},
+	// Game streaming: publishing forwards this server's NetBird ports, and
+	// the reveal hands out Sunshine's password (decision 473). Two-factor
+	// sign-in, hostnames and the NetBird standby are outside the areas
+	// above (auth, users, hostnames, netbird-standby).
+	{"PUT", "/api/v1/vms/*/streaming/remote"},
+	{"POST", "/api/v1/vms/*/streaming/reveal"},
 	// Updates and boot environments, configuration backups (a restore
 	// brings back accounts and settings).
 	{"", "/api/v1/system/updates"},

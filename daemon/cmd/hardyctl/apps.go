@@ -66,7 +66,9 @@ func appCheck(args []string) error {
 		fmt.Printf("  port %-10s %5d  %s\n", pt.Name, pt.Default, pt.Label)
 	}
 	for _, s := range m.Settings {
-		if s.Hidden() {
+		if s.Managed {
+			fmt.Printf("  setting %s: set by HardyOS (%s)\n", s.Env, s.Label)
+		} else if s.Hidden() {
 			fmt.Printf("  setting %s: generated password\n", s.Env)
 		} else {
 			fmt.Printf("  setting %s: %s\n", s.Env, s.Label)

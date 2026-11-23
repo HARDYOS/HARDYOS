@@ -272,14 +272,58 @@ connection and rate limits.
 
 ## Backups
 
-Mail lives in `<pool>/mail` (mailboxes, calendars, DKIM keys, the TLS
-certificate); settings backups keep the configuration and sealed secrets.
-Cloud backups (Backup & Restore) and replication to another HardyOS server
-don't offer the mail dataset as an item yet: both know shared folders, apps
-and VMs (and cloud backups the system), and a "Mail" kind needs its own
-restore rules (into a stopped mail server, never over live mailboxes), its
-own rebuild step and its place in both UIs. That's the follow-up; until
-then, snapshots of the pool keep older states of the mail dataset.
+Mail is backed up and replicated with everything else (decisions
+460-469), and it's on by default: a new task in **Backup** (cloud backups)
+or in its **Replication** tab has **Mail** ticked once the mail server is
+set up, and existing whole-server backup tasks got it with the update.
+An existing replication task gets it only once the other server is
+updated too: the oldest task to each server then copies the mail as well,
+you're notified ("Mail now replicates to …"), and the task shows **Stop
+replicating mail** to turn it off with one click. An older receiving
+server is skipped for mail with a note, never a failed run.
+
+**What's in it.** Every mailbox (all folders and messages), calendars and
+contacts (the family ones too), the DKIM and TLS keys, the configuration
+(domains, mailboxes, aliases, groups; the secrets stay in the settings
+item), what the spam filter learned (Rspamd's data) and webmail settings
+(Roundcube's database; in replication, tick the *Mail (Roundcube)* app,
+which a new task does for you).
+
+**Consistency.** Everything is copied from a ZFS snapshot of
+`<pool>/mail`, taken while mail keeps arriving: Maildir and Dovecot's
+indexes are made to survive a power cut, and that's what a snapshot looks
+like to them. Right before it, HardyOS saves Rspamd's data and the
+configuration into the dataset (`.hardyos-backup/`, root only).
+
+**Keys.** Cloud backups are encrypted on the server, DKIM keys included.
+The server that keeps replicas never mounts or shows the mail copy (it
+can't be browsed there); only its root could read it, and it only ever
+goes back to this server.
+
+**Restore** (Backup › Restore, pick a version and *Mail*; or Replication ›
+Browse & restore… on the Mail row):
+
+| What | Into a new folder / as new | Replace what's there |
+| --- | --- | --- |
+| One mailbox | a folder "Restored &lt;date&gt;" with the old folders inside | its address typed; the folders and messages become as in the version, and mail the version doesn't have (newer mail) stays |
+| One domain | a "Restored" folder in each of its mailboxes | the domain typed; mailboxes, their calendars and the DKIM key |
+| Calendars and contacts (one person) | new calendars "… (restored &lt;date&gt;)" | their address typed |
+| Everything | | `mail` typed: the mail server stops, everything goes back (webmail settings too in cloud backups), and it starts again |
+
+Mailboxes are found by their storage key, not their address: if an account
+was deleted and made again, its old mail can be put into the new mailbox
+by choosing it under **Into** and typing its address. Anything that
+replaces data takes a snapshot `<pool>/mail@hardyos-manual-<time>` first
+and another right before the switch; while a mailbox is switched, its new
+mail waits in the queue for a moment, and what was replaced is kept (root
+only) for 14 days. Only messages come back: Dovecot rebuilds its indexes,
+and Sieve scripts and other files of the mailbox stay as they are now.
+Rspamd's learning comes back only from cloud backups (checked first),
+never from another server's copy. The restore panel shows the free space;
+a restore that clearly doesn't fit is refused before it starts.
+The mail server must be set up to restore into; on a rebuilt server,
+**Rebuild…** in the Backup app brings the whole mail server back, then turn
+it on in Control Panel › Mail.
 
 ## Troubleshooting
 

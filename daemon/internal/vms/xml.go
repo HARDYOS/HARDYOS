@@ -25,6 +25,10 @@ type Paths struct {
 	Virtio string
 	// CloudInit is the generated seed disc.
 	CloudInit string
+	// Unattend is the generated Windows answer disc.
+	Unattend string
+	// Streaming is the generated game streaming disc.
+	Streaming string
 	// Bridge is the home network's bridge (br0).
 	Bridge string
 	// NATNetwork is libvirt's NAT network (default).
@@ -202,6 +206,8 @@ type devicesXML struct {
 	TPM         *tpmXML         `xml:"tpm"`
 	Serial      *serialXML      `xml:"serial"`
 	Console     *consoleXML     `xml:"console"`
+	Sounds      []soundXML      `xml:"sound"`
+	Audios      []audioXML      `xml:"audio"`
 	MemBalloon  memBalloonXML   `xml:"memballoon"`
 	RNG         rngXML          `xml:"rng"`
 	// Passed-through devices from devices.Manager.Prepare, checked by
@@ -294,8 +300,38 @@ type modelXML struct {
 }
 
 type channelXML struct {
-	Type   string           `xml:"type,attr"`
-	Target channelTargetXML `xml:"target"`
+	Type   string            `xml:"type,attr"`
+	Source *channelSourceXML `xml:"source"`
+	Target channelTargetXML  `xml:"target"`
+}
+
+// channelSourceXML is the qemu-vdagent channel's settings: clipboard
+// sharing and the client's mouse.
+type channelSourceXML struct {
+	Clipboard *clipboardXML `xml:"clipboard"`
+	Mouse     *mouseModeXML `xml:"mouse"`
+}
+
+type clipboardXML struct {
+	CopyPaste string `xml:"copypaste,attr"`
+}
+
+type mouseModeXML struct {
+	Mode string `xml:"mode,attr"`
+}
+
+type soundXML struct {
+	Model string      `xml:"model,attr"`
+	Audio audioRefXML `xml:"audio"`
+}
+
+type audioRefXML struct {
+	ID int `xml:"id,attr"`
+}
+
+type audioXML struct {
+	ID   int    `xml:"id,attr"`
+	Type string `xml:"type,attr"`
 }
 
 type channelTargetXML struct {
@@ -309,8 +345,9 @@ type inputXML struct {
 }
 
 type graphicsXML struct {
-	Type   string    `xml:"type,attr"`
-	Listen listenXML `xml:"listen"`
+	Type   string       `xml:"type,attr"`
+	Listen listenXML    `xml:"listen"`
+	Audio  *audioRefXML `xml:"audio"`
 }
 
 type listenXML struct {
@@ -545,6 +582,16 @@ func DomainXML(s *Spec, a ArchInfo, p Paths, devs []devices.Prepared) ([]byte, e
 				return nil, errors.New("the cloud-init disc hasn't been made yet")
 			}
 			src = &diskSource{File: p.CloudInit}
+		case MediaUnattend:
+			if p.Unattend == "" {
+				return nil, errors.New("the Windows answer disc hasn't been made yet")
+			}
+			src = &diskSource{File: p.Unattend}
+		case MediaStreaming:
+			if p.Streaming == "" {
+				return nil, errors.New("the game streaming disc hasn't been made yet")
+			}
+			src = &diskSource{File: p.Streaming}
 		}
 		if src != nil {
 			// QEMU reads discs as itself; libvirt must not take shared
@@ -592,10 +639,24 @@ func DomainXML(s *Spec, a ArchInfo, p Paths, devs []devices.Prepared) ([]byte, e
 	if s.GuestAgent {
 		dv.Channels = append(dv.Channels, channelXML{Type: "unix", Target: channelTargetXML{Type: "virtio", Name: "org.qemu.guest_agent.0"}})
 	}
+	if s.Clipboard {
+		// Copy and paste with the web console (VNC extended clipboard),
+		// for guests running spice-vdagent (decision 418).
+		dv.Channels = append(dv.Channels, channelXML{Type: "qemu-vdagent",
+			Source: &channelSourceXML{Clipboard: &clipboardXML{CopyPaste: "yes"}, Mouse: &mouseModeXML{Mode: "client"}},
+			Target: channelTargetXML{Type: "virtio", Name: "com.redhat.spice.0"}})
+	}
 	dv.Inputs = []inputXML{{Type: "tablet", Bus: "usb"}, {Type: "keyboard", Bus: "usb"}}
 	// The console: VNC on a socket only libvirt and root can reach;
 	// hardyd-priv hands a connection to hardyd (vms.console.open).
 	dv.Graphics = &graphicsXML{Type: "vnc", Listen: listenXML{Type: "socket"}}
+	if s.Sound && a.SoundModel != "" {
+		// An HD audio card whose sound only goes to the web console (QEMU's
+		// VNC audio): the server itself plays nothing.
+		dv.Audios = []audioXML{{ID: 1, Type: "none"}}
+		dv.Sounds = []soundXML{{Model: a.SoundModel, Audio: audioRefXML{ID: 1}}}
+		dv.Graphics.Audio = &audioRefXML{ID: 1}
+	}
 	// A GPU that is the main display replaces the emulated one.
 	primaryGPU := false
 	for _, d := range s.Devices {

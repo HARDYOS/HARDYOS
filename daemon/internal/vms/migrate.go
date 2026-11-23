@@ -188,8 +188,26 @@ func liveMigratable(s *Spec) error {
 			break
 		}
 	}
+	// Phase 9's per-server parts (decision 470): the answer disc of an
+	// unattended install is in this server's run folder, and game
+	// streaming is forwarded from this server's NetBird address.
+	if s.InstallPending() {
+		p = append(p, "Windows is still installing by itself (its answer disc is on this server); move it once it's installed")
+	}
+	if s.Streaming != nil && s.Streaming.Remote {
+		p = append(p, "its game streaming is published from this server's NetBird address; turn publishing off first")
+	}
 	if len(p) > 0 {
 		return p
+	}
+	return nil
+}
+
+// noLiveUSB refuses a live migration while USB devices plugged in by hand
+// are in the VM: they are this server's (decision 470).
+func (m *Manager) noLiveUSB(s *Spec) error {
+	if l := m.liveUSB(s.ID); len(l) > 0 {
+		return Problems{fmt.Sprintf("unplug the USB devices plugged into %s by hand first (%s); they are this server's", s.Name, strings.Join(l, ", "))}
 	}
 	return nil
 }
@@ -476,6 +494,9 @@ func (m *Manager) MigrateListen(ctx context.Context, a MigrateListenArgs) (*os.F
 	if err := liveMigratable(&st.spec); err != nil {
 		return nil, err
 	}
+	if err := m.noLiveUSB(&st.spec); err != nil {
+		return nil, err
+	}
 	if m.state(ctx, a.VM) != "running" {
 		return nil, Problems{"only a running VM migrates live"}
 	}
@@ -571,6 +592,14 @@ func (m *Manager) MigrateSend(ctx context.Context, a MigrateSendArgs) error {
 	}
 	if a.Generation == 0 || st.cluster.Generation != a.Generation {
 		return fmt.Errorf("%w (attached %d, migration %d)", ErrGeneration, st.cluster.Generation, a.Generation)
+	}
+	// Checked again under the VM's lock: a device plugged in by hand since
+	// the socket was made, or settings changed since (decision 470).
+	if err := liveMigratable(&st.spec); err != nil {
+		return err
+	}
+	if err := m.noLiveUSB(&st.spec); err != nil {
+		return err
 	}
 	mg := m.migs()
 	mg.mu.Lock()

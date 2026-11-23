@@ -3,9 +3,11 @@ package vms
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"os/user"
@@ -28,12 +30,21 @@ type Snapshot struct {
 	Bytes int64 `json:"bytes"`
 	// Consistent: the guest's file systems were frozen first (guest agent).
 	Consistent bool `json:"consistent"`
+	// Kind: manual, or hourly/daily/weekly/monthly for scheduled ones.
+	Kind string `json:"kind"`
 }
 
 var (
 	snapLabelRE = regexp.MustCompile(`^[^\x00-\x1f\x7f]{0,80}$`)
-	snapNameRE  = regexp.MustCompile(`^vm-[0-9]{8}-[0-9]{6}(-[0-9]{1,3})?$`)
+	snapNameRE  = regexp.MustCompile(`^vm-([0-9]{8}-[0-9]{6}(-[0-9]{1,3})?|auto-(hourly|daily|weekly|monthly)-[0-9]{8}-[0-9]{4})$`)
 )
+
+func snapKind(name string) string {
+	if k, _, ok := autoKind(name); ok {
+		return string(k)
+	}
+	return "manual"
+}
 
 // SnapshotArgs takes a snapshot.
 type SnapshotArgs struct {
@@ -61,7 +72,7 @@ func (m *Manager) TakeSnapshot(ctx context.Context, a SnapshotArgs) (*Snapshot, 
 	if err := localOnly(st); err != nil {
 		return nil, err
 	}
-	name := "vm-" + m.now().Format("20060102-150405")
+	name := "vm-" + m.now().UTC().Format("20060102-150405")
 	existing, _ := m.snapshots(ctx, st)
 	for i := 1; ; i++ {
 		taken := false
@@ -71,35 +82,44 @@ func (m *Manager) TakeSnapshot(ctx context.Context, a SnapshotArgs) (*Snapshot, 
 		if !taken {
 			break
 		}
-		name = fmt.Sprintf("vm-%s-%d", m.now().Format("20060102-150405"), i)
+		name = fmt.Sprintf("vm-%s-%d", m.now().UTC().Format("20060102-150405"), i)
 	}
-	running := m.state(ctx, a.ID) == "running"
+	return m.takeSnapshot(ctx, st, name, a.Label)
+}
+
+// takeSnapshot snapshots a VM whose lock the caller holds.
+func (m *Manager) takeSnapshot(ctx context.Context, st *stored, name, label string) (*Snapshot, error) {
+	id := st.spec.ID
+	if !snapNameRE.MatchString(name) || !snapLabelRE.MatchString(label) {
+		return nil, fmt.Errorf("bad snapshot name %q", name)
+	}
+	running := m.state(ctx, id) == "running"
 	frozen := false
 	if running && st.spec.GuestAgent {
 		fctx, cancel := context.WithTimeout(ctx, FreezeTimeout)
-		if _, err := m.virsh(fctx, "domfsfreeze", a.ID); err == nil {
+		if _, err := m.virsh(fctx, "domfsfreeze", id); err == nil {
 			frozen = true
 		} else {
-			m.log().Info("vms: the guest agent didn't freeze the file systems; the snapshot is crash-consistent", "id", a.ID, "err", err)
+			m.log().Info("vms: the guest agent didn't freeze the file systems; the snapshot is crash-consistent", "id", id, "err", err)
 			// A freeze that timed out may still happen in the guest.
-			m.thaw(a.ID)
+			m.thaw(id)
 		}
 		cancel()
 	}
 	if running && st.spec.Firmware.TPM {
 		// The TPM copy on the pool is from the last stop; keep it as is.
-		m.log().Debug("vms: snapshot of a running VM keeps the TPM state from its last stop", "id", a.ID)
+		m.log().Debug("vms: snapshot of a running VM keeps the TPM state from its last stop", "id", id)
 	}
 	consistent := strconv.FormatBool(frozen || !running)
-	_, serr := m.zfs(ctx, "snapshot", "-r", "-o", PropLabel+"="+a.Label, "-o", "org.hardyos:consistent="+consistent, st.dataset+"@"+name)
+	_, serr := m.zfs(ctx, "snapshot", "-r", "-o", PropLabel+"="+label, "-o", "org.hardyos:consistent="+consistent, st.dataset+"@"+name)
 	if frozen {
-		m.thaw(a.ID)
+		m.thaw(id)
 	}
 	if serr != nil {
 		return nil, fmt.Errorf("taking the snapshot: %w", serr)
 	}
-	m.log().Info("vms: snapshot", "id", a.ID, "snapshot", name, "consistent", consistent)
-	return &Snapshot{Name: name, Label: a.Label, Created: m.now(), Consistent: frozen || !running}, nil
+	m.log().Info("vms: snapshot", "id", id, "snapshot", name, "consistent", consistent)
+	return &Snapshot{Name: name, Label: label, Created: m.now(), Consistent: frozen || !running, Kind: snapKind(name)}, nil
 }
 
 // FreezeTimeout bounds asking the guest agent to freeze or thaw.
@@ -146,7 +166,7 @@ func (m *Manager) snapshots(ctx context.Context, st *stored) ([]Snapshot, error)
 		if !ok || ds != st.dataset || !snapNameRE.MatchString(name) {
 			continue
 		}
-		s := Snapshot{Name: name, Consistent: f[4] == "true"}
+		s := Snapshot{Name: name, Consistent: f[4] == "true", Kind: snapKind(name)}
 		if secs, err := strconv.ParseInt(f[1], 10, 64); err == nil {
 			s.Created = time.Unix(secs, 0).UTC()
 		}
@@ -467,11 +487,17 @@ func (m *Manager) StartImport(ctx context.Context, a ImportArgs) (*Task, error) 
 	if m.state(ctx, a.ID) != "stopped" {
 		return nil, Problems{"the VM must be off while its disk is imported"}
 	}
-	f, err := m.folder(ctx, "", false)
-	if err != nil || f == nil {
-		return nil, Problems{"the ISOs shared folder isn't available"}
+	var src *os.File
+	if disk.Import.Catalog != "" {
+		// A verified image comes from root's own store, never the share.
+		src, err = m.openCatalogImport(ctx, st.spec.Pool, disk.Import)
+	} else {
+		f, ferr := m.folder(ctx, "", false)
+		if ferr != nil || f == nil {
+			return nil, Problems{"the ISOs shared folder isn't available"}
+		}
+		src, err = openFile(f, disk.Import.File)
 	}
-	src, err := openFile(f, disk.Import.File)
 	if err != nil {
 		return nil, err
 	}
@@ -510,7 +536,7 @@ func (m *Manager) importGID() (int, error) {
 // stageImport copies src (unpacking .xz) into a new private file in the
 // VM's folder, at most limit bytes, and makes it readable to the import
 // group only. The caller removes it.
-func (m *Manager) stageImport(ctx context.Context, t *Task, st *stored, name string, src *os.File, limit int64) (string, error) {
+func (m *Manager) stageImport(ctx context.Context, t *Task, st *stored, name string, srcFile *os.File, limit int64, want digest) (string, error) {
 	gid, err := m.importGID()
 	if err != nil {
 		return "", err
@@ -528,14 +554,26 @@ func (m *Manager) stageImport(ctx context.Context, t *Task, st *stored, name str
 		}
 	}()
 	size := int64(0)
-	if fi, err := src.Stat(); err == nil {
+	if fi, err := srcFile.Stat(); err == nil {
 		size = fi.Size()
 	}
 	w := &capWriter{w: out, n: limit}
+	// An image the catalog verified is checked again as it's read here:
+	// the shared folder's writers could have changed it since (decision
+	// 410).
+	var sum hash.Hash
+	var wantSum string
+	if want.Hex != "" {
+		sum, wantSum = want.hash(), want.Hex
+	}
+	var in io.Reader = srcFile
+	if sum != nil {
+		in = io.TeeReader(srcFile, sum)
+	}
 	tooBig := fmt.Errorf("%s is bigger than the space there is for it (%s); free up space on the pool or use a smaller image", name, human(limit))
 	if strings.HasSuffix(strings.ToLower(name), ".xz") {
 		m.tasks.progress(t.ID, 1, "Unpacking "+name)
-		err = m.stream().Unpack(ctx, src, w, func(read int64) {
+		err = m.stream().Unpack(ctx, in, w, func(read int64) {
 			if size > 0 {
 				m.tasks.progress(t.ID, 1+29*float64(read)/float64(size), "Unpacking "+name)
 			}
@@ -551,7 +589,7 @@ func (m *Manager) stageImport(ctx context.Context, t *Task, st *stored, name str
 			return "", tooBig
 		}
 		m.tasks.progress(t.ID, 1, "Reading "+name)
-		cr := &countingReader{r: src, on: func(read int64) {
+		cr := &countingReader{r: in, on: func(read int64) {
 			if size > 0 {
 				m.tasks.progress(t.ID, 1+29*float64(read)/float64(size), "Reading "+name)
 			}
@@ -561,6 +599,15 @@ func (m *Manager) stageImport(ctx context.Context, t *Task, st *stored, name str
 				return "", tooBig
 			}
 			return "", fmt.Errorf("reading %s: %w", name, err)
+		}
+	}
+	if sum != nil {
+		// Whatever the unpacker left unread counts too.
+		if _, err := io.Copy(io.Discard, in); err != nil {
+			return "", fmt.Errorf("reading %s: %w", name, err)
+		}
+		if got := hex.EncodeToString(sum.Sum(nil)); got != wantSum {
+			return "", fmt.Errorf("%s changed since it was downloaded and checked (its checksum is %s, not %s); download it again", name, got, wantSum)
 		}
 	}
 	if err := out.Sync(); err != nil {
@@ -620,7 +667,7 @@ func (m *Manager) importDisk(ctx context.Context, t *Task, st *stored, d Disk, s
 			m.log().Warn("vms: setting the VM's space limit after an import", "id", st.spec.ID, "err", err)
 		}
 	}()
-	image, err := m.stageImport(ctx, t, st, name, src, limit)
+	image, err := m.stageImport(ctx, t, st, name, src, limit, d.Import.digest())
 	if err != nil {
 		return err
 	}

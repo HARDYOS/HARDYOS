@@ -18,7 +18,7 @@ import (
 )
 
 var (
-	ssoInputRE   = regexp.MustCompile(`name="(id|csrf|next|sub|exp|sig)" value="([^"]*)"`)
+	ssoInputRE   = regexp.MustCompile(`name="(id|csrf|next|sub|exp|sig|challenge|secret)" value="([^"]*)"`)
 	ssoRefreshRE = regexp.MustCompile(`http-equiv="refresh" content="0;url=([^"]+)"`)
 )
 
@@ -36,7 +36,30 @@ func (b *gwBrowser) openApp(t *testing.T, u, user, pw string) (int, string) {
 	}
 	form.Set("username", user)
 	form.Set("password", pw)
-	req, _ := http.NewRequest("POST", "https://sso.home.example.net/login", strings.NewReader(form.Encode()))
+	// sso.<base> is outside: a second factor is required.
+	b.totp.enroll(t, user)
+	code, body = b.ssoPost(t, "/login", form)
+	if strings.Contains(body, `action="/login/code"`) {
+		form = ssoForm(body)
+		form.Set("code", b.totp.code(t, user))
+		code, body = b.ssoPost(t, "/login/code", form)
+	}
+	return b.follow(t, code, body)
+}
+
+// ssoForm is the hidden fields of a provider page's form.
+func ssoForm(body string) url.Values {
+	form := url.Values{}
+	for _, m := range ssoInputRE.FindAllStringSubmatch(body, -1) {
+		form.Set(m[1], html.UnescapeString(m[2]))
+	}
+	return form
+}
+
+// ssoPost posts a provider form like a browser on sso.<base>.
+func (b *gwBrowser) ssoPost(t *testing.T, path string, form url.Values) (int, string) {
+	t.Helper()
+	req, _ := http.NewRequest("POST", "https://sso.home.example.net"+path, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Origin", "https://sso.home.example.net")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
@@ -46,8 +69,7 @@ func (b *gwBrowser) openApp(t *testing.T, u, user, pw string) (int, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	code, body = res.StatusCode, readAll(res)
-	return b.follow(t, code, body)
+	return res.StatusCode, readAll(res)
 }
 
 // follow takes the provider's meta-refresh pages on (relative ones stay on
@@ -312,37 +334,33 @@ func TestPublishedAppsOpenAtTheirAddress(t *testing.T) {
 	if !pv.Enabled || pv.URL != "https://board.home.example.net" || !pv.Config.HardyOSSignIn || !pv.Published {
 		t.Fatalf("publish view = %+v", pv)
 	}
-	// Public with nothing in front and HardyOS sign-in off needs a
-	// confirmation (the app's own sign-in is all that's left).
+	// An app with its own sign-in can't be published without HardyOS
+	// sign-in in front (from outside a second factor is required, which
+	// its own sign-in can't ask for): public, by default or NetBird-only,
+	// confirmed or not.
 	var er ErrorResponse
-	if code := e.admin.do("PUT", "/api/v1/apps/board/publish", PublishRequest{Mode: publish.ModePublic, Auth: publish.AuthNone}, &er); code != 400 || er.Code != "confirm_required" {
-		t.Fatalf("open without confirmation = %d %+v", code, er)
+	for _, req := range []PublishRequest{{Mode: publish.ModePublic, Auth: publish.AuthNone}, {Auth: publish.AuthNone},
+		{Mode: publish.ModeNetBird, Auth: publish.AuthNone}, {Mode: publish.ModePublic, Auth: publish.AuthNone, ConfirmOpen: true}} {
+		if code := e.admin.do("PUT", "/api/v1/apps/board/publish", req, &er); code != 400 || er.Code != "signin_required" {
+			t.Fatalf("%+v without HardyOS sign-in = %d %+v", req, code, er)
+		}
 	}
-	// Following a public default needs it too; NetBird-only or with a
-	// sign-in in front doesn't.
-	if code := e.admin.do("PUT", "/api/v1/apps/board/publish", PublishRequest{Auth: publish.AuthNone}, &er); code != 400 {
-		t.Fatalf("open by default without confirmation = %d", code)
+	// One published that way before is refused at the gateway.
+	if err := e.pub.Store.SetConfig(e.ctx, publish.AppKey("board"), publish.ServiceConfig{Mode: publish.ModePublic, Auth: publish.AuthNone, Groups: []string{}}, nil); err != nil {
+		t.Fatal(err)
 	}
-	if j, _ := e.submit(t, "PUT", "/api/v1/apps/notes/publish", PublishRequest{Mode: publish.ModeNetBird, Auth: publish.AuthNone}); j["state"] != "succeeded" {
-		t.Fatalf("notes NetBird-only without HardyOS sign-in = %v", j)
-	}
-	if j, _ := e.submit(t, "PUT", "/api/v1/apps/board/publish", PublishRequest{Mode: publish.ModePublic, Auth: publish.AuthNone, HardyOSSignIn: false, ConfirmOpen: true}); j["state"] != "succeeded" {
-		t.Fatalf("publish board = %v", j)
-	}
+	e.server.remote.trigger()
 	anon := e.browser(t, secret)
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		code, _, _ := anon.nav(t, "GET", "https://board.home.example.net/", nil)
-		if code == 200 {
+		code, body, _ := anon.nav(t, "GET", "https://board.home.example.net/", nil)
+		if code == 403 && strings.Contains(body, "needs HardyOS sign-in") {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("board without HardyOS sign-in = %d", code)
+			t.Fatalf("legacy board without HardyOS sign-in = %d", code)
 		}
 		time.Sleep(20 * time.Millisecond)
-	}
-	if !strings.Contains(strings.Join(auditActions(e.admin, "remote.publish"), ","), "app:board mode=public auth=none hardyosSignIn=off") {
-		t.Fatalf("audit = %v", auditActions(e.admin, "remote.publish"))
 	}
 	// Removing an app removes its service.
 	if j := e.runJob(t, "DELETE", "/api/v1/apps/board", AppRemoveRequest{Confirm: "board"}); j["state"] != "succeeded" {

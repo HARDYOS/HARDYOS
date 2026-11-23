@@ -67,6 +67,9 @@ func installedPackage(ia *installedApp) (*Package, error) {
 // Reconfigure changes an installed app's settings, ports, shares, grants
 // and limits; the caller then runs Up.
 func (m *Manager) Reconfigure(ctx context.Context, a ReconfigureArgs) (*PrepareResult, error) {
+	if err := m.guard(a.ID); err != nil {
+		return nil, err
+	}
 	if !m.Available() {
 		return nil, errors.New("this HardyOS build doesn't include Docker")
 	}
@@ -142,6 +145,9 @@ func (m *Manager) Config(ctx context.Context, id string) (*AppConfig, error) {
 func (m *Manager) Snapshot(ctx context.Context, a SnapshotArgs) (string, error) {
 	if a.Reason != "update" && a.Reason != "manual" {
 		return "", Problems{"reason must be update or manual"}
+	}
+	if Excluded(a.ID) {
+		return "", Problems{a.ID + " isn't snapshotted: it holds the NetBird standby's secrets only while taken over"}
 	}
 	ia, _, err := m.app(ctx, a.ID)
 	if err != nil {
@@ -237,6 +243,9 @@ func (m *Manager) snapshots(ctx context.Context, ds string) ([]Snapshot, error) 
 // dataset back (later snapshots go) and starts it with the package,
 // settings, shares and limits the snapshot holds. Confirm is the app's name.
 func (m *Manager) Rollback(ctx context.Context, a RollbackArgs) error {
+	if err := m.guard(a.ID); err != nil {
+		return err
+	}
 	ia, c, err := m.app(ctx, a.ID)
 	if err != nil {
 		return err

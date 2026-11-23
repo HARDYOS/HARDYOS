@@ -32,4 +32,5 @@ const (
 	OpKick    = "mail.kick"
 	OpDelete  = "mail.mailbox.delete"
 	OpUsage   = "mail.usage"
+	OpSpace   = "mail.space" // the mail dataset's free space (restores)
 )

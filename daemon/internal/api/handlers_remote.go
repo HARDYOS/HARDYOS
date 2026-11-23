@@ -629,6 +629,16 @@ func (s *Server) handleRemoteService(w http.ResponseWriter, r *http.Request, u *
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
+	// From outside everyone needs a second factor (decision 441), so an
+	// app with its own sign-in is published only behind HardyOS's gateway
+	// sign-in, unless its sign-in is HardyOS's own (Immich with "Sign in
+	// with HardyOS" on and its passwords off): its sessions then start at
+	// sso.<base> with a code.
+	if key != publish.DesktopKey && req.Mode != publish.ModeOff && !req.HardyOSSignIn && !s.signsInWithHardyOS(r.Context(), r.PathValue("id")) {
+		writeError(w, http.StatusBadRequest, "signin_required",
+			what+" has its own sign-in, which can't ask for a two-factor code: publish it with HardyOS sign-in in front (hardyosSignIn)")
+		return
+	}
 	if key != publish.DesktopKey && req.Auth == publish.AuthNone && !req.HardyOSSignIn && !req.ConfirmOpen {
 		mode := req.Mode
 		if mode == "" {

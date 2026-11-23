@@ -7,11 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
+	"github.com/hardyos/hardyos/daemon/internal/ports"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 )
 
@@ -44,11 +46,22 @@ func (a WorkloadArgs) check() error {
 	if !idRE.MatchString(a.ID) {
 		return &ValidationError{fmt.Errorf("%q isn't a valid workload id", a.ID)}
 	}
+	if a.Kind == cluster.KindApp && slices.Contains(NodeLocalApps, a.ID) {
+		return &ValidationError{fmt.Errorf("%s belongs to one server and can't be a cluster app", a.ID)}
+	}
 	if !poolRE.MatchString(a.Pool) {
 		return &ValidationError{fmt.Errorf("%q isn't a valid pool name", a.Pool)}
 	}
 	return nil
 }
+
+// NodeLocalApps are apps whose data is one server's by design and never
+// cluster storage (decision 472): the NetBird standby (its dataset is never
+// snapshotted, its take-over opens this server's firewall and hosts file)
+// and the webmail (the mail server's backup item carries its dataset as
+// its webmail part). Their <pool>/apps/<id> on the storage server is that
+// server's own app's.
+var NodeLocalApps = []string{ports.NetBirdStandbyApp, "roundcube"}
 
 // Dataset is the workload's dataset: <pool>/vms/<id> or <pool>/apps/<id>.
 func (a WorkloadArgs) Dataset() string {

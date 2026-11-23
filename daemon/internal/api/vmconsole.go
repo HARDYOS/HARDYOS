@@ -92,7 +92,7 @@ func (s *Server) handleVMConsoleWS(w http.ResponseWriter, r *http.Request, u *au
 			return false
 		}
 		cur, err := s.sessionUser(r, session, info.UserID)
-		return err == nil && cur.IsAdmin()
+		return err == nil && cur.IsAdmin() && s.sessionGate(r, info, cur) == gateOK
 	}
 	if rr := relayedFrom(r); rr != nil {
 		// Relayed from another member (no session here): the entry node

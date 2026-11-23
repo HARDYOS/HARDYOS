@@ -7,6 +7,7 @@ import { Alert, Button, EmptyState, ErrorBox, Field, Loading, PageHeader, Select
 import { ConfirmDialog, Dialog } from "../../ui/Dialog";
 import { toast } from "../../ui/toasts";
 import { itemLabel, kindLabel, restore, useBrowse, useOverview, useSources, useVersions } from "./backupApi";
+import { CloudMailRestore } from "./MailRestore";
 import { JobProgress } from "./parts";
 import type { BackupTabProps } from "./tabs";
 
@@ -46,7 +47,7 @@ export function RestoreBrowser({ args }: BackupTabProps) {
 
   return (
     <div className="stack">
-      <PageHeader title="Restore" subtitle="Pick a version, then the files to bring back, or put a whole folder, app or VM back to how it was." />
+      <PageHeader title="Restore" subtitle="Pick a version, then the files to bring back, or put a whole folder, app or VM back to how it was; mail comes back by mailbox, domain or all at once." />
       <div className="bk-row2">
         <Field label="Destination">
           {(id) => (
@@ -151,6 +152,14 @@ function ItemRestore({ target, version, item, name }: { target: string; version:
   const [job, setJob] = useState<{ id: string; label: string } | null>(null);
   const [rollback, setRollback] = useState(false);
   const confirmName = kind === "system" ? "settings" : name;
+  if (kind === "mail") {
+    return (
+      <div className="stack">
+        <CloudMailRestore target={target} version={version} item={item} onJob={setJob} />
+        {job && <JobProgress id={job.id} label={job.label} onDone={(j) => j.state === "succeeded" && toast("success", "Restored", job.label)} />}
+      </div>
+    );
+  }
   const doRollback = async () => {
     const r = await restore({ target, snapshot: item.snapshot, mode: "rollback", confirm: confirmName });
     setJob({ id: r.job.id, label: kind === "system" ? "Preparing the settings" : `Rolling back ${name}` });
