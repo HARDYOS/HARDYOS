@@ -81,6 +81,11 @@ func (m *Manager) AttachUSB(ctx context.Context, a USBArgs) (*VM, error) {
 	if err != nil {
 		return nil, err
 	}
+	if a.Persist {
+		if err := perServer(st, "Keeping a plugged-in USB device in the settings"); err != nil {
+			return nil, err
+		}
+	}
 	if m.state(ctx, a.ID) != "running" {
 		return nil, Problems{"start the VM first; a VM that's off gets its USB devices in Hardware"}
 	}
@@ -142,6 +147,11 @@ func (m *Manager) DetachUSB(ctx context.Context, a USBArgs) (*VM, error) {
 	st, err := m.find(ctx, a.ID)
 	if err != nil {
 		return nil, err
+	}
+	if a.Persist {
+		if err := perServer(st, "Removing a USB device from the settings here"); err != nil {
+			return nil, err
+		}
 	}
 	if m.state(ctx, a.ID) != "running" {
 		return nil, Problems{"the VM isn't running; change its USB devices in Hardware"}

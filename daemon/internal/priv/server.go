@@ -30,6 +30,9 @@ type Server struct {
 	OnListen func()
 	// QuietOps are logged at debug level (read-only operations hardyd polls).
 	QuietOps map[string]bool
+	// RootOnly operations may only be called by root itself (hardyctl run
+	// as root: an administrator's confirmation hardyd can't give).
+	RootOnly map[string]bool
 
 	mu  sync.RWMutex
 	ops map[string]HandlerFunc
@@ -140,6 +143,11 @@ func (s *Server) serveConn(ctx context.Context, conn *net.UnixConn) {
 	s.mu.RUnlock()
 	if !ok {
 		writeResponse(conn, Response{Error: Errorf(CodeUnknownOp, "unknown operation %q", req.Op)})
+		return
+	}
+	if s.RootOnly[req.Op] && uid != 0 {
+		log.Warn("rejected a root-only priv op", "op", req.Op, "uid", uid)
+		writeResponse(conn, Response{Error: Errorf(CodeForbidden, "%s may only be run as root", req.Op)})
 		return
 	}
 

@@ -26,6 +26,8 @@ export function linkTarget(link: string): { app: string; args?: Record<string, s
       return { app: "os.hardy.monitor", args: a ? { tab: a } : undefined };
     case "logs":
       return { app: "os.hardy.logs" };
+    case "cluster":
+      return { app: "os.hardy.cluster" };
     case "backup":
       // backup/tasks/<id>, backup/targets/<id> (decision 234; targets live
       // on the Destinations tab), backup/replication.

@@ -119,6 +119,9 @@ type proxyListener struct {
 	// webmail: the catalog's Mail app (Roundcube): each request carries
 	// the person's mailbox sign-in (a token tied to this session).
 	webmail atomic.Bool
+	// remote: an app on another cluster member, relayed to its owner
+	// (clusterproxy.go); nil for this server's own apps.
+	remote *remoteWindow
 }
 
 type proxyToken struct {
@@ -403,6 +406,14 @@ func (p *appProxy) reconcile(ctx context.Context) {
 	now := time.Now()
 	p.mu.Lock()
 	for id, l := range p.listeners {
+		if isRemoteWindow(id) {
+			// Remote windows live while used (decision 371): an idle one
+			// is closed with its sessions and opened again on demand.
+			want[id] = l.remote == nil || !l.remote.idle(now)
+		}
+	}
+
+	for id, l := range p.listeners {
 		if !want[id] {
 			_ = l.srv.Close()
 			delete(p.listeners, id)
@@ -532,6 +543,9 @@ func (p *appProxy) handler(l *proxyListener) http.Handler {
 				"It may be starting or stopped. Check it in the App Store, then reload this window.")
 		},
 	}
+	if l.remote != nil {
+		rp.Transport = l.remote
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if p.s.hosts.redirectOld(w, r, l.appID) {
 			// Reached by a name under the base: the app's own hostname.
@@ -559,6 +573,9 @@ func (p *appProxy) handler(l *proxyListener) http.Handler {
 		}
 		if filterAppRequest(w, r, l.appID) {
 			return
+		}
+		if l.remote != nil {
+			r = r.WithContext(context.WithValue(context.WithValue(r.Context(), windowUserKey{}, ss.userID), windowDeskKey{}, ss.desktopToken))
 		}
 		if l.webmail.Load() {
 			if c, ok := p.webmailCreds(r, ss, key); ok {
@@ -772,9 +789,10 @@ func (p *appProxy) verify(r *http.Request, ss *proxySession) bool {
 	if err != nil || s.sessionGateAt(r, info, u, r.RemoteAddr != "" && s.outside(r)) != gateOK {
 		return false
 	}
-	if !(ss.host && ss.appID == hostOfficeID) {
-		// The office editor's host session has no access list: what a
-		// person may open is checked per file.
+	// A remote app's access list is its owner's, checked there on every
+	// relayed request. The office editor's host session has no access
+	// list: what a person may open is checked per file.
+	if !isRemoteWindow(ss.appID) && !(ss.host && ss.appID == hostOfficeID) {
 		may, err := s.mayUse(ctx, ss.desktopToken, u, ss.appID)
 		if err != nil || !may {
 			return false

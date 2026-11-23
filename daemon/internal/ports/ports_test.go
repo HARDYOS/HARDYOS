@@ -24,6 +24,9 @@ func TestNoPortIsUsedTwice(t *testing.T) {
 		if p >= AppProxyBase && p < AppProxyBase+AppProxyCount {
 			t.Errorf("%s (%d) is inside the app window proxy range %d-%d", name, p, AppProxyBase, AppProxyBase+AppProxyCount-1)
 		}
+		if p >= MigrateFirst && p < MigrateFirst+MigrateCount {
+			t.Errorf("%s (%d) is inside the live migration range %d-%d", name, p, MigrateFirst, MigrateFirst+MigrateCount-1)
+		}
 	}
 	if !Reserved(MailRelay) || Reserved(AppProxyBase) {
 		t.Fatal("Reserved")

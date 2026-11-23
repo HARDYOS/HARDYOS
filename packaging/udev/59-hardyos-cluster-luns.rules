@@ -1,0 +1,12 @@
+# HardyOS cluster storage (security review M5): iSCSI disks on a compute
+# node are cluster LUNs, a VM's disks or an app's block volume. Their
+# contents belong to the guest or the app: udisks never offers or mounts
+# them, and blkid never probes them for file systems (60-persistent-storage
+# skips its blkid import with this flag), so no host tool parses what a
+# guest wrote. The by-id/wwn-0x6001405... links still come from the SCSI
+# identifiers, which is how HardyOS finds the LUNs.
+ACTION=="remove", GOTO="hardyos_cluster_luns_end"
+SUBSYSTEM!="block", GOTO="hardyos_cluster_luns_end"
+KERNEL!="sd*", GOTO="hardyos_cluster_luns_end"
+DEVPATH=="*/session*/target*", ENV{UDISKS_IGNORE}="1", ENV{UDISKS_AUTO}="0", ENV{UDEV_DISABLE_PERSISTENT_STORAGE_BLKID_FLAG}="1"
+LABEL="hardyos_cluster_luns_end"

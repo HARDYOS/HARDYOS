@@ -113,6 +113,9 @@ func (m *Manager) SetSchedule(ctx context.Context, a SetScheduleArgs) (*VM, erro
 	if err != nil {
 		return nil, err
 	}
+	if err := perServer(st, "A snapshot schedule"); err != nil {
+		return nil, err
+	}
 	sc := a.Schedule
 	if sc.Off() {
 		sc = nil
@@ -158,7 +161,8 @@ func (m *Manager) TickSchedules(ctx context.Context) {
 	}
 	now := m.now().UTC()
 	for _, st := range l {
-		if st.spec.Schedule.Off() {
+		if st.spec.Schedule.Off() || st.cluster != nil {
+			// A cluster VM's snapshots are the storage server's (decision 471).
 			continue
 		}
 		// A VM busy with something long (an import, a template copy)

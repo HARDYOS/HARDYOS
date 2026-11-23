@@ -32,5 +32,6 @@
       "access": "write",
       "suggest": "downloads"
     }
-  ]
+  ],
+  "storage": { "database": "sqlite" }
 }

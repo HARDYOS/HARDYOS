@@ -61,6 +61,10 @@ Boot (run as root):
   boot-sync [--reinstall]    copy kernels to the boot disks and rewrite the boot menu
                              (runs automatically after kernel and initramfs updates)
 
+Cluster storage (run as root on the storage server):
+  cluster-storage repin <server>  accept a compute server's changed storage address or key
+  cluster-storage repin --subnet  accept a changed storage network
+  cluster-storage forget <server> clear what is kept of a removed server (its fence too)
 NetBird standby (run as root):
   netbird-standby fingerprint  show HardyOS's VPS key and the VPS host key it trusts,
                                to compare with what the VPS script prints
@@ -122,6 +126,8 @@ func main() {
 		err = bootList()
 	case "boot-sync":
 		err = bootSync(args)
+	case "cluster-storage":
+		err = clusterStorage(*socket, args, os.Stdin)
 	case "netbird-standby":
 		err = standbyCmd(args)
 	default:

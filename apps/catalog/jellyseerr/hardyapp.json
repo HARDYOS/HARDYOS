@@ -16,5 +16,6 @@
   ],
   "folders": [
     { "path": "config", "owner": "1000:1000", "mode": "0750" }
-  ]
+  ],
+  "storage": { "database": "sqlite" }
 }

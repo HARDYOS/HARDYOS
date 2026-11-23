@@ -507,7 +507,7 @@ func (m *Manager) apply(ctx context.Context, exports []Export) error {
 		}
 		m.log().Info("nfs: exports updated", "exports", len(exports))
 	}
-	if len(exports) == 0 && active {
+	if len(exports) == 0 && active && !HasClusterExports(m.Root) { // a storage node keeps nfsd for its cluster exports
 		if _, err := sysexec.Output(ctx, m.Runner, "systemctl", "disable", "--now", "--no-block", Unit); err != nil {
 			return fmt.Errorf("stopping the NFS server: %w", err)
 		}

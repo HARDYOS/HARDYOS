@@ -522,6 +522,10 @@ func (m *Manager) SetStreamingRemote(ctx context.Context, a StreamingPublishArgs
 	}
 	peers := []string{}
 	if a.Enabled {
+		if err := perServer(st, "Publishing game streaming to NetBird devices"); err != nil {
+			unlock()
+			return nil, err
+		}
 		if _, err := streamingNIC(&st.spec); err != nil {
 			unlock()
 			return nil, err

@@ -32,6 +32,10 @@ type Backend interface {
 type App struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+	// Cluster: the app is a cluster workload placed on this server; its
+	// service is the cluster's (cluster.go), re-targeted by whichever
+	// server owns it.
+	Cluster bool `json:"cluster,omitempty"`
 }
 
 // Inputs is what the sync needs to know about this server.
@@ -52,6 +56,10 @@ type Inputs struct {
 	// MailHost is the mail server's name while it's on (published when it
 	// is directly under the base domain).
 	MailHost string
+	// ClusterID is the cluster this server is in ("" when none), and
+	// ClusterApps every cluster app's id wherever it runs (nil: unknown).
+	ClusterID   string
+	ClusterApps []string
 }
 
 // Item is one published (or publishable) thing.
@@ -273,10 +281,38 @@ func (p *Publisher) Sync(ctx context.Context, in Inputs) (*Result, error) {
 	prefix := ServicePrefix(s)
 	ours := map[string]netbird.Service{}
 	others := map[string]string{} // domain -> name of a service HardyOS doesn't own
+	// Cluster apps placed here use the cluster's service names.
+	clusterKeys := map[string]bool{}
+	cprefix := ""
+	if validClusterID(in.ClusterID) {
+		cprefix = ClusterServicePrefix(in.ClusterID)
+		for _, a := range in.Apps {
+			if a.Cluster {
+				clusterKeys[AppKey(a.ID)] = true
+			}
+		}
+	}
+	nameFor := func(key string) string {
+		if clusterKeys[key] {
+			return clusterServiceName(in.ClusterID, key)
+		}
+		return serviceName(s, key)
+	}
+	var staleCluster []netbird.Service
 	for _, v := range existing {
-		if strings.HasPrefix(v.Name, prefix) {
+		switch {
+		case strings.HasPrefix(v.Name, prefix):
 			ours[v.Name] = v
-		} else {
+		case cprefix != "" && strings.HasPrefix(v.Name, cprefix):
+			id := strings.TrimPrefix(v.Name, cprefix+"app-")
+			switch {
+			case clusterKeys[AppKey(id)]:
+				ours[v.Name] = v // ours now: re-pointed at this server below
+			case in.ClusterApps != nil && !slices.Contains(in.ClusterApps, id):
+				staleCluster = append(staleCluster, v) // the app left the cluster
+			}
+			// Otherwise another member runs it and keeps it.
+		default:
 			others[strings.ToLower(v.Domain)] = v.Name
 		}
 	}
@@ -364,13 +400,21 @@ func (p *Publisher) Sync(ctx context.Context, in Inputs) (*Result, error) {
 			w.item.Error = why
 			continue
 		}
+		req.Name = nameFor(w.item.Key)
 		w.req = req
 		w.hash = p.hashRequest(*req, rows[w.item.Key])
 	}
 	seen := map[string]bool{}
+	for _, v := range staleCluster {
+		if err := api.DeleteService(ctx, v.ID); err != nil && !netbird.IsNotFound(err) {
+			res.Problem = joinErr(res.Problem, "removing "+v.Domain+" from NetBird: "+err.Error())
+			continue
+		}
+		res.Deleted++
+	}
 	for i := range plan {
 		w := &plan[i]
-		name := serviceName(s, w.item.Key)
+		name := nameFor(w.item.Key)
 		seen[name] = true
 		cur, has := ours[name]
 		rec := Record{Key: w.item.Key, Domain: w.item.Domain, SyncedAt: now}
@@ -432,7 +476,7 @@ func (p *Publisher) Sync(ctx context.Context, in Inputs) (*Result, error) {
 	}
 	if in.Known {
 		for key := range rows {
-			if strings.HasPrefix(key, "app:") && !seen[serviceName(s, key)] {
+			if strings.HasPrefix(key, "app:") && !seen[nameFor(key)] {
 				_ = p.Store.Forget(ctx, key)
 			}
 		}

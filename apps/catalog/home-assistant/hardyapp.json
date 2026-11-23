@@ -17,5 +17,6 @@
   "folders": [
     { "path": "config", "mode": "0750" }
   ],
-  "permissions": { "hostNetwork": true }
+  "permissions": { "hostNetwork": true },
+  "storage": { "database": "sqlite" }
 }

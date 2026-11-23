@@ -48,5 +48,6 @@
   ],
   "permissions": {
     "hostNetwork": true
-  }
+  },
+  "storage": { "database": "other" }
 }

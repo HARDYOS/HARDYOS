@@ -7,6 +7,7 @@ import { ExternalIcon, PlayIcon, RefreshIcon, RestartIcon, StopIcon, TrashIcon }
 import { Alert, Badge, Button, ErrorBox, Loading, PageHeader } from "../../ui";
 import { ConfirmDialog, Dialog } from "../../ui/Dialog";
 import { toast } from "../../ui/toasts";
+import { MoveButton } from "../cluster/ha/MoveButton";
 import { JobProgress } from "../shared";
 import { PublishEditor } from "../control-panel/RemoteAccessPublish";
 import { openInNewTab } from "./AppFrame";
@@ -183,6 +184,7 @@ function Overview({
             <RestartIcon size={14} /> Restart
           </Button>
         )}
+        <MoveButton kind="app" id={app.id} name={app.name} onJob={(j) => setJob(j.id)} disabled={!!job} />
         <span className="app-card__spacer" />
         <Button variant="ghost" onClick={onRemove} disabled={!!job}>
           <TrashIcon size={14} /> Remove

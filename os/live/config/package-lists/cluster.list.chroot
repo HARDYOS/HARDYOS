@@ -1,0 +1,19 @@
+# Phase 8 part B: cluster storage (docs/plans/cluster.md sections 5 and 6.1).
+# The storage role configures LIO through configfs from hardyd-priv; targetcli
+# stays only for diagnostics (no saveconfig.json: the target is rebuilt from
+# root's own state at boot).
+targetcli-fb
+# Compute nodes: iSCSI initiator (node.startup manual: logins only when the
+# cluster grants them), optional multipath, NFSv4.2 client.
+open-iscsi
+multipath-tools
+nfs-common
+sg3-utils
+# Moving an app's data between its NFS folder and its block volume on the
+# storage node; block volumes are ext4 or xfs.
+rsync
+e2fsprogs
+xfsprogs
+# Phase 8 part C: the live-migration channel is narrowed with libvirt's
+# polkit access driver (decision 351; vms.migrate.setup refuses without it).
+polkitd

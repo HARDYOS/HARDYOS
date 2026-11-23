@@ -37,5 +37,6 @@
   ],
   "folders": [
     { "path": "data", "mode": "0700" }
-  ]
+  ],
+  "storage": { "database": "sqlite" }
 }

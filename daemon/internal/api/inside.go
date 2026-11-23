@@ -454,6 +454,13 @@ func (s *Server) placeOfRequest(r *http.Request) place {
 	if viaGateway(r) {
 		return placeOutside
 	}
+	if relayedFrom(r) != nil {
+		// Another member relayed it over the cluster port: its address is
+		// that member's, not the browser's. The person met two-factor
+		// sign-in's rules on the entry node; here it is never home
+		// (decision 475).
+		return placeOutside
+	}
 	ipStr := s.clientIP(r)
 	a, err := netip.ParseAddr(ipStr)
 	if err != nil {

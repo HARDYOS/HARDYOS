@@ -212,6 +212,10 @@ func (m *Manager) MakeTemplate(ctx context.Context, a MakeTemplateArgs) (*Task, 
 		unlock()
 		return nil, err
 	}
+	if err := perServer(st, "Saving as a template"); err != nil {
+		unlock()
+		return nil, err
+	}
 	if s := m.state(ctx, a.VM); s != "stopped" && s != "crashed" {
 		unlock()
 		return nil, Problems{"shut the VM down before making a template from it"}

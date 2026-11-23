@@ -6,6 +6,7 @@
     "backup/replication",
     "backup/targets/{id}",
     "backup/tasks/{id}",
+    "cluster",
     "control/domain",
     "control/hostnames",
     "control/mail",

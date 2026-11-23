@@ -116,7 +116,7 @@ func parseDisks(lsblkJSON []byte, byID map[string][]string) ([]Disk, error) {
 	}
 	var disks []Disk
 	for _, d := range o.BlockDevices {
-		if d.Type != "disk" || skipDisk(d.Name) {
+		if d.Type != "disk" || skipDisk(d.Name) || clusterLUN(d) {
 			continue
 		}
 		disk := Disk{
@@ -144,6 +144,60 @@ func parseDisks(lsblkJSON []byte, byID map[string][]string) ([]Disk, error) {
 	}
 	sort.Slice(disks, func(i, j int) bool { return naturalLess(disks[i].Name, disks[j].Name) })
 	return disks, nil
+}
+
+// lioWWNPrefix is the NAA prefix of every LIO (Linux iSCSI target) LUN,
+// the cluster storage node's among them.
+const lioWWNPrefix = "6001405"
+
+// clusterLUN reports an iSCSI disk (a cluster LUN on a compute node, or
+// any other network LUN): never a local disk to offer for a pool, and its
+// partitions and file systems belong to a VM or app (M5).
+func clusterLUN(d lsblkDev) bool {
+	return str(d.Tran) == "iscsi" || strings.HasPrefix(strings.TrimPrefix(strings.ToLower(str(d.WWN)), "0x"), lioWWNPrefix)
+}
+
+// ImportDevices lists the /dev/disk/by-id paths `zpool import` may scan:
+// everything except iSCSI disks (by transport, from sysfs) and LIO LUNs
+// (by WWN), so a pool inside a cluster VM's disk is never found, let
+// alone imported, on a compute node (M5). root is "/" (os.DirFS).
+func ImportDevices(root fs.FS) []string {
+	if root == nil {
+		return nil
+	}
+	entries, err := fs.ReadDir(root, "dev/disk/by-id")
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		name := e.Name()
+		low := strings.ToLower(name)
+		if strings.HasPrefix(low, "wwn-0x"+lioWWNPrefix) || strings.HasPrefix(low, "scsi-3"+lioWWNPrefix) || strings.HasPrefix(low, "scsi-slio-org") {
+			continue
+		}
+		target, err := fs.ReadLink(root, path.Join("dev/disk/by-id", name))
+		if err != nil {
+			continue
+		}
+		kernel := path.Base(target)
+		if dev, err := fs.ReadLink(root, path.Join("sys/class/block", kernel)); err == nil && strings.Contains(dev, "/session") {
+			continue
+		}
+		out = append(out, "/dev/disk/by-id/"+name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ImportScanArgs are zpool import's -d arguments for ImportDevices; ok is
+// false when there is nothing to scan (zpool would scan all of /dev
+// without any -d).
+func ImportScanArgs(root fs.FS) (args []string, ok bool) {
+	for _, d := range ImportDevices(root) {
+		args = append(args, "-d", d)
+	}
+	return args, len(args) > 0
 }
 
 func skipDisk(name string) bool {

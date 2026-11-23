@@ -28,6 +28,16 @@ const (
 	// NUT is the UPS server (upsd).
 	NUT = 3493
 
+	// NFS and ISCSI are the kernel's NFS server and LIO's iSCSI target
+	// (shared folders over NFS, and cluster storage on the storage network).
+	NFS   = 2049
+	ISCSI = 3260
+	// MigrateFirst up to MigrateFirst + MigrateCount - 1 is QEMU's live
+	// migration range (libvirt's default 49152-49215); the cluster's
+	// storage firewall opens it to members (decisions 351, 384).
+	MigrateFirst = 49152
+	MigrateCount = 64
+
 	// AppGateway is the app gateway NetBird's reverse proxy reaches
 	// (decision 112).
 	AppGateway = 44200
@@ -43,6 +53,9 @@ const (
 	AppProxyCount = 100
 	// Replication is the receiving side of replication (decision 190).
 	Replication = 44400
+	// Cluster is the cluster listener on members and the witness: Raft,
+	// the peer API and live migration relays (decision 321).
+	Cluster = 44500
 
 	// The NetBird standby server (docs/netbird-standby.md, decisions
 	// 420-429): the netbird-standby app's own host ports, which the router
@@ -97,6 +110,7 @@ var Fixed = map[string]int{
 	"office origin":              Office,
 	"office internal":            OfficeInternal,
 	"replication":                Replication,
+	"cluster":                    Cluster,
 	"netbird standby http":       NetBirdStandbyHTTP,
 	"netbird standby https":      NetBirdStandbyHTTPS,
 	"netbird standby stun":       NetBirdStandbySTUN,
@@ -108,8 +122,8 @@ var Fixed = map[string]int{
 	"sunshine audio (netbird)":   SunshineAudio,
 	"sunshine mic (netbird)":     SunshineMic,
 	"socks (netbird)":            1080,
-	"nfs":                        2049,
-	"iscsi":                      3260,
+	"nfs":                        NFS,
+	"iscsi":                      ISCSI,
 	"global catalog":             3268,
 	"global catalog (tls)":       3269,
 	"mdns":                       5353,

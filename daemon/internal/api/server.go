@@ -19,6 +19,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/backups"
 	"github.com/hardyos/hardyos/daemon/internal/clientip"
 	"github.com/hardyos/hardyos/daemon/internal/cloudbackups"
+	"github.com/hardyos/hardyos/daemon/internal/cluster/ha"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/files"
 	"github.com/hardyos/hardyos/daemon/internal/hostnames"
@@ -122,6 +123,9 @@ type Config struct {
 	// Mail is the family mail server (Control Panel › Mail); nil leaves it
 	// out.
 	Mail *manage.Service
+	// ClusterHA is Phase 8 part C (placement, moves, HA); nil or outside a
+	// cluster its endpoints say so.
+	ClusterHA *ha.Service
 
 	// Hostnames gives apps their own names under the base domain with a
 	// trusted wildcard certificate (Control Panel › Hostnames); nil leaves
@@ -195,6 +199,9 @@ func New(cfg Config) *Server {
 	}
 	if cfg.Root == nil {
 		cfg.Root = os.DirFS("/")
+	}
+	if cfg.ClusterHA != nil {
+		clusterSpecs.Store(cfg.ClusterHA)
 	}
 	s := &Server{cfg: cfg, mux: http.NewServeMux(), started: time.Now(), log: cfg.Logger,
 		ips: &clientip.Resolver{Trusted: cfg.TrustedProxies}, pubLimiter: auth.NewDelayLimiter()}
@@ -310,6 +317,7 @@ func (s *Server) routes() {
 			s.vmStreamingRoutes()
 			s.deviceRoutes()
 			s.replicationRoutes()
+			s.clusterHARoutes()
 		}
 		if s.cfg.Backups != nil {
 			s.backupRoutes()
@@ -337,12 +345,15 @@ func (s *Server) routes() {
 // headers and CSRF protection for state-changing API calls.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	if !viaGateway(r) && r.Context().Value(hostsDoneKey{}) == nil && s.hosts.serve(w, r) {
+	// A request another member relayed carries the entry node's Host (its
+	// desktop's name, decision 373): always this server's API, never one of
+	// this server's host routes (decision 474).
+	if !viaGateway(r) && r.Context().Value(hostsDoneKey{}) == nil && relayedFrom(r) == nil && s.hosts.serve(w, r) {
 		// A hostname under the base: its own app, the provider, the office
 		// editor (hostnames.go).
 		return
 	}
-	if s.oidc != nil && s.oidc.Owns(r) {
+	if relayedFrom(r) == nil && s.oidc != nil && s.oidc.Owns(r) {
 		s.serveProvider(w, r, start)
 		return
 	}
