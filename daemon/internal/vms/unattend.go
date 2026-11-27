@@ -572,6 +572,7 @@ func (m *Manager) checkInstalled(ctx context.Context, id string) {
 		return
 	}
 	s := st.spec
+	before, _ := SpecHash(&st.spec)
 	// The streaming disc goes too: its step ran at the first sign-in
 	// (a running QEMU keeps reading the file it has open).
 	s.Media, s.Unattend = withoutMedia(withoutMedia(s.Media, MediaUnattend), MediaStreaming), nil
@@ -579,6 +580,13 @@ func (m *Manager) checkInstalled(ctx context.Context, id string) {
 	if err := m.saveSpec(st); err != nil {
 		m.log().Warn("vms: saving the VM after its Windows install", "id", id, "err", err)
 		return
+	}
+	if st.cluster != nil {
+		// A cluster VM starts only with approved settings: hardyd records
+		// exactly this change as approved (decision 486).
+		if after, err := SpecHash(&s); err == nil {
+			m.recordInstallDone(id, before, after)
+		}
 	}
 	m.removeUnattend(st)
 	m.removeStreaming(st)

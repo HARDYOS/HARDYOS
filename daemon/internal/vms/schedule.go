@@ -113,22 +113,25 @@ func (m *Manager) SetSchedule(ctx context.Context, a SetScheduleArgs) (*VM, erro
 	if err != nil {
 		return nil, err
 	}
-	if err := perServer(st, "A snapshot schedule"); err != nil {
-		return nil, err
-	}
 	sc := a.Schedule
 	if sc.Off() {
 		sc = nil
 	} else if p := sc.problems(); len(p) > 0 {
 		return nil, Problems(p)
 	}
-	existing, err := m.snapshots(ctx, st)
-	if err != nil {
-		return nil, err
+	if st.cluster == nil {
+		existing, err := m.snapshots(ctx, st)
+		if err != nil {
+			return nil, err
+		}
+		if n := len(SchedulePrunes(existing, sc)); n > 0 && !Confirms(a.Confirm, &st.spec) {
+			return nil, Problems{fmt.Sprintf("these counts delete %d automatic snapshots %s has now; type the VM's name (%s) to confirm", n, st.spec.Name, st.spec.Name)}
+		}
 	}
-	if n := len(SchedulePrunes(existing, sc)); n > 0 && !Confirms(a.Confirm, &st.spec) {
-		return nil, Problems{fmt.Sprintf("these counts delete %d automatic snapshots %s has now; type the VM's name (%s) to confirm", n, st.spec.Name, st.spec.Name)}
-	}
+	// A cluster VM's schedule is kept in its settings like any VM's; the
+	// storage server takes its snapshots, and hardyd (which checked the
+	// prunes against the storage server's snapshots) records the changed
+	// settings as approved (decision 485, amending 471).
 	st.spec.Schedule = sc
 	if err := m.saveSpec(st); err != nil {
 		return nil, err

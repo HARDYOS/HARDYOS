@@ -21,6 +21,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/cluster/runtime"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/state"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/notify"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 	"github.com/hardyos/hardyos/daemon/internal/vms"
@@ -56,6 +57,11 @@ type Service struct {
 	Log     *slog.Logger
 	// BootID is this boot's id (default /proc/sys/kernel/random/boot_id).
 	BootID func() string
+	// Notify raises failover alerts (decision 484); nil: none.
+	Notify notify.Notifier
+	// LocalNetworkOK is the LAN check (decision 487): live moves an
+	// administrator starts are refused when it fails; nil never refuses.
+	LocalNetworkOK func(ctx context.Context) (bool, string)
 
 	Scheduler   *placement.Scheduler
 	Mover       *moves.Mover
@@ -156,7 +162,10 @@ func (s *Service) Init() {
 		s.Node.Register(s.Parts.Mux)
 	}
 	s.Coordinator = &Coordinator{Cluster: m, Scheduler: s.Scheduler, Actions: s, Requirements: s.cachedRequirements,
-		Power: s.Parts.Power, Log: s.Log}
+		Power: s.Parts.Power, Log: s.Log, OnFailover: s.recordFailover}
+	if s.Parts.Mux != nil {
+		s.registerFailovers(s.Parts.Mux)
+	}
 	if s.Priv != nil {
 		s.Announcer = &Announcer{Cluster: m, Priv: s.Priv, BootID: boot}
 	}
@@ -190,6 +199,7 @@ func (s *Service) Start(ctx context.Context) {
 	if s.Priv != nil {
 		run(s.watchPolkit)
 		run(s.setupMigration)
+		run(s.approveInstalls)
 	}
 	wg.Wait()
 }
@@ -524,6 +534,11 @@ func (s *Service) runMove(jc *jobs.Context) (any, error) {
 	}
 	if s.Mover == nil {
 		return nil, ErrNotMember
+	}
+	if p.Mode == cluster.MoveLive && s.LocalNetworkOK != nil {
+		if ok, why := s.LocalNetworkOK(jc); !ok {
+			return nil, fmt.Errorf("%w: the local network check fails (%s)", moves.ErrNotLive, why)
+		}
 	}
 	started := time.Now()
 	res, err := s.Mover.MoveWith(jc, cluster.MoveRequest{Workload: p.Workload, To: p.To, Mode: p.Mode, Generation: p.Generation}, p.Actor,

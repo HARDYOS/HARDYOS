@@ -64,6 +64,11 @@ const (
 	ALPNRaft    = "hardyos-raft/1"    // Raft stream layer
 	ALPNPeer    = "hardyos-peer/1"    // HTTP/2: heartbeats, proposals, API proxy, storage control, join
 	ALPNMigrate = "hardyos-migrate/1" // the relayed libvirt connection of one live migration
+	// ALPNCopy carries one zfs stream of an HA conversion between a compute
+	// node and the storage node (decision 480): LAN or storage network,
+	// never NetBird; only compute nodes dial it, only the storage node
+	// serves it.
+	ALPNCopy = "hardyos-copy/1"
 	// ALPNRelay is HTTP/1.1 for proxied desktop requests that need a
 	// connection of their own: WebSocket upgrades (events, VM console,
 	// terminal), app windows and plain API requests from the entry node

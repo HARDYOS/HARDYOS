@@ -103,6 +103,9 @@ type Coordinator struct {
 	EvacuateLANIsolated *bool
 	Now                 func() time.Time
 	Log                 *slog.Logger
+	// OnFailover hears about every recovery decision (a workload placed on
+	// a new server, or nowhere to run): history and alerts (decision 484).
+	OnFailover func(Failover)
 
 	mu           sync.Mutex
 	leader       bool
@@ -670,11 +673,42 @@ func (c *Coordinator) recover(ctx context.Context, self cluster.NodeID, s *clust
 			c.relocations[p.Workload] = append(c.relocations[p.Workload], now)
 			c.mu.Unlock()
 		}
-		_ = c.act(ctx, kind, title, ref(p.Workload), func(ctx context.Context) error {
+		err = c.act(ctx, kind, title, ref(p.Workload), func(ctx context.Context) error {
 			_, err := c.Cluster.Propose(ctx, cluster.CmdPlacementSet, body, c.actor(self))
 			return err
 		})
+		if c.OnFailover != nil {
+			f := Failover{At: now, Workload: p.Workload, Name: p.Name, From: p.Owner, To: body.Owner, Priority: p.HA.Priority,
+				Coordinator: self, Outcome: FailoverRestarted, Problem: body.Problem}
+			switch {
+			case err != nil:
+				f.Outcome, f.Problem = FailoverFailed, err.Error()
+			case body.State == cluster.PlacementPending:
+				f.Outcome = FailoverPending
+			}
+			c.OnFailover(f)
+		}
 	}
+}
+
+// Failover outcomes.
+const (
+	FailoverRestarted = "restarted" // placed on a new server, which starts it
+	FailoverPending   = "pending"   // no server can run it now
+	FailoverFailed    = "failed"    // the cluster didn't take the decision
+)
+
+// Failover is one recovery decision of the coordinator.
+type Failover struct {
+	At          time.Time           `json:"at"`
+	Workload    cluster.WorkloadRef `json:"workload"`
+	Name        string              `json:"name"`
+	From        cluster.NodeID      `json:"from,omitempty"`
+	To          cluster.NodeID      `json:"to,omitempty"`
+	Outcome     string              `json:"outcome"`
+	Problem     string              `json:"problem,omitempty"`
+	Priority    int                 `json:"priority"`
+	Coordinator cluster.NodeID      `json:"coordinator"`
 }
 
 func summarize(skipped map[cluster.NodeID]string) string {

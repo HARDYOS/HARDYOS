@@ -255,6 +255,25 @@ func (r *Root) inUse(a WorkloadArgs) (bool, error) {
 	return false, nil
 }
 
+// InUse reports whether root maps or exports anything of a workload (the
+// HA conversions' park refuses then).
+func (r *Root) InUse(ctx context.Context, kind cluster.WorkloadKind, id, pool string) (bool, error) {
+	a := WorkloadArgs{Kind: kind, ID: id, Pool: pool}
+	if err := a.check(); err != nil {
+		return false, err
+	}
+	return r.inUse(a)
+}
+
+// EnsureParent caps <pool>/vms or <pool>/apps as DatasetCreate does (an
+// HA conversion receiving into it).
+func (r *Root) EnsureParent(ctx context.Context, pool, parent string) error {
+	if !poolRE.MatchString(pool) || (parent != pool+"/vms" && parent != pool+"/apps") {
+		return &ValidationError{fmt.Errorf("%q isn't a cluster parent", parent)}
+	}
+	return r.ensureParentQuota(ctx, pool, parent)
+}
+
 // DestroyArgs is san.dataset.destroy and san.volume.destroy: Confirm must
 // be the workload's id.
 type DestroyArgs struct {

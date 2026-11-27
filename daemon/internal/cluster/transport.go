@@ -78,6 +78,8 @@ type Transport struct {
 	Peer, Relay, Bootstrap http.Handler
 	// Migrate takes a live migration connection (part C); nil refuses.
 	Migrate func(conn *tls.Conn, from Node)
+	// Copy takes an HA conversion's stream (ALPNCopy); nil refuses.
+	Copy func(conn *tls.Conn, from Node)
 	// RaftAdmit decides whether a Raft request read from a member's
 	// connection reaches Raft (raftguard.go); nil refuses every request.
 	RaftAdmit func(peer Node, rpc RaftRPC) error
@@ -112,7 +114,7 @@ func (t *Transport) port() int {
 	return Port
 }
 
-var serverProtos = []string{ALPNRaft, ALPNPeer, ALPNRelay, ALPNMigrate, "http/1.1"}
+var serverProtos = []string{ALPNRaft, ALPNPeer, ALPNRelay, ALPNMigrate, ALPNCopy, "http/1.1"}
 
 func (t *Transport) serverTLS() *tls.Config {
 	return &tls.Config{
@@ -310,6 +312,14 @@ func (t *Transport) serveConn(c net.Conn) {
 			return
 		}
 		t.Migrate(tc, peer)
+	case ALPNCopy:
+		// Only an unfenced compute member dials; the handler (the storage
+		// node's) checks the one-time token it handed out.
+		if !member || isFenced(peer) || peer.Role != RoleCompute || t.Copy == nil {
+			tc.Close()
+			return
+		}
+		t.Copy(tc, peer)
 	default:
 		if t.Bootstrap == nil || !t.boot.push(tc) {
 			tc.Close()
@@ -402,8 +412,8 @@ func (t *Transport) DialNode(ctx context.Context, id NodeID, alpn string) (net.C
 	paths := t.Paths.DialOrder(id)
 	var lastErr error = fmt.Errorf("no path to %s", id)
 	for i, p := range paths {
-		if alpn == ALPNMigrate && p == PathNetBird {
-			continue
+		if (alpn == ALPNMigrate || alpn == ALPNCopy) && p == PathNetBird {
+			continue // bulk traffic never goes over NetBird
 		}
 		a := pathAddr(n.Addresses, p)
 		if !a.IsValid() {

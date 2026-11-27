@@ -26,6 +26,7 @@ type Live struct {
 	handlers []liveHandler
 	progress map[*cluster.Core]*liveProgress
 	migrate  func(conn *tls.Conn, from cluster.Node)
+	copyFn   func(conn *tls.Conn, from cluster.Node)
 	changed  chan struct{} // closed when the core is replaced
 }
 
@@ -67,6 +68,9 @@ func (l *Live) configureLocked(c *cluster.Core) {
 	l.syncLocked(c)
 	if l.migrate != nil {
 		c.SetMigrate(l.migrate) // before the core starts
+	}
+	if l.copyFn != nil {
+		c.SetCopy(l.copyFn)
 	}
 	close(l.changed)
 	l.changed = make(chan struct{})
@@ -319,6 +323,25 @@ func (l *Live) SetMigrate(f func(conn *tls.Conn, from cluster.Node)) {
 	l.mu.Lock()
 	l.migrate = f
 	l.mu.Unlock()
+}
+
+// SetCopy sets the HA conversions' stream hook (the cluster port's
+// hardyos-copy/1) on every core. Call before Init.
+func (l *Live) SetCopy(f func(conn *tls.Conn, from cluster.Node)) {
+	l.mu.Lock()
+	l.copyFn = f
+	l.mu.Unlock()
+}
+
+// DialCopy dials a member's hardyos-copy/1 (LAN, then the storage
+// network; never NetBird).
+func (l *Live) DialCopy(ctx context.Context, node cluster.NodeID) (net.Conn, error) {
+	c, err := l.core()
+	if err != nil {
+		return nil, err
+	}
+	conn, _, err := c.Transport().DialNode(ctx, node, cluster.ALPNCopy)
+	return conn, err
 }
 
 // DialMigrate dials a member's hardyos-migrate/1 on the current path (LAN,

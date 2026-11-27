@@ -153,6 +153,9 @@ type Manager struct {
 	// schedMissed: rounds in a row a VM's due snapshot waited.
 	schedMissed map[string]int
 	releases    map[string]*pendingRelease // stopped VMs whose devices still go back
+	// installDone: cluster VMs whose unattended install root ended here,
+	// for hardyd to approve that change (ha.go, decision 486).
+	installDone map[string]InstallDone
 }
 
 func (m *Manager) log() *slog.Logger {
@@ -317,14 +320,20 @@ type stored struct {
 
 // datasets lists VM datasets: name -> mountpoint, for every pool.
 func (m *Manager) datasets(ctx context.Context) (map[string]string, error) {
-	out, err := m.zfs(ctx, "list", "-H", "-p", "-t", "filesystem", "-o", "name,mountpoint,"+PropVM)
+	out, err := m.zfs(ctx, "list", "-H", "-p", "-t", "filesystem", "-o", "name,mountpoint,"+PropVM+","+propRole)
 	if err != nil {
 		return nil, fmt.Errorf("listing VMs: %w", err)
 	}
 	res := map[string]string{}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		f := strings.Split(line, "\t")
-		if len(f) != 3 || f[2] == "-" || f[2] == "" {
+		if len(f) < 3 || f[2] == "-" || f[2] == "" {
+			continue
+		}
+		if len(f) > 3 && f[3] == roleCluster {
+			// On the storage server: a cluster VM's datasets are the
+			// cluster's, run by a compute server, never by this one
+			// (decision 488).
 			continue
 		}
 		pool, _, _ := strings.Cut(f[0], "/")

@@ -185,6 +185,47 @@ type MakeTemplateArgs struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
+	// ClusterPool: on the storage server, VM is a cluster VM whose
+	// datasets are on this pool (an HA VM's "Save as template").
+	ClusterPool string `json:"clusterPool,omitempty"`
+}
+
+// clusterHere reads a cluster VM's spec from its datasets on this
+// (storage) server: <pool>/vms/<id>, org.hardyos:role=cluster.
+func (m *Manager) clusterHere(ctx context.Context, pool, id string) (*stored, error) {
+	if ValidID(id) != nil || !poolRE.MatchString(pool) {
+		return nil, ErrNotFound
+	}
+	ds := Dataset(pool, id)
+	out, err := m.zfs(ctx, "get", "-H", "-p", "-o", "value", PropVM+","+propRole, ds)
+	if err != nil {
+		return nil, ErrNotFound
+	}
+	v := strings.Fields(string(out))
+	if len(v) != 2 || v[0] != id || v[1] != roleCluster {
+		return nil, Problems{fmt.Sprintf("%s isn't a cluster VM's storage on this server", ds)}
+	}
+	st, err := m.mounted(ctx, ds)
+	if err != nil {
+		return nil, err
+	}
+	b, err := rootfile.ReadFile(filepath.Join(m.sys(st.dir), specFile))
+	if err != nil {
+		return nil, err
+	}
+	var s Spec
+	if err := json.Unmarshal(b, &s); err != nil {
+		return nil, fmt.Errorf("%s: %w", specFile, err)
+	}
+	if s.ID != id || s.Pool != pool {
+		return nil, fmt.Errorf("%s describes %s on %s", specFile, s.ID, s.Pool)
+	}
+	s.Normalize()
+	if err := m.checkStored(&s); err != nil {
+		return nil, err
+	}
+	st.spec = s
+	return st, nil
 }
 
 // MakeTemplate starts copying a stopped VM into a new template.
@@ -207,18 +248,30 @@ func (m *Manager) MakeTemplate(ctx context.Context, a MakeTemplateArgs) (*Task, 
 	if err != nil {
 		return nil, err
 	}
-	st, err := m.find(ctx, a.VM)
-	if err != nil {
-		unlock()
-		return nil, err
-	}
-	if err := perServer(st, "Saving as a template"); err != nil {
-		unlock()
-		return nil, err
-	}
-	if s := m.state(ctx, a.VM); s != "stopped" && s != "crashed" {
-		unlock()
-		return nil, Problems{"shut the VM down before making a template from it"}
+	var st *stored
+	if a.ClusterPool != "" {
+		// On the storage server: an HA VM's disks are on this server's
+		// pool (decision 485, amending 471); hardyd checked that the
+		// cluster has it stopped.
+		st, err = m.clusterHere(ctx, a.ClusterPool, a.VM)
+		if err != nil {
+			unlock()
+			return nil, err
+		}
+	} else {
+		st, err = m.find(ctx, a.VM)
+		if err != nil {
+			unlock()
+			return nil, err
+		}
+		if err := perServer(st, "Saving as a template"); err != nil {
+			unlock()
+			return nil, err
+		}
+		if s := m.state(ctx, a.VM); s != "stopped" && s != "crashed" {
+			unlock()
+			return nil, Problems{"shut the VM down before making a template from it"}
+		}
 	}
 	if _, _, err := m.findTemplate(ctx, a.ID); err == nil {
 		unlock()
