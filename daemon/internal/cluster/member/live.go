@@ -354,3 +354,26 @@ func (l *Live) DialMigrate(ctx context.Context, node cluster.NodeID) (net.Conn, 
 	conn, _, err := c.Transport().DialNode(ctx, node, cluster.ALPNMigrate)
 	return conn, err
 }
+
+// Identity is the current core's cluster key (nil outside a cluster).
+func (l *Live) Identity() *cluster.Identity {
+	c, err := l.core()
+	if err != nil || c.Info() == nil {
+		return nil
+	}
+	return c.Identity()
+}
+
+// DialPeer opens the peer API (hardyos-peer/1) to a member at exactly addr
+// ("ip:port"), its pinned key checked: the local-network check probes one
+// path at a time, with no fallback to another (netcheck, decision 491).
+func (l *Live) DialPeer(ctx context.Context, addr string, peer cluster.Node) (net.Conn, error) {
+	c, err := l.core()
+	if err != nil {
+		return nil, err
+	}
+	if peer.Pin == "" {
+		return nil, cluster.ErrNotMember
+	}
+	return c.Transport().DialAddr(ctx, addr, cluster.ALPNPeer, peer.Pin, nil)
+}

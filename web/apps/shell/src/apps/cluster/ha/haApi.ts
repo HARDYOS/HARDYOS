@@ -73,8 +73,8 @@ export async function setTimings(t: Timings): Promise<Job> {
   return r.job;
 }
 
-export async function drainNode(node: string, stopOthers: boolean, confirm?: string): Promise<Job> {
-  const r = await unwrap(api.POST("/cluster/moves/drain", { body: { node, stopOthers, confirm } }));
+export async function drainNode(node: string, stopOthers: boolean, confirm?: string, offline = false): Promise<Job> {
+  const r = await unwrap(api.POST("/cluster/moves/drain", { body: { node, stopOthers, confirm, offline } }));
   return r.job;
 }
 

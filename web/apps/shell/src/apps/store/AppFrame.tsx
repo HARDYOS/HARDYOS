@@ -1,6 +1,7 @@
 import type { AppOpen } from "@hardy/api-client";
 import { useCallback, useEffect, useState } from "react";
-import { api, errorMessage, unwrap } from "../../api";
+import { errorMessage, unwrap } from "../../api";
+import { nodeApi } from "../../cluster/scope";
 import { ExternalIcon, RefreshIcon } from "../../icons";
 import { APP_WINDOW, type AppProps } from "../../shell";
 import { Alert, Button, Loading } from "../../ui";
@@ -9,19 +10,24 @@ import { toast } from "../../ui/toasts";
 /** The window id for an installed app. */
 export const appWindowId = (id: string) => `${APP_WINDOW}:${id}`;
 
-/** Asks hardyd where to open an app: a fresh single-use proxy URL each time. */
-export async function openUrl(id: string): Promise<AppOpen> {
-  return unwrap(api.POST("/apps/{id}/open", { params: { path: { id } } }));
+/**
+ * Asks hardyd where to open an app: a fresh single-use proxy URL each time.
+ * node is the server the window is for ("" or undefined: this one); a
+ * cluster app opens wherever it runs, and an app on another server through
+ * this server's window proxy and the cluster relay.
+ */
+export async function openUrl(id: string, node?: string): Promise<AppOpen> {
+  return unwrap(nodeApi(node).POST("/apps/{id}/open", { params: { path: { id } } }));
 }
 
 /**
  * Opens an app in a new browser tab. The tab is opened before asking the
  * server, so popup blockers see it as the click's own window.
  */
-export async function openInNewTab(id: string, name: string) {
+export async function openInNewTab(id: string, name: string, node?: string) {
   const w = window.open("about:blank", "_blank");
   try {
-    const r = await openUrl(id);
+    const r = await openUrl(id, node);
     if (w) {
       w.opener = null;
       w.location.href = r.url;
@@ -51,10 +57,11 @@ export function frameable(o: AppOpen, desktopProtocol = window.location.protocol
 export default function AppFrame({ args }: AppProps) {
   const id = args?.id ?? "";
   const name = args?.title ?? id;
-  return <AppFrameView id={id} name={name} />;
+  return <AppFrameView id={id} name={name} node={args?.node} />;
 }
 
-export function AppFrameView({ id, name }: { id: string; name: string }) {
+/** An app's window; node is the server it runs on ("" or undefined: this one). */
+export function AppFrameView({ id, name, node }: { id: string; name: string; node?: string }) {
   const [open, setOpen] = useState<AppOpen | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
@@ -63,11 +70,11 @@ export function AppFrameView({ id, name }: { id: string; name: string }) {
     setError(null);
     setOpen(null);
     try {
-      setOpen(await openUrl(id));
+      setOpen(await openUrl(id, node));
     } catch (err) {
       setError(errorMessage(err));
     }
-  }, [id]);
+  }, [id, node]);
 
   useEffect(() => {
     void load();
@@ -82,7 +89,7 @@ export function AppFrameView({ id, name }: { id: string; name: string }) {
         <Button size="sm" variant="ghost" onClick={() => setNonce((n) => n + 1)} aria-label={`Reload ${name}`} title="Reload">
           <RefreshIcon size={14} />
         </Button>
-        <Button size="sm" variant="ghost" onClick={() => openInNewTab(id, name)}>
+        <Button size="sm" variant="ghost" onClick={() => openInNewTab(id, name, node)}>
           <ExternalIcon size={14} /> Open in new tab
         </Button>
       </div>
@@ -107,7 +114,7 @@ export function AppFrameView({ id, name }: { id: string; name: string }) {
           />
         ) : (
           <div className="pad">
-            <Alert tone="info" title={`${name} opens in its own tab`} action={<Button size="sm" variant="primary" onClick={() => openInNewTab(id, name)}>Open in new tab</Button>}>
+            <Alert tone="info" title={`${name} opens in its own tab`} action={<Button size="sm" variant="primary" onClick={() => openInNewTab(id, name, node)}>Open in new tab</Button>}>
               The window proxy isn't running, and the desktop can't show an http:// page inside its secure window.
             </Alert>
           </div>

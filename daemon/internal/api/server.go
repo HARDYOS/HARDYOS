@@ -126,6 +126,9 @@ type Config struct {
 	// ClusterHA is Phase 8 part C (placement, moves, HA); nil or outside a
 	// cluster its endpoints say so.
 	ClusterHA *ha.Service
+	// NetCheck is the cluster's local-network check (decision 492); nil
+	// answers "not running".
+	NetCheck NetChecker
 
 	// Hostnames gives apps their own names under the base domain with a
 	// trusted wildcard certificate (Control Panel › Hostnames); nil leaves
@@ -158,13 +161,18 @@ type Server struct {
 	proxy    *appProxy
 	remote   *remoteRuntime
 	hosts    *hostRuntime
-	links    *sharelinks.Store
-	uploads  uploads
-	dav      davState
-	started  time.Time
-	log      *slog.Logger
-	ips      *clientip.Resolver
-	oidc     *oidc.Provider
+	// cluster is the cluster desktop (AttachCluster; nil outside hardyd's
+	// cluster wiring), windows the routing of app windows to other members
+	// (clusterwindows.go).
+	cluster *clusterAPI
+	windows windowRouter
+	links   *sharelinks.Store
+	uploads uploads
+	dav     davState
+	started time.Time
+	log     *slog.Logger
+	ips     *clientip.Resolver
+	oidc    *oidc.Provider
 	// pubLimiter slows down failed sign-ins from the internet (through the
 	// app gateway) in buckets of their own: decision 156.
 	pubLimiter *auth.DelayLimiter

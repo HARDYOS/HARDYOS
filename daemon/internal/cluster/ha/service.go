@@ -17,6 +17,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/fence"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/moves"
+	"github.com/hardyos/hardyos/daemon/internal/cluster/netcheck"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/placement"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/runtime"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/state"
@@ -59,9 +60,9 @@ type Service struct {
 	BootID func() string
 	// Notify raises failover alerts (decision 484); nil: none.
 	Notify notify.Notifier
-	// LocalNetworkOK is the LAN check (decision 487): live moves an
-	// administrator starts are refused when it fails; nil never refuses.
-	LocalNetworkOK func(ctx context.Context) (bool, string)
+	// NetCheck is the cluster's local-network check (decision 492): live
+	// moves and turning HA on need it OK. Nil: not checked (tests).
+	NetCheck func(ctx context.Context, members ...cluster.NodeID) netcheck.Result
 
 	Scheduler   *placement.Scheduler
 	Mover       *moves.Mover
@@ -144,7 +145,9 @@ func (s *Service) Init() {
 	s.Reconciler.CleanFence = s.Agent.CleanFence
 	images := runtime.PrivImages{Priv: s.Priv}
 	if s.Parts.Peers != nil {
-		s.Mover = &moves.Mover{Cluster: m, Peers: s.Parts.Peers, Scheduler: s.Scheduler, Log: s.Log}
+		s.Mover = &moves.Mover{Cluster: m, Peers: s.Parts.Peers, Scheduler: s.Scheduler, Log: s.Log, LocalNetwork: func(ctx context.Context, from, to cluster.NodeID) (bool, string) {
+			return s.localNetwork(ctx, from, to)
+		}}
 		s.Prepuller = &runtime.Prepuller{Cluster: m, Images: images, Log: s.Log,
 			Source: moves.PeerImages{Peers: s.Parts.Peers, Priv: s.Priv, Self: func() cluster.NodeID {
 				n, _ := m.Self()
@@ -162,7 +165,12 @@ func (s *Service) Init() {
 		s.Node.Register(s.Parts.Mux)
 	}
 	s.Coordinator = &Coordinator{Cluster: m, Scheduler: s.Scheduler, Actions: s, Requirements: s.cachedRequirements,
-		Power: s.Parts.Power, Log: s.Log, OnFailover: s.recordFailover}
+		Power: s.Parts.Power, Log: s.Log, OnFailover: s.recordFailover,
+		// Its evacuations are live moves: the same pair check as the
+		// Mover's (decision 487/492), asked before it starts one.
+		LiveOK: func(ctx context.Context, from, to cluster.NodeID) (bool, string) {
+			return s.localNetwork(ctx, from, to)
+		}}
 	if s.Parts.Mux != nil {
 		s.registerFailovers(s.Parts.Mux)
 	}
@@ -535,11 +543,7 @@ func (s *Service) runMove(jc *jobs.Context) (any, error) {
 	if s.Mover == nil {
 		return nil, ErrNotMember
 	}
-	if p.Mode == cluster.MoveLive && s.LocalNetworkOK != nil {
-		if ok, why := s.LocalNetworkOK(jc); !ok {
-			return nil, fmt.Errorf("%w: the local network check fails (%s)", moves.ErrNotLive, why)
-		}
-	}
+	// A live move's network check is the Mover's (LocalNetwork, below).
 	started := time.Now()
 	res, err := s.Mover.MoveWith(jc, cluster.MoveRequest{Workload: p.Workload, To: p.To, Mode: p.Mode, Generation: p.Generation}, p.Actor,
 		moves.Options{Confirm: p.Confirm, Progress: jc.Progress})
@@ -551,7 +555,10 @@ func (s *Service) runMove(jc *jobs.Context) (any, error) {
 type DrainParams struct {
 	Node       cluster.NodeID `json:"node"`
 	StopOthers bool           `json:"stopOthers"`
-	Actor      cluster.Actor  `json:"actor"`
+	// Offline: move offline what the local-network check keeps from moving
+	// live (the administrator agreed; decision 496).
+	Offline bool          `json:"offline,omitempty"`
+	Actor   cluster.Actor `json:"actor"`
 }
 
 func (s *Service) runDrain(jc *jobs.Context) (any, error) {
@@ -562,7 +569,7 @@ func (s *Service) runDrain(jc *jobs.Context) (any, error) {
 	if s.Mover == nil {
 		return nil, ErrNotMember
 	}
-	res, err := s.Mover.DrainWith(jc, p.Node, p.StopOthers, p.Actor, jc.Progress)
+	res, err := s.Mover.DrainWith(jc, p.Node, moves.DrainOptions{StopOthers: p.StopOthers, Offline: p.Offline}, p.Actor, jc.Progress)
 	if err != nil {
 		return nil, &jobs.FailedWith{Err: err, Result: res}
 	}
@@ -594,9 +601,79 @@ func (s *Service) applied(check func(*cluster.Snapshot) error) error {
 	return check(s.Parts.Membership.State().Snapshot())
 }
 
+// localNetwork reports whether the given servers and the storage server
+// share the LAN and the storage network (decision 496; OK when the check
+// isn't wired).
+func (s *Service) localNetwork(ctx context.Context, members ...cluster.NodeID) (bool, string) {
+	if s.NetCheck == nil {
+		return true, ""
+	}
+	r := s.NetCheck(ctx, members...)
+	return r.OK, r.Reason
+}
+
+// ErrNetwork: the servers don't share a local network (HA refused).
+var ErrNetwork = errors.New("the servers don't share a local network")
+
+// FailoverMembers are the compute servers a workload with pol could run on
+// (its owner, and its preferred servers when restricted to them, else every
+// active compute server): the members CheckHA judges, with the storage
+// server.
+func FailoverMembers(snap *cluster.Snapshot, owner cluster.NodeID, pol cluster.HAPolicy) []cluster.NodeID {
+	active := func(id cluster.NodeID) bool {
+		n := snap.Nodes[id]
+		return n != nil && n.Role == cluster.RoleCompute && n.State == cluster.NodeActive
+	}
+	seen := map[cluster.NodeID]bool{}
+	var out []cluster.NodeID
+	add := func(id cluster.NodeID) {
+		if id != "" && !seen[id] && active(id) {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	add(owner)
+	if pol.Restricted && len(pol.Preferred) > 0 {
+		for _, id := range pol.Preferred {
+			add(id)
+		}
+		return out
+	}
+	for _, n := range computeNodes(snap) {
+		add(n.ID)
+	}
+	return out
+}
+
+// CheckHA refuses turning high availability on for w while the servers it
+// could fail over between (FailoverMembers) and the storage server don't
+// share a local network ("warn, block HA only": a policy already on may be
+// changed or turned off, and HA workloads keep failing over).
+func (s *Service) CheckHA(ctx context.Context, w cluster.WorkloadRef, pol cluster.HAPolicy) error {
+	if !pol.Enabled || s.Parts.Membership == nil {
+		return nil
+	}
+	snap := s.Parts.Membership.State().Snapshot()
+	p := snap.Placements[w]
+	if p != nil && p.HA.Enabled {
+		return nil
+	}
+	owner := cluster.NodeID("")
+	if p != nil {
+		owner = p.Owner
+	}
+	if ok, why := s.localNetwork(ctx, FailoverMembers(snap, owner, pol)...); !ok {
+		return fmt.Errorf("%w yet, so high availability can't be turned on: %s", ErrNetwork, why)
+	}
+	return nil
+}
+
 func (s *Service) runPolicy(jc *jobs.Context) (any, error) {
 	var p PolicyParams
 	if err := jc.Params(&p); err != nil {
+		return nil, err
+	}
+	if err := s.CheckHA(jc, p.Workload, p.Policy); err != nil {
 		return nil, err
 	}
 	if err := s.propose(jc, cluster.CmdHAPolicy, state.HAPolicySet{Workload: p.Workload, Policy: p.Policy}, p.Actor); err != nil {
@@ -856,6 +933,10 @@ type Candidate struct {
 	Name   string         `json:"name"`
 	Fits   bool           `json:"fits"`
 	Reason string         `json:"reason,omitempty"`
+	// Live: it can take the VM live (the local-network check of the two
+	// servers and the storage server); LiveReason says why not.
+	Live       bool   `json:"live"`
+	LiveReason string `json:"liveReason,omitempty"`
 }
 
 // Candidates lists where a workload could move, and whether it can move
@@ -892,12 +973,30 @@ func (s *Service) Candidates(ctx context.Context, w cluster.WorkloadRef) (*Candi
 	case out.OwnerDown:
 		out.LiveReason = "its server is down"
 	}
+	anyLive, netWhy := false, ""
 	for _, n := range computeNodes(snap) {
 		if n.ID == p.Owner {
 			continue
 		}
 		why := s.Scheduler.Fits(snap, health, w, req, n.ID)
-		out.Candidates = append(out.Candidates, Candidate{ID: n.ID, Name: n.Name, Fits: why == "", Reason: why})
+		c := Candidate{ID: n.ID, Name: n.Name, Fits: why == ""}
+		c.Reason = why
+		if out.Live && c.Fits {
+			// Live to this server: the two of them and the storage server
+			// share the local network (decision 496).
+			if ok, nwhy := s.localNetwork(ctx, p.Owner, n.ID); ok {
+				c.Live, anyLive = true, true
+			} else {
+				c.LiveReason = "not live: " + nwhy
+				if netWhy == "" {
+					netWhy = nwhy
+				}
+			}
+		}
+		out.Candidates = append(out.Candidates, c)
+	}
+	if out.Live && !anyLive && netWhy != "" {
+		out.Live, out.LiveReason = false, "the servers don't share a local network yet: "+netWhy
 	}
 	return out, nil
 }

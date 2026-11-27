@@ -4,11 +4,15 @@ import (
 	"context"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/ha"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/ha/clustertest"
+	"github.com/hardyos/hardyos/daemon/internal/cluster/netcheck"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/state"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
@@ -17,6 +21,16 @@ import (
 )
 
 func newClusterEnv(t *testing.T, member bool) (*testEnv, *clustertest.World) {
+	t.Helper()
+	return newClusterEnvOpts(t, member, nil)
+}
+
+func newClusterEnvWith(t *testing.T, mod func(*ha.Service)) (*testEnv, *clustertest.World) {
+	t.Helper()
+	return newClusterEnvOpts(t, true, mod)
+}
+
+func newClusterEnvOpts(t *testing.T, member bool, mod func(*ha.Service)) (*testEnv, *clustertest.World) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "api.db"))
@@ -30,6 +44,9 @@ func newClusterEnv(t *testing.T, member bool) (*testEnv, *clustertest.World) {
 	if member {
 		w = clustertest.New(t, "c1", "c2")
 		svc.Parts.Membership = w.Nodes["c1"]
+	}
+	if mod != nil {
+		mod(svc)
 	}
 	svc.Init()
 	if err := m.Start(ctx); err != nil {
@@ -118,4 +135,60 @@ func TestClusterHAAPI(t *testing.T) {
 		t.Fatalf("%d %+v", code, c)
 	}
 	_ = vm
+}
+
+// The local-network check (decision 492): "warn, block HA only".
+func TestClusterHANeedsLocalNetwork(t *testing.T) {
+	var asked [][]cluster.NodeID
+	env, w := newClusterEnvWith(t, func(svc *ha.Service) {
+		svc.NetCheck = func(_ context.Context, members ...cluster.NodeID) netcheck.Result {
+			asked = append(asked, members)
+			// Only pairs with c2 fail (pair-scoped, decision 496).
+			if slices.Contains(members, "c2") {
+				return netcheck.Result{OK: false, Reason: "c2 → c1 on the storage network: not reachable", PerMember: []netcheck.MemberResult{}}
+			}
+			return netcheck.Result{OK: true, PerMember: []netcheck.MemberResult{}}
+		}
+	})
+	w.AddVM("web", "c1", false, 0)
+	w.AddVM("db", "c1", true, 50)
+	w.Run(time.Second)
+	admin := env.client(t)
+	admin.do("POST", "/api/v1/setup/admin", map[string]string{"username": "cade", "password": "supersecret1"}, nil)
+	var e ErrorResponse
+	if code := admin.do("PUT", "/api/v1/cluster/workloads/vm/web/ha", map[string]any{"policy": map[string]any{"enabled": true, "priority": 70}}, &e); code != 409 ||
+		e.Code != "network" || !strings.Contains(e.Message, "storage network") {
+		t.Fatalf("HA turned on without a local network: %d %+v", code, e)
+	}
+	// A workload that already is HA: its policy may change or go off.
+	if code := admin.do("PUT", "/api/v1/cluster/workloads/vm/db/ha", map[string]any{"policy": map[string]any{"enabled": true, "priority": 80}}, nil); code != 202 {
+		t.Fatalf("changing an HA policy: %d", code)
+	}
+	if code := admin.do("PUT", "/api/v1/cluster/workloads/vm/web/ha", map[string]any{"policy": map[string]any{"enabled": false}}, nil); code != 202 {
+		t.Fatalf("turning HA off: %d", code)
+	}
+	// The Move dialog: no live move, with the reason; offline moves stay.
+	var c ha.CandidatesView
+	if code := admin.do("GET", "/api/v1/cluster/moves/candidates?kind=vm&id=web", nil, &c); code != 200 || c.Live || !strings.Contains(c.LiveReason, "local network") {
+		t.Fatalf("%d %+v", code, c)
+	}
+	if len(c.Candidates) != 1 || c.Candidates[0].Live || !strings.Contains(c.Candidates[0].LiveReason, "storage network") {
+		t.Fatalf("candidate: %+v", c.Candidates)
+	}
+	if code := admin.do("POST", "/api/v1/cluster/moves", map[string]any{"kind": "vm", "id": "web", "to": "c2", "mode": "live"}, &e); code != 400 || e.Code != "not_live" {
+		t.Fatalf("a live move: %d %+v", code, e)
+	}
+	// Only the pairs that matter: HA restricted to c1 doesn't need c2.
+	asked = nil
+	if code := admin.do("PUT", "/api/v1/cluster/workloads/vm/web/ha", map[string]any{"policy": map[string]any{"enabled": true, "preferred": []string{"c1"}, "restricted": true}}, &e); code != 202 {
+		t.Fatalf("HA restricted to c1: %d %+v", code, e)
+	}
+	if len(asked) == 0 || !slices.Equal(asked[0], []cluster.NodeID{"c1"}) {
+		t.Fatalf("judged %v, want only c1 (and the storage server)", asked)
+	}
+	// The status endpoint (no monitor wired here: says so, not OK).
+	var r netcheck.Result
+	if code := admin.do("GET", "/api/v1/cluster/netcheck", nil, &r); code != 200 || r.OK {
+		t.Fatalf("netcheck = %d %+v", code, r)
+	}
 }

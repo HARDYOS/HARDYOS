@@ -360,6 +360,59 @@ func TestLiveMigration(t *testing.T) {
 	}
 }
 
+// The local-network check (decision 492): no live move while the servers
+// don't share the LAN and the storage network; nothing changes.
+func TestLiveMigrationNeedsLocalNetwork(t *testing.T) {
+	e := newEnv(t)
+	vm := e.w.AddVM("web", "c1", true, 50)
+	e.w.Run(2 * time.Second)
+	var asked [2]cluster.NodeID
+	e.mover.LocalNetwork = func(_ context.Context, from, to cluster.NodeID) (bool, string) {
+		asked = [2]cluster.NodeID{from, to}
+		return false, "c2 → c1 on the storage network: not reachable"
+	}
+	_, err := e.mover.Move(context.Background(), cluster.MoveRequest{Workload: vm, To: "c2", Mode: cluster.MoveLive, Generation: 1}, actor)
+	if !errors.Is(err, moves.ErrNotLive) || !errors.Is(err, moves.ErrNoLocalNetwork) || !strings.Contains(err.Error(), "local network") {
+		t.Fatalf("%v", err)
+	}
+	if asked != [2]cluster.NodeID{"c1", "c2"} {
+		t.Fatalf("judged %v, want the source and the destination", asked)
+	}
+	if p := e.w.Snapshot().Placements[vm]; p.Owner != "c1" || p.Generation != 1 || p.Target != "" {
+		t.Fatalf("%+v", p)
+	}
+	// An offline move is still allowed.
+	if _, err := e.mover.Move(context.Background(), cluster.MoveRequest{Workload: vm, To: "c2", Mode: cluster.MoveOffline, Generation: 1}, actor); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A drain never quietly turns a live move the network refuses into an
+// offline one: it reports it, and moves it offline only when the
+// administrator allowed that (decision 496).
+func TestDrainDoesntQuietlyGoOffline(t *testing.T) {
+	e := newEnv(t)
+	vm := e.w.AddVM("web", "c1", true, 50)
+	e.w.Run(2 * time.Second)
+	e.mover.LocalNetwork = func(context.Context, cluster.NodeID, cluster.NodeID) (bool, string) {
+		return false, "c1 → nas on the LAN: not reachable"
+	}
+	res, err := e.mover.DrainWith(context.Background(), "c1", moves.DrainOptions{}, actor, nil)
+	if err == nil || !strings.Contains(err.Error(), "local network") || !strings.Contains(err.Error(), "allowing offline") || len(res) != 0 {
+		t.Fatalf("%v %+v", err, res)
+	}
+	if p := e.w.Snapshot().Placements[vm]; p.Owner != "c1" || p.Generation != 1 {
+		t.Fatalf("moved anyway: %+v", p)
+	}
+	if _, ok := e.w.Nodes["c1"].RunningGen(vm); !ok {
+		t.Fatal("stopped anyway")
+	}
+	res, err = e.mover.DrainWith(context.Background(), "c1", moves.DrainOptions{Offline: true}, actor, nil)
+	if err != nil || len(res) != 1 || res[0].Mode != cluster.MoveOffline {
+		t.Fatalf("allowed offline: %v %+v", err, res)
+	}
+}
+
 func TestLiveMigrationFailureKeepsSource(t *testing.T) {
 	e := newEnv(t)
 	vm := e.w.AddVM("web", "c1", true, 50)

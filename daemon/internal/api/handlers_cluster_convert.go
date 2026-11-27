@@ -19,6 +19,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/convert"
+	"github.com/hardyos/hardyos/daemon/internal/cluster/ha"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/hacopy"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/storagesvc"
 	"github.com/hardyos/hardyos/daemon/internal/vms"
@@ -80,6 +81,9 @@ func (s *Server) convertActor(u *auth.User) cluster.Actor {
 func writeConvertError(s *Server, w http.ResponseWriter, err error) {
 	var ref *convert.Refused
 	switch {
+	case errors.Is(err, ha.ErrNetwork), errors.Is(err, convert.ErrNetwork):
+		// The servers don't share a local network (decision 492).
+		writeError(w, http.StatusConflict, "network", err.Error())
 	case errors.As(err, &ref):
 		writeError(w, http.StatusConflict, "refused", err.Error())
 	case errors.Is(err, convert.ErrNotMember):

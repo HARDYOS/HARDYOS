@@ -11,12 +11,14 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/ha/clustertest"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/hacopy"
+	"github.com/hardyos/hardyos/daemon/internal/cluster/netcheck"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/state"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/storagesvc"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
@@ -159,6 +161,8 @@ type fakePriv struct {
 	parkCalls          []hacopy.ParkArgs
 	// changed: written after the final snapshot (RefuseChanged refuses).
 	changed bool
+	// onSnap hears every snapshot taken here.
+	onSnap func(name string)
 	// incoming is what "make local" received here (child -> labels).
 	incoming map[string][]string
 	recvs    sync.WaitGroup
@@ -211,6 +215,9 @@ func (p *fakePriv) Call(_ context.Context, op string, args, out any) error {
 		var a hacopy.SnapArgs
 		_ = json.Unmarshal(b, &a)
 		p.r.log("snapshot " + a.Name)
+		if p.onSnap != nil {
+			p.onSnap(a.Name)
+		}
 		for c := range p.local {
 			p.local[c] = append(p.local[c], a.Name)
 		}
@@ -867,14 +874,97 @@ func TestToHARefusedByNetCheck(t *testing.T) {
 	if !slices.ContainsFunc(rd.Problems, func(p string) bool { return strings.Contains(p, "switch is down") }) {
 		t.Fatalf("problems %v", rd.Problems)
 	}
-	if _, err := r.c.StartToHA(context.Background(), ToHAParams{Workload: vmWeb}, "Web", nil); err == nil {
-		t.Fatal("started with the LAN check failing")
+	if _, err := r.c.StartToHA(context.Background(), ToHAParams{Workload: vmWeb}, "Web", nil); !errors.Is(err, ErrNetwork) {
+		t.Fatalf("started with the LAN check failing: %v", err)
 	}
 }
 
 type netDown struct{}
 
 func (netDown) LocalNetworkOK(context.Context) (bool, string) { return false, "the switch is down" }
+
+// PairCheck judges this server (the monitor adds the storage servers).
+func TestPairCheck(t *testing.T) {
+	var asked []cluster.NodeID
+	p := PairCheck{Self: func() (cluster.Node, error) { return cluster.Node{ID: "c1"}, nil },
+		Status: func(_ context.Context, m ...cluster.NodeID) netcheck.Result {
+			asked = m
+			return netcheck.Result{OK: false, Reason: "c1 and nas: the storage network doesn't answer"}
+		}}
+	ok, why := p.LocalNetworkOK(context.Background())
+	if ok || !strings.Contains(why, "storage network") || !slices.Equal(asked, []cluster.NodeID{"c1"}) {
+		t.Fatalf("pair check: %v %q, asked about %v", ok, why, asked)
+	}
+}
+
+// netFlip fails once down is set.
+type netFlip struct{ down *atomic.Bool }
+
+func (n netFlip) LocalNetworkOK(context.Context) (bool, string) {
+	if n.down.Load() {
+		return false, "the storage network stopped answering"
+	}
+	return true, ""
+}
+
+// haDown is turning HA on's check refusing (ha.Service.CheckHA).
+type haDown struct {
+	asked *atomic.Int32
+	pol   *atomic.Value
+}
+
+var errHANetwork = errors.New("the servers don't share a local network yet, so high availability can't be turned on: c2 can't reach nas")
+
+func (h haDown) CheckHA(_ context.Context, w cluster.WorkloadRef, pol cluster.HAPolicy) error {
+	h.asked.Add(1)
+	h.pol.Store(pol)
+	return errHANetwork
+}
+
+// The conversion asks turning HA on's own check (every server it could
+// fail over to), since its workload.add doesn't pass through it; a refusal
+// is the API's "network" refusal and nothing happens to the VM.
+func TestToHARefusedByHACheck(t *testing.T) {
+	r := newRig(t)
+	h := haDown{asked: &atomic.Int32{}, pol: &atomic.Value{}}
+	r.c.HA = h
+	if _, err := r.c.StartToHA(context.Background(), ToHAParams{Workload: vmWeb, Priority: 70}, "Web", nil); !errors.Is(err, errHANetwork) {
+		t.Fatalf("started with turning HA on refused: %v", err)
+	}
+	pol, _ := h.pol.Load().(cluster.HAPolicy)
+	if !pol.Enabled || pol.Priority != 70 || !slices.Equal(pol.Preferred, []cluster.NodeID{"c1"}) {
+		t.Fatalf("checked the policy %+v, not the one it registers", pol)
+	}
+	if slices.Contains(r.logged(), "stop local") || r.w.Snapshot().Placements[vmWeb] != nil {
+		t.Fatal("something happened to the VM")
+	}
+}
+
+// A network check failing while it copies stops the conversion before the
+// VM goes down: it keeps running from this server, nothing is registered.
+func TestToHANetworkFailsBeforeTheStop(t *testing.T) {
+	r := newRig(t)
+	down := &atomic.Bool{}
+	r.c.Net = netFlip{down: down}
+	r.priv.onSnap = func(name string) {
+		if strings.Contains(name, "-pre") {
+			down.Store(true) // during the copy while it runs
+		}
+	}
+	j, err := r.c.StartToHA(context.Background(), ToHAParams{Workload: vmWeb}, "Web", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.wait(j); got.State != jobs.Failed || !strings.Contains(got.Error, "storage network stopped answering") {
+		t.Fatalf("the conversion: %s %s", got.State, got.Error)
+	}
+	if slices.Contains(r.logged(), "stop local") || !r.priv.running || r.priv.parked {
+		t.Fatalf("the VM went down: %v", r.logged())
+	}
+	if r.w.Snapshot().Placements[vmWeb] != nil {
+		t.Fatal("registered with the network check failing")
+	}
+}
 
 // "Make local again": the cluster workload stops, a final snapshot is
 // copied here, the cluster forgets it before this server's copy is

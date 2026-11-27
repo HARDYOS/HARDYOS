@@ -16,6 +16,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/cluster/convert"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/ha"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/moves"
+	"github.com/hardyos/hardyos/daemon/internal/cluster/netcheck"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/notify"
@@ -36,8 +37,7 @@ func wireClusterC(db *store.DB, pc *priv.Client, manager *jobs.Manager, broker *
 	if parts.Live != nil {
 		hp.Stream = moves.ALPNStream{Dial: parts.Live.DialMigrate}
 	}
-	svc := &ha.Service{Parts: hp, Priv: pc, Jobs: manager, DB: db, Audit: &audit.Log{DB: db, Events: broker}, Log: log, Notify: alerts,
-		LocalNetworkOK: wireNetCheck(parts).LocalNetworkOK}
+	svc := &ha.Service{Parts: hp, Priv: pc, Jobs: manager, DB: db, Audit: &audit.Log{DB: db, Events: broker}, Log: log, Notify: alerts}
 	if remote != nil && remote.Store != nil {
 		svc.Publish = publish.Handoff{Store: remote.Store}
 	}
@@ -48,21 +48,22 @@ func wireClusterC(db *store.DB, pc *priv.Client, manager *jobs.Manager, broker *
 	return svc
 }
 
-// wireNetCheck is the LAN check "Make highly available" and live moves
-// need (decision 487). The cluster's netcheck package (another Phase 10
-// part: cluster/netcheck, Status(ctx, ...) Result{OK, Reason, PerMember})
-// plugs in here as a convert.NetCheck once it is on main; until then the
-// check always passes.
-func wireNetCheck(parts clusterParts) convert.NetCheck {
-	_ = parts
-	return convert.AlwaysOK{}
+// wireNetCheck is the network check "Make highly available" asks first
+// (decisions 487, 492): the cluster's monitor judging this server (the
+// one that converts) and the storage server (StatusFor adds every active
+// storage server). Without a monitor it always passes.
+func wireNetCheck(parts clusterParts, mon *netcheck.Monitor) convert.NetCheck {
+	if mon == nil || parts.M == nil {
+		return convert.AlwaysOK{}
+	}
+	return convert.PairCheck{Self: parts.M.Self, Status: mon.StatusFor}
 }
 
 // wireConvert builds "Make highly available" and "Make local again"
 // (docs/plans/make-ha.md); call before the job manager starts. Its Run
 // deletes kept copies past their grace period.
 func wireConvert(db *store.DB, pc *priv.Client, manager *jobs.Manager, broker *events.Broker, parts clusterParts, storage *clusterB,
-	h *ha.Service, alerts notify.Notifier, log *slog.Logger) *convert.Converter {
+	h *ha.Service, mon *netcheck.Monitor, alerts notify.Notifier, log *slog.Logger) *convert.Converter {
 	if parts.M == nil || storage == nil || h == nil {
 		return nil
 	}
@@ -73,7 +74,7 @@ func wireConvert(db *store.DB, pc *priv.Client, manager *jobs.Manager, broker *e
 		parts.Live.SetCopy(func(conn *tls.Conn, from cluster.Node) { storage.Service.ServeCopy(conn, from) })
 	}
 	c := &convert.Converter{Cluster: parts.M, Storage: st, Priv: pc, Specs: h, DB: db, Jobs: manager,
-		Audit: &audit.Log{DB: db, Events: broker}, Notify: alerts, Net: wireNetCheck(parts), Log: log}
+		Audit: &audit.Log{DB: db, Events: broker}, Notify: alerts, Net: wireNetCheck(parts, mon), HA: h, Log: log}
 	c.RegisterJobs(manager)
 	c.OnStart(context.Background())
 	return c

@@ -28,6 +28,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/cloudbackups"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/convert"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/ha"
+	"github.com/hardyos/hardyos/daemon/internal/cluster/netcheck"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/files"
 	"github.com/hardyos/hardyos/daemon/internal/hostnames"
@@ -251,6 +252,8 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 	var clusterHA *ha.Service
 	var clusterStorage *clusterB
 	var clusterConvert *convert.Converter
+	var netCheck api.NetChecker
+	var netMonitor *netcheck.Monitor
 	if !live {
 		parts := clusterCore.parts()
 		clusterStorage = wireClusterB(ctx, log, db, pc, secrets, &audit.Log{DB: db, Events: broker}, parts)
@@ -259,7 +262,13 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 			al = alerts
 		}
 		clusterHA = wireClusterC(db, pc, manager, broker, remote, parts, clusterStorage, al, log)
-		clusterConvert = wireConvert(db, pc, manager, broker, parts, clusterStorage, clusterHA, al, log)
+		// The local-network check: live moves, turning HA on and making a
+		// workload highly available need it.
+		if netMonitor = wireNetcheck(parts, alerts, log); netMonitor != nil {
+			netCheck = netMonitor
+			clusterHA.NetCheck = netMonitor.StatusFor
+		}
+		clusterConvert = wireConvert(db, pc, manager, broker, parts, clusterStorage, clusterHA, netMonitor, al, log)
 		health := newHealth(parts, clusterStorage, clusterHA)
 		clusterCore.Service.Health = health.Get
 		go health.Run(ctx)
@@ -294,7 +303,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		WebRoot: webRoot, Insecure: httpsAddr == "", Installer: inst, Updates: upd, Backups: bk, CloudBackups: cloud,
 		Apps: appStore, Files: fileAccess, TrustedProxies: trustedProxies, Secrets: secrets, Remote: remote,
 		Replication: repl,
-		Alerts:      alerts, Monitor: mon, Mail: mailSvc, ClusterHA: clusterHA, Hostnames: hosts,
+		Alerts:      alerts, Monitor: mon, Mail: mailSvc, ClusterHA: clusterHA, Hostnames: hosts, NetCheck: netCheck,
 	})
 
 	clusterCore.attach(handler)    // /cluster routes and the per-node API proxy (cluster_a.go)
@@ -326,6 +335,9 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		go clusterHA.Start(ctx)                        // cluster: reconciler, fence agent, HA coordinator, image pre-pull
 		if clusterConvert != nil {
 			go clusterConvert.Run(ctx) // kept copies of converted workloads: grace periods
+		}
+		if netMonitor != nil {
+			go netMonitor.Run(ctx) // cluster: the local-network check every 30 s
 		}
 		go handler.RunHostnames(ctx)      // per-app hostnames: state and certificate renewals
 		go handler.RunNetBirdStandby(ctx) // NetBird standby: sync schedule and stale alerts

@@ -29,6 +29,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/hacopy"
+	"github.com/hardyos/hardyos/daemon/internal/cluster/netcheck"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/storagesvc"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/notify"
@@ -112,10 +113,10 @@ type Specs interface {
 	Hold(w cluster.WorkloadRef) func()
 }
 
-// NetCheck reports whether this server's local network is fit for HA
-// (decision 487): "Make highly available" and live moves are refused when
-// it isn't. The cluster's netcheck package implements it; AlwaysOK is the
-// default until it is wired (cmd/hardyd/cluster_c.go).
+// NetCheck reports whether this server and the storage server share the
+// local network (decisions 487, 492): "Make highly available" is refused
+// when they don't. PairCheck is the cluster monitor's (cmd/hardyd
+// wireNetCheck); AlwaysOK never refuses.
 type NetCheck interface {
 	LocalNetworkOK(ctx context.Context) (bool, string)
 }
@@ -125,6 +126,31 @@ type AlwaysOK struct{}
 
 // LocalNetworkOK implements NetCheck.
 func (AlwaysOK) LocalNetworkOK(context.Context) (bool, string) { return true, "" }
+
+// PairCheck asks the cluster's network check (netcheck.Monitor.StatusFor,
+// which also judges every active storage server) about this server.
+type PairCheck struct {
+	Self   func() (cluster.Node, error)
+	Status func(ctx context.Context, members ...cluster.NodeID) netcheck.Result
+}
+
+// LocalNetworkOK implements NetCheck.
+func (p PairCheck) LocalNetworkOK(ctx context.Context) (bool, string) {
+	self, err := p.Self()
+	if err != nil {
+		return false, err.Error()
+	}
+	r := p.Status(ctx, self.ID)
+	return r.OK, r.Reason
+}
+
+// HAChecker refuses turning high availability on while the servers the
+// workload could fail over between and the storage server don't share a
+// local network (ha.Service.CheckHA, ha.ErrNetwork). A conversion's own
+// workload.add doesn't pass through it, so the conversion asks it.
+type HAChecker interface {
+	CheckHA(ctx context.Context, w cluster.WorkloadRef, pol cluster.HAPolicy) error
+}
 
 // Converter runs conversions on this server.
 type Converter struct {
@@ -137,7 +163,9 @@ type Converter struct {
 	Audit   *audit.Log
 	Notify  notify.Notifier
 	Net     NetCheck
-	Log     *slog.Logger
+	// HA checks turning HA on for the converted workload (nil: not).
+	HA  HAChecker
+	Log *slog.Logger
 	// Grace is how long parked copies are kept (DefaultGrace).
 	Grace time.Duration
 	// Now and Poll are for tests.
@@ -194,6 +222,43 @@ func (c *Converter) Member() bool {
 
 // NetworkOK is the LAN check (decision 487).
 func (c *Converter) NetworkOK(ctx context.Context) (bool, string) { return c.net().LocalNetworkOK(ctx) }
+
+// haPolicy is the HA policy a conversion registers its workload with.
+func haPolicy(r *Record, self cluster.NodeID) cluster.HAPolicy {
+	prio := r.Options.Priority
+	if prio == 0 {
+		prio = 50
+	}
+	return cluster.HAPolicy{Enabled: true, Priority: prio, Preferred: []cluster.NodeID{self}}
+}
+
+// ErrNetwork: the network check refuses making a workload highly
+// available (the API's 409 "network"); ha.ErrNetwork from CheckHA is
+// wrapped as is.
+var ErrNetwork = errors.New("the servers don't share a local network")
+
+// networkRefusal is why the network refuses making w highly available
+// (nil when it doesn't): this server with the storage server, then every
+// server it could fail over to (ha.Service.CheckHA, as turning HA on).
+func (c *Converter) networkRefusal(ctx context.Context, w cluster.WorkloadRef, pol cluster.HAPolicy) error {
+	if ok, why := c.net().LocalNetworkOK(ctx); !ok {
+		return fmt.Errorf("%w yet, so it can't be made highly available: %s", ErrNetwork, why)
+	}
+	if c.HA != nil {
+		if err := c.HA.CheckHA(ctx, w, pol); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// networkProblem is networkRefusal's message ("" when none).
+func (c *Converter) networkProblem(ctx context.Context, w cluster.WorkloadRef, pol cluster.HAPolicy) string {
+	if err := c.networkRefusal(ctx, w, pol); err != nil {
+		return err.Error()
+	}
+	return ""
+}
 
 // ---- records ------------------------------------------------------------------------
 

@@ -104,10 +104,15 @@ the "before" and the stored spec must hash to the "after".
 
 ## LAN check (item 7)
 
-`convert.NetCheck` (`LocalNetworkOK(ctx) (bool, string)`), default OK.
-"Make highly available" and live moves refuse when it isn't OK. The
-`cluster/netcheck` package (another builder) plugs in in
-`cmd/hardyd/cluster_c.go` (`wireNetCheck`).
+Wired to the cluster's `netcheck.Monitor` (PR #46, decisions 490-492):
+"Make highly available" asks `StatusFor` for this server (the monitor
+adds the storage servers; `convert.PairCheck`, `wireNetCheck` in
+`cmd/hardyd/cluster_c.go`), then `ha.Service.CheckHA` with the policy it
+registers (every server it could fail over to), at the start and again
+before the workload shuts down; a refusal is 409 `network`. Live moves:
+the Mover's `LocalNetwork` (any live move) and `Coordinator.LiveOK` (its
+evacuations and fail backs, before they start), both the pair check of
+the move's two servers. Restarts and failovers never ask it.
 
 ## Tests
 

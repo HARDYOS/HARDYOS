@@ -140,8 +140,8 @@ func (c *Converter) Check(ctx context.Context, w cluster.WorkloadRef, cpu string
 	if ok, why := state.HAEligible(snap, self.ID); !ok {
 		res.Problems = append(res.Problems, "this server "+why)
 	}
-	if ok, why := c.net().LocalNetworkOK(ctx); !ok {
-		res.Problems = append(res.Problems, "the local network check fails: "+why)
+	if why := c.networkProblem(ctx, w, haPolicy(&Record{}, self.ID)); why != "" {
+		res.Problems = append(res.Problems, why)
 	}
 	pool, err := c.Storage.HAPool(ctx)
 	if err != nil {
@@ -192,6 +192,14 @@ func (c *Converter) StartToHA(ctx context.Context, p ToHAParams, confirm string,
 		return nil, fmt.Errorf("a conversion of %s back to a server's own storage isn't finished; resume or undo it first", p.Workload.ID)
 	}
 	resuming := rd.Open != nil && phaseAt(haPhases, rd.Open.Phase) >= phaseAt(haPhases, PhasePark)
+	if !resuming {
+		// The network's refusal on its own (the API's 409 "network").
+		if self, err := c.Cluster.Self(); err == nil {
+			if err := c.networkRefusal(ctx, p.Workload, haPolicy(&Record{Options: Options{Priority: p.Priority}}, self.ID)); err != nil {
+				return nil, err
+			}
+		}
+	}
 	if len(rd.Problems) > 0 && !resuming {
 		return nil, &Refused{Problems: rd.Problems}
 	}
@@ -294,8 +302,8 @@ func (c *Converter) toHA(jc *jobs.Context, self cluster.Node, snap *cluster.Snap
 		if ok, why := state.HAEligible(snap, self.ID); !ok {
 			return nil, errors.New("this server " + why)
 		}
-		if ok, why := c.net().LocalNetworkOK(jc); !ok {
-			return nil, errors.New("the local network check fails: " + why)
+		if err := c.networkRefusal(jc, w, haPolicy(r, self.ID)); err != nil {
+			return nil, err
 		}
 		if r.StoragePool == "" {
 			pool, err := c.Storage.HAPool(jc)
@@ -346,6 +354,11 @@ func (c *Converter) toHA(jc *jobs.Context, self cluster.Node, snap *cluster.Snap
 			if err := c.sendToStorage(jc, r, local, p.Actor, report(3, 60, "Copying while it runs")); err != nil {
 				return nil, err
 			}
+		}
+		// Again before it goes down (the copy may have taken hours): past
+		// the stop, the workload is registered with HA on.
+		if err := c.networkRefusal(jc, w, haPolicy(r, self.ID)); err != nil {
+			return nil, err
 		}
 		c.phase(jc, jc, r, PhaseStop, 61, "Shutting it down")
 		if err := c.stopLocal(jc, w); err != nil {
@@ -568,12 +581,8 @@ func (c *Converter) register(jc *jobs.Context, self cluster.Node, r *Record, p T
 	}
 	if pl == nil {
 		c.phase(jc, jc, r, PhaseRegister, 90, "Registering it in the cluster")
-		prio := r.Options.Priority
-		if prio == 0 {
-			prio = 50
-		}
 		body := state.WorkloadAdd{Workload: w, Name: r.Name, Owner: self.ID, Requested: cluster.RequestStopped,
-			HA: cluster.HAPolicy{Enabled: true, Priority: prio, Preferred: []cluster.NodeID{self.ID}}, Storage: *r.Options.Storage, SpecHash: r.Options.Hash}
+			HA: haPolicy(r, self.ID), Storage: *r.Options.Storage, SpecHash: r.Options.Hash}
 		if err := c.propose(jc, cluster.CmdWorkloadAdd, body, p.Actor); err != nil {
 			return err
 		}

@@ -6856,6 +6856,40 @@ paths:
       responses:
         "101": { description: Switching to WebSocket }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /cluster/netcheck:
+    get:
+      operationId: getClusterNetcheck
+      summary: >
+        The local-network check (decisions 490-492): whether every compute and storage server reaches every other one
+        directly on the LAN and the storage network (signed probes on the cluster port, round trip, MTU, large packets).
+        Live moves and turning high availability on need it OK; the cluster works without it. fresh=1 has every server
+        probe now (at most every 10 s each). Reading it changes nothing.
+      tags: [cluster]
+      parameters:
+        - { name: fresh, in: query, required: false, schema: { type: string, enum: ["1"] } }
+      responses:
+        "200":
+          description: The check
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClusterNetcheck" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /cluster/windows:
+    get:
+      operationId: listClusterWindows
+      summary: >
+        Apps with a window on the other members that the person may open there (each member asked as the person; its
+        access list decides). Empty outside a cluster and for local accounts that aren't administrators. Open one with
+        POST /nodes/{node}/apps/{id}/open (a cluster app opens wherever it runs).
+      tags: [cluster]
+      responses:
+        "200":
+          description: The apps
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ClusterWindow" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   /nodes/{node}/{path}:
     parameters:
       - { name: node, in: path, required: true, schema: { type: string } }
@@ -7174,7 +7208,10 @@ paths:
   /cluster/workloads/{kind}/{id}/ha:
     put:
       operationId: setClusterHAPolicy
-      summary: Set a cluster workload's HA policy (a job; refused for VMs with passthrough devices and on servers without a watchdog)
+      summary: >
+        Set a cluster workload's HA policy (a job; refused for VMs with passthrough devices and on servers without a
+        watchdog). Turning HA on is refused with 409 network while the local-network check fails (GET /cluster/netcheck);
+        changing or turning off a policy that is on is not.
       tags: [cluster-ha]
       parameters:
         - { name: kind, in: path, required: true, schema: { type: string, enum: [vm, app] } }
@@ -7292,6 +7329,7 @@ paths:
               properties:
                 node: { type: string }
                 stopOthers: { type: boolean }
+                offline: { type: boolean, description: "move offline the VMs the local-network check keeps from moving live (else they stay and are reported)" }
                 confirm: { type: string }
       responses:
         "202": { $ref: "#/components/responses/JobAccepted" }
@@ -12789,6 +12827,8 @@ components:
         name: { type: string }
         fits: { type: boolean }
         reason: { type: string }
+        live: { type: boolean, description: "it can take the VM live: the local-network check of the two servers and the storage server passes" }
+        liveReason: { type: string }
     ClusterMoveCandidates:
       type: object
       required: [placement, candidates, live, pinned, ownerDown]
@@ -12909,3 +12949,54 @@ components:
         conv: { type: string, description: "The conversion that put it aside" }
         node: { type: string }
     # ---- end of Phase 10 make-HA schemas ----
+    ClusterNetcheckPath:
+      type: object
+      description: One server's probes of one other server over one path (lan or storage).
+      required: [peer, path, ok, answered, rtt, sameSubnet, mtu, peerMtu, bulk]
+      properties:
+        peer: { type: string }
+        path: { type: string, enum: [lan, storage] }
+        ok: { type: boolean }
+        reason: { type: string }
+        answered: { type: boolean, description: "the signed probes were answered" }
+        rtt: { type: integer, format: int64, description: "best round trip of 5 small probes (nanoseconds); at most 5 ms" }
+        addr: { type: string, description: "this server's address on the path" }
+        peerAddr: { type: string }
+        local: { type: string, description: "the address the connection left from" }
+        seenAs: { type: string, description: "the address the peer saw it come from" }
+        arrived: { type: string, description: "the address it arrived at on the peer" }
+        sameSubnet: { type: boolean, description: "the peer is in this server's interface subnet (else routed)" }
+        interface: { type: string }
+        mtu: { type: integer }
+        peerMtu: { type: integer }
+        bulk: { type: boolean, description: "a 64 KiB probe got through" }
+        problem: { type: string }
+    ClusterNetcheckMember:
+      type: object
+      required: [node, name, role, ok, paths]
+      properties:
+        node: { type: string }
+        name: { type: string }
+        role: { type: string }
+        ok: { type: boolean }
+        reason: { type: string }
+        skipped: { type: boolean, description: "not checked while dead, fenced or joining" }
+        checked: { type: string, format: date-time }
+        paths: { type: array, items: { $ref: "#/components/schemas/ClusterNetcheckPath" } }
+    ClusterNetcheck:
+      type: object
+      required: [ok, perMember]
+      properties:
+        ok: { type: boolean }
+        reason: { type: string, description: "the first problem, in words" }
+        perMember: { type: array, items: { $ref: "#/components/schemas/ClusterNetcheckMember" } }
+    ClusterWindow:
+      type: object
+      required: [node, nodeName, id, name, state, cluster]
+      properties:
+        node: { type: string }
+        nodeName: { type: string }
+        id: { type: string }
+        name: { type: string }
+        state: { type: string }
+        cluster: { type: boolean, description: "a cluster app (it opens wherever it runs)" }
