@@ -163,6 +163,8 @@ type fakePriv struct {
 	changed bool
 	// onSnap hears every snapshot taken here.
 	onSnap func(name string)
+	// listFail: ha.parked.list fails.
+	listFail bool
 	// incoming is what "make local" received here (child -> labels).
 	incoming map[string][]string
 	recvs    sync.WaitGroup
@@ -269,6 +271,9 @@ func (p *fakePriv) Call(_ context.Context, op string, args, out any) error {
 		}
 		return set(hacopy.ParkResult{Pool: "tank", Name: "vm-web-1"})
 	case hacopy.OpParkedList:
+		if p.listFail {
+			return errors.New("root didn't answer")
+		}
 		l := []hacopy.Parked{}
 		if p.parked && p.parkConv != "" {
 			l = append(l, hacopy.Parked{Pool: "tank", Name: "vm-web-1", Kind: cluster.KindVM, ID: "web", Side: hacopy.SideLocal, Conv: p.parkConv})
@@ -458,7 +463,7 @@ func (s *fakeStorage) HAPark(_ context.Context, r storagesvc.HARequest) (*hacopy
 		s.r.log("park storage failed")
 		return nil, errors.New("the storage server didn't answer")
 	}
-	if r.Adopted && (!s.adopted || s.adoptedBy != r.Conv) {
+	if r.Expect != "" && (!s.adopted || s.adoptedBy != r.Expect) {
 		return nil, errors.New("isn't what this conversion set up")
 	}
 	// Make local parks the cluster workload's copy (registered with
@@ -824,6 +829,52 @@ func TestUndo(t *testing.T) {
 	}
 }
 
+// L-A: when this server's copy can't be seen as the workload after a
+// failed park (parked, the answer lost, the lookup failing too), the
+// cluster copy put aside gets no expiry: it may be the only copy left.
+func TestAsideCopyKeptWhenLocalCopyIsntSeen(t *testing.T) {
+	r := newRig(t)
+	r.priv.parkLost = 1
+	r.priv.listFail = true
+	j, _ := r.c.StartToHA(context.Background(), ToHAParams{Workload: vmWeb}, "Web", nil)
+	if got := r.wait(j); got.State != jobs.Failed {
+		t.Fatalf("the conversion: %s", got.State)
+	}
+	aside := r.stor.parks[len(r.stor.parks)-1]
+	if aside.KeepUntil != 0 || aside.Expect == "" {
+		t.Fatalf("the cluster copy was put aside as %+v with this server's copy gone", aside)
+	}
+	if r.w.Snapshot().Placements[vmWeb] != nil {
+		t.Fatal("registered")
+	}
+}
+
+// Undo (M-D): once this server's copy is back and the cluster forgot the
+// workload, it runs again here, even when the cluster copy can't be put
+// aside (that is left for a retry of the undo).
+func TestUndoStartsLocalWhenClusterParkFails(t *testing.T) {
+	r := newRig(t)
+	r.priv.adoptOK = -1
+	j, _ := r.c.StartToHA(context.Background(), ToHAParams{Workload: vmWeb}, "Web", nil)
+	if got := r.wait(j); got.State != jobs.Failed {
+		t.Fatalf("the conversion: %s", got.State)
+	}
+	recs, _ := r.c.List(context.Background(), 10)
+	r.stor.mu.Lock()
+	r.stor.parkFail = 1 << 30
+	r.stor.mu.Unlock()
+	j, err := r.c.StartUndo(context.Background(), UndoParams{Conv: recs[0].ID}, "Web", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.wait(j); got.State != jobs.Failed {
+		t.Fatalf("undo with the storage server refusing: %s", got.State)
+	}
+	if !r.priv.running || r.priv.parked || r.w.Snapshot().Placements[vmWeb] != nil {
+		t.Fatalf("this server's copy isn't running again: running %v parked %v", r.priv.running, r.priv.parked)
+	}
+}
+
 // Abandon puts a copy the conversion adopted aside (an hour) instead of
 // leaving it in the way of the next conversion.
 func TestAbandonPutsAdoptedCopyAside(t *testing.T) {
@@ -840,7 +891,7 @@ func TestAbandonPutsAdoptedCopyAside(t *testing.T) {
 		t.Fatalf("abandon: %s", got.Error)
 	}
 	park := r.stor.parks[len(r.stor.parks)-1]
-	if !park.Adopted || park.Conv != recs[0].ID || park.KeepUntil == 0 || r.stor.adopted {
+	if park.Expect != recs[0].ID || park.Conv != recs[0].ID || park.KeepUntil == 0 || r.stor.adopted {
 		t.Fatalf("the adopted copy: %+v (still there %v)", park, r.stor.adopted)
 	}
 }
@@ -963,6 +1014,72 @@ func TestToHANetworkFailsBeforeTheStop(t *testing.T) {
 	}
 	if r.w.Snapshot().Placements[vmWeb] != nil {
 		t.Fatal("registered with the network check failing")
+	}
+}
+
+// lateRemove makes the first workload.remove answer with an error and
+// commit a moment later (a proposal whose outcome wasn't known in time).
+type lateRemove struct {
+	Cluster
+	once sync.Once
+	done chan struct{}
+}
+
+func (l *lateRemove) Propose(ctx context.Context, t cluster.CommandType, body any, actor cluster.Actor) (uint64, error) {
+	if t != cluster.CmdWorkloadRemove {
+		return l.Cluster.Propose(ctx, t, body, actor)
+	}
+	late := false
+	l.once.Do(func() { late = true })
+	if !late {
+		return l.Cluster.Propose(ctx, t, body, actor)
+	}
+	go func() {
+		defer close(l.done)
+		time.Sleep(20 * time.Millisecond)
+		_, _ = l.Cluster.Propose(context.Background(), t, body, actor)
+	}()
+	return 0, errors.New("timed out waiting for the log")
+}
+
+// "Make local again" whose removal's outcome wasn't known (M-C): the
+// record keeps the removal as its own, so the resume after it committed
+// goes on instead of refusing a workload "removed by someone else".
+func TestToLocalRemovalOutcomeUnknown(t *testing.T) {
+	r := newRig(t)
+	r.priv.parked, r.priv.running = true, false
+	if err := r.w.Propose("c1", cluster.CmdWorkloadAdd, state.WorkloadAdd{SpecHash: "sha256:" + strings.Repeat("a", 64), Workload: vmWeb, Name: "Web",
+		Owner: "c1", Requested: cluster.RequestRunning, HA: cluster.HAPolicy{Enabled: true}, Storage: cluster.WorkloadStorage{Pool: "nas"}}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2000 && r.w.Snapshot().Placements[vmWeb].State != cluster.PlacementRunning; i++ {
+		time.Sleep(time.Millisecond)
+	}
+	late := &lateRemove{Cluster: r.c.Cluster, done: make(chan struct{})}
+	r.c.Cluster = late
+	j, err := r.c.StartToLocal(context.Background(), ToLocalParams{Workload: vmWeb, Pool: "tank"}, "Web", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.wait(j); got.State != jobs.Failed || !strings.Contains(got.Error, "timed out") {
+		t.Fatalf("make local: %s %s", got.State, got.Error)
+	}
+	<-late.done
+	for i := 0; i < 2000 && r.w.Snapshot().Placements[vmWeb] != nil; i++ {
+		time.Sleep(time.Millisecond)
+	}
+	if r.w.Snapshot().Placements[vmWeb] != nil {
+		t.Fatal("the late removal didn't commit")
+	}
+	j, err = r.c.StartToLocal(context.Background(), ToLocalParams{Workload: vmWeb, Pool: "tank"}, "Web", nil)
+	if err != nil {
+		t.Fatalf("resuming: %v", err)
+	}
+	if got := r.wait(j); got.State != jobs.Succeeded {
+		t.Fatalf("resuming after its own removal committed: %s", got.Error)
+	}
+	if !slices.Contains(r.logged(), "adopt local") {
+		t.Fatalf("not adopted here: %v", r.logged())
 	}
 }
 

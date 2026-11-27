@@ -147,7 +147,7 @@ func (s *Service) Init() {
 	if s.Parts.Peers != nil {
 		s.Mover = &moves.Mover{Cluster: m, Peers: s.Parts.Peers, Scheduler: s.Scheduler, Log: s.Log, LocalNetwork: func(ctx context.Context, from, to cluster.NodeID) (bool, string) {
 			return s.localNetwork(ctx, from, to)
-		}}
+		}, StorageNetwork: s.storagePath}
 		s.Prepuller = &runtime.Prepuller{Cluster: m, Images: images, Log: s.Log,
 			Source: moves.PeerImages{Peers: s.Parts.Peers, Priv: s.Priv, Self: func() cluster.NodeID {
 				n, _ := m.Self()
@@ -610,6 +610,51 @@ func (s *Service) localNetwork(ctx context.Context, members ...cluster.NodeID) (
 	}
 	r := s.NetCheck(ctx, members...)
 	return r.OK, r.Reason
+}
+
+// storagePath reports whether two servers reach each other over the
+// storage network, both ways (an evacuation's check, decision 487: the
+// owner lost its LAN, so the LAN rule can't apply; a live migration then
+// runs over the storage network). OK when the check isn't wired.
+func (s *Service) storagePath(ctx context.Context, from, to cluster.NodeID) (bool, string) {
+	if s.NetCheck == nil {
+		return true, ""
+	}
+	return StoragePathOK(s.NetCheck(ctx, from, to), from, to)
+}
+
+// StoragePathOK judges only the storage-network paths between a and b in
+// a check's result: each must have probed the other there, successfully.
+func StoragePathOK(r netcheck.Result, a, b cluster.NodeID) (bool, string) {
+	seen := map[cluster.NodeID]bool{}
+	for _, m := range r.PerMember {
+		if m.Node != a && m.Node != b {
+			continue
+		}
+		peer := b
+		if m.Node == b {
+			peer = a
+		}
+		for _, p := range m.Paths {
+			if p.Peer != peer || p.Path != cluster.PathStorage {
+				continue
+			}
+			if !p.OK {
+				why := p.Reason
+				if why == "" {
+					why = "not reachable"
+				}
+				return false, fmt.Sprintf("%s → %s on the storage network: %s", m.Node, peer, why)
+			}
+			seen[m.Node] = true
+		}
+	}
+	for _, n := range []cluster.NodeID{a, b} {
+		if !seen[n] {
+			return false, fmt.Sprintf("%s hasn't checked the storage network to the other server", n)
+		}
+	}
+	return true, ""
 }
 
 // ErrNetwork: the servers don't share a local network (HA refused).

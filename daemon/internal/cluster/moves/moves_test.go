@@ -387,6 +387,58 @@ func TestLiveMigrationNeedsLocalNetwork(t *testing.T) {
 	}
 }
 
+// An evacuation (the owner lost its LAN) judges only the storage network
+// with each destination the scheduler chooses, never the LAN check, and
+// tries the next one when one doesn't pass (decision 487).
+func TestEvacuationNeedsOnlyTheStorageNetwork(t *testing.T) {
+	e := newEnv(t)
+	vm := e.w.AddVM("web", "c1", true, 50)
+	e.w.Run(2 * time.Second)
+	e.mover.LocalNetwork = func(context.Context, cluster.NodeID, cluster.NodeID) (bool, string) {
+		return false, "c1 has no LAN"
+	}
+	var tried []cluster.NodeID
+	first := cluster.NodeID("")
+	e.mover.StorageNetwork = func(_ context.Context, from, to cluster.NodeID) (bool, string) {
+		if from != "c1" {
+			t.Errorf("judged from %s", from)
+		}
+		tried = append(tried, to)
+		if first == "" {
+			first = to
+			return false, "no storage network to " + string(to)
+		}
+		return true, ""
+	}
+	res, err := e.mover.Evacuate(context.Background(), cluster.MoveRequest{Workload: vm, Generation: 1}, actor)
+	if err != nil {
+		t.Fatalf("evacuating: %v", err)
+	}
+	if len(tried) != 2 || res.To == first || res.To != tried[1] || res.Mode != cluster.MoveLive {
+		t.Fatalf("tried %v, moved to %s", tried, res.To)
+	}
+	onlyOn(t, e.w, vm, res.To)
+}
+
+// An evacuation no destination's storage network passes refuses (the VM
+// keeps running where it is) and changes nothing.
+func TestEvacuationWithoutStorageNetworkStays(t *testing.T) {
+	e := newEnv(t)
+	vm := e.w.AddVM("web", "c1", true, 50)
+	e.w.Run(2 * time.Second)
+	e.mover.StorageNetwork = func(context.Context, cluster.NodeID, cluster.NodeID) (bool, string) {
+		return false, "not reachable"
+	}
+	_, err := e.mover.Evacuate(context.Background(), cluster.MoveRequest{Workload: vm, Generation: 1}, actor)
+	if !errors.Is(err, moves.ErrNotLive) || !errors.Is(err, moves.ErrNoLocalNetwork) {
+		t.Fatalf("%v", err)
+	}
+	if p := e.w.Snapshot().Placements[vm]; p.Owner != "c1" || p.Generation != 1 || p.Target != "" {
+		t.Fatalf("%+v", p)
+	}
+	onlyOn(t, e.w, vm, "c1")
+}
+
 // A drain never quietly turns a live move the network refuses into an
 // offline one: it reports it, and moves it offline only when the
 // administrator allowed that (decision 496).

@@ -119,6 +119,7 @@ type Coordinator struct {
 	storageBad   map[cluster.NodeID]time.Time
 	lanBad       map[cluster.NodeID]time.Time
 	evacuated    map[cluster.NodeID]bool
+	evacRetry    map[cluster.NodeID]time.Time // an evacuation that failed is tried again after
 	fenceSeen    map[cluster.NodeID]time.Time // first time this leader saw a node's current fence
 	relocations  map[cluster.WorkloadRef][]time.Time
 	pendingTry   map[cluster.WorkloadRef]time.Time
@@ -262,6 +263,7 @@ func (c *Coordinator) Tick(ctx context.Context) {
 		c.storageBad = map[cluster.NodeID]time.Time{}
 		c.lanBad = map[cluster.NodeID]time.Time{}
 		c.evacuated = map[cluster.NodeID]bool{}
+		c.evacRetry = map[cluster.NodeID]time.Time{}
 		c.fenceSeen = map[cluster.NodeID]time.Time{}
 		for id := range s.Nodes {
 			c.lastHeard[id] = now
@@ -436,11 +438,12 @@ func (c *Coordinator) detectIsolation(ctx context.Context, self cluster.NodeID, 
 		if h.LANOK || lanOK == 0 {
 			delete(c.lanBad, id)
 			delete(c.evacuated, id)
+			delete(c.evacRetry, id)
 		} else if _, ok := c.lanBad[id]; !ok {
 			c.lanBad[id] = now
 		}
 		lanSince, lanIsBad := c.lanBad[id]
-		evac := c.evacuated[id]
+		evac := c.evacuated[id] || now.Before(c.evacRetry[id])
 		c.mu.Unlock()
 		n := s.Nodes[id]
 		if bad && now.Sub(since) >= t.StorageIsolated && n.State == cluster.NodeActive && id != self {
@@ -496,8 +499,16 @@ func (c *Coordinator) background(ctx context.Context, self cluster.NodeID, p *cl
 			delete(c.moving, p.Workload)
 			c.mu.Unlock()
 		}()
-		_ = c.act(lead, kind, title, string(p.Workload.Kind)+":"+p.Workload.ID, func(ctx context.Context) error {
-			if c.LiveOK != nil {
+		err := c.act(lead, kind, title, string(p.Workload.Kind)+":"+p.Workload.ID, func(ctx context.Context) error {
+			if kind == JobEvacuate {
+				// Off a server that lost its LAN: the LAN can't be asked
+				// of it; the Mover checks the storage network with each
+				// destination it chooses (decision 487).
+				if ev, ok := c.Mover.(Evacuator); ok {
+					_, err := ev.Evacuate(ctx, req, c.actor(self))
+					return err
+				}
+			} else if c.LiveOK != nil {
 				if ok, why := c.LiveOK(ctx, p.Owner, to); !ok {
 					return fmt.Errorf("not moved live: the network check fails (%s)", why)
 				}
@@ -505,8 +516,28 @@ func (c *Coordinator) background(ctx context.Context, self cluster.NodeID, p *cl
 			_, err := c.Mover.Move(ctx, req, c.actor(self))
 			return err
 		})
+		if err != nil && kind == JobEvacuate {
+			// Not marked evacuated: tried again later while its LAN stays
+			// down; meanwhile it keeps running where it is (decision 359:
+			// a LAN-isolated server still has cluster storage).
+			c.mu.Lock()
+			if c.evacuated != nil {
+				delete(c.evacuated, p.Owner)
+				c.evacRetry[p.Owner] = c.now().Add(EvacuateRetry)
+			}
+			c.mu.Unlock()
+		}
 	}()
 }
+
+// Evacuator moves a VM live off a LAN-isolated server, checking only the
+// storage network with the destination it chooses (moves.Mover).
+type Evacuator interface {
+	Evacuate(ctx context.Context, r cluster.MoveRequest, actor cluster.Actor) (*cluster.MoveResult, error)
+}
+
+// EvacuateRetry is how soon a failed evacuation is tried again.
+var EvacuateRetry = 30 * time.Second
 
 // fenceHolds: n's current fence is confirmed by the storage node, and for
 // an isolated node (which may still be running, stuck in I/O) the

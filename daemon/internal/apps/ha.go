@@ -11,8 +11,10 @@ package apps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -120,6 +122,95 @@ func (m *Manager) HARelease(ctx context.Context, id string, park func() error) e
 		m.log().Warn("apps: removing a moved app's slice", "app", id, "err", err)
 	}
 	m.log().Warn("apps: let go of an app whose folder moves", "app", id)
+	return nil
+}
+
+// PropHAHold marks an app's dataset held by a conversion (its id): from
+// the conversion's final snapshot until its folder is parked, or the
+// conversion gives up and starts it again, nothing may start or write it.
+const PropHAHold = "org.hardyos:ha-hold"
+
+var convRE = regexp.MustCompile(`^[a-z0-9]{8,32}$`)
+
+// HAHoldArgs is apps.ha.hold.
+type HAHoldArgs struct {
+	ID   string `json:"id"`
+	Conv string `json:"conv"`
+	// Release ends the hold (its own conversion's only).
+	Release bool `json:"release,omitempty"`
+}
+
+// ErrHeld: a conversion holds the app (it is being moved).
+var ErrHeld = errors.New("it is being moved to or from cluster storage")
+
+// HAHold holds a local app for a conversion: its containers removed (so
+// Docker's restart policy can't start them), its dataset read-only and
+// marked, so Start, Restart and updates refuse (Up) until the hold ends.
+// The hold is on the dataset, so it outlives restarts of hardyd-priv.
+func (m *Manager) HAHold(ctx context.Context, a HAHoldArgs) error {
+	if !convRE.MatchString(a.Conv) {
+		return Problems{"bad conversion id"}
+	}
+	ia, c, err := m.app(ctx, a.ID)
+	if err != nil {
+		return err
+	}
+	if ia.remote {
+		return ErrClusterPlaced
+	}
+	ds := c.Pool + "/apps/" + a.ID
+	cur := m.heldBy(ctx, ds)
+	if a.Release {
+		if cur == "" {
+			return nil
+		}
+		if cur != a.Conv {
+			return Problems{"another conversion holds it"}
+		}
+		for _, p := range []string{"readonly", PropHAHold} {
+			if _, err := m.run(ctx, "zfs", "inherit", p, ds); err != nil {
+				return err
+			}
+		}
+		m.log().Info("apps: an app's conversion let go of it", "app", a.ID, "conv", a.Conv)
+		return nil
+	}
+	if cur != "" && cur != a.Conv {
+		return Problems{"another conversion holds it"}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, err := m.runCompose(ctx, m.composeArgs(ia, "down", "--remove-orphans")...); err != nil {
+		return err
+	}
+	if _, err := m.run(ctx, "zfs", "set", "readonly=on", PropHAHold+"="+a.Conv, ds); err != nil {
+		return err
+	}
+	m.log().Warn("apps: held for a conversion (read-only, no containers)", "app", a.ID, "conv", a.Conv)
+	return nil
+}
+
+// heldBy is the conversion holding an app's dataset ("" none).
+func (m *Manager) heldBy(ctx context.Context, ds string) string {
+	out, err := m.run(ctx, "zfs", "get", "-H", "-p", "-s", "local", "-o", "value", PropHAHold, ds)
+	if err != nil {
+		return ""
+	}
+	v := strings.TrimSpace(string(out))
+	if v == "-" {
+		return ""
+	}
+	return v
+}
+
+// checkHeld refuses starting a held app.
+func (m *Manager) checkHeld(ctx context.Context, ia *installedApp, c *EngineConfig) error {
+	if c == nil || ia.remote {
+		return nil
+	}
+	if conv := m.heldBy(ctx, c.Pool+"/apps/"+ia.state.ID); conv != "" {
+		return Problems{fmt.Sprintf("%s %s (conversion %s): resume, abandon or undo it first", ia.manifest.Name, ErrHeld, conv)}
+	}
 	return nil
 }
 

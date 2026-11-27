@@ -67,6 +67,9 @@ func (c *Converter) StartToLocal(ctx context.Context, p ToLocalParams, confirm s
 			return nil, fmt.Errorf("the conversion of %s to cluster storage isn't finished; resume or undo it first", name)
 		}
 		p.Conv, p.Pool = open.ID, open.LocalPool
+		if open.Name != "" {
+			name = open.Name
+		}
 	}
 	if !confirmed(confirm, name, w.ID) {
 		return nil, errTyped
@@ -170,7 +173,7 @@ func (c *Converter) toLocal(jc *jobs.Context, self cluster.Node, r *Record, acto
 	if phaseAt(localPhases, r.Phase) <= phaseAt(localPhases, PhaseLRemove) {
 		c.phase(jc, jc, r, PhaseLRemove, 86, "Removing it from the cluster")
 		pl := c.snapshot().Placements[w]
-		if pl == nil && !r.Options.Removed {
+		if pl == nil && (!r.Options.Removed || r.Options.RemovedGen != r.Options.Generation) {
 			// Gone, but not through this conversion (another server made
 			// it local, or it was removed): this copy isn't its latest.
 			return errors.New("the cluster no longer has it, and this conversion didn't remove it (another server made it local, or it was removed); this copy isn't used")
@@ -185,19 +188,24 @@ func (c *Converter) toLocal(jc *jobs.Context, self cluster.Node, r *Record, acto
 			// interruption knows the cluster forgot it through this
 			// conversion (while the cluster still has it, the checks above
 			// run again).
-			r.Options.Removed = true
+			r.Options.Removed, r.Options.RemovedGen = true, pl.Generation
 			if err := c.save(jc, r); err != nil {
 				c.requestAgain(r, actor)
 				return err
 			}
 			err := c.propose(jc, cluster.CmdWorkloadRemove, state.WorkloadRemove{Workload: w, Generation: pl.Generation}, actor)
-			if c.snapshot().Placements[w] != nil {
-				r.Options.Removed = false
+			if err != nil && c.snapshot().Placements[w] != nil {
+				// The removal's outcome isn't known (it may commit later):
+				// the record keeps it as this conversion's, so a resume
+				// that finds the workload gone goes on; one that finds it
+				// still there checks and removes it again.
+				return fmt.Errorf("removing it from the cluster (resume to carry on): %w", err)
+			}
+			if err == nil && c.snapshot().Placements[w] != nil {
+				// Applied, and refused.
+				r.Options.Removed, r.Options.RemovedGen = false, 0
 				_ = c.save(jc, r)
 				c.requestAgain(r, actor)
-				if err != nil {
-					return err
-				}
 				return errors.New("the cluster refused to remove it (see the server's log)")
 			}
 		}
@@ -448,6 +456,10 @@ func (c *Converter) undo(jc *jobs.Context, self cluster.Node, r *Record, actor c
 	if err := c.putLocalBack(jc, r); err != nil {
 		return err
 	}
+	// This server's copy is the workload again (the cluster no longer has
+	// it): it runs as it did, whatever becomes of the cluster copy.
+	c.releaseLocal(r)
+	started := c.restartLocal(r)
 	// The cluster copy is put aside with no expiry: it may have run (it
 	// is newer than this server's then), and even if not, it is deleted
 	// only once this server's copy ran again (Cleanup).
@@ -476,13 +488,13 @@ func (c *Converter) undo(jc *jobs.Context, self cluster.Node, r *Record, actor c
 	} else {
 		// One this conversion adopted and lost track of (its answer was
 		// lost), if any; then what it was still receiving.
-		req.Adopted = true
+		req.Expect = r.ID
 		if pr, err := c.Storage.HAPark(jc, req); err == nil {
 			parked(pr)
 		}
 		_ = c.Storage.HAAbort(jc, storagesvc.HARequest{Workload: w, Pool: r.StoragePool, Conv: r.ID, Actor: actor})
 	}
-	if c.restartLocal(r) && r.Options.AwaitStart {
+	if started && r.Options.AwaitStart {
 		if err := c.keepFor(jc, hacopy.SideCluster, r.Options.ParkedPool, r.Options.ParkedName, c.grace(), actor); err == nil {
 			r.Options.AwaitStart = false
 			_ = c.save(jc, r)
@@ -572,7 +584,7 @@ func (c *Converter) runAbandon(jc *jobs.Context) (any, error) {
 		// A copy this conversion adopted (never registered, so never
 		// exported) is put aside for an hour; this server's copy is the
 		// workload and stays as it is.
-		_, perr := c.Storage.HAPark(jc, storagesvc.HARequest{Workload: w, Pool: r.StoragePool, Confirm: w.ID, Conv: r.ID, Adopted: true,
+		_, perr := c.Storage.HAPark(jc, storagesvc.HARequest{Workload: w, Pool: r.StoragePool, Confirm: w.ID, Conv: r.ID, Expect: r.ID,
 			KeepUntil: c.now().Add(time.Hour).Unix(), Actor: p.Actor})
 		if perr == nil || r.Options.Storage == nil {
 			r.Options.Storage = nil
@@ -588,6 +600,9 @@ func (c *Converter) runAbandon(jc *jobs.Context) (any, error) {
 			}
 		}
 		if err == nil {
+			// The app is this server's again: its hold ends (it isn't
+			// started; it was off when the conversion stopped).
+			c.releaseLocal(r)
 			// The conversion's own snapshots on this server go too.
 			ref := hacopy.Ref{Kind: w.Kind, ID: w.ID, Pool: r.LocalPool, Side: hacopy.SideLocal}
 			for a := 1; a <= r.Options.Attempt; a++ {

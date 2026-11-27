@@ -74,9 +74,11 @@ const (
 	SnapPrefix = "hardyos-ha-"
 	// propVM is the VM engine's own id property (vms.PropVM, on local
 	// VMs too); propApp and propRole are cluster storage's.
-	propVM   = san.PropVM
-	propApp  = san.PropApp
-	propRole = san.PropRole
+	// propHAHold is a local app's conversion hold (apps.PropHAHold).
+	propHAHold = "org.hardyos:ha-hold"
+	propVM     = san.PropVM
+	propApp    = san.PropApp
+	propRole   = san.PropRole
 )
 
 // Side says whose datasets an operation works on.
@@ -98,6 +100,10 @@ var (
 	parkedRE = regexp.MustCompile(`^(vm|app)-([a-z][a-z0-9-]{0,30}[a-z0-9])-([0-9]{1,12})$`)
 	guidRE   = regexp.MustCompile(`^[0-9]{1,20}$`)
 )
+
+// AppBlockChild is a cluster app's block volume below its folder
+// (san.AppBlock).
+const AppBlockChild = "block"
 
 // nodeLocalApps are apps that are one server's by design (decision 472).
 var nodeLocalApps = san.NodeLocalApps
@@ -314,7 +320,13 @@ func (r *Root) children(ctx context.Context, ref Ref, top string) (map[string]st
 			continue
 		}
 		child := strings.TrimPrefix(name, top+"/")
-		if child == name || ref.Kind != cluster.KindVM || !diskRE.MatchString(child) || typ != "volume" {
+		switch {
+		case child != name && ref.Kind == cluster.KindVM && diskRE.MatchString(child) && typ == "volume":
+		case child == AppBlockChild && ref.Kind == cluster.KindApp && ref.Side == SideCluster && typ == "volume":
+			// A cluster app's block volume (block mode): parked with its
+			// copy, never sent (Tree leaves it out: "make local" moves
+			// its data back into the app's folder first).
+		default:
 			return nil, invalid("%s holds %s, which isn't one of its disks; it can't be moved as it is", top, name)
 		}
 		res[child] = typ
@@ -450,6 +462,9 @@ func (r *Root) Tree(ctx context.Context, a TreeArgs) (*Tree, error) {
 	t.Exists = true
 	names := []string{""}
 	for c := range kids {
+		if c == AppBlockChild {
+			continue // never sent (children)
+		}
 		names = append(names, c)
 	}
 	slices.Sort(names)
@@ -695,7 +710,7 @@ func (r *Root) applyProps(ctx context.Context, ref Ref, top string, kids map[str
 		return err
 	}
 	for c := range kids {
-		vol := []string{propVM + "=" + ref.ID}
+		vol := []string{ref.ownerProp() + "=" + ref.ID}
 		if ref.Side == SideCluster {
 			vol = append(vol, propRole+"="+san.RoleCluster, "volmode=dev")
 		} else {
@@ -728,7 +743,9 @@ func (r *Root) describe(ctx context.Context, ref Ref, top string, kids map[strin
 	res := &AdoptResult{Dataset: top, Mountpoint: p["mountpoint"], GUID: p["guid"], Volumes: []VolumeInfo{}}
 	names := make([]string, 0, len(kids))
 	for k := range kids {
-		names = append(names, k)
+		if k != AppBlockChild { // an app's block volume isn't one of its disks
+			names = append(names, k)
+		}
 	}
 	slices.Sort(names)
 	for _, d := range names {
@@ -787,9 +804,10 @@ type ParkArgs struct {
 	// counts as written), and RefuseChanged refuses to park then.
 	Since         string `json:"since,omitempty"`
 	RefuseChanged bool   `json:"refuseChanged,omitempty"`
-	// Adopted parks only what conversion Conv adopted (its mark on the
-	// datasets): a copy a conversion lost track of, never another's.
-	Adopted bool `json:"adopted,omitempty"`
+	// Expect parks only a copy carrying this conversion mark (what that
+	// conversion adopted): a copy a conversion puts aside or lost track of
+	// is always its own, never another server's conversion's.
+	Expect string `json:"expect,omitempty"`
 }
 
 // PropKeepUntil is a parked copy's expiry (unix seconds; unset: kept).
@@ -883,15 +901,19 @@ func (r *Root) ParkedBy(ctx context.Context, ref Ref, conv string) (*ParkResult,
 	return nil, false
 }
 
-// MetadataSlack is what a file system may have written after a snapshot
-// without counting as changed: access times (pools with atime or relatime
-// on) and similar metadata when its files are only read. Disks (zvols)
-// get none: any write counts.
+// MetadataSlack is what a VM's state folder may have written after a
+// snapshot without counting as changed: access times (pools with atime or
+// relatime on) when vm.json and the firmware files are only read, as
+// letting go of the VM does (its definition is removed, its files read).
+// Nothing in that folder is the guest's data: a guest that ran writes its
+// disks, and disks (zvols) get no slack. An app's folder is its data: it
+// gets none either, and is kept read-only from its final snapshot until it
+// is parked (apps.HAHold), so nothing writes there, access times included.
 const MetadataSlack = 128 << 10
 
 // writtenSince says whether any of the datasets was written after their
 // snapshot since (one without it counts as written).
-func (r *Root) writtenSince(ctx context.Context, all []string, since string) bool {
+func (r *Root) writtenSince(ctx context.Context, kind cluster.WorkloadKind, all []string, since string) bool {
 	for _, ds := range all {
 		p, err := r.props(ctx, ds, "written@"+since, "type")
 		if err != nil {
@@ -902,7 +924,7 @@ func (r *Root) writtenSince(ctx context.Context, all []string, since string) boo
 			return true
 		}
 		slack := int64(0)
-		if p["type"] == "filesystem" {
+		if kind == cluster.KindVM && p["type"] == "filesystem" {
 			slack = MetadataSlack
 		}
 		if n > slack {
@@ -932,7 +954,7 @@ func (r *Root) Park(ctx context.Context, a ParkArgs) (*ParkResult, error) {
 	if pr, ok := r.ParkedBy(ctx, a.Ref, a.Conv); ok {
 		return pr, nil
 	}
-	if a.Adopted && (a.Conv == "" || r.localProp(ctx, a.Dataset(), PropParkedConv) != a.Conv) {
+	if a.Expect != "" && (!convRE.MatchString(a.Expect) || r.localProp(ctx, a.Dataset(), PropParkedConv) != a.Expect) {
 		return nil, invalid("%s isn't what this conversion set up", a.Dataset())
 	}
 	kids, err := r.checkSource(ctx, a.Ref)
@@ -959,7 +981,7 @@ func (r *Root) Park(ctx context.Context, a ParkArgs) (*ParkResult, error) {
 			all = append(all, top+"/"+c)
 		}
 		slices.Sort(all)
-		res.Changed = r.writtenSince(ctx, all, a.Since)
+		res.Changed = r.writtenSince(ctx, a.Kind, all, a.Since)
 		if res.Changed && a.RefuseChanged {
 			return nil, &ErrInvalid{fmt.Errorf("%w (%s); it wasn't put aside", ErrChanged, a.Since)}
 		}
@@ -1077,7 +1099,12 @@ func (r *Root) Unpark(ctx context.Context, a UnparkArgs) error {
 	if _, err := r.zfs(ctx, "rename", src, top); err != nil {
 		return err
 	}
-	for _, p := range []string{PropParked, PropKeepUntil, PropParkedConv} {
+	props := []string{PropParked, PropKeepUntil, PropParkedConv}
+	if a.Side == SideLocal {
+		// A local app's hold (apps.HAHold) ends with its copy put back.
+		props = append(props, "readonly", propHAHold)
+	}
+	for _, p := range props {
 		if _, err := r.zfs(ctx, "inherit", p, top); err != nil {
 			return err
 		}

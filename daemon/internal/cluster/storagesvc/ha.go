@@ -81,9 +81,9 @@ type HARequest struct {
 	// Since is the conversion's final snapshot a park compares the
 	// datasets with (ParkResult.Changed).
 	Since string `json:"since,omitempty"`
-	// Adopted parks only a copy conversion Conv adopted.
-	Adopted bool          `json:"adopted,omitempty"`
-	Actor   cluster.Actor `json:"actor"`
+	// Expect parks only a copy carrying that conversion's mark.
+	Expect string        `json:"expect,omitempty"`
+	Actor  cluster.Actor `json:"actor"`
 }
 
 // HAParkedDestroy deletes a parked copy on the storage server now;
@@ -590,7 +590,7 @@ func (s *Service) registerHAPeer(h func(path string, fn func(r *http.Request, c 
 			_ = s.reconcile(r.Context())
 		}
 		var res hacopy.ParkResult
-		err = s.Priv.Call(r.Context(), hacopy.OpPark, hacopy.ParkArgs{Ref: ref, Confirm: p.Confirm, KeepUntil: p.KeepUntil, Conv: p.Conv, Since: p.Since, Adopted: p.Adopted}, &res)
+		err = s.Priv.Call(r.Context(), hacopy.OpPark, hacopy.ParkArgs{Ref: ref, Confirm: p.Confirm, KeepUntil: p.KeepUntil, Conv: p.Conv, Since: p.Since, Expect: p.Expect}, &res)
 		s.audit(r.Context(), q.Actor, "cluster.ha.park", string(p.Workload.Kind)+" "+p.Workload.ID, err)
 		if err != nil {
 			return nil, err

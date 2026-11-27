@@ -355,7 +355,7 @@ func TestParkConversion(t *testing.T) {
 		t.Fatal("a refused park moved the copy")
 	}
 	// Only what this conversion adopted, when asked so.
-	if _, err := r.Park(ctx, ParkArgs{Ref: ref, Confirm: "web", Conv: conv, Adopted: true}); err == nil {
+	if _, err := r.Park(ctx, ParkArgs{Ref: ref, Confirm: "web", Conv: conv + "x1", Expect: conv}); err == nil {
 		t.Fatal("parked a copy another conversion (or none) set up")
 	}
 
@@ -393,6 +393,75 @@ func TestParkConversion(t *testing.T) {
 	}
 	if l, _ := r.ParkedList(ctx); len(l) != 1 || l[0].Conv != conv {
 		t.Fatalf("parked list %+v", l)
+	}
+}
+
+// A block-mode cluster app (M-D): its block volume is accepted on the
+// cluster side (marked as the app's), left out of what is sent, and parked
+// with its copy; a server's own app never has one. An app's folder gets no
+// slack for writes after its final snapshot (M-A).
+func TestBlockModeAppAndAppChanges(t *testing.T) {
+	f := newFake()
+	f.add("tank", "filesystem")
+	f.add("tank/apps", "filesystem")
+	f.add("tank/apps/notes", "filesystem", "org.hardyos:app", "notes", "org.hardyos:role", "cluster")
+	f.add("tank/apps/notes/block", "volume", "org.hardyos:app", "notes", "org.hardyos:role", "cluster")
+	r := &Root{Runner: f, Busy: func(context.Context, cluster.WorkloadKind, string, string) (bool, error) { return false, nil },
+		Now: func() time.Time { return time.Unix(1000, 0) }}
+	ctx := context.Background()
+	app := Ref{Kind: cluster.KindApp, ID: "notes", Pool: "tank", Side: SideCluster}
+	tr, err := r.Tree(ctx, TreeArgs{Ref: app})
+	if err != nil {
+		t.Fatalf("a block-mode app's tree: %v", err)
+	}
+	if len(tr.Datasets) != 1 || tr.Datasets[0].Child != "" {
+		t.Fatalf("the block volume is sent along: %+v", tr.Datasets)
+	}
+	// Another app's volume below it isn't.
+	f.ds["tank/apps/notes/block"]["org.hardyos:app"] = "other"
+	if _, err := r.Tree(ctx, TreeArgs{Ref: app}); err == nil {
+		t.Fatal("another app's block volume was accepted")
+	}
+	f.ds["tank/apps/notes/block"]["org.hardyos:app"] = "notes"
+	// Its folder written after the final snapshot: changed, no slack.
+	f.ds["tank/apps/notes"]["written"] = "4096"
+	pr, err := r.Park(ctx, ParkArgs{Ref: app, Confirm: "notes", Conv: "abcdefgh12", Since: SnapPrefix + "abcdefgh12-final1"})
+	if err != nil {
+		t.Fatalf("parking a block-mode app: %v", err)
+	}
+	if !pr.Changed {
+		t.Fatal("4 KiB written to an app's folder didn't count as a change")
+	}
+	ds := "tank/" + ParkedDir + "/" + pr.Name
+	if f.ds[ds+"/block"] == nil || f.ds[ds+"/block"]["volmode"] != "none" || f.ds[ds+"/block"]["org.hardyos:app"] != "" {
+		t.Fatalf("the block volume wasn't parked with its copy: %+v", f.ds[ds+"/block"])
+	}
+	// A server's own app has no block volume.
+	f.add("tank/apps/own", "filesystem")
+	f.add("tank/apps/own/block", "volume")
+	if _, err := r.Tree(ctx, TreeArgs{Ref: Ref{Kind: cluster.KindApp, ID: "own", Pool: "tank", Side: SideLocal}}); err == nil {
+		t.Fatal("a local app's block volume was accepted")
+	}
+}
+
+// Putting a local app's copy back ends its conversion hold.
+func TestUnparkEndsAppHold(t *testing.T) {
+	f := newFake()
+	f.add("tank", "filesystem")
+	f.add("tank/apps", "filesystem")
+	f.add("tank/apps/notes", "filesystem", "readonly", "on", "org.hardyos:ha-hold", "abcdefgh12")
+	r := &Root{Runner: f, Now: func() time.Time { return time.Unix(1000, 0) }}
+	ctx := context.Background()
+	ref := Ref{Kind: cluster.KindApp, ID: "notes", Pool: "tank", Side: SideLocal}
+	pr, err := r.Park(ctx, ParkArgs{Ref: ref, Confirm: "notes", Conv: "abcdefgh12"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Unpark(ctx, UnparkArgs{Ref: ref, Name: pr.Name}); err != nil {
+		t.Fatal(err)
+	}
+	if p := f.ds["tank/apps/notes"]; p["readonly"] != "" || p["org.hardyos:ha-hold"] != "" {
+		t.Fatalf("still held after it was put back: %+v", p)
 	}
 }
 

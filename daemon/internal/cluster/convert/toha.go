@@ -292,8 +292,7 @@ func (c *Converter) toHA(jc *jobs.Context, self cluster.Node, snap *cluster.Snap
 		if r.Options.Storage != nil {
 			// An earlier attempt's adopted copy is still there (its park
 			// failed): put aside before copying afresh.
-			if _, err := c.Storage.HAPark(jc, storagesvc.HARequest{Workload: w, Pool: r.StoragePool, Confirm: w.ID, Conv: asideConv(r),
-				KeepUntil: c.now().Add(time.Hour).Unix(), Actor: p.Actor}); err != nil {
+			if _, err := c.Storage.HAPark(jc, c.asideRequest(jc, r, p.Actor)); err != nil {
 				return nil, fmt.Errorf("putting the earlier attempt's cluster copy aside: %w", err)
 			}
 			r.Options.Storage = nil
@@ -363,6 +362,15 @@ func (c *Converter) toHA(jc *jobs.Context, self cluster.Node, snap *cluster.Snap
 		c.phase(jc, jc, r, PhaseStop, 61, "Shutting it down")
 		if err := c.stopLocal(jc, w); err != nil {
 			return nil, err
+		}
+		if w.Kind == cluster.KindApp {
+			// From the final snapshot until its folder is parked (or the
+			// conversion gives up and starts it again) nothing starts it or
+			// writes its folder: no containers, read-only, starts refused.
+			if err := c.Priv.Call(jc, priv.OpAppsHAHold, apps.HAHoldArgs{ID: w.ID, Conv: r.ID}, nil); err != nil {
+				c.restartLocal(r)
+				return nil, fmt.Errorf("holding it for the move: %w", err)
+			}
 		}
 		c.phase(jc, jc, r, PhaseFinal, 63, "Copying what changed (it is off now)")
 		err = func() error {
@@ -446,8 +454,7 @@ func (c *Converter) parkLocal(jc *jobs.Context, r *Record, local hacopy.Ref, act
 		ctx := context.WithoutCancel(jc)
 		r.Phase = PhaseAdopt
 		c.restartLocal(r)
-		if _, perr := c.Storage.HAPark(ctx, storagesvc.HARequest{Workload: w, Pool: r.StoragePool, Confirm: w.ID, Conv: asideConv(r),
-			KeepUntil: c.now().Add(time.Hour).Unix(), Actor: actor}); perr == nil {
+		if _, perr := c.Storage.HAPark(ctx, c.asideRequest(ctx, r, actor)); perr == nil {
 			r.Options.Storage = nil
 		} else {
 			c.log().Warn("convert: putting an unregistered cluster copy aside", "workload", w.ID, "err", perr)
@@ -458,6 +465,22 @@ func (c *Converter) parkLocal(jc *jobs.Context, r *Record, local hacopy.Ref, act
 	r.Options.ParkedPool, r.Options.ParkedName, r.Options.ParkedSide = pr.Pool, pr.Name, string(hacopy.SideLocal)
 	r.Phase = PhaseRegister
 	return c.save(jc, r)
+}
+
+// asideRequest puts aside the cluster copy this conversion adopted (its
+// mark expected, never another server's conversion's copy) under the
+// attempt's own mark. It expires in an hour only when this server's copy
+// is seen to be there as the workload; otherwise it is kept until an
+// administrator deletes it (it may be the only copy).
+func (c *Converter) asideRequest(ctx context.Context, r *Record, actor cluster.Actor) storagesvc.HARequest {
+	w := r.Ref()
+	req := storagesvc.HARequest{Workload: w, Pool: r.StoragePool, Confirm: w.ID, Conv: asideConv(r), Expect: r.ID, Actor: actor}
+	var t hacopy.Tree
+	local := hacopy.Ref{Kind: w.Kind, ID: w.ID, Pool: r.LocalPool, Side: hacopy.SideLocal}
+	if c.Priv.Call(ctx, hacopy.OpTree, hacopy.TreeArgs{Ref: local}, &t) == nil && t.Exists {
+		req.KeepUntil = c.now().Add(time.Hour).Unix()
+	}
+	return req
 }
 
 // parkedHere finds this server's copy of w that conversion conv parked.
@@ -545,9 +568,23 @@ func (c *Converter) stopLocal(ctx context.Context, w cluster.WorkloadRef) error 
 	}
 }
 
+// releaseLocal ends an app's hold for this conversion (apps.ha.hold).
+func (c *Converter) releaseLocal(r *Record) {
+	if r.Kind != cluster.KindApp {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if err := c.Priv.Call(ctx, priv.OpAppsHAHold, apps.HAHoldArgs{ID: r.Workload, Conv: r.ID, Release: true}, nil); err != nil {
+		c.log().Warn("convert: letting go of a local app's hold", "app", r.Workload, "err", err)
+	}
+}
+
 // restartLocal starts the local copy again when the conversion stopped it
-// and gave up before parking it; true when it started.
+// and gave up before parking it (ending an app's hold first); true when it
+// started.
 func (c *Converter) restartLocal(r *Record) bool {
+	c.releaseLocal(r)
 	if !r.WasRunning {
 		return false
 	}

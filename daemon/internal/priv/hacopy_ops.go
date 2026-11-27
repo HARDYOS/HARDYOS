@@ -26,6 +26,9 @@ const (
 	OpVMsClusterSchedule = "vms.cluster.schedules"
 	OpAppsHACheck        = "apps.ha.check"
 	OpAppsClusterAdopt   = "apps.cluster.adopt"
+	// OpAppsHAHold holds (or lets go of) a local app for a conversion:
+	// containers removed, dataset read-only, starts refused.
+	OpAppsHAHold = "apps.ha.hold"
 )
 
 // HAAdoptArgs is ha.adopt: From is, for an app coming back from cluster
@@ -204,6 +207,9 @@ func RegisterHACopy(s *Server, r *hacopy.Root, vmm *vms.Manager, am *apps.Manage
 		s.Handle(OpAppsHACheck, typed(func(ctx context.Context, a AppRef) (any, error) {
 			res, err := am.HACheck(ctx, a.ID)
 			return res, haErr(err)
+		}))
+		s.Handle(OpAppsHAHold, typed(func(ctx context.Context, a apps.HAHoldArgs) (any, error) {
+			return map[string]bool{"ok": true}, haErr(am.HAHold(ctx, a))
 		}))
 		s.Handle(OpAppsClusterAdopt, typed(func(ctx context.Context, a apps.HAAdoptArgs) (any, error) {
 			h, err := am.ClusterAdopt(ctx, a)

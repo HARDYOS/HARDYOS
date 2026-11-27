@@ -159,3 +159,24 @@ and adopted locally.
   a dataset with more than 512 snapshots is refused up front. Root's
   install-completion records survive a hardyd-priv restart
   (`/var/lib/hardyos/vms/cluster-installs.json`).
+
+## After the re-review (PR #47, dc9ec96)
+
+- **Apps between the final snapshot and the park (M-A)**: held by the
+  conversion (`apps.ha.hold`): containers removed, dataset read-only and
+  marked `org.hardyos:ha-hold`, starts and updates refused (`up`,
+  `Restart`); the hold ends when the conversion gives up (restartLocal),
+  is abandoned, or the copy is put back (Unpark). An app's folder gets no
+  margin for writes after the final snapshot; a VM's state folder keeps
+  128 KiB (access times; its data is on its disks, which get none).
+- **Evacuations (M-B)**: `moves.Mover.Evacuate` judges only the storage
+  network between the LAN-isolated owner and each destination it chooses;
+  when none passes the VM stays, the server isn't marked evacuated, and
+  the coordinator tries again after 30 s.
+- **Make local (M-C, M-D)**: a removal whose outcome isn't known stays
+  recorded as the conversion's (with its generation); a block-mode app's
+  block volume is accepted on the cluster side, never sent, parked with
+  the cluster copy. Undo starts this server's copy as soon as it is back.
+- **Putting a cluster copy aside (L-A, L-B)**: only one carrying the
+  conversion's own mark (`Expect`), expiring in an hour only when this
+  server's copy is seen to be there.

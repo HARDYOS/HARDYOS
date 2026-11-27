@@ -301,6 +301,8 @@ type Options struct {
 	// Removed: this "make local" removed the cluster workload (only then
 	// does it go on once the cluster no longer has it).
 	Removed bool `json:"removed,omitempty"`
+	// RemovedGen is the generation that removal was proposed for.
+	RemovedGen uint64 `json:"removedGen,omitempty"`
 }
 
 // Record is one conversion.

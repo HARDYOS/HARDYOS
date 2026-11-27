@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -139,10 +140,14 @@ func TestClusterHAAPI(t *testing.T) {
 
 // The local-network check (decision 492): "warn, block HA only".
 func TestClusterHANeedsLocalNetwork(t *testing.T) {
+	// Judged by the handler and by the policy jobs' goroutines: guarded.
+	var mu sync.Mutex
 	var asked [][]cluster.NodeID
 	env, w := newClusterEnvWith(t, func(svc *ha.Service) {
 		svc.NetCheck = func(_ context.Context, members ...cluster.NodeID) netcheck.Result {
+			mu.Lock()
 			asked = append(asked, members)
+			mu.Unlock()
 			// Only pairs with c2 fail (pair-scoped, decision 496).
 			if slices.Contains(members, "c2") {
 				return netcheck.Result{OK: false, Reason: "c2 → c1 on the storage network: not reachable", PerMember: []netcheck.MemberResult{}}
@@ -179,12 +184,17 @@ func TestClusterHANeedsLocalNetwork(t *testing.T) {
 		t.Fatalf("a live move: %d %+v", code, e)
 	}
 	// Only the pairs that matter: HA restricted to c1 doesn't need c2.
+	mu.Lock()
 	asked = nil
+	mu.Unlock()
 	if code := admin.do("PUT", "/api/v1/cluster/workloads/vm/web/ha", map[string]any{"policy": map[string]any{"enabled": true, "preferred": []string{"c1"}, "restricted": true}}, &e); code != 202 {
 		t.Fatalf("HA restricted to c1: %d %+v", code, e)
 	}
-	if len(asked) == 0 || !slices.Equal(asked[0], []cluster.NodeID{"c1"}) {
-		t.Fatalf("judged %v, want only c1 (and the storage server)", asked)
+	mu.Lock()
+	first := slices.Clone(asked)
+	mu.Unlock()
+	if len(first) == 0 || !slices.Equal(first[0], []cluster.NodeID{"c1"}) {
+		t.Fatalf("judged %v, want only c1 (and the storage server)", first)
 	}
 	// The status endpoint (no monitor wired here: says so, not OK).
 	var r netcheck.Result
