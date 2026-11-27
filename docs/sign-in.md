@@ -141,6 +141,13 @@ last used, and can be revoked on its own. The rules:
 
 App passwords are removed when your domain password changes.
 
+Administrators see anyone's app passwords in Control Panel › **Users &
+Groups** (the lock button of a domain account): each device's name, what it
+may sign in to, when it was made and when and from where it was last used.
+**Revoke** (after a confirmation) stops that device at once; the audit log
+records who revoked which one. Use it when someone loses a phone and can't
+get to the desktop.
+
 **Not covered**: shared folders over SMB, Windows sign-in, Kerberos and
 LDAP check the domain password in Samba itself, and keep doing so. HardyOS
 doesn't publish them outside.

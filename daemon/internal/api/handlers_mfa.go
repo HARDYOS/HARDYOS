@@ -776,6 +776,22 @@ func (s *Server) appPasswordDelete(w http.ResponseWriter, r *http.Request, actor
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid id")
 		return
 	}
+	// What is revoked, for the audit log (decision 517).
+	detail := ""
+	if list, err := s.appPw.List(r.Context(), uid); err == nil {
+		for _, p := range list {
+			if p.ID == id {
+				detail = fmt.Sprintf("%q (%s)", p.Name, strings.Join(p.Scopes, ", "))
+			}
+		}
+	}
+	if actor.ID != uid {
+		owner := strconv.FormatInt(uid, 10)
+		if u, err := s.users.Get(r.Context(), uid); err == nil {
+			owner = u.Username
+		}
+		detail = strings.TrimSpace(detail + " of " + owner + " by an administrator")
+	}
 	if err := s.appPw.Delete(r.Context(), uid, id); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "not_found", "no such app password")
@@ -786,7 +802,7 @@ func (s *Server) appPasswordDelete(w http.ResponseWriter, r *http.Request, actor
 	}
 	// WebDAV remembers a working password for a short while.
 	s.dav.dropUser(uid)
-	s.record(r, actor, "auth.app_password.delete", strconv.FormatInt(uid, 10)+"/"+rawID, audit.Success, "")
+	s.record(r, actor, "auth.app_password.delete", strconv.FormatInt(uid, 10)+"/"+rawID, audit.Success, detail)
 	w.WriteHeader(http.StatusNoContent)
 }
 

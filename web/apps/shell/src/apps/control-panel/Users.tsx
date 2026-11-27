@@ -3,13 +3,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, errorMessage, unwrap } from "../../api";
 import { dateTime, initials, relativeTime } from "../../format";
-import { EditIcon, KeyIcon, PlusIcon, ShieldIcon, TrashIcon } from "../../icons";
+import { EditIcon, KeyIcon, LockIcon, PlusIcon, ShieldIcon, TrashIcon } from "../../icons";
 import { routerTrustText, twoFactorLabel } from "../../auth/twoFactorRules";
 
 import { useShell } from "../../shell";
 import { Alert, Badge, Button, Card, ErrorBox, Field, IconButton, Loading, PageHeader, Select, TextInput, Toggle } from "../../ui";
 import { ConfirmDialog, Dialog } from "../../ui/Dialog";
 import { toast } from "../../ui/toasts";
+import { UserAppPasswordsDialog } from "./UserAppPasswords";
 
 const useUsers = () => useQuery({ queryKey: ["users"], queryFn: () => unwrap(api.GET("/users")) });
 
@@ -22,6 +23,7 @@ export function Users() {
   const [deleting, setDeleting] = useState<User | null>(null);
   const [resetting2FA, setResetting2FA] = useState<User | null>(null);
   const [setupFor, setSetupFor] = useState<User | null>(null);
+  const [appPwFor, setAppPwFor] = useState<User | null>(null);
   const [revokeAppPw, setRevokeAppPw] = useState(true);
   const qc = useQueryClient();
 
@@ -105,6 +107,11 @@ export function Users() {
                         <ShieldIcon size={16} />
                       </IconButton>
                     )}
+                    {u.source === "domain" && (
+                      <IconButton label={`App passwords of ${u.username}`} onClick={() => setAppPwFor(u)}>
+                        <LockIcon size={16} />
+                      </IconButton>
+                    )}
                     <IconButton label={`Delete ${u.username}`} onClick={() => setDeleting(u)} disabled={u.id === me.id}>
                       <TrashIcon size={16} />
                     </IconButton>
@@ -120,6 +127,7 @@ export function Users() {
       {editing && <UserDialog user={editing} onClose={() => setEditing(null)} />}
       {resetting && <ResetPasswordDialog user={resetting} onClose={() => setResetting(null)} />}
       {setupFor && <SetupCodeDialog user={setupFor} onClose={() => setSetupFor(null)} />}
+      {appPwFor && <UserAppPasswordsDialog user={appPwFor} onClose={() => setAppPwFor(null)} />}
       {resetting2FA && (
         <ConfirmDialog
           title={`Reset two-factor sign-in for ${resetting2FA.username}?`}
