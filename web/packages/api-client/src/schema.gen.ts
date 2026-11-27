@@ -6239,6 +6239,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/cluster/netcheck": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The local-network check (decisions 490-492): whether every compute and storage server reaches every other one directly on the LAN and the storage network (signed probes on the cluster port, round trip, MTU, large packets). Live moves and turning high availability on need it OK; the cluster works without it. fresh=1 has every server probe now (at most every 10 s each). Reading it changes nothing. */
+        get: operations["getClusterNetcheck"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/windows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Apps with a window on the other members that the person may open there (each member asked as the person; its access list decides). Empty outside a cluster and for local accounts that aren't administrators. Open one with POST /nodes/{node}/apps/{id}/open (a cluster app opens wherever it runs). */
+        get: operations["listClusterWindows"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/nodes/{node}/{path}": {
         parameters: {
             query?: never;
@@ -6498,7 +6532,7 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Set a cluster workload's HA policy (a job; refused for VMs with passthrough devices and on servers without a watchdog) */
+        /** Set a cluster workload's HA policy (a job; refused for VMs with passthrough devices and on servers without a watchdog). Turning HA on is refused with 409 network while the local-network check fails (GET /cluster/netcheck); changing or turning off a policy that is on is not. */
         put: operations["setClusterHAPolicy"];
         post?: never;
         delete?: never;
@@ -11782,6 +11816,9 @@ export interface components {
             name: string;
             fits: boolean;
             reason?: string;
+            /** @description it can take the VM live: the local-network check of the two servers and the storage server passes */
+            live?: boolean;
+            liveReason?: string;
         };
         ClusterMoveCandidates: {
             placement: components["schemas"]["ClusterPlacement"];
@@ -11806,6 +11843,65 @@ export interface components {
             ok: boolean;
             problem?: string;
             actor: string;
+        };
+        /** @description One server's probes of one other server over one path (lan or storage). */
+        ClusterNetcheckPath: {
+            peer: string;
+            /** @enum {string} */
+            path: "lan" | "storage";
+            ok: boolean;
+            reason?: string;
+            /** @description the signed probes were answered */
+            answered: boolean;
+            /**
+             * Format: int64
+             * @description best round trip of 5 small probes (nanoseconds); at most 5 ms
+             */
+            rtt: number;
+            /** @description this server's address on the path */
+            addr?: string;
+            peerAddr?: string;
+            /** @description the address the connection left from */
+            local?: string;
+            /** @description the address the peer saw it come from */
+            seenAs?: string;
+            /** @description the address it arrived at on the peer */
+            arrived?: string;
+            /** @description the peer is in this server's interface subnet (else routed) */
+            sameSubnet: boolean;
+            interface?: string;
+            mtu: number;
+            peerMtu: number;
+            /** @description a 64 KiB probe got through */
+            bulk: boolean;
+            problem?: string;
+        };
+        ClusterNetcheckMember: {
+            node: string;
+            name: string;
+            role: string;
+            ok: boolean;
+            reason?: string;
+            /** @description not checked while dead, fenced or joining */
+            skipped?: boolean;
+            /** Format: date-time */
+            checked?: string;
+            paths: components["schemas"]["ClusterNetcheckPath"][];
+        };
+        ClusterNetcheck: {
+            ok: boolean;
+            /** @description the first problem, in words */
+            reason?: string;
+            perMember: components["schemas"]["ClusterNetcheckMember"][];
+        };
+        ClusterWindow: {
+            node: string;
+            nodeName: string;
+            id: string;
+            name: string;
+            state: string;
+            /** @description a cluster app (it opens wherever it runs) */
+            cluster: boolean;
         };
     };
     responses: {
@@ -21328,6 +21424,51 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
         };
     };
+    getClusterNetcheck: {
+        parameters: {
+            query?: {
+                fresh?: "1";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The check */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClusterNetcheck"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    listClusterWindows: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The apps */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClusterWindow"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
     nodeProxyGet: {
         parameters: {
             query?: never;
@@ -21893,6 +22034,8 @@ export interface operations {
                 "application/json": {
                     node: string;
                     stopOthers?: boolean;
+                    /** @description move offline the VMs the local-network check keeps from moving live (else they stay and are reported) */
+                    offline?: boolean;
                     confirm?: string;
                 };
             };

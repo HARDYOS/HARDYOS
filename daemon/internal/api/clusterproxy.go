@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -158,6 +159,15 @@ func (c *clusterAPI) handleNodeProxy(w http.ResponseWriter, r *http.Request, u *
 	}
 	core := c.core()
 	info := core.Info()
+	if app, ok := strings.CutPrefix(path, "/api/v1/apps/"); ok && info != nil && r.Method == http.MethodPost && strings.HasSuffix(app, "/open") {
+		// A cluster app's window opens where it runs, whatever server the
+		// desktop named (decision 493).
+		if owner, ok := c.placed(strings.TrimSuffix(app, "/open")); ok {
+			node = owner
+		} else if p, ok := core.State().Placement(cluster.WorkloadRef{Kind: cluster.KindApp, ID: strings.TrimSuffix(app, "/open")}); ok && p != nil && p.Owner == info.Node {
+			node = info.Node
+		}
+	}
 	if info == nil || node == info.Node {
 		// This server: the same handler as without the node scope.
 		r2 := r.Clone(r.Context())
@@ -595,6 +605,10 @@ func (c *clusterAPI) relayHandler() http.Handler {
 			c.checkWindow(w, r, u, app)
 			return
 		}
+		if r.URL.Path == cluster.PeerPathPrefix+"windowlist" && r.Method == http.MethodGet {
+			c.windowList(w, r, u)
+			return
+		}
 		if !proxyable(r.URL.Path) {
 			writeError(w, http.StatusNotFound, "not_found", "no such API endpoint")
 			return
@@ -729,17 +743,109 @@ func (c *clusterAPI) serveWindow(w http.ResponseWriter, r *http.Request, u *auth
 		return
 	}
 	target := appTarget(*app)
+	scheme := requestScheme(r)
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
 			pr.Out.Host = pr.In.Host // the entry node's window address
 			pr.Out.Header.Del("X-HardyOS-Request")
+			// How the browser reaches the window (signed by the entry).
+			pr.Out.Header.Set("X-Forwarded-Proto", scheme)
+			pr.Out.Header.Set("X-Forwarded-Host", pr.In.Host)
+		},
+		ModifyResponse: func(resp *http.Response) error {
+			// The app's redirects to its own address go to the window's
+			// (only this server knows that address).
+			if loc := resp.Header.Get("Location"); loc != "" {
+				if u, err := url.Parse(loc); err == nil && u.IsAbs() &&
+					(u.Host == target.Host || (isLoopback(u.Hostname()) && u.Port() == target.Port())) {
+					u.Scheme, u.Host = scheme, resp.Request.Host
+					resp.Header.Set("Location", u.String())
+				}
+			}
+			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			writeError(w, http.StatusBadGateway, "unavailable", app.Name+" isn't answering")
 		},
 	}
+	if cluster.IsUpgrade(r) {
+		// A WebSocket lives while the person may still use the app here:
+		// checked every sessionCheck (the entry closes it when the desktop
+		// session or its two-factor gate ends, decision 475).
+		hw := &hijackWatch{ResponseWriter: w}
+		w = hw
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			t := time.NewTicker(sessionCheck)
+			defer t.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-t.C:
+					if !c.windowStill(r, appID) {
+						hw.close()
+						return
+					}
+				}
+			}
+		}()
+	}
 	rp.ServeHTTP(w, r)
+}
+
+// windowStill reports whether a relayed window's person may still use the
+// app here (the member still forwards, the account is usable, the access
+// list still names them).
+func (c *clusterAPI) windowStill(r *http.Request, appID string) bool {
+	rr := relayedFrom(r)
+	if rr == nil {
+		return false
+	}
+	ctx := context.WithoutCancel(r.Context())
+	u, ok := rr.still(ctx)
+	if !ok {
+		return false
+	}
+	may, err := c.s.mayUse(ctx, "", u, appID)
+	return err == nil && may
+}
+
+// hijackWatch keeps the connection a reverse proxy hijacks (a WebSocket),
+// so it can be closed when the person may no longer use the app.
+type hijackWatch struct {
+	http.ResponseWriter
+	mu     sync.Mutex
+	conn   net.Conn
+	closed bool
+}
+
+func (h *hijackWatch) Unwrap() http.ResponseWriter { return h.ResponseWriter }
+
+func (h *hijackWatch) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	c, brw, err := http.NewResponseController(h.ResponseWriter).Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		_ = c.Close()
+		return nil, nil, errors.New("the window was closed")
+	}
+	h.conn = c
+	return c, brw, nil
+}
+
+func (h *hijackWatch) close() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.closed = true
+	if h.conn != nil {
+		_ = h.conn.Close()
+	}
 }
 
 // remoteWindowKey names a remote app's window on the entry node.
@@ -791,6 +897,9 @@ func (c *clusterAPI) checkWindow(w http.ResponseWriter, r *http.Request, u *auth
 			writeError(w, http.StatusForbidden, "forbidden", "you haven't been given "+a.Name)
 			return
 		}
+		// Where the window opens, in a header: the answer stays 204 for an
+		// entry one release older.
+		w.Header().Set(windowPathHeader, webPath(a.Web))
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -823,7 +932,7 @@ type windowDeskKey struct{}
 // openRemoteWindow answers POST /nodes/{node}/apps/{id}/open for an app on
 // another member: a window proxy on this (the entry) node that relays to
 // the owner, with this node's own sign-in token.
-func (c *clusterAPI) openRemoteWindow(w http.ResponseWriter, r *http.Request, u *auth.User, pr cluster.Principal, node cluster.NodeID, app string) {
+func (c *clusterAPI) openRemoteWindow(w http.ResponseWriter, r *http.Request, u *auth.User, _ cluster.Principal, node cluster.NodeID, app string) {
 	if apps.ValidID(app) != nil {
 		writeError(w, http.StatusNotFound, "not_found", "no such app")
 		return
@@ -834,27 +943,28 @@ func (c *clusterAPI) openRemoteWindow(w http.ResponseWriter, r *http.Request, u 
 		return
 	}
 	// The owner says whether the app has a window and the person may use
-	// it before a listener is opened here (decision 371).
+	// it before a listener is opened here (decision 371), and where it
+	// opens.
 	token, _ := c.s.sessionToken(r)
-	creq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, "http://"+string(node)+cluster.PeerPathPrefix+"windowcheck/"+app, nil)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", "no such app")
-		return
-	}
-	creq.Host = r.Host
-	cresp, err := relayRT{core: c.core(), node: node, p: pr, sess: sessionHash(token)}.RoundTrip(creq)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "unreachable", fmt.Sprintf("%s isn't answering: %v", node, err))
-		return
-	}
-	cresp.Body.Close()
+	next, err := c.check(r.Context(), r, u, token, node, app)
 	switch {
-	case cresp.StatusCode == http.StatusForbidden:
+	case errors.Is(err, errWindowForbidden):
 		writeError(w, http.StatusForbidden, "forbidden", "you haven't been given that app on "+string(node))
 		return
-	case cresp.StatusCode != http.StatusNoContent:
+	case errors.Is(err, errWindowNone):
 		writeError(w, http.StatusNotFound, "not_found", app+" has no window on "+string(node))
 		return
+	case err != nil:
+		writeError(w, http.StatusBadGateway, "unreachable", err.Error())
+		return
+	}
+	// Used by its hostname, the desktop opens the app at its own name here
+	// too, which relays to the owner (decision 494).
+	if !viaGateway(r) && c.s.hosts.onDesktopHost(r) && c.s.hostRoutesTo(r.Context(), app, node) {
+		if hu := c.s.hosts.hostURL(app); hu != "" {
+			writeJSON(w, http.StatusOK, AppOpen{URL: hu + next, Proxied: true, Hostname: true})
+			return
+		}
 	}
 	rw := &remoteWindow{c: c, node: node, app: app}
 	rw.used.Store(time.Now().Unix())
@@ -867,7 +977,7 @@ func (c *clusterAPI) openRemoteWindow(w http.ResponseWriter, r *http.Request, u 
 	if strings.Contains(host, ":") {
 		host = "[" + host + "]"
 	}
-	tok := p.mint(remoteWindowKey(node, app), u.ID, sessionToken(r), "/")
+	tok := p.mint(remoteWindowKey(node, app), u.ID, sessionToken(r), next)
 	writeJSON(w, http.StatusOK, AppOpen{URL: fmt.Sprintf("%s://%s:%d%s?token=%s", p.scheme(), host, port, proxyAuthPath, tok), Proxied: true})
 }
 

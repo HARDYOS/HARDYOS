@@ -1287,6 +1287,27 @@
 .app-card__spacer {
   flex: 1;
 }
+/* My apps › On other servers (apps that run on another cluster member). */
+.app-other-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.app-other-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border-radius: var(--hos-radius-sm);
+  background: var(--hos-surface-2);
+}
+.app-other-row__name {
+  font-weight: 600;
+}
 .app-icon {
   flex: none;
   border-radius: 12px;

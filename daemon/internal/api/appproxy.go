@@ -62,6 +62,7 @@ import (
 
 	"github.com/hardyos/hardyos/daemon/internal/apps"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
+	"github.com/hardyos/hardyos/daemon/internal/cluster"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/ports"
@@ -154,6 +155,10 @@ type proxySession struct {
 	// desktop host to a desktop session; never good on a window proxy
 	// port or the gateway.
 	host bool
+	// remote: a host session for an app another cluster member runs
+	// (decision 494): its access list is checked there on every request;
+	// good only while the app still routes to that member.
+	remote cluster.NodeID
 	// grant is the provider's access token id (jti) the sign-in got: the
 	// session lasts while its grant does (revoked by an administrator,
 	// signing out of HardyOS sign-in, a new password, the account replaced).
@@ -547,7 +552,13 @@ func (p *appProxy) handler(l *proxyListener) http.Handler {
 		rp.Transport = l.remote
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if p.s.hosts.redirectOld(w, r, l.appID) {
+		hostID := l.appID // a remote window's key: no hostname, no redirect
+		if l.remote != nil && p.s.hosts.underBase(r.Host) && p.s.hostRoutesTo(r.Context(), l.remote.app, l.remote.node) {
+			// Its hostname reaches this very member's app (never this
+			// server's own app with the same id, never another owner).
+			hostID = l.remote.app
+		}
+		if p.s.hosts.redirectOld(w, r, hostID) {
 			// Reached by a name under the base: the app's own hostname.
 			return
 		}
@@ -571,7 +582,11 @@ func (p *appProxy) handler(l *proxyListener) http.Handler {
 				"Your HardyOS sign-in ended or an administrator changed who may use it. Open it again from the desktop.")
 			return
 		}
-		if filterAppRequest(w, r, l.appID) {
+		filterID := l.appID
+		if l.remote != nil {
+			filterID = l.remote.app // the app's own filter (its owner applies it too)
+		}
+		if filterAppRequest(w, r, filterID) {
 			return
 		}
 		if l.remote != nil {
@@ -792,7 +807,7 @@ func (p *appProxy) verify(r *http.Request, ss *proxySession) bool {
 	// A remote app's access list is its owner's, checked there on every
 	// relayed request. The office editor's host session has no access
 	// list: what a person may open is checked per file.
-	if !isRemoteWindow(ss.appID) && !(ss.host && ss.appID == hostOfficeID) {
+	if !isRemoteWindow(ss.appID) && ss.remote == "" && !(ss.host && ss.appID == hostOfficeID) {
 		may, err := s.mayUse(ctx, ss.desktopToken, u, ss.appID)
 		if err != nil || !may {
 			return false
@@ -962,8 +977,10 @@ func (p *appProxy) fixResponse(resp *http.Response, l *proxyListener) {
 			target := l.target.Load()
 			_, tport, _ := net.SplitHostPort(target.Host)
 			// The app's own address, or the proxy's with http:// (apps that
-			// ignore X-Forwarded-Proto).
-			if u.Host == target.Host || u.Port() == tport || strings.EqualFold(u.Host, resp.Request.Host) {
+			// ignore X-Forwarded-Proto). A remote window's target is a node
+			// id without a port: its owner rewrote the app's own address
+			// already, and a port-less URL elsewhere isn't the app's.
+			if u.Host == target.Host || (tport != "" && u.Port() == tport) || strings.EqualFold(u.Host, resp.Request.Host) {
 				u.Scheme, u.Host = p.scheme(), resp.Request.Host
 				h.Set("Location", u.String())
 			}

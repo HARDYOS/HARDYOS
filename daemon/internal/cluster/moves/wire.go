@@ -39,6 +39,10 @@ var ErrConfirm = errors.New("this move needs a typed confirmation")
 // ErrNotLive: the workload can't move live.
 var ErrNotLive = errors.New("it can't move live")
 
+// ErrNoLocalNetwork: the source, the destination and the storage server
+// don't share a local network (the local-network check, decision 496).
+var ErrNoLocalNetwork = errors.New("the servers don't share a local network")
+
 // HoldRequest keeps a node's reconciler off a workload for Seconds (0
 // releases).
 type HoldRequest struct {

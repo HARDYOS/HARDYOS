@@ -56,6 +56,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/apps"
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/cfdns"
+	"github.com/hardyos/hardyos/daemon/internal/cluster"
 	"github.com/hardyos/hardyos/daemon/internal/hostnames"
 	"github.com/hardyos/hardyos/daemon/internal/photos"
 	"github.com/hardyos/hardyos/daemon/internal/publish"
@@ -85,6 +86,8 @@ type hostCode struct {
 	next         string
 	ip           string
 	expires      time.Time
+	// remote: the app runs on this other member (decision 494).
+	remote cluster.NodeID
 }
 
 // maxCodesEach bounds the codes waiting per desktop session and per
@@ -270,6 +273,15 @@ func (h *hostRuntime) app(id string) (apps.App, bool) {
 	return a, ok
 }
 
+// hasApp reports whether the hostnames know this server's apps (known) and
+// whether one has that id.
+func (h *hostRuntime) hasApp(id string) (known, has bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	_, has = h.apps[id]
+	return h.appsKnow, has
+}
+
 // appForLabel finds the app a label names.
 func (h *hostRuntime) appForLabel(label string) (apps.App, bool) {
 	switch label {
@@ -282,6 +294,22 @@ func (h *hostRuntime) appForLabel(label string) (apps.App, bool) {
 		return apps.App{}, false
 	}
 	return h.app(label)
+}
+
+// appIDForLabel is the app id a label names, whether or not the app is
+// here (photos and mail are their apps' names).
+func appIDForLabel(label string) (string, bool) {
+	switch label {
+	case hostnames.PhotosLabel:
+		return photos.AppID, true
+	case hostnames.MailLabel:
+		// Webmail is each server's own (its mail server, decision 472).
+		return "", false
+	}
+	if label == WebmailAppID || hostnames.Reserved(label) || !validAppLabel(label) || apps.ValidID(label) != nil {
+		return "", false
+	}
+	return label, true
 }
 
 func validAppLabel(l string) bool {
@@ -453,6 +481,29 @@ func (h *hostRuntime) serve(w http.ResponseWriter, r *http.Request) bool {
 	}
 	a, ok := h.appForLabel(label)
 	if !ok {
+		// Not this server's: in a cluster, the member running it (decision
+		// 494).
+		if id, ok := appIDForLabel(label); ok && h.s.windows != nil {
+			node, many := h.s.windows.route(r.Context(), id)
+			switch {
+			case node != "":
+				if canon := labelFor(id); canon != label {
+					u := url.URL{Scheme: "https", Host: canon + "." + base, Path: r.URL.Path, RawQuery: r.URL.RawQuery}
+					http.Redirect(w, r, u.String(), http.StatusPermanentRedirect)
+					return true
+				}
+				h.serveRemote(w, r, node, id)
+				return true
+			case len(many) > 1:
+				names := make([]string, len(many))
+				for i, n := range many {
+					names[i] = string(n)
+				}
+				proxyPage(w, http.StatusConflict, "This app runs on several servers",
+					"It is installed on "+strings.Join(names, ", ")+". Open it from the HardyOS desktop on the server you want.")
+				return true
+			}
+		}
 		proxyPage(w, http.StatusNotFound, "Nothing is here", "No HardyOS app has this address.")
 		return true
 	}
@@ -564,22 +615,40 @@ func (h *hostRuntime) bind(w http.ResponseWriter, r *http.Request) {
 		proxyPage(w, http.StatusForbidden, "Set up two-factor sign-in first", "Administrators must set up two-factor sign-in on the desktop before opening apps.")
 		return
 	}
+	var remote cluster.NodeID
 	if appID == hostOfficeID {
 		if s.office == nil || !s.office.enabled(r.Context()) {
 			proxyPage(w, http.StatusNotFound, "The office suite is off", "Turn it on in Control Panel › Office.")
 			return
 		}
-	} else {
-		if _, ok := h.app(appID); !ok {
-			proxyPage(w, http.StatusNotFound, "No such app", "Open the app from the HardyOS desktop.")
-			return
-		}
+	} else if _, ok := h.app(appID); ok {
 		may, err := s.mayUse(r.Context(), tok, u, appID)
 		if err != nil || !may {
 			s.record(r, u, "apps.open", appID, audit.Denied, "hostname")
 			proxyPage(w, http.StatusForbidden, "You can't use this app", "An administrator hasn't given you this app.")
 			return
 		}
+	} else {
+		// An app another member runs (decision 494): its owner decides,
+		// as the person this desktop session is.
+		node := cluster.NodeID("")
+		if s.windows != nil && appID != WebmailAppID { // webmail is each server's own
+			node, _ = s.windows.route(r.Context(), appID)
+		}
+		if node == "" {
+			proxyPage(w, http.StatusNotFound, "No such app", "Open the app from the HardyOS desktop.")
+			return
+		}
+		if _, err := s.windows.check(r.Context(), r, u, tok, node, appID); err != nil {
+			s.record(r, u, "apps.open", appID, audit.Denied, "hostname, on "+string(node))
+			msg := "An administrator hasn't given you this app."
+			if !errors.Is(err, errWindowForbidden) {
+				msg = err.Error()
+			}
+			proxyPage(w, http.StatusForbidden, "You can't use this app", msg)
+			return
+		}
+		remote = node
 	}
 	code := randomToken()
 	h.mu.Lock()
@@ -603,7 +672,7 @@ func (h *hostRuntime) bind(w http.ResponseWriter, r *http.Request) {
 	}
 	full := len(h.codes) >= maxHostCodes || perSession >= maxCodesEach || perIP >= maxCodesEach
 	if !full {
-		h.codes[stateHash(code)] = hostCode{appID: appID, userID: u.ID, desktopToken: tok, stateHash: sh, next: next, ip: ip, expires: now.Add(hostCodeTTL)}
+		h.codes[stateHash(code)] = hostCode{appID: appID, userID: u.ID, desktopToken: tok, stateHash: sh, next: next, ip: ip, expires: now.Add(hostCodeTTL), remote: remote}
 	}
 	h.mu.Unlock()
 	if full {
@@ -629,7 +698,7 @@ h1{margin:0 0 8px;font-size:18px}p{margin:0 0 16px;color:#A7B0C2}a{display:inlin
 
 // callback runs on an app host: a code from the desktop host plus the
 // state cookie it was made for become this host's session.
-func (h *hostRuntime) callback(w http.ResponseWriter, r *http.Request, appID string) {
+func (h *hostRuntime) callback(w http.ResponseWriter, r *http.Request, appID string, remote cluster.NodeID) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	code := r.URL.Query().Get("code")
@@ -639,7 +708,7 @@ func (h *hostRuntime) callback(w http.ResponseWriter, r *http.Request, appID str
 	h.mu.Unlock()
 	st, err := r.Cookie(hostStateCookie)
 	http.SetCookie(w, &http.Cookie{Name: hostStateCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
-	if !ok || code == "" || time.Now().After(c.expires) || c.appID != appID || err != nil || !sameSecret(stateHash(st.Value), c.stateHash) {
+	if !ok || code == "" || time.Now().After(c.expires) || c.appID != appID || c.remote != remote || err != nil || !sameSecret(stateHash(st.Value), c.stateHash) {
 		proxyPage(w, http.StatusForbidden, "Open the app again", "This sign-in was started in another browser or has expired.")
 		return
 	}
@@ -648,14 +717,17 @@ func (h *hostRuntime) callback(w http.ResponseWriter, r *http.Request, appID str
 	key := randomToken()
 	now := time.Now()
 	p.mu.Lock()
-	p.sessions[key] = &proxySession{appID: appID, userID: c.userID, desktopToken: c.desktopToken, expires: now.Add(proxySessionTTL), checked: now, host: true}
+	p.sessions[key] = &proxySession{appID: appID, userID: c.userID, desktopToken: c.desktopToken, expires: now.Add(proxySessionTTL), checked: now, host: true, remote: remote}
 	p.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{Name: hostCookie, Value: key, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, safeNext(c.next), http.StatusSeeOther)
 }
 
-// session finds a request's host session for an app.
-func (h *hostRuntime) session(r *http.Request, appID string) (*proxySession, string) {
+// session finds a request's host session for an app, as it routes now
+// (remote: the member running it; "" this server): a session made for an
+// app on another member is never good once the app is here, and the
+// other way round.
+func (h *hostRuntime) session(r *http.Request, appID string, remote cluster.NodeID) (*proxySession, string) {
 	c, err := r.Cookie(hostCookie)
 	if err != nil {
 		return nil, ""
@@ -664,7 +736,7 @@ func (h *hostRuntime) session(r *http.Request, appID string) (*proxySession, str
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	ss := p.sessions[c.Value]
-	if ss == nil || !ss.host || ss.appID != appID || time.Now().After(ss.expires) {
+	if ss == nil || !ss.host || ss.appID != appID || ss.remote != remote || time.Now().After(ss.expires) {
 		return nil, ""
 	}
 	return ss, c.Value
@@ -672,8 +744,8 @@ func (h *hostRuntime) session(r *http.Request, appID string) (*proxySession, str
 
 // checkSession finds and rechecks the request's session; false means the
 // response was written (sign-in started or refused).
-func (h *hostRuntime) checkSession(w http.ResponseWriter, r *http.Request, appID string) (*proxySession, string, bool) {
-	ss, key := h.session(r, appID)
+func (h *hostRuntime) checkSession(w http.ResponseWriter, r *http.Request, appID string, remote cluster.NodeID) (*proxySession, string, bool) {
+	ss, key := h.session(r, appID, remote)
 	if ss == nil {
 		h.startBind(w, r, appID)
 		return nil, "", false
@@ -689,16 +761,70 @@ func (h *hostRuntime) checkSession(w http.ResponseWriter, r *http.Request, appID
 	return ss, key, true
 }
 
-func (h *hostRuntime) serveApp(w http.ResponseWriter, r *http.Request, a apps.App) {
+// serveRemote serves an app another member runs at its hostname here
+// (decision 494): the same bounce and host session as a local app (this
+// server's desktop session and two-factor gate), each request relayed to
+// the owner as the person, whose access list the owner checks.
+func (h *hostRuntime) serveRemote(w http.ResponseWriter, r *http.Request, node cluster.NodeID, appID string) {
 	if r.URL.Path == hostCallback {
-		h.callback(w, r, a.ID)
+		h.callback(w, r, appID, node)
 		return
 	}
 	if why := crossSiteRequest(r, "https://"+r.Host); why != "" {
 		proxyPage(w, http.StatusForbidden, "Blocked a request from another page", why)
 		return
 	}
-	ss, key, ok := h.checkSession(w, r, a.ID)
+	ss, key, ok := h.checkSession(w, r, appID, node)
+	if !ok {
+		return
+	}
+	if filterAppRequest(w, r, appID) {
+		return
+	}
+	ctx := context.WithValue(r.Context(), windowUserKey{}, ss.userID)
+	ctx = context.WithValue(ctx, windowDeskKey{}, ss.desktopToken)
+	r = r.WithContext(ctx)
+	h.remoteProxyFor(node, appID).ServeHTTP(&trackingWriter{ResponseWriter: w, p: h.s.proxy, key: key, ss: ss}, r)
+}
+
+// remoteProxyFor is the reverse proxy to an app on another member, over
+// the cluster relay (made per request: the owner can change).
+func (h *hostRuntime) remoteProxyFor(node cluster.NodeID, appID string) *httputil.ReverseProxy {
+	h.mu.Lock()
+	frame := "frame-ancestors 'self' https://" + h.desktop + "." + h.base
+	h.mu.Unlock()
+	target := &url.URL{Scheme: "https", Host: string(node)}
+	return &httputil.ReverseProxy{
+		Transport: h.s.windows.transport(node, appID),
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(target)
+			pr.Out.Host = pr.In.Host // signed into the relay's assertion
+			pr.Out.Header.Del("Forwarded")
+			gatewayRequestCookies(pr.Out.Header)
+			h.dropTossedCookies(pr.Out.Header, appID)
+		},
+		ModifyResponse: func(resp *http.Response) error {
+			gatewayFixResponse(resp, target, hostOnly(resp.Request.Host), frame)
+			h.learnCookies(resp.Header, appID)
+			return nil
+		},
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+			proxyPage(w, http.StatusBadGateway, "The app isn't answering",
+				"It runs on "+string(node)+", which may be starting or unreachable. Reload in a moment.")
+		},
+	}
+}
+
+func (h *hostRuntime) serveApp(w http.ResponseWriter, r *http.Request, a apps.App) {
+	if r.URL.Path == hostCallback {
+		h.callback(w, r, a.ID, "")
+		return
+	}
+	if why := crossSiteRequest(r, "https://"+r.Host); why != "" {
+		proxyPage(w, http.StatusForbidden, "Blocked a request from another page", why)
+		return
+	}
+	ss, key, ok := h.checkSession(w, r, a.ID, "")
 	if !ok {
 		return
 	}
@@ -850,10 +976,10 @@ func (h *hostRuntime) serveOffice(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.URL.Path {
 	case hostCallback:
-		h.callback(w, r, hostOfficeID)
+		h.callback(w, r, hostOfficeID, "")
 		return
 	case "/s/-/office/editor":
-		ss, _, ok := h.checkSession(w, r, hostOfficeID)
+		ss, _, ok := h.checkSession(w, r, hostOfficeID, "")
 		if !ok {
 			return
 		}

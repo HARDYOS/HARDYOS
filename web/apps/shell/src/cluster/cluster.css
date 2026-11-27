@@ -86,3 +86,26 @@
   border-radius: 8px;
   background: var(--hos-surface-2);
 }
+/* Overview › Local network (the local-network check). */
+.cluster-net__members {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+}
+.cluster-net__member {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+.cluster-net__cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.cluster-net__problems {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--hos-text-2);
+}

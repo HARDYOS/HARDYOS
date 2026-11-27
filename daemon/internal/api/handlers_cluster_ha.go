@@ -24,6 +24,7 @@ func (s *Server) clusterHARoutes() {
 	m.Handle("PUT /api/v1/cluster/workloads/{kind}/{id}/ha", s.admin(s.handleClusterPolicy))
 	m.Handle("POST /api/v1/cluster/workloads/{kind}/{id}/request", s.admin(s.handleClusterRequest))
 	s.clusterMoveRoutes()
+	s.clusterNetcheckRoutes()
 }
 
 // clusterHA returns the service when this server is in a cluster, or
@@ -105,6 +106,11 @@ func (s *Server) handleClusterPolicy(w http.ResponseWriter, r *http.Request, u *
 	pol := state.NormalizePolicy(req.Policy)
 	if err := state.ValidatePolicy(snap, p, pol); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
+	// Turning HA on needs the servers on one local network (decision 492).
+	if err := svc.CheckHA(r.Context(), ref, pol); err != nil {
+		writeError(w, http.StatusConflict, "network", err.Error())
 		return
 	}
 	title := "Turn high availability off for " + p.Name

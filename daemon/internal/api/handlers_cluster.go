@@ -30,6 +30,9 @@ type clusterAPI struct {
 
 	// limits caps relayed requests on the entry node (decision 371).
 	limits relayLimits
+
+	// dir is the other members' app windows (clusterwindows.go).
+	dir windowDirectory
 }
 
 type sidEntry struct {
@@ -53,7 +56,14 @@ func (c *ClusterAPI) HandleAdmin(pattern string, h func(w http.ResponseWriter, r
 // makes). Call once, before serving.
 func (s *Server) AttachCluster(svc *member.Service) *ClusterAPI {
 	c := &clusterAPI{s: s, svc: svc, sids: map[string]sidEntry{}}
-	svc.Configure = append(svc.Configure, func(core *cluster.Core) { core.SetRelay(c.relayHandler()) })
+	s.cluster = c
+	s.windows = c
+	svc.Configure = append(svc.Configure, func(core *cluster.Core) {
+		core.SetRelay(c.relayHandler())
+		// Which apps have windows here, for app hostnames on other members
+		// (decision 494).
+		core.Mux().Handle("GET /"+windowsPeerPath, http.HandlerFunc(c.handlePeerWindows))
+	})
 	m := s.mux
 	m.Handle("GET /api/v1/cluster", s.admin(c.handleStatus))
 	m.Handle("GET /api/v1/cluster/nodes", s.authed(c.handleNodes))
@@ -70,6 +80,7 @@ func (s *Server) AttachCluster(svc *member.Service) *ClusterAPI {
 	m.Handle("PUT /api/v1/cluster/admin-trust", s.admin(c.handleAdminTrustSet))
 
 	m.Handle("GET /api/v1/cluster/events", s.authed(c.handleEvents))
+	m.Handle("GET /api/v1/cluster/windows", s.authed(c.handleWindows))
 	m.Handle("/api/v1/nodes/{node}/{rest...}", s.authed(c.handleNodeProxy))
 	return &ClusterAPI{c: c}
 }

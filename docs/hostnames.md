@@ -74,6 +74,19 @@ Devices that can't resolve the names keep working at the server's address:
 apps there still open on their ports. Old port addresses used with a name
 under the base redirect to the new ones.
 
+## In a cluster
+
+Every member can serve every app's name (decision 494): `<app>.<base>` on
+a server that doesn't run the app relays it, over the cluster port, to the
+server that does: a cluster app's current server, or the one other server
+that has an app with that id. You sign in through the desktop of the
+server you reached (its two-factor rules apply); the server running the
+app decides whether you may use it, on every request. An app installed on
+several other servers (and not on this one) can't be told apart by name:
+the page says which servers have it; open it from the desktop instead.
+Webmail (`mail.<base>`) is always the server's own. The names at home are
+still each server's own apps; point a cluster app's name at any member.
+
 ## Turning it off
 
 Turn off **Use hostnames**, or **Forget token** (type the base domain):
