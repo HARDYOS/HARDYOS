@@ -319,11 +319,61 @@ server that could take it over, so a failover never needs the internet.
 **Published apps** (NetBird) follow the app: its new server re-targets the
 app's published name after a move or a failover.
 
-**Not there yet.** Nothing in the desktop or the API turns a VM or app into
-a cluster workload yet (the plan's "Move to cluster storage", section
-6.5); cluster workloads exist only once that conversion is built. The LAN
-check (a server whose LAN alone fails) reports the LAN as always working
-until its probe is built, so LAN isolation never triggers.
+**Not there yet.** The LAN check (a server whose LAN alone fails) reports
+the LAN as always working until its probe is built, so LAN isolation never
+triggers.
+
+## Making a VM or app highly available
+
+Phase 10 (decisions 480-489, plan: [plans/make-ha.md](plans/make-ha.md)).
+A VM's page and an app's details show **Make highly available…** on a
+compute server of a cluster.
+
+- **What it does**: a snapshot and a copy of its storage (a VM's settings
+  folder and disks, an app's folder), with every snapshot it has, to the
+  storage server while it runs; then it shuts down (a VM: the guest, up to
+  3 minutes), what changed is copied, the storage server takes it as
+  cluster storage, and it starts from there on the same server, now
+  highly available (priority as chosen, this server preferred). Downtime
+  is the final copy only. The job shows the bytes copied.
+- **The dialog** says what can't move now and why: passthrough devices
+  (they pin a VM), discs from this server's ISO library, an unfinished
+  Windows install, this server without a hardware watchdog, the local
+  network check, an app with shared folders. A VM can take the cluster's
+  CPU model (default; it then moves live between any servers) or keep its
+  own. Type the name to confirm.
+- **This server's copy** is kept, unused (it is no longer a VM or app),
+  until the workload has run from cluster storage, then for 24 hours.
+  Cluster › HA › **Kept copies** lists these copies (on this server and on
+  the storage server) with when they go; **Delete now…** (type the name)
+  frees the space sooner.
+- **If it fails or is cancelled**: before the local copy is put aside
+  nothing changed (it starts again if it ran); what was copied stays on the
+  storage server so trying again copies only what's new (**Abandon…**
+  deletes it). After that, nothing is undone by itself: try again to carry
+  on, or **Undo…** (type the name) to put this server's copy back (the
+  cluster copy is kept for 24 hours). Cluster › HA › **Conversions** shows
+  each one and where it stopped.
+- **Apps** with a database move to a block volume (as their package or
+  compose file says); their user id is kept, cluster-wide.
+- **Make local again…** (Cluster › HA › Workloads) brings a cluster
+  workload to a compute server's own pool: it stops, its storage and
+  snapshots are copied there, it leaves the cluster (no failover any
+  more) and runs there; the cluster copy is kept for 24 hours.
+- **HA VMs** keep their snapshot schedule (the storage server takes the
+  snapshots), may publish game streaming (the server running the VM
+  forwards it; it can't move live while published), and **Save as
+  template** (stopped) makes the template on the storage server. Keeping a
+  plugged-in USB device in an HA VM's settings stays refused.
+- **Copies travel** over the cluster port on the LAN or the storage
+  network, never over NetBird, from the compute server to the storage
+  server only.
+
+**Failover history**: Cluster › HA › **Failover history** lists every
+restart elsewhere and every "nowhere to run", from every server (the
+coordinator is whichever server leads). A workload restarts on the server
+with the most room (memory and CPUs), its preferred server first; it never
+moves back by itself.
 
 ## Alerts
 
@@ -335,6 +385,10 @@ until its probe is built, so LAN isolation never triggers.
   recoveries, workloads pending or in error) are recorded as finished jobs
   (`cluster.ha.*`) and in the audit log; so is every step a server runs for
   a move (`cluster.move.step`), with the member that asked.
+- *X is restarting on Y* (warning, `cluster.ha.failover`) for every
+  failover, *No server can run X* (critical, `cluster.ha.nowhere`), and a
+  conversion that stopped or finished (`cluster.ha.convert`,
+  `cluster.ha.local`).
 - *polkit isn't running* (critical, `cluster.polkit.down`): with live
   migration set up, libvirt refuses every call until polkitd is back (a
   forced stop still works).
@@ -404,3 +458,10 @@ until its probe is built, so LAN isolation never triggers.
 - Compute servers never treat cluster disks as their own (they aren't
   offered for pools, imported or probed), and a block volume another server
   wrote is checked before it is mounted.
+- Conversions (decisions 480-489): streams are single datasets only (never
+  `zfs send -R` packages, which carry properties) and land in a folder of
+  their own that is never exported; a copy connection takes a one-time
+  token the storage server gave that compute server less than a minute
+  before; the storage server's own VM engine never runs a cluster VM's
+  datasets; the copy a workload left can't run (it is no longer a VM or
+  app); administrators of other servers may convert like they may move.

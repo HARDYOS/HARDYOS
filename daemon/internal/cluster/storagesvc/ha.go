@@ -573,6 +573,9 @@ func (s *Service) openStream(ctx context.Context, node cluster.NodeID, recv bool
 // storage) root's verdict.
 func (s *Service) ServeCopy(conn net.Conn, from cluster.Node) {
 	defer conn.Close()
+	if me, _, err := s.self(); err != nil || me.Role != cluster.RoleStorage || from.Role != cluster.RoleCompute {
+		return // only the storage server serves copies, to compute servers
+	}
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	br := bufio.NewReaderSize(conn, 4096)
 	line, err := br.ReadString('\n')

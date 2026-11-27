@@ -265,10 +265,11 @@ func (r *Root) InUse(ctx context.Context, kind cluster.WorkloadKind, id, pool st
 	return r.inUse(a)
 }
 
-// EnsureParent caps <pool>/vms or <pool>/apps as DatasetCreate does (an
-// HA conversion receiving into it).
+// EnsureParent caps <pool>/vms, <pool>/apps or the HA conversions'
+// incoming folder as DatasetCreate caps the first two: a compute server's
+// copy can't fill the storage server's pool.
 func (r *Root) EnsureParent(ctx context.Context, pool, parent string) error {
-	if !poolRE.MatchString(pool) || (parent != pool+"/vms" && parent != pool+"/apps") {
+	if !poolRE.MatchString(pool) || (parent != pool+"/vms" && parent != pool+"/apps" && parent != pool+"/hardyos-ha-incoming") {
 		return &ValidationError{fmt.Errorf("%q isn't a cluster parent", parent)}
 	}
 	return r.ensureParentQuota(ctx, pool, parent)

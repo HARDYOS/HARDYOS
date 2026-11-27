@@ -443,6 +443,11 @@ func (r *Root) makeIncoming(ctx context.Context, ref Ref, conv string) error {
 			return err
 		}
 	}
+	if ref.Side == SideCluster && r.EnsureParent != nil {
+		if err := r.EnsureParent(ctx, ref.Pool, base); err != nil {
+			return err
+		}
+	}
 	_, err := r.zfs(ctx, "create", "-o", "canmount=off", "-o", PropIncoming+"="+ref.incomingValue(), ref.incomingDir(conv))
 	return err
 }

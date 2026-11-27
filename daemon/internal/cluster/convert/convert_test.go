@@ -170,6 +170,9 @@ func (p *fakePriv) Call(_ context.Context, op string, args, out any) error {
 	}
 	switch op {
 	case priv.OpVMsHACheck:
+		if p.parked {
+			return &priv.Error{Code: priv.CodeNotFound, Message: "no such VM"}
+		}
 		st := "stopped"
 		if p.running {
 			st = "running"

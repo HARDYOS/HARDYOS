@@ -130,6 +130,13 @@ func (c *Converter) Check(ctx context.Context, w cluster.WorkloadRef, cpu string
 		res.Problems = append(res.Problems, "it is a cluster workload already")
 		return res, nil
 	}
+	if o := res.Open; o != nil && o.Direction == DirHA && phaseAt(haPhases, o.Phase) >= phaseAt(haPhases, PhasePark) {
+		// This server's copy is put aside already: what is left is the
+		// cluster's part, from the record.
+		res.Name, res.Running, res.LocalPool, res.StoragePool = o.Name, o.WasRunning, o.LocalPool, o.StoragePool
+		res.SizeBytes, res.CPUModel, res.Mode = o.BytesTotal, o.Options.CPUModel, o.Options.Mode
+		return res, nil
+	}
 	if ok, why := state.HAEligible(snap, self.ID); !ok {
 		res.Problems = append(res.Problems, "this server "+why)
 	}

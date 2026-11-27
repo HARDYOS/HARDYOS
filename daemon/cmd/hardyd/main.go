@@ -303,7 +303,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		// Make highly available, make local again, kept copies, failovers.
 		handler.ClusterConvertRoutes(clusterConvert, clusterStorage.Service)
 	}
-	clusterCore.start(ctx, log)    // the cluster log, heartbeats and paths
+	clusterCore.start(ctx, log) // the cluster log, heartbeats and paths
 	go housekeeping(ctx, log, &auth.Sessions{DB: db})
 	go collector.Run(ctx) // CPU, memory and network history
 	if !live {
@@ -327,8 +327,8 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		if clusterConvert != nil {
 			go clusterConvert.Run(ctx) // kept copies of converted workloads: grace periods
 		}
-		go handler.RunHostnames(ctx)                   // per-app hostnames: state and certificate renewals
-		go handler.RunNetBirdStandby(ctx)              // NetBird standby: sync schedule and stale alerts
+		go handler.RunHostnames(ctx)      // per-app hostnames: state and certificate renewals
+		go handler.RunNetBirdStandby(ctx) // NetBird standby: sync schedule and stale alerts
 	}
 
 	var servers []*http.Server
