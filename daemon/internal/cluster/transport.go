@@ -436,7 +436,7 @@ func (t *Transport) DialNode(ctx context.Context, id NodeID, alpn string) (net.C
 			cancel()
 		}
 		if err == nil {
-			return t.track(id, c), p, nil
+			return t.track(id, c, alpn), p, nil
 		}
 		lastErr = fmt.Errorf("%s over %s: %w", id, p, err)
 		if ctx.Err() != nil {
@@ -450,6 +450,7 @@ type trackedConn struct {
 	*tls.Conn
 	t    *Transport
 	id   NodeID
+	alpn string
 	once sync.Once
 }
 
@@ -462,8 +463,8 @@ func (c *trackedConn) Close() error {
 	return c.Conn.Close()
 }
 
-func (t *Transport) track(id NodeID, c *tls.Conn) net.Conn {
-	tc := &trackedConn{Conn: c, t: t, id: id}
+func (t *Transport) track(id NodeID, c *tls.Conn, alpn string) net.Conn {
+	tc := &trackedConn{Conn: c, t: t, id: id, alpn: alpn}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.closed {
@@ -477,15 +478,22 @@ func (t *Transport) track(id NodeID, c *tls.Conn) net.Conn {
 	return tc
 }
 
-// DropConns closes every outgoing connection to a node (its path changed:
-// the next dial takes the new one; Raft reconnects by itself).
+// DropConns closes the outgoing connections to a node (its path changed:
+// the next dial takes the new one; Raft reconnects by itself). Peer API
+// connections (ALPNPeer) are left to the peer client, which drains them
+// (peerClient.drain): closing one would cut the requests in flight on it,
+// such as a storage server provisioning a workload's storage, which a path
+// switch (a few slow probes) must not do.
 func (t *Transport) DropConns(id NodeID) {
 	t.mu.Lock()
 	var l []net.Conn
 	for c := range t.conns[id] {
+		if tc, ok := c.(*trackedConn); ok && tc.alpn == ALPNPeer {
+			continue
+		}
 		l = append(l, c)
+		delete(t.conns[id], c)
 	}
-	delete(t.conns, id)
 	t.mu.Unlock()
 	for _, c := range l {
 		c.Close()
