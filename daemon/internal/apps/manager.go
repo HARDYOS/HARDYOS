@@ -72,6 +72,9 @@ func keptPort(p int, id string) bool {
 	if reservedPorts[p] {
 		return true
 	}
+	if _, ok := portreg.InRange(p); ok {
+		return true // app windows and live migration (decision 510)
+	}
 	return portreg.Reserved(p) && (id == "" || portreg.OwnedBy(p) != id)
 }
 

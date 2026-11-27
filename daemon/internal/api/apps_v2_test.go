@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
-	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"io"
 	"net"
 	"net/http"
@@ -18,6 +17,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/hardyos/hardyos/daemon/internal/auth"
+	"github.com/hardyos/hardyos/daemon/internal/ports"
 
 	"github.com/coder/websocket"
 
@@ -586,7 +588,7 @@ func TestAppWindowProxy(t *testing.T) {
 	probe.Close()
 	ctx, cancel := context.WithCancel(e.ctx)
 	defer cancel()
-	go e.server.RunAppProxy(ctx, AppProxyOptions{TLS: &tls.Config{Certificates: []tls.Certificate{cert}}, BasePort: base,
+	go e.server.RunAppProxy(ctx, AppProxyOptions{TLS: &tls.Config{Certificates: []tls.Certificate{cert}}, portRange: ports.Range{Name: "test", First: base, Last: base + ports.AppProxyCount - 1},
 		ListenHost: "127.0.0.1", DesktopPort: 443, Interval: 50 * time.Millisecond})
 	deadline := time.Now().Add(5 * time.Second)
 	for !e.server.proxy.isRunning() && time.Now().Before(deadline) {

@@ -47,8 +47,10 @@ const (
 	// OfficeInternal is hardyd's listener for the Document Server container,
 	// on the docker0 address (decisions 253, 266).
 	OfficeInternal = 44251
-	// AppProxyBase is the first app window proxy port; app n gets
-	// AppProxyBase + n, up to AppProxyBase + AppProxyCount - 1 (decision 66).
+	// AppProxyBase up to AppProxyBase + AppProxyCount - 1 is the app window
+	// proxy range (decision 66): every window, local or relayed from another
+	// member, listens on a port of it and never outside it (AppProxy,
+	// decision 510).
 	AppProxyBase  = 44300
 	AppProxyCount = 100
 	// Replication is the receiving side of replication (decision 190).
@@ -92,9 +94,64 @@ var (
 // NetBirdStandbyApp is the app id that owns the NetBird standby ports.
 const NetBirdStandbyApp = "netbird-standby"
 
-// Fixed lists every single fixed port with its owner (the app proxy range
-// is checked separately), including ports services HardyOS runs take that
-// no Go code listens on itself.
+// Range is a registered block of ports, First to Last inclusive: no fixed
+// port, no other range and no app's host port may use a port in it
+// (decision 510).
+type Range struct {
+	Name        string
+	First, Last int
+}
+
+// Contains reports whether p is in r.
+func (r Range) Contains(p int) bool { return p >= r.First && p <= r.Last }
+
+// Size is the number of ports in r.
+func (r Range) Size() int { return r.Last - r.First + 1 }
+
+// Overlaps reports whether r and o share a port.
+func (r Range) Overlaps(o Range) bool { return r.First <= o.Last && o.First <= r.Last }
+
+// The registered ranges.
+var (
+	// AppProxy is the app window proxy range.
+	AppProxy = Range{Name: "app window proxies", First: AppProxyBase, Last: AppProxyBase + AppProxyCount - 1}
+	// Migrate is QEMU's live migration range.
+	Migrate = Range{Name: "live migration", First: MigrateFirst, Last: MigrateFirst + MigrateCount - 1}
+)
+
+// Ranges lists every registered range; a test checks that they and Fixed
+// are pairwise disjoint.
+var Ranges = []Range{AppProxy, Migrate}
+
+// InRange returns the registered range p is in, if any.
+func InRange(p int) (Range, bool) {
+	for _, r := range Ranges {
+		if r.Contains(p) {
+			return r, true
+		}
+	}
+	return Range{}, false
+}
+
+// TakenOutside reports whether p is a fixed port or in a registered range
+// other than r: an allocator handing out the ports of r skips it. For a
+// registered r nothing is ever skipped this way (the ranges are disjoint);
+// it matters for ranges tests make up.
+func TakenOutside(p int, r Range) bool {
+	if Reserved(p) {
+		return true
+	}
+	for _, o := range Ranges {
+		if o != r && o.Contains(p) {
+			return true
+		}
+	}
+	return false
+}
+
+// Fixed lists every single fixed port with its owner (the ranges are in
+// Ranges), including ports services HardyOS runs take that no Go code
+// listens on itself.
 var Fixed = map[string]int{
 	"http":                       HTTP,
 	"https":                      HTTPS,

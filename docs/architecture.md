@@ -852,7 +852,9 @@ section 3; decisions 65-69, security review 80-82):
   Compose file and a generated icon into a `.hardyapp` (source `custom`,
   stored like an upload) and answers with an install plan.
 - **Window proxy** (`api/appproxy.go`). For every installed app with a web
-  page hardyd listens on its own port (44300 + n, kept in the database) with
+  page hardyd listens on its own port (44300-44399, `ports.AppProxy`, kept in
+  the database; a recorded port outside it is reassigned when the proxy
+  starts, decision 510) with
   the desktop's certificate and reverse-proxies to `127.0.0.1:<web port>`,
   WebSockets included. `X-Frame-Options` and `frame-ancestors` from the app
   are removed and replaced with `frame-ancestors` for the desktop's origin;
@@ -2100,8 +2102,11 @@ hardyd ── /s/-/ds/* ──▶ Document Server  <container address>:80  (cata
   from the desktop's address) or on `files.<base>`; participants of kind
   `link` read and write as the link's creator.
 - **Ports.** 44250 and 44251, like every fixed port of HardyOS's own
-  listeners (app gateway 44200, app windows 44300 and up, replication
-  44400), are in `internal/ports`, whose test refuses duplicates.
+  listeners (app gateway 44200, replication 44400), are in `internal/ports`,
+  with the registered ranges (`ports.Ranges`: app windows 44300-44399, live
+  migration 49152-49215); its tests refuse duplicates and any overlap
+  between a fixed port and a range or between two ranges, and no app may
+  publish a port of a range (decision 510).
 - **Notes** is web only: Markdown files through `/files/*` as the person
   (list, download, chunked upload with overwrite after a stat check),
   rendered by a React-element Markdown renderer without HTML.

@@ -258,15 +258,24 @@ func (s *Store) ProxyPorts(ctx context.Context) (map[string]int, error) {
 	return out, rows.Err()
 }
 
+// ProxyPortUsable reports whether a recorded window port may still be
+// listened on: inside r and not a fixed port or another range's.
+func ProxyPortUsable(p int, r ports.Range) bool {
+	return r.Contains(p) && !ports.TakenOutside(p, r)
+}
+
 // AllocateProxyPort gives an app the lowest free port of the window proxy
-// range (base up to base + ports.AppProxyCount - 1, skipping avoid, ports
-// that turned out to be taken, and every fixed HardyOS port) and records
-// it. The range is bounded so a window never takes the replication or the
-// cluster port (decision 371).
-func (s *Store) AllocateProxyPort(ctx context.Context, appID string, base int, avoid map[int]bool) (int, error) {
+// range r (ports.AppProxy in production; skipping avoid, ports that turned
+// out to be taken, every fixed HardyOS port and every other registered
+// range) and records it. Windows never leave the range, so they never take
+// the replication or the cluster port (decisions 371, 510).
+func (s *Store) AllocateProxyPort(ctx context.Context, appID string, r ports.Range, avoid map[int]bool) (int, error) {
 	db, err := s.db()
 	if err != nil {
 		return 0, err
+	}
+	if r.First < 1024 || r.Last > 65535 || r.First > r.Last {
+		return 0, fmt.Errorf("window port range %d-%d isn't valid", r.First, r.Last)
 	}
 	used, err := s.ProxyPorts(ctx)
 	if err != nil {
@@ -278,8 +287,8 @@ func (s *Store) AllocateProxyPort(ctx context.Context, appID string, base int, a
 			taken[p] = true
 		}
 	}
-	for port := base; port < base+ports.AppProxyCount && port <= 65535; port++ {
-		if taken[port] || avoid[port] || ports.Reserved(port) {
+	for port := r.First; port <= r.Last; port++ {
+		if taken[port] || avoid[port] || !ProxyPortUsable(port, r) {
 			continue
 		}
 		if _, err := db.ExecContext(ctx, `INSERT INTO app_proxy_ports (app_id, port) VALUES (?, ?)
@@ -288,5 +297,32 @@ func (s *Store) AllocateProxyPort(ctx context.Context, appID string, base int, a
 		}
 		return port, nil
 	}
-	return 0, fmt.Errorf("no free port for %s's window in %d-%d", appID, base, base+ports.AppProxyCount-1)
+	return 0, fmt.Errorf("no free port for %s's window in %d-%d", appID, r.First, r.Last)
+}
+
+// ReleaseStrayProxyPorts forgets every recorded window port outside r (or
+// on a fixed port or another range: windows allocated before the range was
+// fixed could reach 44400 and beyond) and returns them by app, so the next
+// window of each gets a port inside r (decision 510). Windows reached by a
+// name under the base keep working through the hostname redirect.
+func (s *Store) ReleaseStrayProxyPorts(ctx context.Context, r ports.Range) (map[string]int, error) {
+	db, err := s.db()
+	if err != nil {
+		return nil, err
+	}
+	used, err := s.ProxyPorts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]int{}
+	for id, p := range used {
+		if ProxyPortUsable(p, r) {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, `DELETE FROM app_proxy_ports WHERE app_id = ? AND port = ?`, id, p); err != nil {
+			return out, err
+		}
+		out[id] = p
+	}
+	return out, nil
 }

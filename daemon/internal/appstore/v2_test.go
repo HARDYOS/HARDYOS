@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/hardyos/hardyos/daemon/internal/apps"
+	"github.com/hardyos/hardyos/daemon/internal/ports"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 )
 
@@ -80,14 +81,14 @@ func TestRecordsTravelInBackups(t *testing.T) {
 	if err := s.SetAccess(ctx, "jellyfin", []Principal{{Kind: "user", Name: "kid"}, {Kind: "group", Name: `HOME\Family`}}); err != nil {
 		t.Fatal(err)
 	}
-	p1, err := s.AllocateProxyPort(ctx, "jellyfin", 44300, nil)
+	p1, err := s.AllocateProxyPort(ctx, "jellyfin", ports.AppProxy, nil)
 	if err != nil || p1 != 44300 {
 		t.Fatalf("port: %v %d", err, p1)
 	}
-	if p, _ := s.AllocateProxyPort(ctx, "immich", 44300, map[int]bool{44301: true}); p != 44302 {
+	if p, _ := s.AllocateProxyPort(ctx, "immich", ports.AppProxy, map[int]bool{44301: true}); p != 44302 {
 		t.Fatalf("second port %d", p)
 	}
-	if p, _ := s.AllocateProxyPort(ctx, "jellyfin", 44300, map[int]bool{44300: true}); p != 44301 {
+	if p, _ := s.AllocateProxyPort(ctx, "jellyfin", ports.AppProxy, map[int]bool{44300: true}); p != 44301 {
 		t.Fatalf("moved port %d", p)
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO app_catalogs (url, name, added_at, index_json) VALUES ('https://x/i.json', 'X', ?, '{"name":"X","apps":[{"id":"a","name":"A","version":"1","sha256":"`+strings.Repeat("c", 64)+`"}]}')`, store.Now()); err != nil {
