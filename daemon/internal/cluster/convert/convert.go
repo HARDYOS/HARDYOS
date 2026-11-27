@@ -99,6 +99,12 @@ type Storage interface {
 	HAParkedDestroy(ctx context.Context, r storagesvc.HAParkedDestroy) error
 	// CopyConn opens the copy connection for an opened stream.
 	CopyConn(ctx context.Context, token string) (Conn, error)
+	// Shared folders that move with an app (decisions 500-503): what the
+	// storage server has, letting go of one adopted held, and putting one
+	// in or out of the cluster.
+	HAShares(ctx context.Context) (*storagesvc.HASharesInfo, error)
+	HAShareRelease(ctx context.Context, r storagesvc.HARequest) error
+	SetShareCluster(ctx context.Context, r storagesvc.ShareRequest) error
 	SwitchAppMode(ctx context.Context, r storagesvc.ModeRequest) (*storagesvc.ModeResult, error)
 	Attach(ctx context.Context, ws cluster.WorkloadStorage, g cluster.Grant) (*cluster.Attachment, error)
 	Detach(ctx context.Context, w cluster.WorkloadRef, force bool) error
@@ -164,8 +170,11 @@ type Converter struct {
 	Notify  notify.Notifier
 	Net     NetCheck
 	// HA checks turning HA on for the converted workload (nil: not).
-	HA  HAChecker
-	Log *slog.Logger
+	HA HAChecker
+	// Peers asks the other members (their kept copies, a cluster app's
+	// shared folders); nil: this server alone.
+	Peers cluster.PeerClient
+	Log   *slog.Logger
 	// Grace is how long parked copies are kept (DefaultGrace).
 	Grace time.Duration
 	// Now and Poll are for tests.
@@ -303,6 +312,8 @@ type Options struct {
 	Removed bool `json:"removed,omitempty"`
 	// RemovedGen is the generation that removal was proposed for.
 	RemovedGen uint64 `json:"removedGen,omitempty"`
+	// Shares are the shared folders that move with an app (decision 500).
+	Shares []ShareMove `json:"shares,omitempty"`
 }
 
 // Record is one conversion.

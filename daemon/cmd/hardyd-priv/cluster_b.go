@@ -11,6 +11,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/cluster/sanclient"
 	"github.com/hardyos/hardyos/daemon/internal/nfs"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
+	"github.com/hardyos/hardyos/daemon/internal/shares"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 	"github.com/hardyos/hardyos/daemon/internal/vms"
 )
@@ -47,7 +48,11 @@ func wireClusterB(ctx context.Context, s *priv.Server, log *slog.Logger, dump fu
 // (ha.*, vms.ha.*, apps.ha.*; docs/plans/make-ha.md): the copy of a
 // workload's datasets between this server's pool and cluster storage,
 // with the storage server's own rules for what is still mapped.
-func wireHACopy(s *priv.Server, b *clusterB, vmm *vms.Manager, am *apps.Manager, log *slog.Logger) {
-	r := &hacopy.Root{Runner: sysexec.Exec{}, Log: log, Busy: b.SAN.InUse, EnsureParent: b.SAN.EnsureParent}
+func wireHACopy(s *priv.Server, b *clusterB, vmm *vms.Manager, am *apps.Manager, shm *shares.Manager, hooks []priv.ShareHook, log *slog.Logger) {
+	r := &hacopy.Root{Runner: sysexec.Exec{}, Log: log, Busy: b.SAN.InUse, EnsureParent: b.SAN.EnsureParent, ShareBusy: b.SAN.ShareInUse}
+	// Shared folders that move with an app (decision 500) follow file
+	// sharing's own rules: let go of before they're parked, taken up after.
+	priv.HACopyShares(r, shm, hooks)
 	priv.RegisterHACopy(s, r, vmm, am)
+	priv.RegisterShareHold(s, shm, hooks)
 }

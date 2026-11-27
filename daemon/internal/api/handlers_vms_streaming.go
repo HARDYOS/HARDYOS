@@ -97,6 +97,12 @@ type VMStreamingStatus struct {
 	Forwarding  bool                 `json:"forwarding"`
 	NetBird     string               `json:"netbirdAddress,omitempty"`
 	Ports       VMStreamingPortsInfo `json:"ports"`
+	// Base is Sunshine's base port in this VM (its port set, decision
+	// 506); Moonlight is what to add in Moonlight away from home: this
+	// server's NetBird address, with the port when it isn't the standard
+	// one.
+	Base      int    `json:"base"`
+	Moonlight string `json:"moonlight,omitempty"`
 	// Peers are the NetBird devices streaming is forwarded from (none
 	// until chosen); NetBirdPeers what this server sees, to choose from.
 	Peers         []string            `json:"peers"`
@@ -153,7 +159,85 @@ func (s *Server) streamTarget(ctx context.Context, id string) (*streaming.Target
 		}
 		return nil, &info, err
 	}
-	return &streaming.Target{Address: info.Address, CertSHA256: info.CertSHA256, User: acct.User, Password: acct.Password}, &info, nil
+	return &streaming.Target{Address: info.Address, CertSHA256: info.CertSHA256, User: acct.User, Password: acct.Password, WebPort: info.WebUI}, &info, nil
+}
+
+// ensureSunshinePort moves the VM's Sunshine to the port set root gave it
+// when it was published (decision 506): found where it answers now (its
+// set's web port, else another set's; the certificate pinned every time),
+// its base port setting changed through its own settings, restarted, and
+// waited for on the new web port. A VM that is off moves the next time it
+// is published while it runs (a warning).
+func (s *Server) ensureSunshinePort(jc *jobs.Context, id string) (string, error) {
+	t, info, err := s.streamTarget(jc, id)
+	if err != nil {
+		if info != nil && info.Address == "" {
+			// Off, or not seen yet: nothing to move now.
+			if info.Base != 0 && info.Base != ports.SunshineHTTP {
+				return fmt.Sprintf("the VM isn't running, so Sunshine in it wasn't moved to its ports (%d) yet: publish it again once it runs", info.Base), nil
+			}
+			return "", nil
+		}
+		return "", err
+	}
+	if !info.Remote {
+		return "", nil
+	}
+	cands := []int{info.WebUI}
+	for _, p := range ports.StreamingWebUIPorts() {
+		if p != info.WebUI {
+			cands = append(cands, p)
+		}
+	}
+	found := 0
+	for _, p := range cands {
+		probe := *t
+		probe.WebPort = p
+		cctx, cancel := context.WithTimeout(jc, 4*time.Second)
+		_, err := s.stream.client.Devices(cctx, probe)
+		cancel()
+		if err == nil {
+			found = p
+			break
+		}
+		if !errors.Is(err, streaming.ErrUnreachable) {
+			return "", err
+		}
+	}
+	if found == 0 {
+		return "Sunshine isn't answering in the VM yet; publish again once it runs to move it to its ports (" + strconv.Itoa(info.Base) + ")", nil
+	}
+	t.WebPort = found
+	if found == info.WebUI {
+		if base, err := s.stream.client.BasePort(jc, *t); err == nil && base == info.Base {
+			return "", nil
+		}
+	}
+	jc.Progress(60, fmt.Sprintf("Moving Sunshine in the VM to its ports (%d)", info.Base))
+	if err := s.stream.client.SetBasePort(jc, *t, info.Base); err != nil {
+		return "", fmt.Errorf("moving Sunshine in the VM to ports %d: %w", info.Base, err)
+	}
+	t.WebPort = info.WebUI
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		cctx, cancel := context.WithTimeout(jc, 5*time.Second)
+		base, err := s.stream.client.BasePort(cctx, *t)
+		cancel()
+		if err == nil && base == info.Base {
+			return "", nil
+		}
+		if err != nil && !errors.Is(err, streaming.ErrUnreachable) {
+			return "", err
+		}
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("Sunshine didn't come back on its new ports (%d) within 2 minutes; restart the VM, then publish again", info.Base)
+		}
+		select {
+		case <-jc.Done():
+			return "", jc.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
 func (s *Server) handleVMStreaming(w http.ResponseWriter, r *http.Request, _ *auth.User) {
@@ -173,9 +257,20 @@ func (s *Server) handleVMStreaming(w http.ResponseWriter, r *http.Request, _ *au
 	st.User = v.Streaming.User
 	st.Remote = v.Streaming.Remote
 	st.AccountKept, st.RevealedAt = s.stream.accounts.Has(r.Context(), v.ID)
+	st.Base = ports.SunshineHTTP
 	t, info, err := s.streamTarget(r.Context(), v.ID)
 	if info != nil {
 		st.Address, st.Forwarding, st.NetBird = info.Address, info.Forwarding, info.NetBirdAddress
+		if info.Base != 0 {
+			st.Base = info.Base
+			st.Ports = VMStreamingPortsInfo{TCP: append([]int{}, info.TCP...), UDP: append([]int{}, info.UDP...)}
+		}
+		if info.NetBirdAddress != "" {
+			st.Moonlight = info.NetBirdAddress
+			if st.Base != ports.SunshineHTTP {
+				st.Moonlight += ":" + strconv.Itoa(st.Base)
+			}
+		}
 		st.Peers, st.NetBirdKernel, st.BridgeAddress = append(st.Peers, info.Peers...), info.NetBirdKernel, info.BridgeAddress
 		proxies := s.remote.knownProxies()
 		for _, p := range info.NetBirdPeers {
@@ -486,7 +581,18 @@ func (s *Server) registerVMStreamingJobs(m *jobs.Manager, pc *priv.Client) {
 				return nil, err
 			}
 		}
-		return VMJobResult{VM: &v, Warnings: []string{}}, nil
+		warn := []string{}
+		if p.Enabled {
+			// Its own port set (decision 506): Sunshine moves there.
+			w, err := s.ensureSunshinePort(jc, p.ID)
+			if err != nil {
+				return nil, err
+			}
+			if w != "" {
+				warn = append(warn, w)
+			}
+		}
+		return VMJobResult{VM: &v, Warnings: warn}, nil
 	}})
 }
 

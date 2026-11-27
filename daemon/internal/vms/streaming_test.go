@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -149,7 +150,8 @@ func TestSetupScript(t *testing.T) {
 		"if ($vols.Count -ne 1)",
 		"/SC ONSTART /RU SYSTEM",
 		"if (Test-Path -LiteralPath $untrustMarker) { Untrust",
-		"-LocalPort 47990 -RemoteAddress $ranges -Action Block",
+		// Every port set's web UI port (decision 506), the standard first.
+		"-LocalPort 47990,48090,48190,48290,48390,48490,48590,48690 -RemoteAddress $ranges -Action Block",
 		"if ($LASTEXITCODE -ne 0) { throw \"limiting the key file",
 		"origin_pin_allowed|upnp|address_family|pkey|cert|port|",
 		"\r\n",
@@ -374,6 +376,55 @@ func TestStreamingValidation(t *testing.T) {
 	}
 }
 
+// Several published VMs (decision 506): one table, each VM its own port
+// set from its own devices to its own address; never two forwards on one
+// port set, VM or address; no web UI port of any set is forwarded.
+func TestRenderStreamingNFTAll(t *testing.T) {
+	a := StreamForward{VM: "game", Iface: "wt0", PeerNet: "100.92.0.0/16", Peers: []string{"100.92.0.5"}, HostIP: "100.92.1.2", Bridge: "br0", VMIP: "192.168.1.77"}
+	b := a
+	b.VM, b.VMIP, b.Slot, b.Peers = "game2", "192.168.1.78", 2, []string{"100.92.7.9"}
+	text, err := RenderStreamingNFTAll([]StreamForward{b, a})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`iifname "wt0" ip saddr { 100.92.0.5 } ip daddr 100.92.1.2 tcp dport { 47984, 47989, 48010 } dnat to 192.168.1.77`,
+		`iifname "wt0" ip saddr { 100.92.7.9 } ip daddr 100.92.1.2 tcp dport { 48184, 48189, 48210 } dnat to 192.168.1.78`,
+		`iifname "wt0" ip saddr { 100.92.7.9 } ip daddr 100.92.1.2 udp dport { 48198-48200, 48202, 48210 } dnat to 192.168.1.78`,
+		`iifname "wt0" oifname "br0" ip saddr { 100.92.7.9 } ip daddr 192.168.1.78 ct status dnat masquerade`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in\n%s", want, text)
+		}
+	}
+	for _, p := range ports.StreamingWebUIPorts() {
+		if strings.Contains(text, strconv.Itoa(p)) {
+			t.Fatalf("web UI port %d forwarded:\n%s", p, text)
+		}
+	}
+	// The second VM's devices never reach the first VM's ports.
+	if strings.Contains(text, `saddr { 100.92.7.9 } ip daddr 100.92.1.2 tcp dport { 47984`) {
+		t.Fatal("devices crossed")
+	}
+	rules, err := StreamingIPTablesAll([]StreamForward{a, b})
+	if err != nil || len(rules) != 6 || !slices.Contains(rules[3], "48184,48189,48210") {
+		t.Fatalf("iptables %v %v", rules, err)
+	}
+	for name, fs := range map[string][]StreamForward{
+		"same slot":    {a, func() StreamForward { c := b; c.Slot = 0; return c }()},
+		"same VM":      {a, func() StreamForward { c := b; c.VM = "game"; return c }()},
+		"same address": {a, func() StreamForward { c := b; c.VMIP = a.VMIP; return c }()},
+		"bad slot":     {func() StreamForward { c := a; c.Slot = ports.StreamingSlots; return c }()},
+	} {
+		if _, err := RenderStreamingNFTAll(fs); err == nil {
+			t.Errorf("%s: rendered", name)
+		}
+		if _, err := StreamingIPTablesAll(fs); err == nil {
+			t.Errorf("%s: iptables rules", name)
+		}
+	}
+}
+
 func TestRenderStreamingNFT(t *testing.T) {
 	f := StreamForward{VM: "game", Iface: "wt0", PeerNet: "100.92.0.0/16", Peers: []string{"100.92.7.9", "100.92.0.5"}, HostIP: "100.92.1.2", Bridge: "br0", VMIP: "192.168.1.77"}
 	text, err := RenderStreamingNFT(&f)
@@ -534,14 +585,32 @@ func TestStreamingForwarding(t *testing.T) {
 	if !reloaded {
 		t.Fatal("removed rules weren't restored")
 	}
-	// A second VM can't take the same ports.
+	// A second VM gets its own port set (decision 506), never the first
+	// one's; one set up before port sets existed gets the standard set
+	// only.
 	other := gamingStreamSpec(t)
 	other.ID, other.Name, other.NICs[0].MAC = "game2", "Game 2", ""
 	if _, err := e.m.Create(ctx, CreateArgs{Spec: other, Password: "Windows pass 1", StreamingPassword: streamPW}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.m.SetStreamingRemote(ctx, StreamingPublishArgs{ID: "game2", Enabled: true, Peers: []string{"100.92.0.5"}}); err == nil || !strings.Contains(err.Error(), "only one VM") {
-		t.Fatalf("second VM: %v", err)
+	v2, err := e.m.SetStreamingRemote(ctx, StreamingPublishArgs{ID: "game2", Enabled: true, Peers: []string{"100.92.0.5"}})
+	if err != nil || v2.Streaming.Slot != 1 || !v2.Streaming.Remote {
+		t.Fatalf("second VM: %+v %v", v2, err)
+	}
+	if i2, _ := e.m.StreamingInfo(ctx, "game2"); i2.Base != ports.StreamingSlot(1).Base || i2.WebUI != ports.StreamingSlot(1).WebUI {
+		t.Fatalf("second VM's ports %+v", i2)
+	}
+	if v1, _ := e.m.Get(ctx, "game"); v1.Streaming.Slot != 0 {
+		t.Fatalf("the first VM's ports moved: %d", v1.Streaming.Slot)
+	}
+	if _, err := e.m.SetStreamingRemote(ctx, StreamingPublishArgs{ID: "game2", Enabled: false}); err != nil {
+		t.Fatal(err)
+	}
+	old, _ := e.m.find(ctx, "game2")
+	old.spec.Streaming.AllSlots, old.spec.Streaming.Slot = false, 0
+	_ = e.m.saveSpec(old)
+	if _, err := e.m.SetStreamingRemote(ctx, StreamingPublishArgs{ID: "game2", Enabled: true, Peers: []string{"100.92.0.5"}}); err == nil || !strings.Contains(err.Error(), "standard streaming ports") {
+		t.Fatalf("an old VM took another port set: %v", err)
 	}
 	// NetBird disconnects: the rules go.
 	nb.Connected = false

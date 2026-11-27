@@ -82,7 +82,7 @@ export function StreamingPanel({ vm, onJob }: { vm: VM; onJob: (j: Job) => void 
           </div>
           <div className="stack" style={{ gap: 4 }}>
             <span className="small muted">Away from home (NetBird)</span>
-            <span className="mono">{st.remote && st.netbirdAddress ? st.netbirdAddress : "—"}</span>
+            <span className="mono">{st.remote && st.netbirdAddress ? (st.moonlight ?? st.netbirdAddress) : "—"}</span>
             <span className="small muted">
               {st.remote ? (st.forwarding ? "Forwarding now, to your NetBird devices only." : "On; forwarding starts while the VM runs and NetBird is connected.") : "Off."}
             </span>
@@ -119,7 +119,7 @@ function RemoteToggle({ vm, st, onJob }: { vm: VM; st: VMStreamingStatus; onJob:
     <div className="stack" style={{ gap: 8 }}>
       <Toggle
         label="Play away from home over NetBird"
-        description={`Forwards only Sunshine's streaming ports (TCP ${portSummary(st.ports.tcp)}, UDP ${portSummary(st.ports.udp)}) from this server's NetBird address to this VM, for the NetBird devices you choose; never from the internet. Sunshine's web page stays in the VM. One VM at a time.`}
+        description={`Forwards only Sunshine's streaming ports (TCP ${portSummary(st.ports.tcp)}, UDP ${portSummary(st.ports.udp)}) from this server's NetBird address to this VM, for the NetBird devices you choose; never from the internet. Sunshine's web page stays in the VM. Several VMs can be published: each gets its own ports, and Sunshine in the VM is moved to them (add the address with its port in Moonlight).`}
         checked={st.remote || open}
         disabled={busy}
         onChange={(v) => (v ? setOpen(true) : void put(false, []))}
@@ -169,7 +169,7 @@ function PairDevice({ vm, st, onJob }: { vm: VM; st: VMStreamingStatus; onJob: (
           <a href="https://moonlight-stream.org" target="_blank" rel="noreferrer">
             Moonlight <ExternalIcon size={11} />
           </a>
-          , pick this VM (or add <span className="mono">{st.remote && st.netbirdAddress ? st.netbirdAddress : st.address || "its address"}</span>). Moonlight shows a PIN and the
+          , pick this VM (or add <span className="mono">{st.remote && st.netbirdAddress ? (st.moonlight ?? st.netbirdAddress) : st.address || "its address"}</span>). Moonlight shows a PIN and the
           device appears here; enter the PIN to pair it.
         </p>
       ) : (

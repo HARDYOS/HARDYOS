@@ -74,8 +74,11 @@ func wireConvert(db *store.DB, pc *priv.Client, manager *jobs.Manager, broker *e
 		parts.Live.SetCopy(func(conn *tls.Conn, from cluster.Node) { storage.Service.ServeCopy(conn, from) })
 	}
 	c := &convert.Converter{Cluster: parts.M, Storage: st, Priv: pc, Specs: h, DB: db, Jobs: manager,
-		Audit: &audit.Log{DB: db, Events: broker}, Notify: alerts, Net: wireNetCheck(parts, mon), HA: h, Log: log}
+		Audit: &audit.Log{DB: db, Events: broker}, Notify: alerts, Net: wireNetCheck(parts, mon), HA: h, Peers: parts.Peers, Log: log}
 	c.RegisterJobs(manager)
+	// Kept copies of every member and a cluster app's shared folders
+	// (decisions 505, 503) are answered between members.
+	c.RegisterPeer(parts.Mux)
 	c.OnStart(context.Background())
 	return c
 }

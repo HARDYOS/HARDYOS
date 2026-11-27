@@ -10,11 +10,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/hardyos/hardyos/daemon/internal/ports"
 	"github.com/hardyos/hardyos/daemon/internal/secretbox"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 )
@@ -30,6 +32,9 @@ type fakeSunshine struct {
 	waiting  []map[string]string
 	authSeen int
 	paired   []string
+	// config is sunshine.conf (key by key); restarts counts /api/restart.
+	config   map[string]string
+	restarts int
 }
 
 func (f *fakeSunshine) handler() http.Handler {
@@ -71,6 +76,28 @@ func (f *fakeSunshine) handler() http.Handler {
 			f.paired = append(f.paired, in["name"])
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": ok})
+	}))
+	// Sunshine's settings: GET answers the file's keys with its own
+	// fields; POST writes the file from exactly what it is given.
+	mux.HandleFunc("GET /api/config", auth(func(w http.ResponseWriter, _ *http.Request) {
+		out := map[string]any{"status": true, "platform": "windows", "version": "2026.914", "restart_supported": true}
+		for k, v := range f.config {
+			out[k] = v
+		}
+		_ = json.NewEncoder(w).Encode(out)
+	}))
+	mux.HandleFunc("POST /api/config", auth(func(w http.ResponseWriter, r *http.Request) {
+		var in map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			http.Error(w, `{"error":"not strings"}`, http.StatusBadRequest)
+			return
+		}
+		f.config = in
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": true})
+	}))
+	mux.HandleFunc("POST /api/restart", auth(func(w http.ResponseWriter, _ *http.Request) {
+		f.restarts++
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": true})
 	}))
 	mux.HandleFunc("POST /api/clients/unpair", auth(func(w http.ResponseWriter, r *http.Request) {
 		var in map[string]string
@@ -141,6 +168,47 @@ func TestClient(t *testing.T) {
 	}
 	if err := c.Unpair(ctx, tgt, "../../x"); err == nil {
 		t.Error("bad uuid accepted")
+	}
+}
+
+// A VM's Sunshine moves to its port set (decision 506): only `port`
+// changes, every other setting is written back as it was (Sunshine writes
+// its file from what it is given), its own answer fields aren't, and it
+// restarts. Only HardyOS's port sets are accepted.
+func TestClientBasePort(t *testing.T) {
+	f, _, tg, c := newFake(t)
+	ctx := context.Background()
+	f.config = map[string]string{"sunshine_name": "game", "origin_web_ui_allowed": "lan", "pkey": "C:/x/hardyos-key.pem", "upnp": "disabled"}
+	if b, err := c.BasePort(ctx, tg); err != nil || b != ports.SunshineHTTP {
+		t.Fatalf("base %d %v", b, err)
+	}
+	if err := c.SetBasePort(ctx, tg, ports.StreamingSlot(3).Base); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"sunshine_name": "game", "origin_web_ui_allowed": "lan", "pkey": "C:/x/hardyos-key.pem", "upnp": "disabled",
+		"port": strconv.Itoa(ports.StreamingSlot(3).Base)}
+	if !reflect.DeepEqual(f.config, want) || f.restarts != 1 {
+		t.Fatalf("settings %v restarts %d", f.config, f.restarts)
+	}
+	if b, _ := c.BasePort(ctx, tg); b != ports.StreamingSlot(3).Base {
+		t.Fatalf("base after %d", b)
+	}
+	// Back to the standard set: the setting goes.
+	if err := c.SetBasePort(ctx, tg, ports.SunshineHTTP); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.config["port"]; ok || f.config["upnp"] != "disabled" {
+		t.Fatalf("settings %v", f.config)
+	}
+	for _, bad := range []int{ports.SunshineHTTP + 1, 22, ports.StreamingSlot(ports.StreamingSlots-1).Base + ports.StreamingSlotStride} {
+		if err := c.SetBasePort(ctx, tg, bad); err == nil {
+			t.Errorf("moved to %d", bad)
+		}
+	}
+	// A setting with a line break would rewrite the file: refused.
+	f.config = map[string]string{"sunshine_name": "a\nport = 22"}
+	if err := c.SetBasePort(ctx, tg, ports.StreamingSlot(1).Base); err == nil {
+		t.Fatal("a line break was written back")
 	}
 }
 

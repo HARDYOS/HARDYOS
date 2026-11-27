@@ -35,6 +35,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/san"
 	"github.com/hardyos/hardyos/daemon/internal/replica"
+	"github.com/hardyos/hardyos/daemon/internal/shares"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 )
 
@@ -74,11 +75,13 @@ const (
 	SnapPrefix = "hardyos-ha-"
 	// propVM is the VM engine's own id property (vms.PropVM, on local
 	// VMs too); propApp and propRole are cluster storage's.
-	// propHAHold is a local app's conversion hold (apps.PropHAHold).
-	propHAHold = "org.hardyos:ha-hold"
-	propVM     = san.PropVM
-	propApp    = san.PropApp
-	propRole   = san.PropRole
+	// propHAHold is a local app's conversion hold (apps.PropHAHold), and
+	// propHAHoldRunning the state it recorded (apps.PropHAHoldRunning).
+	propHAHold        = "org.hardyos:ha-hold"
+	propHAHoldRunning = "org.hardyos:ha-hold-running"
+	propVM            = san.PropVM
+	propApp           = san.PropApp
+	propRole          = san.PropRole
 )
 
 // Side says whose datasets an operation works on.
@@ -97,9 +100,18 @@ var (
 	convRE   = regexp.MustCompile(`^[a-z0-9]{8,32}$`)
 	snapRE   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$`)
 	ownSnap  = regexp.MustCompile(`^` + SnapPrefix + `[a-z0-9-]{1,48}$`)
-	parkedRE = regexp.MustCompile(`^(vm|app)-([a-z][a-z0-9-]{0,30}[a-z0-9])-([0-9]{1,12})$`)
+	parkedRE = regexp.MustCompile(`^(vm|app|share)-([a-z0-9][a-z0-9-]{0,31})-([0-9]{1,12})$`)
 	guidRE   = regexp.MustCompile(`^[0-9]{1,20}$`)
 )
+
+// KindShare is a shared folder that moves with an app made highly
+// available (decision 500): <pool>/shares/<id> on this server (local) or
+// on the storage server (cluster), where it is the storage server's own
+// shared folder, used in the cluster. It is never a cluster workload.
+const KindShare cluster.WorkloadKind = "share"
+
+// propShare marks a shared folder's dataset (shares.PropShare = "1").
+const propShare = shares.PropShare
 
 // AppBlockChild is a cluster app's block volume below its folder
 // (san.AppBlock).
@@ -126,11 +138,17 @@ type Ref struct {
 
 // Validate checks the names.
 func (r Ref) Validate() error {
-	if r.Kind != cluster.KindVM && r.Kind != cluster.KindApp {
-		return invalid("kind %q isn't vm or app", r.Kind)
-	}
-	if !idRE.MatchString(r.ID) || strings.Contains(r.ID, "--") || strings.Contains(r.ID, "-kept-") {
-		return invalid("%q isn't a workload id", r.ID)
+	switch r.Kind {
+	case cluster.KindVM, cluster.KindApp:
+		if !idRE.MatchString(r.ID) || strings.Contains(r.ID, "--") || strings.Contains(r.ID, "-kept-") {
+			return invalid("%q isn't a workload id", r.ID)
+		}
+	case KindShare:
+		if shares.ValidID(r.ID) != nil {
+			return invalid("%q isn't a shared folder id", r.ID)
+		}
+	default:
+		return invalid("kind %q isn't vm, app or share", r.Kind)
 	}
 	if r.Kind == cluster.KindApp && slices.Contains(nodeLocalApps, r.ID) {
 		return invalid("%s belongs to one server and can't move to cluster storage", r.ID)
@@ -146,8 +164,11 @@ func (r Ref) Validate() error {
 
 // parent is <pool>/vms or <pool>/apps.
 func (r Ref) parent() string {
-	if r.Kind == cluster.KindApp {
+	switch r.Kind {
+	case cluster.KindApp:
 		return r.Pool + "/apps"
+	case KindShare:
+		return shares.SharesDataset(r.Pool)
 	}
 	return r.Pool + "/vms"
 }
@@ -167,8 +188,11 @@ func (r Ref) dataset(child string) (string, error) {
 }
 
 func (r Ref) ownerProp() string {
-	if r.Kind == cluster.KindApp {
+	switch r.Kind {
+	case cluster.KindApp:
 		return propApp
+	case KindShare:
+		return propShare
 	}
 	return propVM
 }
@@ -226,6 +250,16 @@ type Root struct {
 	// EnsureParent makes <pool>/vms or <pool>/apps on the cluster side
 	// with its quota (san.Root.EnsureParent).
 	EnsureParent func(ctx context.Context, pool, parent string) error
+	// Shared folders (KindShare): ShareRelease lets the file services go
+	// of one before it is parked (priv's share hooks, as before a delete),
+	// ShareChanged has them take up a change (a folder adopted, parked or
+	// put back), ShareTaken refuses adopting a folder whose id or name this
+	// server has already, and ShareBusy reports a cluster share still
+	// exported to compute servers (the storage server's NFS exports).
+	ShareRelease func(ctx context.Context, id string)
+	ShareChanged func(ctx context.Context)
+	ShareTaken   func(ctx context.Context, id, name string) error
+	ShareBusy    func(ctx context.Context, pool, id string) (bool, error)
 	// Now is root's clock (tests).
 	Now func() time.Time
 
@@ -353,6 +387,16 @@ func (r *Root) checkSource(ctx context.Context, ref Ref) (map[string]string, err
 	}
 	if p[PropIncoming] != "" || p[PropParked] != "" {
 		return nil, invalid("%s is being received or is parked", top)
+	}
+	if ref.Kind == KindShare {
+		// A shared folder is the server's own on either side (on the
+		// storage server it is one of its shared folders, used in the
+		// cluster): never cluster workload storage, always marked as a
+		// shared folder, and nothing below it.
+		if p[propRole] == san.RoleCluster || p[propShare] != "1" {
+			return nil, invalid("%s isn't a shared folder", top)
+		}
+		return r.children(ctx, ref, top)
 	}
 	switch ref.Side {
 	case SideLocal:
@@ -568,6 +612,9 @@ type AdoptArgs struct {
 	Conv string `json:"conv"`
 	// Cluster names the LUNs' serials (cluster side).
 	Cluster cluster.ClusterID `json:"cluster,omitempty"`
+	// Share is a shared folder's settings (KindShare, cluster side only):
+	// checked like a person's input and written as its properties.
+	Share *shares.Settings `json:"share,omitempty"`
 }
 
 // VolumeInfo is an adopted zvol.
@@ -595,10 +642,23 @@ func (r *Root) Adopt(ctx context.Context, a AdoptArgs) (*AdoptResult, error) {
 	if !convRE.MatchString(a.Conv) {
 		return nil, invalid("bad conversion id")
 	}
-	if a.Side == SideCluster {
+	if a.Side == SideCluster && a.Kind != KindShare {
 		if err := san.ValidCluster(a.Cluster); err != nil {
 			return nil, invalid("%v", err)
 		}
+	}
+	var set *shares.Settings
+	if a.Kind == KindShare {
+		// A shared folder only ever moves to the storage server (with its
+		// app); it comes back by Undo, which puts this server's copy back.
+		if a.Side != SideCluster || a.Share == nil {
+			return nil, invalid("a shared folder is adopted on the storage server, with its settings")
+		}
+		s, err := a.Share.Check()
+		if err != nil {
+			return nil, invalid("the shared folder's settings: %v", err)
+		}
+		set = &s
 	}
 	ok, err := r.checkIncoming(ctx, a.Ref, a.Conv)
 	if err != nil {
@@ -619,15 +679,34 @@ func (r *Root) Adopt(ctx context.Context, a AdoptArgs) (*AdoptResult, error) {
 			if err := r.applyProps(ctx, a.Ref, top, kids); err != nil {
 				return nil, err
 			}
+			if err := r.applyShare(ctx, top, set); err != nil {
+				return nil, err
+			}
+			if set != nil && r.localProp(ctx, top, propHAHold) != "" {
+				// Still held for this conversion (see below).
+				if err := r.holdShare(ctx, top, a.Conv); err != nil {
+					return nil, err
+				}
+				return r.describe(ctx, a.Ref, top, kids, a.Cluster)
+			}
 			if err := r.mount(ctx, top); err != nil {
 				return nil, err
 			}
+			r.shareChanged(ctx, a.Ref)
 			return r.describe(ctx, a.Ref, top, kids, a.Cluster)
 		}
 		return nil, invalid("nothing was received for %s", a.ID)
 	}
 	if _, there := r.exists(ctx, top); there {
 		return nil, invalid("%s exists already; it isn't replaced", top)
+	}
+	if set != nil {
+		if r.ShareTaken == nil {
+			return nil, invalid("this server's shared folders aren't known here")
+		}
+		if err := r.ShareTaken(ctx, a.ID, set.Name); err != nil {
+			return nil, invalid("%v", err)
+		}
 	}
 	kids, err := r.children(ctx, a.Ref, src)
 	if err != nil {
@@ -660,14 +739,57 @@ func (r *Root) Adopt(ctx context.Context, a AdoptArgs) (*AdoptResult, error) {
 	if err := r.applyProps(ctx, a.Ref, top, kids); err != nil {
 		return nil, err
 	}
-	if err := r.mount(ctx, top); err != nil {
+	if err := r.applyShare(ctx, top, set); err != nil {
+		return nil, err
+	}
+	if set != nil {
+		// A shared folder is adopted held (read-only, unmounted, out of
+		// file sharing) until the server it came from has put its own copy
+		// aside: never two copies anyone can write (decision 501). The
+		// conversion lets go of it then (shares.ha.hold, its own mark).
+		if err := r.holdShare(ctx, top, a.Conv); err != nil {
+			return nil, err
+		}
+	} else if err := r.mount(ctx, top); err != nil {
 		return nil, err
 	}
 	if _, err := r.zfs(ctx, "destroy", a.incomingDir(a.Conv)); err != nil {
 		r.log().Warn("ha: removing an empty incoming folder", "conv", a.Conv, "err", err)
 	}
+	r.shareChanged(ctx, a.Ref)
 	r.log().Info("ha: adopted", "dataset", top, "side", a.Side)
 	return r.describe(ctx, a.Ref, top, kids, a.Cluster)
+}
+
+// holdShare holds an adopted shared folder for its conversion, as
+// shares.HAHold does (that releases it).
+func (r *Root) holdShare(ctx context.Context, top, conv string) error {
+	if _, err := r.zfs(ctx, "set", "canmount=noauto", "readonly=on", propHAHold+"="+conv, top); err != nil {
+		return err
+	}
+	if p, _ := r.props(ctx, top, "mounted"); p["mounted"] == "yes" {
+		if _, err := r.zfs(ctx, "unmount", top); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// applyShare writes a moved shared folder's checked settings (nil: not a
+// shared folder).
+func (r *Root) applyShare(ctx context.Context, top string, set *shares.Settings) error {
+	if set == nil {
+		return nil
+	}
+	_, err := r.zfs(ctx, append(append([]string{"set"}, set.Props()...), top)...)
+	return err
+}
+
+// shareChanged has the file services take up a shared folder's change.
+func (r *Root) shareChanged(ctx context.Context, ref Ref) {
+	if ref.Kind == KindShare && r.ShareChanged != nil {
+		r.ShareChanged(context.WithoutCancel(ctx))
+	}
 }
 
 // applyProps gives a workload's datasets their side's properties.
@@ -678,6 +800,11 @@ func (r *Root) applyProps(ctx context.Context, ref Ref, top string, kids map[str
 		}
 		_, err := r.zfs(ctx, append(append([]string{"set"}, kv...), ds)...)
 		return err
+	}
+	if ref.Kind == KindShare {
+		// As shares.Manager makes a shared folder (POSIX ACLs kept with
+		// the files, which the stream carries).
+		return set(top, "canmount=on", "devices=off", "setuid=off", "acltype=posixacl", "xattr=sa", "aclinherit=passthrough")
 	}
 	// As the engines make them: a VM's state folder as vms.Manager does
 	// (canmount, no devices, setuid or exec), a local app's folder as
@@ -961,7 +1088,28 @@ func (r *Root) Park(ctx context.Context, a ParkArgs) (*ParkResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	if a.Side == SideCluster {
+	if a.Kind == KindShare && a.Side == SideLocal && (a.Conv == "" || r.localProp(ctx, a.Dataset(), propHAHold) != a.Conv) {
+		// This server's shared folder is put aside only while its own
+		// conversion holds it (unmounted, read-only, out of file sharing).
+		return nil, invalid("%s isn't held by this conversion", a.ID)
+	}
+	if a.Kind == KindShare && a.Side == SideCluster {
+		// The storage server's own shared folder: only one a conversion
+		// adopted (its mark), and only once no compute server mounts it.
+		if a.Expect == "" {
+			return nil, invalid("only a shared folder a conversion moved here is put aside")
+		}
+		if r.ShareBusy == nil {
+			return nil, invalid("the storage server's state isn't known")
+		}
+		busy, err := r.ShareBusy(ctx, a.Pool, a.ID)
+		if err != nil {
+			return nil, err
+		}
+		if busy {
+			return nil, fmt.Errorf("%w: %s is still used in the cluster", ErrBusy, a.ID)
+		}
+	} else if a.Side == SideCluster {
 		if r.Busy == nil {
 			return nil, invalid("the storage server's state isn't known")
 		}
@@ -993,6 +1141,11 @@ func (r *Root) Park(ctx context.Context, a ParkArgs) (*ParkResult, error) {
 		}
 	}
 	name := string(a.Kind) + "-" + a.ID + "-" + strconv.FormatInt(r.now().Unix(), 10)
+	if a.Kind == KindShare && r.ShareRelease != nil {
+		// SMB, NFS and SFTP let go of it, as before a delete.
+		r.ShareRelease(ctx, a.ID)
+		defer r.shareChanged(ctx, a.Ref)
+	}
 	if _, err := r.zfs(ctx, "set", "canmount=noauto", top); err != nil {
 		return nil, err
 	}
@@ -1076,44 +1229,67 @@ type UnparkArgs struct {
 	Name string `json:"name"`
 }
 
+// UnparkResult says what putting a copy back found: a local app held by
+// its conversion, and whether it ran before that (the hold's record).
+type UnparkResult struct {
+	Held       bool `json:"held,omitempty"`
+	WasRunning bool `json:"wasRunning,omitempty"`
+}
+
 // Unpark puts a parked copy back as the workload's storage.
 func (r *Root) Unpark(ctx context.Context, a UnparkArgs) error {
+	_, err := r.UnparkState(ctx, a)
+	return err
+}
+
+// UnparkState is Unpark, reporting the hold it ended.
+func (r *Root) UnparkState(ctx context.Context, a UnparkArgs) (*UnparkResult, error) {
+	res := &UnparkResult{}
 	if err := a.Ref.Validate(); err != nil {
-		return err
+		return nil, err
 	}
 	src, err := r.parked(ctx, a.Pool, a.Name, a.Ref)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	top := a.Dataset()
 	if _, ok := r.exists(ctx, top); ok {
-		return invalid("%s exists; it can't be put back over it", top)
+		return nil, invalid("%s exists; it can't be put back over it", top)
 	}
 	if _, ok := r.exists(ctx, a.parent()); !ok {
-		return invalid("%s doesn't exist", a.parent())
+		return nil, invalid("%s doesn't exist", a.parent())
 	}
 	kids, err := r.children(ctx, a.Ref, src)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	if a.Side == SideLocal && a.Kind == cluster.KindApp {
+		res.Held = r.localProp(ctx, src, propHAHold) != ""
+		res.WasRunning = res.Held && r.localProp(ctx, src, propHAHoldRunning) == "on"
 	}
 	if _, err := r.zfs(ctx, "rename", src, top); err != nil {
-		return err
+		return nil, err
 	}
 	props := []string{PropParked, PropKeepUntil, PropParkedConv}
 	if a.Side == SideLocal {
-		// A local app's hold (apps.HAHold) ends with its copy put back.
-		props = append(props, "readonly", propHAHold)
+		// A local app's or shared folder's hold (apps.HAHold,
+		// shares.HAHold) ends with its copy put back.
+		props = append(props, "readonly", propHAHold, propHAHoldRunning)
 	}
 	for _, p := range props {
 		if _, err := r.zfs(ctx, "inherit", p, top); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if err := r.applyProps(ctx, a.Ref, top, kids); err != nil {
-		return err
+		return nil, err
 	}
 	r.log().Warn("ha: put back", "from", src, "to", top)
-	return r.mount(ctx, top)
+	if err := r.mount(ctx, top); err != nil {
+		return nil, err
+	}
+	r.shareChanged(ctx, a.Ref)
+	return res, nil
 }
 
 // parked finds a parked copy of ref.

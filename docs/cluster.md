@@ -387,16 +387,48 @@ compute server of a cluster.
   Windows install, this server without a hardware watchdog, the local
   network check (this server and the storage server, and every server it
   could fail over to, as turning HA on; asked again before it shuts
-  down), an app with shared folders. A VM can take the cluster's
+  down). A VM can take the cluster's
   CPU model (default; it then moves live between any servers) or keep its
   own. Type the name to confirm.
+- **An app's shared folders move with it** (decisions 500-503): a cluster
+  app runs on any compute server, so each shared folder it was given goes
+  to the storage server too, copied like the app's own folder (every
+  snapshot, a copy while people still use it, the final increment once the
+  app is off), and becomes one of the storage server's shared folders,
+  used in the cluster: same name, description, permissions, quota,
+  recycle bin, snapshot schedule and SMB, NFS, Time Machine, WebDAV and
+  SFTP settings, and its files keep their permissions (the app's user id
+  is the same everywhere; domain accounts are, on servers in the same
+  domain). From the final copy on, nobody uses this server's copy (it is
+  read-only and taken out of file sharing); the storage server's copy is
+  shared only once this server's copy is put aside, so there are never two
+  copies anyone can write. People then reach the folder on the storage
+  server (File Manager, SMB, NFS, Time Machine) under the same name; this
+  server's copy is kept like the app's, for 24 hours after the app ran
+  from cluster storage. The dialog lists the folders and says why one
+  can't move: another app of this server uses it too, it is in one of this
+  server's backup or replication tasks (back it up from the storage server
+  afterwards), it is the VMs' ISO library, the storage server has a shared
+  folder with its name or id, or its permissions name domain accounts and
+  the storage server isn't in the same domain. Web links into it stop
+  working (make them again on the storage server). **Undo** puts this
+  server's shared folders back as they were (the storage server's copies
+  go aside: kept until you delete them if they were shared from there).
+  An app whose shared folders moved stays highly available: **Make local
+  again** refuses it.
+- **If the conversion stopped after the app was shut down** (a crash),
+  **Abandon** starts the app again when it ran before (decision 504: the
+  state is recorded with the app's hold), as giving up does.
 - **This server's copy** is kept, unused (it is no longer a VM or app),
   until the workload has run from cluster storage, then for 24 hours.
-  Cluster › HA › **Kept copies** lists these copies (on this server and on
-  the storage server) with when they go; **Delete now…** (type the name)
-  frees the space sooner. A copy marked *Kept until you delete it* has no
-  expiry because its workload hasn't run from its other copy yet, so it may
-  be the only good one: deleting it also asks you to confirm that.
+  Cluster › HA › **Kept copies** lists these copies on **every server** of
+  the cluster (decision 505) with when they go; **Delete now…** (type the
+  name) frees the space sooner, through the server that holds the copy
+  (its own rules apply: whether it accepts administrators of other
+  servers, the "last copy" confirmation). A copy marked *Kept until you
+  delete it* has no expiry because its workload hasn't run from its other
+  copy yet, so it may be the only good one: deleting it also asks you to
+  confirm that.
 - **If it fails or is cancelled**: before the local copy is put aside
   nothing changed (it starts again if it ran); what was copied stays on the
   storage server so trying again copies only what's new (**Abandon…**

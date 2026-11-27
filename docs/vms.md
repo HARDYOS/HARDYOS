@@ -334,9 +334,21 @@ for those devices only and never from the internet; Sunshine's web page is
 never forwarded. NetBird's own access policies don't limit these forwarded
 ports, so the ticked list is what decides. In Moonlight away from home, add
 the NetBird address the card shows. The forwarding is there only while the
-VM runs and NetBird is connected, goes away when HardyOS's root helper
-stops, and only one VM can be published at a time (Moonlight uses fixed
-ports).
+VM runs and NetBird is connected, and goes away when HardyOS's root helper
+stops.
+
+Several VMs can be published at once (up to 8 per server, decision 506).
+Each gets its own set of ports: the first keeps Sunshine's standard ones,
+the others a set 100 apart (base 48089, 48189, ...). When a VM gets a new
+set, HardyOS moves Sunshine in the VM to it (Sunshine's own port setting,
+then a restart; the VM must be running), and the card shows the address
+to add in Moonlight with its port, like `100.92.1.2:48089`. Moonlight
+learns the other ports from Sunshine, so each one is forwarded to the
+same number in the VM. A VM whose streaming was set up before this can
+use the standard ports only (its firewall rule covers only that web
+page's port). Two published HA VMs with the same set that end up on one
+server after a failover aren't forwarded until one is published again
+(turn it off and on: it gets a free set).
 
 ### A VM HardyOS didn't set up
 

@@ -80,7 +80,12 @@ type StreamForward struct {
 	HostIP  string   // this server's NetBird address
 	Bridge  string   // the home network's bridge
 	VMIP    string   // the VM's verified address
+	// Slot is the VM's port set (ports.StreamingSlot): its Sunshine's own
+	// port numbers, forwarded as they are (decision 506).
+	Slot int
 }
+
+func (f StreamForward) set() ports.StreamingSet { return ports.StreamingSlot(f.Slot) }
 
 const (
 	streamTable = "hardyos_streaming"
@@ -128,6 +133,9 @@ func (f StreamForward) check() error {
 	var p Problems
 	if ValidID(f.VM) != nil {
 		p = append(p, "bad VM name")
+	}
+	if !ports.ValidStreamingSlot(f.Slot) {
+		p = append(p, "bad streaming port set")
 	}
 	if !ifnameRE.MatchString(f.Iface) || !ifnameRE.MatchString(f.Bridge) || f.Iface == f.Bridge {
 		p = append(p, "bad interface names")
@@ -189,33 +197,79 @@ func RenderStreamingNFT(f *StreamForward) (string, error) {
 	if f == nil {
 		return "", nil
 	}
-	if err := f.check(); err != nil {
+	return RenderStreamingNFTAll([]StreamForward{*f})
+}
+
+// RenderStreamingNFTAll is the ruleset for every forwarded VM of this
+// server (decision 506): each VM's own port set, from its own chosen
+// devices, to its own address. Two forwards never share a VM, a port set
+// or a VM address; none removes the table.
+func RenderStreamingNFTAll(fs []StreamForward) (string, error) {
+	if len(fs) == 0 {
+		return "", nil
+	}
+	if err := checkForwards(fs); err != nil {
 		return "", err
 	}
-	tcp := strings.ReplaceAll(portList(ports.SunshineTCP, "-"), ",", ", ")
-	udp := strings.ReplaceAll(portList(ports.SunshineUDP, "-"), ",", ", ")
-	peers := "{ " + strings.Join(sortedPeers(f.Peers), ", ") + " }"
-	return fmt.Sprintf(`# Made by HardyOS: game streaming for the VM %[1]s, from the chosen NetBird devices only (decision 404).
+	fs = slices.Clone(fs)
+	slices.SortFunc(fs, func(a, b StreamForward) int { return a.Slot - b.Slot })
+	var pre, fwd, post, names []string
+	for _, f := range fs {
+		set := f.set()
+		tcp := strings.ReplaceAll(portList(set.TCP, "-"), ",", ", ")
+		udp := strings.ReplaceAll(portList(set.UDP, "-"), ",", ", ")
+		peers := "{ " + strings.Join(sortedPeers(f.Peers), ", ") + " }"
+		names = append(names, f.VM)
+		pre = append(pre,
+			fmt.Sprintf("    iifname %q ip saddr %s ip daddr %s tcp dport { %s } dnat to %s", f.Iface, peers, f.HostIP, tcp, f.VMIP),
+			fmt.Sprintf("    iifname %q ip saddr %s ip daddr %s udp dport { %s } dnat to %s", f.Iface, peers, f.HostIP, udp, f.VMIP))
+		fwd = append(fwd,
+			fmt.Sprintf("    iifname %q oifname %q ip saddr %s ip daddr %s ct status dnat tcp dport { %s } accept", f.Iface, f.Bridge, peers, f.VMIP, tcp),
+			fmt.Sprintf("    iifname %q oifname %q ip saddr %s ip daddr %s ct status dnat udp dport { %s } accept", f.Iface, f.Bridge, peers, f.VMIP, udp),
+			fmt.Sprintf("    iifname %q oifname %q ip saddr %s ct state established,related accept", f.Bridge, f.Iface, f.VMIP))
+		post = append(post,
+			fmt.Sprintf("    iifname %q oifname %q ip saddr %s ip daddr %s ct status dnat masquerade", f.Iface, f.Bridge, peers, f.VMIP))
+	}
+	return fmt.Sprintf(`# Made by HardyOS: game streaming for the VMs %[1]s, each from its chosen NetBird devices only (decisions 404, 506).
 table ip %[2]s
 delete table ip %[2]s
 table ip %[2]s {
   chain prerouting {
     type nat hook prerouting priority dstnat - 5; policy accept;
-    iifname %[3]q ip saddr %[4]s ip daddr %[5]s tcp dport { %[8]s } dnat to %[7]s
-    iifname %[3]q ip saddr %[4]s ip daddr %[5]s udp dport { %[9]s } dnat to %[7]s
+%[3]s
   }
   chain forward {
     type filter hook forward priority filter - 5; policy accept;
-    iifname %[3]q oifname %[6]q ip saddr %[4]s ip daddr %[7]s ct status dnat tcp dport { %[8]s } accept
-    iifname %[3]q oifname %[6]q ip saddr %[4]s ip daddr %[7]s ct status dnat udp dport { %[9]s } accept
-    iifname %[6]q oifname %[3]q ip saddr %[7]s ct state established,related accept
+%[4]s
   }
   chain postrouting {
     type nat hook postrouting priority srcnat - 5; policy accept;
-    iifname %[3]q oifname %[6]q ip saddr %[4]s ip daddr %[7]s ct status dnat masquerade
+%[5]s
   }
 }
-`, f.VM, streamTable, f.Iface, peers, f.HostIP, f.Bridge, f.VMIP, tcp, udp), nil
+`, strings.Join(names, ", "), streamTable, strings.Join(pre, "\n"), strings.Join(fwd, "\n"), strings.Join(post, "\n")), nil
+}
+
+// checkForwards checks every forward and that no two share a VM, a port
+// set or an address.
+func checkForwards(fs []StreamForward) error {
+	vms, slots, addrs := map[string]bool{}, map[int]string{}, map[string]string{}
+	for _, f := range fs {
+		if err := f.check(); err != nil {
+			return err
+		}
+		if vms[f.VM] {
+			return Problems{f.VM + " is forwarded twice"}
+		}
+		if o, dup := slots[f.Slot]; dup {
+			return Problems{fmt.Sprintf("%s and %s have the same streaming ports", o, f.VM)}
+		}
+		if o, dup := addrs[f.VMIP]; dup {
+			return Problems{fmt.Sprintf("%s and %s have the same address", o, f.VM)}
+		}
+		vms[f.VM], slots[f.Slot], addrs[f.VMIP] = true, f.VM, f.VM
+	}
+	return nil
 }
 
 // StreamingIPTables are the HARDYOS-STREAM chain's rules (Docker's FORWARD
@@ -224,6 +278,7 @@ func StreamingIPTables(f StreamForward) ([][]string, error) {
 	if err := f.check(); err != nil {
 		return nil, err
 	}
+	set := f.set()
 	vm := f.VMIP + "/32"
 	src := make([]string, 0, len(f.Peers))
 	for _, p := range sortedPeers(f.Peers) {
@@ -231,10 +286,26 @@ func StreamingIPTables(f StreamForward) ([][]string, error) {
 	}
 	srcs := strings.Join(src, ",")
 	return [][]string{
-		{"-i", f.Iface, "-o", f.Bridge, "-s", srcs, "-d", vm, "-p", "tcp", "-m", "multiport", "--dports", portList(ports.SunshineTCP, ":"), "-m", "conntrack", "--ctstate", "DNAT", "-j", "ACCEPT"},
-		{"-i", f.Iface, "-o", f.Bridge, "-s", srcs, "-d", vm, "-p", "udp", "-m", "multiport", "--dports", portList(ports.SunshineUDP, ":"), "-m", "conntrack", "--ctstate", "DNAT", "-j", "ACCEPT"},
+		{"-i", f.Iface, "-o", f.Bridge, "-s", srcs, "-d", vm, "-p", "tcp", "-m", "multiport", "--dports", portList(set.TCP, ":"), "-m", "conntrack", "--ctstate", "DNAT", "-j", "ACCEPT"},
+		{"-i", f.Iface, "-o", f.Bridge, "-s", srcs, "-d", vm, "-p", "udp", "-m", "multiport", "--dports", portList(set.UDP, ":"), "-m", "conntrack", "--ctstate", "DNAT", "-j", "ACCEPT"},
 		{"-i", f.Bridge, "-o", f.Iface, "-s", vm, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"},
 	}, nil
+}
+
+// StreamingIPTablesAll are every forward's rules.
+func StreamingIPTablesAll(fs []StreamForward) ([][]string, error) {
+	if err := checkForwards(fs); err != nil {
+		return nil, err
+	}
+	var out [][]string
+	for _, f := range fs {
+		r, err := StreamingIPTables(f)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r...)
+	}
+	return out, nil
 }
 
 // StreamingInfo is a VM's streaming state as root knows it.
@@ -265,6 +336,24 @@ type StreamingInfo struct {
 	NetBirdKernel bool          `json:"netbirdKernel"`
 	// Problem says why something isn't ready, in a sentence.
 	Problem string `json:"problem,omitempty"`
+	// Slot is the VM's port set (decision 506): Base is Sunshine's base
+	// port in the VM (Moonlight adds this server as NetBirdAddress:Base
+	// when Base isn't Sunshine's standard one), WebUI its web page's port
+	// (where hardyd reaches it), TCP and UDP what is forwarded.
+	Slot     int   `json:"slot"`
+	Base     int   `json:"base"`
+	WebUI    int   `json:"webUI"`
+	TCP      []int `json:"tcp"`
+	UDP      []int `json:"udp"`
+	AllSlots bool  `json:"allSlots"`
+}
+
+// StreamingPortsArgs records the port set a VM's Sunshine was moved to
+// (hardyd moved it, through Sunshine's own settings, and checked it
+// answers there).
+type StreamingPortsArgs struct {
+	ID   string `json:"id"`
+	Slot int    `json:"slot"`
 }
 
 // StreamingPublishArgs turns publishing to NetBird devices on or off and
@@ -418,7 +507,7 @@ func (m *Manager) vmAddress(ctx context.Context, st *stored) (netip.Addr, error)
 		for _, a := range append(append([]netip.Addr(nil), other...), guest...) {
 			if inNet(a) && !knock[a] && len(knock) < 4 {
 				knock[a] = true
-				_ = m.dialVM(ctx, netip.AddrPortFrom(a, ports.SunshineWebUI).String())
+				_ = m.dialVM(ctx, netip.AddrPortFrom(a, uint16(st.spec.StreamingPorts().WebUI)).String())
 			}
 		}
 		if len(knock) > 0 {
@@ -471,8 +560,10 @@ func (m *Manager) StreamingInfo(ctx context.Context, id string) (*StreamingInfo,
 		return nil, Problems{st.spec.Name + " has no game streaming set up by HardyOS"}
 	}
 	sp := st.spec.Streaming
+	set := st.spec.StreamingPorts()
 	info := &StreamingInfo{User: sp.User, CertSHA256: sp.CertSHA256, Remote: sp.Remote, Peers: append([]string{}, sp.Peers...),
-		WebUIFrom: sp.WebUIFrom, NetBirdPeers: []NetBirdPeer{}}
+		WebUIFrom: sp.WebUIFrom, NetBirdPeers: []NetBirdPeer{}, Slot: set.Slot, Base: set.Base, WebUI: set.WebUI,
+		TCP: slices.Clone(set.TCP), UDP: slices.Clone(set.UDP), AllSlots: sp.AllSlots}
 	if m.Network != nil && m.Network.BridgeName() != "" {
 		if p, err := m.bridgeIPv4(ctx, m.Network.BridgeName()); err == nil {
 			info.BridgeAddress = p.Addr().String()
@@ -489,8 +580,19 @@ func (m *Manager) StreamingInfo(ctx context.Context, id string) (*StreamingInfo,
 		info.Problem = "this server's address on the home network changed since the VM was set up (" + sp.WebUIFrom + " → " + info.BridgeAddress + "); Sunshine's firewall rule in the VM still names the old one, so HardyOS can't reach Sunshine (see Game streaming in the user guide)"
 	}
 	m.streamMu.Lock()
-	info.Forwarding = m.streamActive == id && m.streamApplied != ""
+	info.Forwarding = m.streamActive[id] && m.streamApplied != ""
 	m.streamMu.Unlock()
+	if info.Problem == "" && sp.Remote && m.state(ctx, id) == "running" && !info.Forwarding {
+		// Another published VM running here has the same port set (an HA
+		// VM that came here, decision 506): neither is forwarded.
+		if all, err := m.all(ctx); err == nil {
+			for _, o := range all {
+				if o.spec.ID != id && o.spec.StreamingSetUp() && o.spec.Streaming.Remote && o.spec.Streaming.Slot == sp.Slot && m.state(ctx, o.spec.ID) == "running" {
+					info.Problem = fmt.Sprintf("%s uses the same streaming ports on this server, so neither is forwarded; turn publishing off and on again for one of them to give it other ports", o.spec.Name)
+				}
+			}
+		}
+	}
 	nb := m.netBird(ctx)
 	if nb.Connected {
 		info.NetBirdAddress = nb.IP
@@ -502,10 +604,38 @@ func (m *Manager) StreamingInfo(ctx context.Context, id string) (*StreamingInfo,
 	return info, nil
 }
 
+// pickStreamingSlot is the port set a VM gets when it is published
+// (decision 506): its own when no other published VM this server knows
+// has it, else the lowest free one. A VM set up before HardyOS had port
+// sets (its firewall rule covers only the standard web UI port) gets the
+// standard set only.
+func pickStreamingSlot(st *stored, all []*stored) (int, error) {
+	used := map[int]string{}
+	for _, o := range all {
+		if o.spec.ID != st.spec.ID && o.spec.StreamingSetUp() && o.spec.Streaming.Remote {
+			used[o.spec.Streaming.Slot] = o.spec.Name
+		}
+	}
+	cur := st.spec.Streaming.Slot
+	if _, taken := used[cur]; !taken && ports.ValidStreamingSlot(cur) {
+		return cur, nil
+	}
+	if !st.spec.Streaming.AllSlots {
+		return 0, Problems{fmt.Sprintf("%s uses the standard streaming ports, and %s's game streaming was set up before HardyOS could give a VM other ports, so it can only use those (turn %s's publishing off first)", used[0], st.spec.Name, used[0])}
+	}
+	for s := 0; s < ports.StreamingSlots; s++ {
+		if _, taken := used[s]; !taken {
+			return s, nil
+		}
+	}
+	return 0, Problems{fmt.Sprintf("at most %d VMs of one server are published for game streaming; turn another one off first", ports.StreamingSlots)}
+}
+
 // SetStreamingRemote turns publishing a VM's streaming ports to NetBird
-// devices on or off. Only one VM at a time: Moonlight uses fixed ports.
-// The devices must be NetBird peers this server sees now, in its NetBird
-// network (hardyd also leaves out NetBird's reverse proxy peers).
+// devices on or off. Several VMs may be published, each with its own port
+// set (decision 506). The devices must be NetBird peers this server sees
+// now, in its NetBird network (hardyd also leaves out NetBird's reverse
+// proxy peers).
 func (m *Manager) SetStreamingRemote(ctx context.Context, a StreamingPublishArgs) (*VM, error) {
 	unlock, err := m.lockValid(a.ID)
 	if err != nil {
@@ -521,6 +651,7 @@ func (m *Manager) SetStreamingRemote(ctx context.Context, a StreamingPublishArgs
 		return nil, Problems{st.spec.Name + " has no game streaming set up by HardyOS"}
 	}
 	peers := []string{}
+	slot := st.spec.Streaming.Slot
 	if a.Enabled {
 		// A cluster VM may be published too (decision 485, amending 471):
 		// the server running it forwards (desiredForward lists the VMs
@@ -554,16 +685,19 @@ func (m *Manager) SetStreamingRemote(ctx context.Context, a StreamingPublishArgs
 			unlock()
 			return nil, err
 		}
-		for _, o := range all {
-			if o.spec.ID != a.ID && o.spec.Streaming != nil && o.spec.Streaming.Remote {
-				unlock()
-				return nil, Problems{fmt.Sprintf("%s is already published to NetBird devices; Moonlight uses fixed ports, so only one VM at a time (turn it off there first)", o.spec.Name)}
-			}
+		if slot, err = pickStreamingSlot(st, all); err != nil {
+			unlock()
+			return nil, err
 		}
 	}
 	s := *st.spec.Streaming
-	if s.Remote != a.Enabled || !slices.Equal(s.Peers, peers) {
-		s.Remote, s.Peers = a.Enabled, peers
+	if s.Remote != a.Enabled || !slices.Equal(s.Peers, peers) || s.Slot != slot {
+		if s.Slot != slot {
+			// hardyd moves the VM's Sunshine to the new port set next (its
+			// own settings, then a restart) and checks it answers there.
+			m.log().Info("vms: game streaming port set", "id", a.ID, "slot", slot, "base", ports.StreamingSlot(slot).Base)
+		}
+		s.Remote, s.Peers, s.Slot = a.Enabled, peers, slot
 		st.spec.Streaming = &s
 		if err := m.saveSpec(st); err != nil {
 			unlock()
@@ -578,41 +712,58 @@ func (m *Manager) SetStreamingRemote(ctx context.Context, a StreamingPublishArgs
 	return m.Get(ctx, a.ID)
 }
 
-// desiredForward is the forwarding that should be in place now, if any.
-func (m *Manager) desiredForward(ctx context.Context) (*StreamForward, error) {
+// desiredForwards is the forwarding that should be in place now: every
+// published VM running here with a verified address, each on its own port
+// set. VMs that share a port set (an HA VM that came here) or an address
+// are left out, all of them, and named in the error.
+func (m *Manager) desiredForwards(ctx context.Context) ([]StreamForward, error) {
 	all, err := m.all(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var pub []*stored
 	for _, st := range all {
-		if st.spec.StreamingSetUp() && st.spec.Streaming.Remote && len(st.spec.Streaming.Peers) > 0 {
+		if st.spec.StreamingSetUp() && st.spec.Streaming.Remote && len(st.spec.Streaming.Peers) > 0 && m.state(ctx, st.spec.ID) == "running" {
 			pub = append(pub, st)
 		}
 	}
 	if len(pub) == 0 {
 		return nil, nil
 	}
-	if len(pub) > 1 {
-		return nil, errors.New("more than one VM is published for game streaming; none is forwarded")
-	}
-	st := pub[0]
-	if m.state(ctx, st.spec.ID) != "running" {
-		return nil, nil
-	}
 	nb := m.netBird(ctx)
 	if !nb.Connected {
 		return nil, nil
 	}
-	ip, err := m.vmAddress(ctx, st)
-	if err != nil {
-		return nil, nil
+	var fs []StreamForward
+	var errs []error
+	for _, st := range pub {
+		ip, err := m.vmAddress(ctx, st)
+		if err != nil {
+			continue
+		}
+		f := StreamForward{VM: st.spec.ID, Iface: nb.Interface, PeerNet: nb.Network, Peers: st.spec.Streaming.Peers, HostIP: nb.IP,
+			Bridge: m.Network.BridgeName(), VMIP: ip.String(), Slot: st.spec.Streaming.Slot}
+		if err := f.check(); err != nil {
+			errs = append(errs, fmt.Errorf("not forwarding game streaming to %s: %w", st.spec.ID, err))
+			continue
+		}
+		fs = append(fs, f)
 	}
-	f := &StreamForward{VM: st.spec.ID, Iface: nb.Interface, PeerNet: nb.Network, Peers: st.spec.Streaming.Peers, HostIP: nb.IP, Bridge: m.Network.BridgeName(), VMIP: ip.String()}
-	if err := f.check(); err != nil {
-		return nil, fmt.Errorf("not forwarding game streaming: %w", err)
+	// A port set or an address twice: none of those VMs is forwarded.
+	slots, addrs := map[int]int{}, map[string]int{}
+	for _, f := range fs {
+		slots[f.Slot]++
+		addrs[f.VMIP]++
 	}
-	return f, nil
+	out := fs[:0]
+	for _, f := range fs {
+		if slots[f.Slot] > 1 || addrs[f.VMIP] > 1 {
+			errs = append(errs, fmt.Errorf("not forwarding game streaming to %s: another published VM here has the same ports or address", f.VM))
+			continue
+		}
+		out = append(out, f)
+	}
+	return out, errors.Join(errs...)
 }
 
 // kickStreaming updates the forwarding soon (a VM stopped or went away).
@@ -633,12 +784,17 @@ func (m *Manager) kickStreaming() {
 
 // liveStreamingOK reports whether the kernel still has the forward's rules
 // (nobody flushed the table or the chain since root loaded them).
-func (m *Manager) liveStreamingOK(ctx context.Context, f *StreamForward) bool {
+func (m *Manager) liveStreamingOK(ctx context.Context, fs []StreamForward) bool {
 	out, err := m.run(ctx, "nft", "list", "table", "ip", streamTable)
-	if err != nil || !strings.Contains(string(out), "dnat to "+f.VMIP) || !strings.Contains(string(out), "ip daddr "+f.HostIP) {
+	if err != nil {
 		return false
 	}
-	rules, err := StreamingIPTables(*f)
+	for _, f := range fs {
+		if !strings.Contains(string(out), "dnat to "+f.VMIP) || !strings.Contains(string(out), "ip daddr "+f.HostIP) {
+			return false
+		}
+	}
+	rules, err := StreamingIPTablesAll(fs)
 	if err != nil {
 		return false
 	}
@@ -660,21 +816,21 @@ func (m *Manager) liveStreamingOK(ctx context.Context, f *StreamForward) bool {
 func (m *Manager) syncStreaming(ctx context.Context) error {
 	m.streamMu.Lock()
 	defer m.streamMu.Unlock()
-	f, derr := m.desiredForward(ctx)
-	text, err := RenderStreamingNFT(f)
+	fs, derr := m.desiredForwards(ctx)
+	text, err := RenderStreamingNFTAll(fs)
 	if err != nil {
-		f, text = nil, ""
+		fs, text = nil, ""
 		derr = err
 	}
 	if m.streamSynced && text == m.streamApplied {
-		if f == nil || m.liveStreamingOK(ctx, f) {
+		if len(fs) == 0 || m.liveStreamingOK(ctx, fs) {
 			return derr
 		}
-		m.log().Warn("vms: the game streaming rules were changed outside HardyOS; loading them again", "id", f.VM)
+		m.log().Warn("vms: the game streaming rules were changed outside HardyOS; loading them again", "vms", len(fs))
 	}
-	if f == nil {
+	if len(fs) == 0 {
 		m.clearStreaming(ctx)
-		m.streamSynced, m.streamApplied, m.streamActive = true, "", ""
+		m.streamSynced, m.streamApplied, m.streamActive = true, "", nil
 		return derr
 	}
 	dir, err := m.streamDir()
@@ -688,10 +844,14 @@ func (m *Manager) syncStreaming(ctx context.Context) error {
 	if _, err := m.run(ctx, "nft", "-f", file); err != nil {
 		return fmt.Errorf("loading the game streaming rules: %w", err)
 	}
-	rules, _ := StreamingIPTables(*f)
+	rules, _ := StreamingIPTablesAll(fs)
 	m.iptablesStream(ctx, rules)
-	m.streamSynced, m.streamApplied, m.streamActive = true, text, f.VM
-	m.log().Info("vms: game streaming forwarded to the chosen NetBird devices", "id", f.VM, "address", f.VMIP, "devices", len(f.Peers))
+	active := map[string]bool{}
+	for _, f := range fs {
+		active[f.VM] = true
+		m.log().Info("vms: game streaming forwarded to the chosen NetBird devices", "id", f.VM, "address", f.VMIP, "devices", len(f.Peers), "base", f.set().Base)
+	}
+	m.streamSynced, m.streamApplied, m.streamActive = true, text, active
 	return derr
 }
 
@@ -707,7 +867,7 @@ func (m *Manager) StopStreaming(ctx context.Context) {
 	defer m.streamMu.Unlock()
 	m.clearStreaming(ctx)
 	_, _ = m.run(ctx, "iptables", "-w", "-D", "FORWARD", "-j", streamChain)
-	m.streamSynced, m.streamApplied, m.streamActive = false, "", ""
+	m.streamSynced, m.streamApplied, m.streamActive = false, "", nil
 }
 
 // iptablesStream fills the HARDYOS-STREAM chain (empty: nothing).

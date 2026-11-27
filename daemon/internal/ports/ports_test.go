@@ -106,6 +106,74 @@ func portName(n string) bool {
 	return true
 }
 
+// Game streaming slots (decision 506): slot 0 is Sunshine's standard set,
+// no two slots share a port, no slot reaches into another fixed port,
+// the app proxy range or the migration range, and every slot's ports are
+// reserved.
+func TestStreamingSlots(t *testing.T) {
+	s0 := StreamingSlot(0)
+	if s0.Base != SunshineHTTP || s0.WebUI != SunshineWebUI {
+		t.Fatalf("slot 0 %+v", s0)
+	}
+	if !equalSets(s0.TCP, SunshineTCP) || !equalSets(s0.UDP, SunshineUDP) {
+		t.Fatalf("slot 0's ports aren't Sunshine's own: %+v", s0)
+	}
+	sunshine := map[int]bool{SunshineHTTPS: true, SunshineHTTP: true, SunshineWebUI: true, SunshineRTSP: true, SunshineVideo: true,
+		SunshineControl: true, SunshineAudio: true, SunshineMic: true}
+	owner := map[string]int{}
+	for s := 0; s < StreamingSlots; s++ {
+		set := StreamingSlot(s)
+		if got, ok := StreamingSlotOfBase(set.Base); !ok || got != s {
+			t.Errorf("slot %d's base %d maps back to %d", s, set.Base, got)
+		}
+		all := append(append([]int{set.WebUI}, set.TCP...), set.UDP...)
+		for i, p := range all {
+			proto := "tcp"
+			if i > len(set.TCP) {
+				proto = "udp"
+			}
+			key := proto + strconv.Itoa(p)
+			if o, dup := owner[key]; dup && o != s {
+				t.Errorf("slots %d and %d share %s", o, s, key)
+			}
+			owner[key] = s
+			if !Reserved(p) {
+				t.Errorf("slot %d's port %d isn't reserved", s, p)
+			}
+			if p >= AppProxyBase && p < AppProxyBase+AppProxyCount || p >= MigrateFirst && p < MigrateFirst+MigrateCount || p > 65535 {
+				t.Errorf("slot %d's port %d is in another range", s, p)
+			}
+			for name, f := range Fixed {
+				if f == p && !sunshine[p] {
+					t.Errorf("slot %d's port %d is %s's", s, p, name)
+				}
+			}
+		}
+	}
+	if _, ok := StreamingSlotOfBase(SunshineHTTP + 1); ok {
+		t.Fatal("a base between slots")
+	}
+	if len(StreamingWebUIPorts()) != StreamingSlots {
+		t.Fatal("web UI ports")
+	}
+}
+
+func equalSets(a, b []int) bool {
+	m := map[int]int{}
+	for _, x := range a {
+		m[x]++
+	}
+	for _, x := range b {
+		m[x]--
+	}
+	for _, v := range m {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func TestOwnedPorts(t *testing.T) {
 	for _, p := range []int{NetBirdStandbyHTTP, NetBirdStandbyHTTPS, NetBirdStandbySTUN} {
 		if OwnedBy(p) != NetBirdStandbyApp || !Reserved(p) {

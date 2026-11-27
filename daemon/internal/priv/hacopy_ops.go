@@ -155,7 +155,9 @@ func RegisterHACopy(s *Server, r *hacopy.Root, vmm *vms.Manager, am *apps.Manage
 		}
 		var err error
 		switch {
-		case a.Side == hacopy.SideCluster:
+		case a.Side == hacopy.SideCluster, a.Kind == hacopy.KindShare:
+			// A shared folder (either side) has no engine of its own: it is
+			// held (unmounted) here, and file sharing lets go of it in Park.
 			err = park()
 		case a.Kind == cluster.KindVM && vmm != nil:
 			err = vmm.HARelease(ctx, a.ID, park)
@@ -167,14 +169,14 @@ func RegisterHACopy(s *Server, r *hacopy.Root, vmm *vms.Manager, am *apps.Manage
 		return res, haErr(err)
 	}))
 	s.Handle(hacopy.OpUnpark, typed(func(ctx context.Context, a hacopy.UnparkArgs) (any, error) {
-		if err := r.Unpark(ctx, a); err != nil {
+		res, err := r.UnparkState(ctx, a)
+		if err != nil {
 			return nil, haErr(err)
 		}
-		var err error
 		if a.Side == hacopy.SideLocal && a.Kind == cluster.KindVM && vmm != nil {
 			err = vmm.HAPutBack(ctx, a.ID)
 		}
-		return map[string]bool{"ok": true}, haErr(err)
+		return res, haErr(err)
 	}))
 	s.Handle(hacopy.OpParkedList, typed(func(ctx context.Context, _ struct{}) (any, error) {
 		l, err := r.ParkedList(ctx)
@@ -209,7 +211,8 @@ func RegisterHACopy(s *Server, r *hacopy.Root, vmm *vms.Manager, am *apps.Manage
 			return res, haErr(err)
 		}))
 		s.Handle(OpAppsHAHold, typed(func(ctx context.Context, a apps.HAHoldArgs) (any, error) {
-			return map[string]bool{"ok": true}, haErr(am.HAHold(ctx, a))
+			res, err := am.HAHoldState(ctx, a)
+			return res, haErr(err)
 		}))
 		s.Handle(OpAppsClusterAdopt, typed(func(ctx context.Context, a apps.HAAdoptArgs) (any, error) {
 			h, err := am.ClusterAdopt(ctx, a)

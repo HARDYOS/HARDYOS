@@ -11412,8 +11412,11 @@ components:
         remote: { type: boolean }
         forwarding: { type: boolean, description: "The NetBird forwarding rules are in place now" }
         netbirdAddress: { type: string, description: "This server's NetBird address: add it in Moonlight away from home" }
+        base: { type: integer, description: "Sunshine's base port in this VM (its port set, decision 506; 47989 is the standard one)" }
+        moonlight: { type: string, description: "What to add in Moonlight away from home: the NetBird address, with :base when it isn't the standard one" }
         ports:
           type: object
+          description: The ports forwarded to this VM (its port set)
           required: [tcp, udp]
           properties:
             tcp: { type: array, items: { type: integer } }
@@ -12928,6 +12931,18 @@ components:
         mode: { type: string, enum: [nfs, block] }
         modeReason: { type: string }
         problems: { type: array, items: { type: string } }
+        shares:
+          type: array
+          description: The shared folders an app takes along to the storage server (decision 500)
+          items:
+            type: object
+            required: [id, name, sizeBytes, write]
+            properties:
+              id: { type: string }
+              name: { type: string }
+              sizeBytes: { type: integer }
+              write: { type: boolean }
+        notes: { type: array, items: { type: string }, description: "What changes for the people using its shared folders" }
         open: { $ref: "#/components/schemas/ClusterConversion" }
     ClusterKeptCopy:
       type: object
@@ -12935,7 +12950,7 @@ components:
       properties:
         pool: { type: string }
         name: { type: string }
-        kind: { type: string, enum: [vm, app] }
+        kind: { type: string, enum: [vm, app, share] }
         id: { type: string }
         side: { type: string, enum: [local, cluster] }
         used: { type: integer }
@@ -12948,6 +12963,11 @@ components:
             other copy since, so deleting it needs lastCopy)
         conv: { type: string, description: "The conversion that put it aside" }
         node: { type: string }
+        deleteOn:
+          type: string
+          description: >-
+            The member whose own API deletes it (POST /nodes/{deleteOn}/cluster/kept/delete, with that member's guards);
+            absent: this server's API (its own copies and the storage server's)
     # ---- end of Phase 10 make-HA schemas ----
     ClusterNetcheckPath:
       type: object

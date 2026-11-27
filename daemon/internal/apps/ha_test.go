@@ -30,7 +30,7 @@ func TestHAHoldRefusesStarts(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Join(e.fake.Lines(), "\n")
-	down, ro := strings.Index(lines, "compose"), strings.Index(lines, "zfs set readonly=on "+PropHAHold+"=abcdefgh12 tank/apps/notes")
+	down, ro := strings.Index(lines, "compose"), strings.Index(lines, "zfs set readonly=on "+PropHAHold+"=abcdefgh12 "+PropHAHoldRunning+"=off tank/apps/notes")
 	if !strings.Contains(lines, " down --remove-orphans") || ro < 0 || down > ro {
 		t.Fatalf("not held (containers removed, then read-only): %s", lines)
 	}
@@ -63,6 +63,49 @@ func TestHAHoldRefusesStarts(t *testing.T) {
 	e.fake.On(get, "/mnt/tank/apps/notes\n")
 	if err := e.m.Up(ctx, "notes"); err != nil && strings.Contains(err.Error(), ErrHeld.Error()) {
 		t.Fatalf("a stray value was taken for a hold: %v", err)
+	}
+}
+
+// The hold records whether the app ran before its conversion stopped it
+// (decision 504), and the release says so; a stray value isn't "on".
+func TestHAHoldRecordsTheState(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	if _, err := e.install(PrepareArgs{Settings: map[string]string{"ADMIN_PASSWORD": "hunter2"}, Shares: map[string]ShareChoice{"MEDIA": {Share: "media"}},
+		Source: SourceUpload}); err != nil {
+		t.Fatal(err)
+	}
+	e.fake.On("zfs get -H -p -s local -o value "+PropHAHold+" tank/apps/notes", "-\n")
+	e.fake.OnPrefix("zfs set ", sysexec.Result{})
+	e.fake.OnPrefix("zfs inherit ", sysexec.Result{})
+	if err := e.m.HAHold(ctx, HAHoldArgs{ID: "notes", Conv: "abcdefgh12", WasRunning: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(e.fake.Lines(), "\n"), PropHAHoldRunning+"=on tank/apps/notes") {
+		t.Fatal("the state it ran in wasn't recorded")
+	}
+	e.fake.On("zfs get -H -p -s local -o value "+PropHAHold+" tank/apps/notes", "abcdefgh12\n")
+	for v, want := range map[string]bool{"on\n": true, "off\n": false, "yes\n": false} {
+		e.fake.On("zfs get -H -p -s local -o value "+PropHAHoldRunning+" tank/apps/notes", v)
+		res, err := e.m.HAHoldState(ctx, HAHoldArgs{ID: "notes", Conv: "abcdefgh12", Release: true})
+		if err != nil || !res.Held || res.WasRunning != want {
+			t.Fatalf("%q: %+v %v", v, res, err)
+		}
+	}
+	e.fake.On("zfs get -H -p -s local -o value "+PropHAHold+" tank/apps/notes", "-\n")
+	if res, err := e.m.HAHoldState(ctx, HAHoldArgs{ID: "notes", Conv: "abcdefgh12", Release: true}); err != nil || res.Held {
+		t.Fatalf("not held: %+v %v", res, err)
+	}
+}
+
+// The folders of the shared folders that moved with an app (decision 500)
+// are only shares/<id> folders.
+func TestValidSharePath(t *testing.T) {
+	for p, ok := range map[string]bool{"/mnt/tank/shares/media": true, "/tank/shares/media": true, "/mnt/tank/apps/media": false,
+		"/mnt/tank/shares/media/sub": false, "mnt/tank/shares/media": false, "/mnt/tank/shares/../shares/media": false, "/mnt/tank/shares/other": false} {
+		if (validSharePath(p, "media") == nil) != ok {
+			t.Errorf("%s: %v", p, !ok)
+		}
 	}
 }
 

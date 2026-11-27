@@ -27,6 +27,7 @@ import (
 
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/hacopy"
+	"github.com/hardyos/hardyos/daemon/internal/shares"
 )
 
 // FilePriv is the part of priv.Client that hands over a stream's file.
@@ -82,8 +83,91 @@ type HARequest struct {
 	// datasets with (ParkResult.Changed).
 	Since string `json:"since,omitempty"`
 	// Expect parks only a copy carrying that conversion's mark.
-	Expect string        `json:"expect,omitempty"`
-	Actor  cluster.Actor `json:"actor"`
+	Expect string `json:"expect,omitempty"`
+	// Share is a shared folder's settings (adopting one that moved with
+	// its app, decision 500).
+	Share *shares.Settings `json:"share,omitempty"`
+	Actor cluster.Actor    `json:"actor"`
+}
+
+// HASharesInfo is what the storage server has that a shared folder moving
+// there must not clash with: its shared folders' ids and names, and the
+// domain it shares files as (decision 502).
+type HASharesInfo struct {
+	Shares []HAShareName `json:"shares"`
+	Joined bool          `json:"joined"`
+	Realm  string        `json:"realm,omitempty"`
+	// FreeBytes is what the cluster pool has free.
+	FreeBytes uint64 `json:"freeBytes"`
+}
+
+// HAShareName is one of the storage server's shared folders.
+type HAShareName struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Pool string `json:"pool"`
+}
+
+// HAShareRelease lets go of a shared folder a conversion adopted here,
+// held until this server's copy was put aside (r.Workload: the shared
+// folder, r.Conv: the conversion that holds it). From then on the storage
+// server's copy is the only one: it is mounted and shared again.
+func (s *Service) HAShareRelease(ctx context.Context, r HARequest) error {
+	return s.onStorage(ctx, "storage/ha/share/release", r, nil, r.Actor, func(*cluster.Snapshot, cluster.Node) error {
+		return errors.New("the storage server can't convert its own workloads")
+	})
+}
+
+// HAShares reports the storage server's shared folders and domain.
+func (s *Service) HAShares(ctx context.Context) (*HASharesInfo, error) {
+	var out HASharesInfo
+	err := s.onStorage(ctx, "storage/ha/shares", struct{}{}, &out, cluster.Actor{}, func(snap *cluster.Snapshot, _ cluster.Node) error {
+		res, err := s.haShares(ctx, snap)
+		if err == nil {
+			out = *res
+		}
+		return err
+	})
+	return &out, err
+}
+
+func (s *Service) haShares(ctx context.Context, snap *cluster.Snapshot) (*HASharesInfo, error) {
+	out := &HASharesInfo{Shares: []HAShareName{}}
+	var l struct {
+		Shares []shares.Share `json:"shares"`
+	}
+	if err := s.Priv.Call(ctx, "shares.list", nil, &l); err != nil {
+		return nil, err
+	}
+	for _, sh := range l.Shares {
+		out.Shares = append(out.Shares, HAShareName{ID: sh.ID, Name: sh.Name, Pool: sh.Pool})
+	}
+	var fs struct {
+		Joined bool `json:"joined"`
+		Domain *struct {
+			Realm string `json:"realm"`
+		} `json:"domain"`
+	}
+	if err := s.Priv.Call(ctx, "files.status", nil, &fs); err == nil {
+		out.Joined = fs.Joined
+		if fs.Domain != nil {
+			out.Realm = fs.Domain.Realm
+		}
+	}
+	if pool, err := s.storagePool(snap); err == nil {
+		var pools []struct {
+			Name      string `json:"name"`
+			FreeBytes uint64 `json:"freeBytes"`
+		}
+		if s.Priv.Call(ctx, "zfs.pools", nil, &pools) == nil {
+			for _, p := range pools {
+				if p.Name == pool {
+					out.FreeBytes = p.FreeBytes
+				}
+			}
+		}
+	}
+	return out, nil
 }
 
 // HAParkedDestroy deletes a parked copy on the storage server now;
@@ -471,6 +555,16 @@ func (s *Service) registerHAPeer(h func(path string, fn func(r *http.Request, c 
 		var out hacopy.StreamState
 		return &out, s.Priv.Call(r.Context(), hacopy.OpStream, p, &out)
 	}))
+	h("ha/shares", storage(func(r *http.Request, c cluster.Node, q asked, b []byte) (any, error) {
+		if err := activeCompute(c); err != nil {
+			return nil, err
+		}
+		_, snap, err := s.self()
+		if err != nil {
+			return nil, err
+		}
+		return s.haShares(r.Context(), snap)
+	}))
 	h("ha/parked", storage(func(r *http.Request, c cluster.Node, q asked, b []byte) (any, error) {
 		var out struct {
 			Parked []hacopy.Parked `json:"parked"`
@@ -550,11 +644,23 @@ func (s *Service) registerHAPeer(h func(path string, fn func(r *http.Request, c 
 		if err != nil {
 			return nil, err
 		}
+		if p.Workload.Kind == hacopy.KindShare && p.Share == nil {
+			return nil, &forbidden{errors.New("a shared folder is adopted with its settings")}
+		}
+		if p.Workload.Kind != hacopy.KindShare {
+			p.Share = nil
+		}
 		var res hacopy.AdoptResult
-		err = s.Priv.Call(r.Context(), hacopy.OpAdopt, hacopy.AdoptArgs{Ref: ref, Conv: p.Conv, Cluster: snap.Cluster}, &res)
+		err = s.Priv.Call(r.Context(), hacopy.OpAdopt, hacopy.AdoptArgs{Ref: ref, Conv: p.Conv, Cluster: snap.Cluster, Share: p.Share}, &res)
 		s.audit(r.Context(), q.Actor, "cluster.ha.adopt", string(p.Workload.Kind)+" "+p.Workload.ID, err)
 		if err != nil {
 			return nil, err
+		}
+		if p.Workload.Kind == hacopy.KindShare {
+			// A shared folder of this server now: what a cluster share
+			// record needs (put in the cluster next, storage.share).
+			return &cluster.WorkloadStorage{Pool: ref.Pool, Exports: []cluster.Export{{Dataset: res.Dataset, Path: res.Mountpoint,
+				MountPath: cluster.RemoteMountRoot + "/" + res.Dataset, FSID: res.GUID}}}, nil
 		}
 		return storageOf(ref, &res), nil
 	}))
@@ -582,6 +688,11 @@ func (s *Service) registerHAPeer(h func(path string, fn func(r *http.Request, c 
 		if snap.Placements[p.Workload] != nil {
 			return nil, &forbidden{fmt.Errorf("%s is still a cluster workload", p.Workload.ID)}
 		}
+		if p.Workload.Kind == hacopy.KindShare && snap.ClusterShares[p.Workload.ID] != nil {
+			// Taken out of the cluster first (storage.share), so no compute
+			// server is given it again.
+			return nil, &forbidden{fmt.Errorf("the shared folder %s is still used in the cluster", p.Workload.ID)}
+		}
 		ref, err := s.clusterRef(snap, p.Workload, p.Pool)
 		if err != nil {
 			return nil, err
@@ -605,12 +716,29 @@ func (s *Service) registerHAPeer(h func(path string, fn func(r *http.Request, c 
 		if snap.Placements[p.Workload] != nil {
 			return nil, &forbidden{fmt.Errorf("%s is a cluster workload", p.Workload.ID)}
 		}
+		if p.Workload.Kind == hacopy.KindShare {
+			return nil, &forbidden{errors.New("a shared folder put aside here isn't put back from another server")}
+		}
 		ref, err := s.clusterRef(snap, p.Workload, p.Pool)
 		if err != nil {
 			return nil, err
 		}
 		err = s.Priv.Call(r.Context(), hacopy.OpUnpark, hacopy.UnparkArgs{Ref: ref, Name: p.Name}, nil)
 		s.audit(r.Context(), q.Actor, "cluster.ha.unpark", string(p.Workload.Kind)+" "+p.Workload.ID, err)
+		return ok(err)
+	}))
+	h("ha/share/release", admin("moving a shared folder to cluster storage", func(r *http.Request, c cluster.Node, q asked, b []byte, snap *cluster.Snapshot) (any, error) {
+		var p HARequest
+		if err := decode(b, &p); err != nil {
+			return nil, err
+		}
+		if p.Workload.Kind != hacopy.KindShare {
+			return nil, &forbidden{errors.New("only a shared folder is let go of here")}
+		}
+		// Root lets go only of the hold this very conversion took when it
+		// adopted the folder (shares.HAHold checks the mark).
+		err := s.Priv.Call(r.Context(), "shares.ha.hold", shares.HAHoldArgs{ID: p.Workload.ID, Conv: p.Conv, Release: true}, nil)
+		s.audit(r.Context(), q.Actor, "cluster.ha.share.release", p.Workload.ID, err)
 		return ok(err)
 	}))
 	h("ha/parked/keep", admin("keeping a copy", func(r *http.Request, c cluster.Node, q asked, b []byte, snap *cluster.Snapshot) (any, error) {

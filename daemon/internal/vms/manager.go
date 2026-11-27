@@ -124,9 +124,9 @@ type Manager struct {
 	streamDial func(ctx context.Context, addr string) error
 
 	streamMu      sync.Mutex
-	streamSynced  bool   // the forwarding rules were set at least once
-	streamApplied string // the ruleset in place ("" none)
-	streamActive  string // the VM forwarded to
+	streamSynced  bool            // the forwarding rules were set at least once
+	streamApplied string          // the ruleset in place ("" none)
+	streamActive  map[string]bool // the VMs forwarded to
 
 	// grant replaces grantQEMU in tests (some test file systems have no
 	// POSIX ACLs); verify replaces verifyPath.

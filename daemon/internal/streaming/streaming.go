@@ -29,6 +29,7 @@ import (
 	"net/netip"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/ports"
@@ -140,6 +141,20 @@ type Target struct {
 	CertSHA256 string
 	User       string
 	Password   string
+	// WebPort is Sunshine's web UI and API port in the VM (its port set's,
+	// decision 506; 0: the standard one).
+	WebPort int
+}
+
+// webPort is where t's Sunshine answers.
+func (c *Client) webPort(t Target) int {
+	switch {
+	case c.Port != 0:
+		return c.Port
+	case t.WebPort != 0:
+		return t.WebPort
+	}
+	return ports.SunshineWebUI
 }
 
 // Client calls Sunshine's API.
@@ -172,9 +187,9 @@ func (c *Client) http(t Target) (*http.Client, string, error) {
 	if err != nil || len(want) != sha256.Size {
 		return nil, "", errors.New("no certificate to pin for this VM's Sunshine")
 	}
-	port := ports.SunshineWebUI
-	if c.Port != 0 {
-		port = c.Port
+	port := c.webPort(t)
+	if port <= 0 || port > 65535 {
+		return nil, "", errors.New("bad Sunshine port")
 	}
 	timeout := c.Timeout
 	if timeout == 0 {
@@ -265,6 +280,86 @@ func (c *Client) do(ctx context.Context, t Target, method, path string, body, ou
 		if err := json.Unmarshal(b, out); err != nil {
 			return fmt.Errorf("Sunshine's answer can't be read: %w", err)
 		}
+	}
+	return nil
+}
+
+// configKeyRE: a key of Sunshine's settings file.
+var configKeyRE = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+
+// configMeta are what Sunshine's settings answer carries besides its
+// settings (never written back).
+var configMeta = map[string]bool{"status": true, "platform": true, "version": true, "restart_supported": true, "error": true}
+
+// config reads Sunshine's settings (its sunshine.conf, key by key).
+func (c *Client) config(ctx context.Context, t Target) (map[string]string, error) {
+	var raw map[string]json.RawMessage
+	if err := c.do(ctx, t, http.MethodGet, "/api/config", nil, &raw); err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for k, v := range raw {
+		if configMeta[k] || !configKeyRE.MatchString(k) {
+			continue
+		}
+		var s string
+		if json.Unmarshal(v, &s) != nil {
+			continue // only the file's own values, which are strings
+		}
+		if len(s) > 4096 || strings.ContainsAny(s, "\r\n") {
+			return nil, errors.New("Sunshine's settings can't be read safely")
+		}
+		out[k] = s
+	}
+	if len(out) > 512 {
+		return nil, errors.New("Sunshine's settings are too many to keep")
+	}
+	return out, nil
+}
+
+// BasePort is the base port Sunshine in the VM uses (its `port` setting;
+// the standard one when unset).
+func (c *Client) BasePort(ctx context.Context, t Target) (int, error) {
+	cfg, err := c.config(ctx, t)
+	if err != nil {
+		return 0, err
+	}
+	v, ok := cfg["port"]
+	if !ok || v == "" {
+		return ports.SunshineHTTP, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 || n > 65535 {
+		return 0, fmt.Errorf("Sunshine's port setting %q isn't a port", clip(v))
+	}
+	return n, nil
+}
+
+// SetBasePort gives Sunshine in the VM a new base port (decision 506):
+// its settings are read, written back with only `port` changed (every
+// other setting as it is: Sunshine writes the file from what it is
+// given) and Sunshine restarts. Its web UI is then at the new port set's
+// own port; the caller waits for it there.
+func (c *Client) SetBasePort(ctx context.Context, t Target, base int) error {
+	if _, ok := ports.StreamingSlotOfBase(base); !ok {
+		return errors.New("that isn't one of HardyOS's streaming port sets")
+	}
+	cfg, err := c.config(ctx, t)
+	if err != nil {
+		return err
+	}
+	if base == ports.SunshineHTTP {
+		delete(cfg, "port")
+	} else {
+		cfg["port"] = strconv.Itoa(base)
+	}
+	if err := c.do(ctx, t, http.MethodPost, "/api/config", cfg, nil); err != nil {
+		return err
+	}
+	// Sunshine answers and then restarts: a connection it drops on the
+	// way is the restart itself.
+	if err := c.do(ctx, t, http.MethodPost, "/api/restart", map[string]string{}, nil); err != nil && !errors.Is(err, ErrUnreachable) {
+		return err
 	}
 	return nil
 }

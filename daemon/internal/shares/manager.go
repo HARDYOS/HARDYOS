@@ -651,6 +651,9 @@ func (m *Manager) Update(ctx context.Context, a ShareUpdate) (*Share, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := m.refuseHeld(ctx, sh); err != nil {
+		return nil, err
+	}
 	var set []string
 	inheritDesc := false
 	if a.Name != nil {
@@ -744,6 +747,9 @@ func (m *Manager) Delete(ctx context.Context, id, confirm string) error {
 	}
 	if !strings.EqualFold(strings.Join(strings.Fields(confirm), " "), sh.Name) {
 		return invalid("type the shared folder's name (%s) to confirm: every file in it is deleted", sh.Name)
+	}
+	if err := m.refuseHeld(ctx, sh); err != nil {
+		return err
 	}
 	if len(sh.Apps) > 0 {
 		names := make([]string, 0, len(sh.Apps))

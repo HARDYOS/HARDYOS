@@ -175,6 +175,16 @@ describe("the Streaming panel", () => {
     expect(calls.find((c) => c.method === "PUT")?.body).toEqual({ enabled: false });
   });
 
+  it("shows the address with its port for a VM on its own port set", async () => {
+    serve({
+      "/vms/game/streaming": () =>
+        status({ remote: true, forwarding: true, peers: ["100.92.0.5"], base: 48089, moonlight: "100.92.1.2:48089", ports: { tcp: [48084, 48089, 48110], udp: [48098, 48099, 48100, 48102, 48110] } }),
+    }, []);
+    wrap(<StreamingPanel vm={game} onJob={vi.fn()} />);
+    expect((await screen.findAllByText("100.92.1.2:48089")).length).toBeGreaterThan(0);
+    expect(document.body.textContent).toContain("48084");
+  });
+
   it("asks before pairing a device that came through NetBird", async () => {
     const calls: Call[] = [];
     serve(

@@ -137,6 +137,8 @@ jobs:
           sudo HARDYOS_CLUSTER_INTEGRATION=1 setsid -w "$RUNNER_TEMP/san.test" -test.run 'TestClusterStorageIntegration|TestFirewallSyntax' -test.v -test.timeout 10m
       - name: make a VM highly available and local again - its disk and snapshots sent to the storage pool (a cut stream resumed), adopted, LIO export, iSCSI read, sent back
         run: sudo HARDYOS_CLUSTER_INTEGRATION=1 setsid -w "$RUNNER_TEMP/hacopy.test" -test.run TestHAConvertIntegration -test.v -test.timeout 10m
+      - name: move an app's shared folder to the storage pool - held, its final snapshot sent and adopted held with its settings and ACLs, a late write refused, parked, put back
+        run: sudo HARDYOS_CLUSTER_INTEGRATION=1 setsid -w "$RUNNER_TEMP/hacopy.test" -test.run TestHAShareIntegration -test.v -test.timeout 10m
       - name: LIO and NFS state
         if: failure()
         run: |
@@ -337,7 +339,7 @@ jobs:
         run: go test -c -o "$RUNNER_TEMP/vms.test" ./internal/vms
       - name: download Sunshine and the Virtual Display Driver and check their pinned SHA-256
         run: HARDYOS_NET_TESTS=1 "$RUNNER_TEMP/vms.test" -test.run TestStreamingPinsDownload -test.v -test.timeout 15m
-      - name: load the forwarding rules in network namespaces and stream through them
+      - name: load the forwarding rules in network namespaces and stream through them (two VMs, each on its own port set)
         run: sudo HARDYOS_NFT_TEST=1 "$RUNNER_TEMP/vms.test" -test.run 'TestStreamingRulesLoad|TestStreamingForwardsInNamespaces' -test.v
       - name: make a streaming disc with xorriso
         run: HARDYOS_XORRISO_TEST=1 "$RUNNER_TEMP/vms.test" -test.run TestStreamingDiscXorriso -test.v

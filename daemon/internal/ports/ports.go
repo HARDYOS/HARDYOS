@@ -89,6 +89,91 @@ var (
 	SunshineUDP = []int{SunshineVideo, SunshineControl, SunshineAudio, SunshineMic, SunshineRTSP}
 )
 
+// Game streaming port sets (decision 506). Several VMs of one server may
+// be published to NetBird devices at once: each published VM gets a slot,
+// its Sunshine runs with the slot's base port (Sunshine's `port` setting:
+// every port it uses is an offset of it, and it tells Moonlight its own
+// numbers, so the server forwards each number to the same number in the
+// VM) and Moonlight adds the server as <NetBird address>:<base>. Slot 0 is
+// Sunshine's standard set (base SunshineHTTP). Slots are StreamingSlotStride
+// apart, so their sets never overlap; Reserved covers every slot's ports
+// (no app is given one as a host port).
+const (
+	StreamingSlots      = 8
+	StreamingSlotStride = 100
+)
+
+// Sunshine's ports as offsets of its base port (SunshineHTTP in slot 0).
+const (
+	sunshineOffHTTPS   = SunshineHTTPS - SunshineHTTP
+	sunshineOffWebUI   = SunshineWebUI - SunshineHTTP
+	sunshineOffRTSP    = SunshineRTSP - SunshineHTTP
+	sunshineOffVideo   = SunshineVideo - SunshineHTTP
+	sunshineOffControl = SunshineControl - SunshineHTTP
+	sunshineOffAudio   = SunshineAudio - SunshineHTTP
+	sunshineOffMic     = SunshineMic - SunshineHTTP
+)
+
+// StreamingSet is one slot's ports.
+type StreamingSet struct {
+	Slot int
+	// Base is Sunshine's `port` (HTTP; what Moonlight is given).
+	Base int
+	// WebUI is Sunshine's web page and API (never forwarded).
+	WebUI int
+	TCP   []int
+	UDP   []int
+}
+
+// ValidStreamingSlot reports whether slot is one of the slots.
+func ValidStreamingSlot(slot int) bool { return slot >= 0 && slot < StreamingSlots }
+
+// StreamingSlot is slot's port set (slot 0 for an invalid one).
+func StreamingSlot(slot int) StreamingSet {
+	if !ValidStreamingSlot(slot) {
+		slot = 0
+	}
+	b := SunshineHTTP + slot*StreamingSlotStride
+	return StreamingSet{Slot: slot, Base: b, WebUI: b + sunshineOffWebUI,
+		TCP: []int{b + sunshineOffHTTPS, b, b + sunshineOffRTSP},
+		UDP: []int{b + sunshineOffVideo, b + sunshineOffControl, b + sunshineOffAudio, b + sunshineOffMic, b + sunshineOffRTSP}}
+}
+
+// StreamingSlotOfBase is the slot whose base port is base (false: none).
+func StreamingSlotOfBase(base int) (int, bool) {
+	d := base - SunshineHTTP
+	if d < 0 || d%StreamingSlotStride != 0 || !ValidStreamingSlot(d/StreamingSlotStride) {
+		return 0, false
+	}
+	return d / StreamingSlotStride, true
+}
+
+// StreamingWebUIPorts are every slot's web UI port (the VM's firewall
+// keeps them to the HardyOS server, decision 401).
+func StreamingWebUIPorts() []int {
+	out := make([]int, 0, StreamingSlots)
+	for s := 0; s < StreamingSlots; s++ {
+		out = append(out, StreamingSlot(s).WebUI)
+	}
+	return out
+}
+
+// inStreamingSlots reports whether p is one of any slot's ports.
+func inStreamingSlots(p int) bool {
+	for s := 0; s < StreamingSlots; s++ {
+		set := StreamingSlot(s)
+		if p == set.WebUI {
+			return true
+		}
+		for _, q := range append(append([]int{}, set.TCP...), set.UDP...) {
+			if p == q {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // NetBirdStandbyApp is the app id that owns the NetBird standby ports.
 const NetBirdStandbyApp = "netbird-standby"
 
@@ -138,7 +223,7 @@ func Reserved(p int) bool {
 			return true
 		}
 	}
-	return false
+	return inStreamingSlots(p)
 }
 
 // owned are fixed ports one app may publish (and no other).

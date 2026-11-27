@@ -108,9 +108,34 @@ export function MakeHADialog({ kind, id, name, onClose, onJob }: { kind: Workloa
                 </dd>
               </>
             )}
+            {(r.shares ?? []).length > 0 && (
+              <>
+                <dt>Shared folders</dt>
+                <dd>
+                  {(r.shares ?? []).map((s) => (
+                    <div key={s.id}>
+                      {s.name} <span className="mono muted">{bytes(s.sizeBytes)}</span> {s.write ? <Badge tone="neutral">read and write</Badge> : <Badge tone="neutral">read only</Badge>}
+                    </div>
+                  ))}
+                  <span className="small muted">
+                    They move to the storage server with it and become its shared folders there, with the same names, permissions and settings: every server
+                    can then give them to {name}. Nobody can use them on this server during the final copy.
+                  </span>
+                </dd>
+              </>
+            )}
             <dt>This server's copy</dt>
             <dd>Kept, unused, until it has run from cluster storage, then for 24 hours (you can delete it sooner).</dd>
           </dl>
+          {(r.notes ?? []).length > 0 && (
+            <Alert tone="warn" title="For the people using its shared folders">
+              <ul className="list">
+                {(r.notes ?? []).map((n) => (
+                  <li key={n}>{n}</li>
+                ))}
+              </ul>
+            </Alert>
+          )}
           <Field label="Priority" hint="Higher recovers first when a server fails (1-100).">
             {(fid) => <TextInput id={fid} value={priority} onChange={(e) => setPriority(e.target.value)} inputMode="numeric" />}
           </Field>

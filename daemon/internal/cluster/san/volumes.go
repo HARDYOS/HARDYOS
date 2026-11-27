@@ -265,6 +265,31 @@ func (r *Root) InUse(ctx context.Context, kind cluster.WorkloadKind, id, pool st
 	return r.inUse(a)
 }
 
+// ShareInUse reports whether the storage server still exports shared
+// folder id of pool to compute servers (a cluster share; the HA
+// conversions' park of a shared folder that moved here refuses then).
+func (r *Root) ShareInUse(ctx context.Context, pool, id string) (bool, error) {
+	if !poolRE.MatchString(pool) {
+		return false, &ValidationError{fmt.Errorf("%q isn't a pool name", pool)}
+	}
+	ds := pool + "/shares/" + id
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	st, err := r.load()
+	if err != nil {
+		return false, err
+	}
+	if st.Desired.UsesDataset(ds) {
+		return true, nil
+	}
+	for _, e := range st.Exports {
+		if e.Dataset == ds {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // EnsureParent caps <pool>/vms, <pool>/apps or the HA conversions'
 // incoming folder as DatasetCreate caps the first two: a compute server's
 // copy can't fill the storage server's pool.

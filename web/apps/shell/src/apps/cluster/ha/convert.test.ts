@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { type Conversion, canAbandon, canUndo, isLastCopy, keptID } from "./haApi";
+import { api } from "../../../api";
+import { nodeApi } from "../../../cluster/scope";
+import { type Conversion, canAbandon, canUndo, isLastCopy, keptDeleteApi, keptID, keptKind } from "./haApi";
 
 const conv = (over: Partial<Conversion>): Conversion => ({
   id: "abc",
@@ -43,5 +45,12 @@ describe("conversions", () => {
   it("reads a kept copy's workload from its name", () => {
     expect(keptID("vm-web-1764240000")).toBe("web");
     expect(keptID("app-home-assistant-1764240000")).toBe("home-assistant");
+    expect(keptID("share-media-1764240000")).toBe("media");
+    expect(keptKind({ kind: "share" })).toBe("shared folder");
+  });
+  it("deletes another member's kept copy through that member's own API", () => {
+    expect(keptDeleteApi({ deleteOn: undefined })).toBe(api);
+    expect(keptDeleteApi({ deleteOn: "c2" })).toBe(nodeApi("c2"));
+    expect(keptDeleteApi({ deleteOn: "c2" })).not.toBe(api);
   });
 });
