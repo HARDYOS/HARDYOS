@@ -7329,6 +7329,7 @@ paths:
               properties:
                 node: { type: string }
                 stopOthers: { type: boolean }
+                offline: { type: boolean, description: "move offline the VMs the local-network check keeps from moving live (else they stay and are reported)" }
                 confirm: { type: string }
       responses:
         "202": { $ref: "#/components/responses/JobAccepted" }
@@ -12618,6 +12619,8 @@ components:
         name: { type: string }
         fits: { type: boolean }
         reason: { type: string }
+        live: { type: boolean, description: "it can take the VM live: the local-network check of the two servers and the storage server passes" }
+        liveReason: { type: string }
     ClusterMoveCandidates:
       type: object
       required: [placement, candidates, live, pinned, ownerDown]

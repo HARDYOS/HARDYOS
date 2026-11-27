@@ -130,6 +130,28 @@ func TestHostnamesRemoteApp(t *testing.T) {
 	}
 	fw.deny.Store(false)
 
+	// Windows opened on the desktop's hostname use the app's name only when
+	// that name reaches the very member running it (review M1): never when
+	// this server has an app with the same id, nor for another member, nor
+	// when several have it.
+	ctx2 := context.Background()
+	for _, x := range []struct {
+		app  string
+		node cluster.NodeID
+		want bool
+	}{
+		{"remoteapp", "c1", true},
+		{"remoteapp", "c2", false},
+		{"board", "c1", false}, // this server's own board wins on board.<base>
+		{"dup", "c1", false},   // on c1 and c2
+		{"roundcube", "c1", false},
+		{"nope", "c1", false},
+	} {
+		if got := e.server.hostRoutesTo(ctx2, x.app, x.node); got != x.want {
+			t.Errorf("hostRoutesTo(%s, %s) = %v, want %v", x.app, x.node, got, x.want)
+		}
+	}
+
 	// On several other members: refused with their names.
 	if r, body := admin.req("GET", "https://dup.home.example.net/", nil); r.StatusCode != http.StatusConflict || !strings.Contains(body, "c1, c2") {
 		t.Fatalf("dup = %d %s", r.StatusCode, body)

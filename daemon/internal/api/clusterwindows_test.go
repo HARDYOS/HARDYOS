@@ -87,8 +87,17 @@ func windowBackend(t *testing.T) (int, chan *http.Request) {
 // "board" and nas's window proxy runs.
 func windowCluster(t *testing.T) (nas, c1 *clusterNode, admin *client, seen chan *http.Request) {
 	t.Helper()
+	return windowClusterWith(t, nil)
+}
+
+// windowClusterWith is windowCluster with apps of nas's own.
+func windowClusterWith(t *testing.T, nasApps map[string]apps.App) (nas, c1 *clusterNode, admin *client, seen chan *http.Request) {
+	t.Helper()
 	port, seen := windowBackend(t)
-	nasStub := &stubApps{apps: map[string]apps.App{}, pool: "tank"}
+	if nasApps == nil {
+		nasApps = map[string]apps.App{}
+	}
+	nasStub := &stubApps{apps: nasApps, pool: "tank"}
 	c1Stub := &stubApps{apps: map[string]apps.App{
 		"board": {ID: "board", Name: "Board", State: "running", Web: &apps.AppWeb{Port: port, Path: "/start", Scheme: "http"}},
 	}, pool: "tank"}

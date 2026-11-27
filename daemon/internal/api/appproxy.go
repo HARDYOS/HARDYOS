@@ -552,9 +552,11 @@ func (p *appProxy) handler(l *proxyListener) http.Handler {
 		rp.Transport = l.remote
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hostID := l.appID
-		if l.remote != nil && l.remote.app != WebmailAppID {
-			hostID = l.remote.app // its hostname relays to the owner too (webmail is each server's own)
+		hostID := l.appID // a remote window's key: no hostname, no redirect
+		if l.remote != nil && p.s.hosts.underBase(r.Host) && p.s.hostRoutesTo(r.Context(), l.remote.app, l.remote.node) {
+			// Its hostname reaches this very member's app (never this
+			// server's own app with the same id, never another owner).
+			hostID = l.remote.app
 		}
 		if p.s.hosts.redirectOld(w, r, hostID) {
 			// Reached by a name under the base: the app's own hostname.

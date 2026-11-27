@@ -113,9 +113,31 @@ type Source interface {
 	Reports(ctx context.Context, nodes []cluster.NodeID) (map[cluster.NodeID]*Report, map[cluster.NodeID]error)
 }
 
-// Status is the cluster's local-network check now. Outside a cluster it is
-// OK with nothing to check.
+// Status is the cluster-wide local-network check now (the Cluster app's
+// card): every pair of active compute and storage servers. Outside a
+// cluster it is OK with nothing to check.
 func Status(ctx context.Context, src Source) Result {
+	return status(ctx, src, nil)
+}
+
+// StatusFor is the check of only the pairs that matter for one decision
+// (decision 496): among members and every active storage server, e.g. a
+// live move's source and destination, or the compute servers a workload
+// could fail over to. A named member that isn't active (maintenance,
+// rejoining, dead, ...) or isn't a compute or storage server fails it.
+func StatusFor(ctx context.Context, src Source, members ...cluster.NodeID) Result {
+	return status(ctx, src, scopeOf(members))
+}
+
+func scopeOf(members []cluster.NodeID) map[cluster.NodeID]bool {
+	scope := map[cluster.NodeID]bool{}
+	for _, m := range members {
+		scope[m] = true
+	}
+	return scope
+}
+
+func status(ctx context.Context, src Source, scope map[cluster.NodeID]bool) Result {
 	if src == nil {
 		return Result{OK: false, Reason: "the local-network check isn't running on this server", PerMember: []MemberResult{}}
 	}
@@ -124,15 +146,18 @@ func Status(ctx context.Context, src Source) Result {
 		return Result{OK: true, PerMember: []MemberResult{}}
 	}
 	ids := []cluster.NodeID{}
-	for _, n := range Checked(s) {
-		ids = append(ids, n.ID)
+	for _, n := range scoped(s, scope) {
+		if checkable(n) {
+			ids = append(ids, n.ID)
+		}
 	}
 	reps, errs := src.Reports(ctx, ids)
-	return Evaluate(s, reps, errs, time.Now())
+	return evaluate(s, reps, errs, time.Now(), scope)
 }
 
-// Checked lists the servers the check covers: compute and storage, not
-// removed, dead, fenced or joining, by id.
+// Checked lists the servers the check covers: active compute and storage
+// servers, by id (maintenance, rejoining, joining, dead and fenced ones are
+// skipped: nothing new is placed on them).
 func Checked(s *cluster.Snapshot) []*cluster.Node {
 	var out []*cluster.Node
 	for _, n := range s.Nodes {
@@ -148,32 +173,69 @@ func covered(n *cluster.Node) bool {
 	return n != nil && (n.Role == cluster.RoleCompute || n.Role == cluster.RoleStorage) && n.State != cluster.NodeRemoved
 }
 
-func checkable(n *cluster.Node) bool {
-	switch n.State {
-	case cluster.NodeDead, cluster.NodeFenced, cluster.NodeJoining, cluster.NodeRemoved:
-		return false
+func checkable(n *cluster.Node) bool { return n.State == cluster.NodeActive }
+
+// scoped is the servers a result covers: every compute and storage server
+// (scope nil), or the scope's plus the active storage servers, sorted.
+func scoped(s *cluster.Snapshot, scope map[cluster.NodeID]bool) []*cluster.Node {
+	var out []*cluster.Node
+	for _, n := range s.Nodes {
+		if !covered(n) {
+			continue
+		}
+		if scope == nil || scope[n.ID] || (n.Role == cluster.RoleStorage && checkable(n)) {
+			out = append(out, n)
+		}
 	}
-	return true
+	slices.SortFunc(out, func(a, b *cluster.Node) int { return strings.Compare(string(a.ID), string(b.ID)) })
+	return out
 }
+
+// MaxSkew is how far in the future a report's time may be (clocks apart).
+const MaxSkew = 5 * time.Second
 
 // Evaluate judges every member's report with the rules (decision 490).
 func Evaluate(s *cluster.Snapshot, reps map[cluster.NodeID]*Report, errs map[cluster.NodeID]error, now time.Time) Result {
+	return evaluate(s, reps, errs, now, nil)
+}
+
+// EvaluateFor is Evaluate for the pairs among members and the storage
+// servers (StatusFor).
+func EvaluateFor(s *cluster.Snapshot, reps map[cluster.NodeID]*Report, errs map[cluster.NodeID]error, now time.Time, members ...cluster.NodeID) Result {
+	return evaluate(s, reps, errs, now, scopeOf(members))
+}
+
+func evaluate(s *cluster.Snapshot, reps map[cluster.NodeID]*Report, errs map[cluster.NodeID]error, now time.Time, scope map[cluster.NodeID]bool) Result {
 	out := Result{OK: true, PerMember: []MemberResult{}}
 	if s == nil {
 		return out
 	}
-	var all []*cluster.Node
-	for _, n := range s.Nodes {
-		if covered(n) {
-			all = append(all, n)
+	fail := func(why string) {
+		if out.OK {
+			out.OK, out.Reason = false, why
 		}
 	}
-	slices.SortFunc(all, func(a, b *cluster.Node) int { return strings.Compare(string(a.ID), string(b.ID)) })
-	peers := Checked(s)
+	for _, id := range sortedIDs(scope) {
+		if !covered(s.Nodes[id]) {
+			fail(fmt.Sprintf("%s isn't a compute or storage server of the cluster", id))
+		}
+	}
+	all := scoped(s, scope)
+	var peers []*cluster.Node
+	for _, n := range all {
+		if checkable(n) {
+			peers = append(peers, n)
+		}
+	}
 	for _, n := range all {
 		mr := MemberResult{Node: n.ID, Name: n.Name, Role: n.Role, OK: true, Paths: []PathResult{}}
 		if !checkable(n) {
 			mr.Skipped, mr.Reason = true, "not checked while it is "+string(n.State)
+			if scope != nil {
+				// Named for this decision: it can't take part now.
+				mr.OK, mr.Reason = false, fmt.Sprintf("%s is %s", label(n), n.State)
+				fail(mr.Reason)
+			}
 			out.PerMember = append(out.PerMember, mr)
 			continue
 		}
@@ -187,6 +249,8 @@ func Evaluate(s *cluster.Snapshot, reps map[cluster.NodeID]*Report, errs map[clu
 			mr.OK, mr.Reason = false, fmt.Sprintf("couldn't get %s's check: %s", label(n), why)
 		case rep.Node != n.ID:
 			mr.OK, mr.Reason = false, fmt.Sprintf("%s answered with another server's check", label(n))
+		case rep.Checked.Sub(now) > MaxSkew:
+			mr.OK, mr.Reason = false, fmt.Sprintf("%s's check is dated %s in the future (check its clock)", label(n), rep.Checked.Sub(now).Round(time.Second))
 		case now.Sub(rep.Checked) > MaxAge:
 			mr.OK, mr.Reason = false, fmt.Sprintf("%s's check is %s old", label(n), now.Sub(rep.Checked).Round(time.Second))
 		}
@@ -222,17 +286,20 @@ func Evaluate(s *cluster.Snapshot, reps map[cluster.NodeID]*Report, errs map[clu
 				mr.Paths = append(mr.Paths, pr)
 			}
 		}
-		if rep != nil && !mr.OK && mr.Reason == "" {
-			mr.Reason = "its check failed"
-		}
 		if !mr.OK {
-			out.OK = false
-			if out.Reason == "" {
-				out.Reason = mr.Reason
-			}
+			fail(mr.Reason)
 		}
 		out.PerMember = append(out.PerMember, mr)
 	}
+	return out
+}
+
+func sortedIDs(m map[cluster.NodeID]bool) []cluster.NodeID {
+	out := make([]cluster.NodeID, 0, len(m))
+	for id := range m {
+		out = append(out, id)
+	}
+	slices.Sort(out)
 	return out
 }
 

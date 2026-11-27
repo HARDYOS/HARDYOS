@@ -11816,6 +11816,9 @@ export interface components {
             name: string;
             fits: boolean;
             reason?: string;
+            /** @description it can take the VM live: the local-network check of the two servers and the storage server passes */
+            live?: boolean;
+            liveReason?: string;
         };
         ClusterMoveCandidates: {
             placement: components["schemas"]["ClusterPlacement"];
@@ -22031,6 +22034,8 @@ export interface operations {
                 "application/json": {
                     node: string;
                     stopOthers?: boolean;
+                    /** @description move offline the VMs the local-network check keeps from moving live (else they stay and are reported) */
+                    offline?: boolean;
                     confirm?: string;
                 };
             };

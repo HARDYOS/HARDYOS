@@ -51,7 +51,7 @@ type Mover struct {
 	// LocalNetwork is the local-network check (decision 492): a live
 	// migration needs the servers to share the LAN and the storage network.
 	// Nil: not checked.
-	LocalNetwork func(ctx context.Context) (ok bool, reason string)
+	LocalNetwork func(ctx context.Context, from, to cluster.NodeID) (ok bool, reason string)
 
 	// applied is the highest log index this mover's proposals reached:
 	// every step names it, and the node waits until it has applied it
@@ -209,8 +209,8 @@ func (m *Mover) MoveWith(ctx context.Context, r cluster.MoveRequest, actor clust
 			return nil, fmt.Errorf("%w: it isn't running (move it offline)", ErrNotLive)
 		}
 		if m.LocalNetwork != nil {
-			if ok, why := m.LocalNetwork(ctx); !ok {
-				return nil, fmt.Errorf("%w: the servers don't share a local network yet (%s)", ErrNotLive, why)
+			if ok, why := m.LocalNetwork(ctx, p.Owner, to); !ok {
+				return nil, fmt.Errorf("%w: %w yet (%s)", ErrNotLive, ErrNoLocalNetwork, why)
 			}
 		}
 		return m.live(ctx, s, p, to, actor, o)
@@ -561,11 +561,19 @@ func ownerFencedConfirmed(s *cluster.Snapshot, n cluster.NodeID) bool {
 // the rest (HA first, by priority), stop the workloads that can't move
 // when stopOthers, else report them.
 func (m *Mover) Drain(ctx context.Context, node cluster.NodeID, stopOthers bool, actor cluster.Actor) ([]cluster.MoveResult, error) {
-	return m.DrainWith(ctx, node, stopOthers, actor, nil)
+	return m.DrainWith(ctx, node, DrainOptions{StopOthers: stopOthers}, actor, nil)
 }
 
-// DrainWith is Drain with progress.
-func (m *Mover) DrainWith(ctx context.Context, node cluster.NodeID, stopOthers bool, actor cluster.Actor, progress Progress) ([]cluster.MoveResult, error) {
+// DrainOptions are a drain's choices. StopOthers stops what can't move;
+// Offline moves offline the VMs the local-network check keeps from moving
+// live (without it they stay and are reported: decision 496).
+type DrainOptions struct {
+	StopOthers bool
+	Offline    bool
+}
+
+// DrainWith is Drain with its options and progress.
+func (m *Mover) DrainWith(ctx context.Context, node cluster.NodeID, o DrainOptions, actor cluster.Actor, progress Progress) ([]cluster.MoveResult, error) {
 	s := m.Cluster.State().Snapshot()
 	var todo []*cluster.Placement
 	for _, p := range state.SortedPlacements(s) {
@@ -593,7 +601,7 @@ func (m *Mover) DrainWith(ctx context.Context, node cluster.NodeID, stopOthers b
 			continue
 		}
 		if cur.Pinned {
-			if stopOthers && cur.Requested == cluster.RequestRunning {
+			if o.StopOthers && cur.Requested == cluster.RequestRunning {
 				if err := m.propose(ctx, cluster.CmdRequested, state.RequestedSet{Workload: cur.Workload, Generation: cur.Generation, Requested: cluster.RequestStopped}, actor); err != nil {
 					problems = append(problems, cur.Name+": "+err.Error())
 				}
@@ -607,8 +615,15 @@ func (m *Mover) DrainWith(ctx context.Context, node cluster.NodeID, stopOthers b
 			mode = cluster.MoveLive
 		}
 		res, err := m.Move(ctx, cluster.MoveRequest{Workload: cur.Workload, Mode: mode, Generation: cur.Generation}, actor)
+		if err != nil && mode == cluster.MoveLive && errors.Is(err, ErrNoLocalNetwork) && !o.Offline {
+			// Not quietly offline because of the network: the administrator
+			// chooses (decision 496).
+			problems = append(problems, cur.Name+": "+err.Error()+"; drain again allowing offline moves to stop and move it")
+			continue
+		}
 		if err != nil && mode == cluster.MoveLive {
-			// Can't move live (CPU, a disc inserted…): offline instead.
+			// Can't move live (CPU, a disc inserted…, or the network with
+			// the administrator's agreement): offline instead.
 			again := m.Cluster.State().Snapshot().Placements[cur.Workload]
 			if again != nil && again.Owner == node {
 				res, err = m.Move(ctx, cluster.MoveRequest{Workload: cur.Workload, Mode: cluster.MoveOffline, Generation: again.Generation}, actor)

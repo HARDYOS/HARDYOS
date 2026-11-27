@@ -67,11 +67,17 @@ checks:
 
 Cluster › Overview › **Local network** shows each server's probes of the
 others per path, with round trip, MTU, same subnet or routed, and what
-failed; **Check now** probes at once. While it fails, turning high
-availability on (Workloads and HA) and live moves are refused with the
-reason, offline moves still work, and workloads that already are highly
-available keep failing over. Each server sends a notification when its own
-result changes.
+failed; **Check now** probes at once. Servers in maintenance or rejoining
+aren't checked. Each decision looks only at the servers it involves, with
+the storage server (decision 496): a live move at its two servers (the Move
+dialog says per server whether it can go live; the HA coordinator's own
+live moves are checked too), turning high availability on at the servers
+the workload could run on (its preferred ones when it is restricted to
+them). Those are refused with the reason; offline moves still work, and
+workloads that already are highly available keep failing over. **Move
+everything off…** leaves a VM that can't move live because of the network
+running where it is and reports it, unless you tick **Move offline**. Each
+server sends a notification when its own result changes.
 
 ## Creating the cluster
 

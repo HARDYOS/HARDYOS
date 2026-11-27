@@ -273,6 +273,15 @@ func (h *hostRuntime) app(id string) (apps.App, bool) {
 	return a, ok
 }
 
+// hasApp reports whether the hostnames know this server's apps (known) and
+// whether one has that id.
+func (h *hostRuntime) hasApp(id string) (known, has bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	_, has = h.apps[id]
+	return h.appsKnow, has
+}
+
 // appForLabel finds the app a label names.
 func (h *hostRuntime) appForLabel(label string) (apps.App, bool) {
 	switch label {

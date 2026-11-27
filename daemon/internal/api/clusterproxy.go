@@ -960,7 +960,7 @@ func (c *clusterAPI) openRemoteWindow(w http.ResponseWriter, r *http.Request, u 
 	}
 	// Used by its hostname, the desktop opens the app at its own name here
 	// too, which relays to the owner (decision 494).
-	if !viaGateway(r) && app != WebmailAppID && c.s.hosts.onDesktopHost(r) {
+	if !viaGateway(r) && c.s.hosts.onDesktopHost(r) && c.s.hostRoutesTo(r.Context(), app, node) {
 		if hu := c.s.hosts.hostURL(app); hu != "" {
 			writeJSON(w, http.StatusOK, AppOpen{URL: hu + next, Proxied: true, Hostname: true})
 			return

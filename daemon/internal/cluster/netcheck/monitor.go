@@ -44,9 +44,19 @@ type Monitor struct {
 	runMu   sync.Mutex
 	known   *bool // this server's last notified state
 	pending *bool // the state seen once, waiting for a second round
-	cache   *Result
-	cacheAt time.Time
+	// fetched caches the other members' reports for 5 seconds (the Move
+	// dialog judges one pair per candidate; the overview asks often).
+	fetched map[cluster.NodeID]fetchedReport
 }
+
+type fetchedReport struct {
+	rep *Report
+	err error
+	at  time.Time
+}
+
+// reportCache is how long another member's fetched report is reused.
+const reportCache = 5 * time.Second
 
 var _ Source = (*Monitor)(nil)
 
@@ -129,6 +139,17 @@ func (m *Monitor) Reports(ctx context.Context, nodes []cluster.NodeID) (map[clus
 			}
 			continue
 		}
+		m.mu.Lock()
+		f, ok := m.fetched[id]
+		m.mu.Unlock()
+		if ok && time.Since(f.at) < reportCache {
+			if f.err != nil {
+				errs[id] = f.err
+			} else {
+				reps[id] = f.rep
+			}
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -136,14 +157,22 @@ func (m *Monitor) Reports(ctx context.Context, nodes []cluster.NodeID) (map[clus
 			defer cancel()
 			var r *Report
 			err := m.Peers.Call(cctx, id, http.MethodGet, "/"+ReportPath, nil, &r)
+			if err == nil && r == nil {
+				err = errors.New("it has no report yet")
+			}
+			if ctx.Err() == nil {
+				m.mu.Lock()
+				if m.fetched == nil {
+					m.fetched = map[cluster.NodeID]fetchedReport{}
+				}
+				m.fetched[id] = fetchedReport{rep: r, err: err, at: time.Now()}
+				m.mu.Unlock()
+			}
 			mu.Lock()
 			defer mu.Unlock()
-			switch {
-			case err != nil:
+			if err != nil {
 				errs[id] = err
-			case r == nil:
-				errs[id] = errors.New("it has no report yet")
-			default:
+			} else {
 				reps[id] = r
 			}
 		}()
@@ -152,21 +181,14 @@ func (m *Monitor) Reports(ctx context.Context, nodes []cluster.NodeID) (map[clus
 	return reps, errs
 }
 
-// Status is Status(ctx, m), cached for 5 seconds (the Move dialog and the
-// overview ask often).
-func (m *Monitor) Status(ctx context.Context) Result {
-	m.mu.Lock()
-	if m.cache != nil && time.Since(m.cacheAt) < 5*time.Second {
-		r := *m.cache
-		m.mu.Unlock()
-		return r
-	}
-	m.mu.Unlock()
-	r := Status(ctx, m)
-	m.mu.Lock()
-	m.cache, m.cacheAt = &r, time.Now()
-	m.mu.Unlock()
-	return r
+// Status is the cluster-wide Status(ctx, m) (other members' reports are
+// reused for 5 seconds).
+func (m *Monitor) Status(ctx context.Context) Result { return Status(ctx, m) }
+
+// StatusFor is StatusFor(ctx, m, members...): the pairs among members and
+// the storage servers only (a live move, turning HA on).
+func (m *Monitor) StatusFor(ctx context.Context, members ...cluster.NodeID) Result {
+	return StatusFor(ctx, m, members...)
 }
 
 // Fresh asks every member to probe now, then judges (Check now).
@@ -192,13 +214,14 @@ func (m *Monitor) Fresh(ctx context.Context) Result {
 	}
 	wg.Wait()
 	m.mu.Lock()
-	m.cache = nil
+	m.fetched = nil
 	m.mu.Unlock()
 	return m.Status(ctx)
 }
 
 // RunNow runs a round unless one ran in the last 10 seconds, and returns
-// the latest report.
+// the latest report. The round runs to its end even when the asking
+// request goes away (its own bound: the prober's timeouts).
 func (m *Monitor) RunNow(ctx context.Context) *Report {
 	m.runMu.Lock()
 	defer m.runMu.Unlock()
@@ -206,7 +229,7 @@ func (m *Monitor) RunNow(ctx context.Context) *Report {
 	recent := time.Since(m.lastRun) < 10*time.Second && m.report != nil
 	m.mu.Unlock()
 	if !recent {
-		m.round(ctx)
+		m.round(context.WithoutCancel(ctx))
 	}
 	return m.Latest()
 }
@@ -222,8 +245,12 @@ func (m *Monitor) round(ctx context.Context) {
 	p := &Prober{Dial: m.Local.DialPeer, Port: m.Port, Interfaces: m.interfaces()}
 	s := m.Local.State().Snapshot()
 	rep := p.Probe(ctx, self, Checked(s))
+	if ctx.Err() != nil {
+		// Cut short (shutting down): its failures say nothing of the network.
+		return
+	}
 	m.mu.Lock()
-	m.report, m.lastRun, m.cache = &rep, time.Now(), nil
+	m.report, m.lastRun = &rep, time.Now()
 	m.mu.Unlock()
 }
 
@@ -259,9 +286,6 @@ func (m *Monitor) observe(ctx context.Context) {
 	if err != nil || m.OnChange == nil {
 		return
 	}
-	m.mu.Lock()
-	m.cache = nil
-	m.mu.Unlock()
 	all := m.Status(ctx)
 	var mine *MemberResult
 	for i := range all.PerMember {

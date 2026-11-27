@@ -187,6 +187,7 @@ function Nodes({ nodes, self, onJob }: { nodes: NodeHA[]; self?: string; onJob: 
 
 function DrainDialog({ node, onClose, onJob }: { node: NodeHA; onClose: () => void; onJob: (j: Job) => void }) {
   const [stopOthers, setStopOthers] = useState(false);
+  const [offline, setOffline] = useState(false);
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -195,7 +196,7 @@ function DrainDialog({ node, onClose, onJob }: { node: NodeHA; onClose: () => vo
     if (!ready) return;
     setBusy(true);
     try {
-      onJob(await drainNode(node.id, stopOthers, stopOthers ? confirm : undefined));
+      onJob(await drainNode(node.id, stopOthers, stopOthers ? confirm : undefined, offline));
       onClose();
     } catch (err) {
       setError(errorMessage(err));
@@ -218,6 +219,11 @@ function DrainDialog({ node, onClose, onJob }: { node: NodeHA; onClose: () => vo
       }
     >
       <Toggle checked={stopOthers} onChange={setStopOthers} label="Also stop what can't move (VMs with passthrough devices)" />
+      <Toggle
+        checked={offline}
+        onChange={setOffline}
+        label="Move offline (a short stop) the VMs that can't move live because the servers don't share a local network"
+      />
       {stopOthers && (
         <Field label={`Type ${node.id} to confirm`}>{(id) => <TextInput id={id} value={confirm} onChange={(e) => setConfirm(e.target.value)} />}</Field>
       )}

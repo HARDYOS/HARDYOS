@@ -28,7 +28,9 @@ export function MoveDialog({
   const [error, setError] = useState<string | null>(null);
   const c = q.data;
   const forced = !!c && (c.pinned || c.ownerDown);
-  const canLive = !!c?.live;
+  // Live to the chosen server needs that pair on one local network.
+  const target = c?.candidates.find((x) => x.id === to);
+  const canLive = !!c?.live && (!target || target.live === true);
   const mode = canLive && live ? "live" : "offline";
   const needsTarget = !!c?.pinned;
   const ready = !!c && (!forced || confirm === c.placement.name) && (!needsTarget || to !== "");
@@ -92,9 +94,9 @@ export function MoveDialog({
               </Select>)}
             </Field>
           )}
-          {!canLive && c.liveReason && kind === "vm" && (
+          {!canLive && (target?.liveReason || c.liveReason) && kind === "vm" && (
             <p className="muted">
-              <Badge tone="neutral">Offline only</Badge> {c.liveReason}.
+              <Badge tone="neutral">Offline only</Badge> {c.live ? target?.liveReason : c.liveReason}.
             </p>
           )}
           {kind === "app" && <p className="muted">Apps stop for a moment while they move; their published address follows them.</p>}

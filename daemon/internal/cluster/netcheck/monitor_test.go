@@ -110,7 +110,7 @@ func TestMonitorNotifiesOwnChangesAfterTwoRounds(t *testing.T) {
 		t.Fatalf("notified for c2: %v", notes)
 	}
 	m.mu.Lock()
-	m.cache = nil
+	m.fetched = nil
 	m.mu.Unlock()
 	if r := m.Status(context.Background()); r.OK {
 		t.Fatalf("c2's missing report: %+v", r)

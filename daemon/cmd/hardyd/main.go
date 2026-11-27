@@ -259,7 +259,7 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		// The local-network check: live moves and turning HA on need it.
 		if netMonitor = wireNetcheck(parts, alerts, log); netMonitor != nil {
 			netCheck = netMonitor
-			clusterHA.NetCheck = netMonitor.Status
+			clusterHA.NetCheck = netMonitor.StatusFor
 		}
 		health := newHealth(parts, clusterStorage, clusterHA)
 		clusterCore.Service.Health = health.Get

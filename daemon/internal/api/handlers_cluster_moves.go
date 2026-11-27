@@ -127,6 +127,10 @@ func (s *Server) handleClusterMove(w http.ResponseWriter, r *http.Request, u *au
 					writeError(w, http.StatusBadRequest, "no_fit", string(req.To)+" can't take it: "+c.Reason)
 					return
 				}
+				if req.Mode == cluster.MoveLive && !c.Live {
+					writeError(w, http.StatusBadRequest, "not_live", "it can't move live to "+string(req.To)+": "+c.LiveReason)
+					return
+				}
 			}
 		}
 		if !found {
@@ -154,6 +158,9 @@ type ClusterDrainRequest struct {
 	Node       cluster.NodeID `json:"node"`
 	StopOthers bool           `json:"stopOthers"`
 	Confirm    string         `json:"confirm,omitempty"`
+	// Offline moves offline the VMs the local-network check keeps from
+	// moving live (otherwise they stay and are reported; decision 496).
+	Offline bool `json:"offline,omitempty"`
 }
 
 func (s *Server) handleClusterDrain(w http.ResponseWriter, r *http.Request, u *auth.User) {
@@ -174,6 +181,6 @@ func (s *Server) handleClusterDrain(w http.ResponseWriter, r *http.Request, u *a
 		writeError(w, http.StatusBadRequest, "confirm_required", "type the server's name ("+string(req.Node)+") to stop what can't move")
 		return
 	}
-	s.submit(w, r, u, ha.JobDrain, "Move everything off "+string(req.Node), ha.DrainParams{Node: req.Node, StopOthers: req.StopOthers, Actor: s.clusterActor(svc, u)},
+	s.submit(w, r, u, ha.JobDrain, "Move everything off "+string(req.Node), ha.DrainParams{Node: req.Node, StopOthers: req.StopOthers, Offline: req.Offline, Actor: s.clusterActor(svc, u)},
 		"cluster.drain", string(req.Node), nil)
 }

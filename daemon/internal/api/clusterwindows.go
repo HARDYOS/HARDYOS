@@ -154,6 +154,24 @@ func (c *clusterAPI) transport(node cluster.NodeID, appID string) http.RoundTrip
 	return rw
 }
 
+// hostRoutesTo reports whether the app's hostname here reaches its window on
+// node (decision 494 amended): only when this server has no app with that id
+// (its own app wins on the name) and the name routes to that very member.
+// Otherwise a window on another member stays on its port (a remote window).
+func (s *Server) hostRoutesTo(ctx context.Context, appID string, node cluster.NodeID) bool {
+	if s.windows == nil || node == "" || appID == WebmailAppID {
+		return false
+	}
+	if id, ok := appIDForLabel(labelFor(appID)); !ok || id != appID {
+		return false
+	}
+	if known, has := s.hosts.hasApp(appID); !known || has {
+		return false
+	}
+	got, _ := s.windows.route(ctx, appID)
+	return got == node
+}
+
 // ---- the directory of app windows (peer API) -------------------------------------
 
 type windowDirectory struct {
