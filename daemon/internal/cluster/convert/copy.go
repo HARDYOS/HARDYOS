@@ -163,6 +163,26 @@ func treeBytes(t *hacopy.Tree) int64 {
 	return n
 }
 
+// refOf is what a local ref names on the storage server's side (the
+// workload, or a shared folder that moves with an app).
+func refOf(local hacopy.Ref) cluster.WorkloadRef {
+	return cluster.WorkloadRef{Kind: local.Kind, ID: local.ID}
+}
+
+// convFor is the conversion id a local ref's copy is received under: the
+// conversion's own, or a shared folder's (ShareMove.Conv).
+func convFor(r *Record, local hacopy.Ref) string {
+	if local.Kind == hacopy.KindShare {
+		for _, s := range r.Options.Shares {
+			if s.ID == local.ID {
+				return s.Conv
+			}
+		}
+		return "" // refused by both sides: never the app's own copy
+	}
+	return r.ID
+}
+
 // sendToStorage copies a local workload's datasets into the storage
 // server's incoming copy until every snapshot is there.
 func (c *Converter) sendToStorage(ctx context.Context, r *Record, local hacopy.Ref, actor cluster.Actor, report func(done, total int64)) error {
@@ -171,7 +191,7 @@ func (c *Converter) sendToStorage(ctx context.Context, r *Record, local hacopy.R
 		if err := c.Priv.Call(ctx, hacopy.OpTree, hacopy.TreeArgs{Ref: local}, &src); err != nil {
 			return err
 		}
-		dst, err := c.Storage.HATree(ctx, storagesvc.HARequest{Workload: r.Ref(), Pool: r.StoragePool, Conv: r.ID})
+		dst, err := c.Storage.HATree(ctx, storagesvc.HARequest{Workload: refOf(local), Pool: r.StoragePool, Conv: convFor(r, local)})
 		if err != nil {
 			return err
 		}
@@ -197,7 +217,7 @@ func (c *Converter) sendToStorage(ctx context.Context, r *Record, local hacopy.R
 }
 
 func (c *Converter) pushStep(ctx context.Context, r *Record, local hacopy.Ref, st step, actor cluster.Actor, tick func(int64)) (int64, error) {
-	open, err := c.Storage.HAOpenRecv(ctx, storagesvc.HAStreamRequest{Workload: r.Ref(), Pool: r.StoragePool, Conv: r.ID,
+	open, err := c.Storage.HAOpenRecv(ctx, storagesvc.HAStreamRequest{Workload: refOf(local), Pool: r.StoragePool, Conv: convFor(r, local),
 		Child: st.Child, Label: st.To, Actor: actor})
 	if err != nil {
 		return 0, fmt.Errorf("the storage server: %w", err)

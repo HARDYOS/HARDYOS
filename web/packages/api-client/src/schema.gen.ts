@@ -10582,6 +10582,11 @@ export interface components {
             forwarding: boolean;
             /** @description This server's NetBird address: add it in Moonlight away from home */
             netbirdAddress?: string;
+            /** @description Sunshine's base port in this VM (its port set, decision 506; 47989 is the standard one) */
+            base?: number;
+            /** @description What to add in Moonlight away from home: the NetBird address, with :base when it isn't the standard one */
+            moonlight?: string;
+            /** @description The ports forwarded to this VM (its port set) */
             ports: {
                 tcp: number[];
                 udp: number[];
@@ -12072,13 +12077,22 @@ export interface components {
             mode?: "nfs" | "block";
             modeReason?: string;
             problems: string[];
+            /** @description The shared folders an app takes along to the storage server (decision 500) */
+            shares?: {
+                id: string;
+                name: string;
+                sizeBytes: number;
+                write: boolean;
+            }[];
+            /** @description What changes for the people using its shared folders */
+            notes?: string[];
             open?: components["schemas"]["ClusterConversion"];
         };
         ClusterKeptCopy: {
             pool: string;
             name: string;
             /** @enum {string} */
-            kind: "vm" | "app";
+            kind: "vm" | "app" | "share";
             id: string;
             /** @enum {string} */
             side: "local" | "cluster";
@@ -12093,6 +12107,8 @@ export interface components {
             /** @description The conversion that put it aside */
             conv?: string;
             node: string;
+            /** @description The member whose own API deletes it (POST /nodes/{deleteOn}/cluster/kept/delete, with that member's guards); absent: this server's API (its own copies and the storage server's) */
+            deleteOn?: string;
         };
         /** @description One server's probes of one other server over one path (lan or storage). */
         ClusterNetcheckPath: {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/apps"
@@ -66,6 +67,10 @@ type Readiness struct {
 	Mode       string   `json:"mode,omitempty"`
 	ModeReason string   `json:"modeReason,omitempty"`
 	Problems   []string `json:"problems"`
+	// Shares are the shared folders an app takes along to the storage
+	// server (decision 500); Notes what changes for the people using them.
+	Shares []ReadyShare `json:"shares"`
+	Notes  []string     `json:"notes"`
 	// Open is a conversion of it that failed or was interrupted.
 	Open *Record `json:"open,omitempty"`
 }
@@ -82,6 +87,8 @@ type localInfo struct {
 	uid       int
 	cpuModel  string
 	problems  []string
+	shares    []apps.HAShare
+	held      string // the conversion holding an app ("" none)
 }
 
 func (c *Converter) localCheck(ctx context.Context, w cluster.WorkloadRef, storagePool string, setCPU bool, cpuModel string) (*localInfo, error) {
@@ -99,7 +106,7 @@ func (c *Converter) localCheck(ctx context.Context, w cluster.WorkloadRef, stora
 			return nil, err
 		}
 		return &localInfo{name: res.Name, localPool: res.Pool, running: res.Running, hash: res.Hash, memoryMB: res.MemoryMB, dir: res.Dir,
-			mode: res.Mode, reason: res.ModeReason, uid: res.UID, problems: res.Problems}, nil
+			mode: res.Mode, reason: res.ModeReason, uid: res.UID, problems: res.Problems, shares: res.Shares, held: res.HeldBy}, nil
 	}
 	return nil, fmt.Errorf("unknown kind %q", w.Kind)
 }
@@ -113,7 +120,7 @@ func cpuChoice(snap *cluster.Snapshot, choice string) (bool, string) {
 
 // Check says whether a local workload can be made highly available now.
 func (c *Converter) Check(ctx context.Context, w cluster.WorkloadRef, cpu string) (*Readiness, error) {
-	res := &Readiness{Workload: w, Problems: []string{}}
+	res := &Readiness{Workload: w, Problems: []string{}, Shares: []ReadyShare{}, Notes: []string{}}
 	self, snap, err := c.hostCheck()
 	if err != nil {
 		if errors.Is(err, ErrNotMember) {
@@ -156,7 +163,25 @@ func (c *Converter) Check(ctx context.Context, w cluster.WorkloadRef, cpu string
 	}
 	res.Name, res.Running, res.LocalPool, res.MemoryMB, res.CPUModel = li.name, li.running, li.localPool, li.memoryMB, li.cpuModel
 	res.Mode, res.ModeReason = li.mode, li.reason
-	res.Problems = append(res.Problems, li.problems...)
+	held := res.Open != nil && res.Open.Direction == DirHA && len(res.Open.Options.Shares) > 0 && phaseAt(haPhases, res.Open.Phase) > phaseAt(haPhases, PhaseCopy)
+	for _, p := range li.problems {
+		if held && strings.HasPrefix(p, "shared folder ") {
+			continue // held (unmounted) by the open conversion, which lets go of it first
+		}
+		res.Problems = append(res.Problems, p)
+	}
+	if probs, notes, ready := c.shareProblems(ctx, w, li); len(ready) > 0 || len(probs) > 0 {
+		res.Shares, res.Notes = ready, append(res.Notes, notes...)
+		for _, p := range probs {
+			if held && strings.HasSuffix(p, " isn't mounted on this server") {
+				continue // held by the open conversion; a resume lets go of it first
+			}
+			res.Problems = append(res.Problems, p)
+		}
+		for _, s := range ready {
+			res.SizeBytes += s.SizeBytes
+		}
+	}
 	if w.Kind == cluster.KindApp {
 		if u, ok := snap.AppUIDs[w.ID]; ok && u != li.uid {
 			res.Problems = append(res.Problems, fmt.Sprintf("the cluster gave %s another user id (%d)", w.ID, u))
@@ -169,7 +194,7 @@ func (c *Converter) Check(ctx context.Context, w cluster.WorkloadRef, cpu string
 	}
 	var t hacopy.Tree
 	if err := c.Priv.Call(ctx, hacopy.OpTree, hacopy.TreeArgs{Ref: hacopy.Ref{Kind: w.Kind, ID: w.ID, Pool: li.localPool, Side: hacopy.SideLocal}}, &t); err == nil {
-		res.SizeBytes = treeBytes(&t)
+		res.SizeBytes += treeBytes(&t)
 		if p := snapsProblem(&t); p != "" {
 			res.Problems = append(res.Problems, p)
 		}
@@ -298,6 +323,16 @@ func (c *Converter) toHA(jc *jobs.Context, self cluster.Node, snap *cluster.Snap
 			r.Options.Storage = nil
 			_ = c.save(jc, r)
 		}
+		if len(r.Options.Shares) > 0 {
+			// Shared folders the earlier attempt had set up there go aside
+			// too (what they were still receiving stays for the resume), and
+			// this server's are let go of: this attempt holds them again
+			// before its own final snapshot.
+			if err := c.asideShares(jc, r, p.Actor, false); err != nil {
+				return nil, fmt.Errorf("putting the earlier attempt's shared folders aside: %w", err)
+			}
+			c.releaseShares(r)
+		}
 		if ok, why := state.HAEligible(snap, self.ID); !ok {
 			return nil, errors.New("this server " + why)
 		}
@@ -322,9 +357,21 @@ func (c *Converter) toHA(jc *jobs.Context, self cluster.Node, snap *cluster.Snap
 		if len(li.problems) > 0 {
 			return nil, &Refused{Problems: li.problems}
 		}
+		if probs, _, _ := c.shareProblems(jc, w, li); len(probs) > 0 {
+			return nil, &Refused{Problems: probs}
+		}
+		if err := c.planShares(jc, r, li); err != nil {
+			return nil, err
+		}
 		r.Name, r.LocalPool, r.Options.Hash, r.Options.Dir, r.Options.Mode, r.Options.UID = li.name, li.localPool, li.hash, li.dir, li.mode, li.uid
-		if at <= phaseAt(haPhases, PhaseCopy) {
+		// Every attempt, before its hold (decision 509): running now counts;
+		// stopped counts unless this conversion stopped it (it still holds
+		// the app, or, a VM, an earlier attempt of it got past the copy).
+		switch {
+		case li.running || at <= phaseAt(haPhases, PhaseCopy):
 			r.WasRunning = li.running
+		case w.Kind == cluster.KindApp && li.held != r.ID:
+			r.WasRunning = false // let go of since, and off: it stays off
 		}
 		local.Pool = r.LocalPool
 		if w.Kind == cluster.KindApp {
@@ -350,7 +397,11 @@ func (c *Converter) toHA(jc *jobs.Context, self cluster.Node, snap *cluster.Snap
 			if err := c.ensureSnap(jc, local, snapName(r.ID, "pre", attempt)); err != nil {
 				return nil, err
 			}
-			if err := c.sendToStorage(jc, r, local, p.Actor, report(3, 60, "Copying while it runs")); err != nil {
+			if err := c.sendToStorage(jc, r, local, p.Actor, report(3, 40, "Copying while it runs")); err != nil {
+				return nil, err
+			}
+			// Its shared folders, while people still use them.
+			if err := c.copyShares(jc, r, "pre", attempt, p.Actor, report, 40, 60); err != nil {
 				return nil, err
 			}
 		}
@@ -367,9 +418,17 @@ func (c *Converter) toHA(jc *jobs.Context, self cluster.Node, snap *cluster.Snap
 			// From the final snapshot until its folder is parked (or the
 			// conversion gives up and starts it again) nothing starts it or
 			// writes its folder: no containers, read-only, starts refused.
-			if err := c.Priv.Call(jc, priv.OpAppsHAHold, apps.HAHoldArgs{ID: w.ID, Conv: r.ID}, nil); err != nil {
+			// The state it was in before is recorded with the hold (decision
+			// 504): whatever ends the hold starts it again only if it ran.
+			if err := c.Priv.Call(jc, priv.OpAppsHAHold, apps.HAHoldArgs{ID: w.ID, Conv: r.ID, WasRunning: r.WasRunning}, nil); err != nil {
 				c.restartLocal(r)
 				return nil, fmt.Errorf("holding it for the move: %w", err)
+			}
+			// Its shared folders too: from their final snapshot nobody
+			// writes them here (file sharing lets go, read-only, unmounted).
+			if err := c.holdShares(jc, r); err != nil {
+				c.restartLocal(r)
+				return nil, err
 			}
 		}
 		c.phase(jc, jc, r, PhaseFinal, 63, "Copying what changed (it is off now)")
@@ -377,7 +436,10 @@ func (c *Converter) toHA(jc *jobs.Context, self cluster.Node, snap *cluster.Snap
 			if err := c.ensureSnap(jc, local, snapName(r.ID, "final", attempt)); err != nil {
 				return err
 			}
-			return c.sendToStorage(jc, r, local, p.Actor, report(63, 85, "Final copy"))
+			if err := c.sendToStorage(jc, r, local, p.Actor, report(63, 75, "Final copy")); err != nil {
+				return err
+			}
+			return c.copyShares(jc, r, "final", attempt, p.Actor, report, 75, 85)
 		}()
 		if err != nil {
 			// Nothing local changed: it runs again as it did.
@@ -391,6 +453,13 @@ func (c *Converter) toHA(jc *jobs.Context, self cluster.Node, snap *cluster.Snap
 			return nil, err
 		}
 		r.Options.Storage = ws
+		_ = c.save(jc, r)
+		if err := c.adoptShares(jc, r, p.Actor); err != nil {
+			// Set up held there, never shared: the next attempt (or Abandon)
+			// puts them aside.
+			c.restartLocal(r)
+			return nil, err
+		}
 		c.phase(jc, jc, r, PhasePark, 88, "Putting this server's copy aside")
 	}
 	if r.Phase == PhasePark || r.Options.ParkedName == "" {
@@ -437,18 +506,50 @@ func asideConv(r *Record) string { return fmt.Sprintf("%sx%d", r.ID, r.Options.A
 // put aside for an hour, so a retry copies afresh.
 func (c *Converter) parkLocal(jc *jobs.Context, r *Record, local hacopy.Ref, actor cluster.Actor) error {
 	w := r.Ref()
-	args := hacopy.ParkArgs{Ref: local, Confirm: w.ID, Conv: r.ID, Since: snapName(r.ID, "final", r.Options.Attempt), RefuseChanged: true}
-	var pr hacopy.ParkResult
-	err := c.Priv.Call(jc, hacopy.OpPark, args, &pr)
-	if err != nil {
-		// Root may have parked it and its answer got lost: look (only
-		// look) for the copy this conversion parked.
-		if found, ok := c.parkedHere(context.WithoutCancel(jc), w, r.ID); ok {
-			pr, err = *found, nil
+	// Its shared folders first (each refused when written after its final
+	// snapshot; a failure puts back the ones parked), then its own folder.
+	var err error
+	if len(r.Options.Shares) > 0 {
+		refs := make([]hacopy.Ref, len(r.Options.Shares))
+		pools, perr := c.sharePools(jc, r)
+		err = perr
+		for i := range r.Options.Shares {
+			refs[i] = r.Options.Shares[i].ref(pools[r.Options.Shares[i].ID], hacopy.SideLocal)
+		}
+		if err == nil {
+			err = c.parkShares(jc, r, refs)
 		}
 	}
-	if err == nil && pr.Name == "" {
-		err = errors.New("root didn't name the parked copy")
+	var pr hacopy.ParkResult
+	if err == nil {
+		args := hacopy.ParkArgs{Ref: local, Confirm: w.ID, Conv: r.ID, Since: snapName(r.ID, "final", r.Options.Attempt), RefuseChanged: true}
+		err = c.Priv.Call(jc, hacopy.OpPark, args, &pr)
+		if err != nil {
+			// Root may have parked it and its answer got lost: look (only
+			// look) for the copy this conversion parked.
+			if found, ok := c.parkedHere(context.WithoutCancel(jc), w, r.ID); ok {
+				pr, err = *found, nil
+			}
+		}
+		if err == nil && pr.Name == "" {
+			err = errors.New("root didn't name the parked copy")
+		}
+		if err != nil {
+			// The shared folders parked above come back (still held).
+			if uerr := c.unparkShares(context.WithoutCancel(jc), r); uerr != nil {
+				err = errors.Join(err, &stuckParked{uerr})
+			}
+		}
+	}
+	var stuck *stuckParked
+	if errors.As(err, &stuck) {
+		// A shared folder parked here couldn't be put back: nothing goes
+		// back before the park (the app stays held, the copies there stay
+		// as they are), so the folder is never parked on both servers;
+		// Resume carries on, Undo puts everything back (decision 508).
+		r.Phase = PhasePark
+		_ = c.save(context.WithoutCancel(jc), r)
+		return fmt.Errorf("putting this server's copy aside (a shared folder couldn't be put back: resume or undo): %w", err)
 	}
 	if err != nil {
 		ctx := context.WithoutCancel(jc)
@@ -458,6 +559,9 @@ func (c *Converter) parkLocal(jc *jobs.Context, r *Record, local hacopy.Ref, act
 			r.Options.Storage = nil
 		} else {
 			c.log().Warn("convert: putting an unregistered cluster copy aside", "workload", w.ID, "err", perr)
+		}
+		if serr := c.asideShares(ctx, r, actor, false); serr != nil {
+			c.log().Warn("convert: putting unregistered shared folders aside", "workload", w.ID, "err", serr)
 		}
 		_ = c.save(ctx, r)
 		return fmt.Errorf("putting this server's copy aside: %w", err)
@@ -568,23 +672,31 @@ func (c *Converter) stopLocal(ctx context.Context, w cluster.WorkloadRef) error 
 	}
 }
 
-// releaseLocal ends an app's hold for this conversion (apps.ha.hold).
-func (c *Converter) releaseLocal(r *Record) {
+// releaseLocal ends an app's hold for this conversion (apps.ha.hold) and
+// says what it found: whether the conversion held it, and whether it ran
+// before (the state recorded with the hold, decision 504).
+func (c *Converter) releaseLocal(r *Record) *apps.HAHoldResult {
 	if r.Kind != cluster.KindApp {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	if err := c.Priv.Call(ctx, priv.OpAppsHAHold, apps.HAHoldArgs{ID: r.Workload, Conv: r.ID, Release: true}, nil); err != nil {
+	var res apps.HAHoldResult
+	if err := c.Priv.Call(ctx, priv.OpAppsHAHold, apps.HAHoldArgs{ID: r.Workload, Conv: r.ID, Release: true}, &res); err != nil {
 		c.log().Warn("convert: letting go of a local app's hold", "app", r.Workload, "err", err)
+		return nil
 	}
+	return &res
 }
 
 // restartLocal starts the local copy again when the conversion stopped it
 // and gave up before parking it (ending an app's hold first); true when it
 // started.
 func (c *Converter) restartLocal(r *Record) bool {
-	c.releaseLocal(r)
+	c.releaseShares(r)
+	if held := c.releaseLocal(r); held != nil && held.Held && held.WasRunning {
+		r.WasRunning = true
+	}
 	if !r.WasRunning {
 		return false
 	}
@@ -615,6 +727,15 @@ func (c *Converter) register(jc *jobs.Context, self cluster.Node, r *Record, p T
 	pl := snap.Placements[w]
 	if pl == nil && r.Options.Generation != 0 {
 		return errors.New("it left the cluster after it was registered; undo this conversion")
+	}
+	if len(r.Options.Shares) > 0 {
+		// This server's copies are put aside: the storage server's are the
+		// only ones now. They are shared from there and used in the
+		// cluster, and mounted here before the app is attached.
+		c.phase(jc, jc, r, PhaseRegister, 89, "Sharing its shared folders from the storage server")
+		if err := c.shareIntoCluster(jc, r, p.Actor); err != nil {
+			return err
+		}
 	}
 	if pl == nil {
 		c.phase(jc, jc, r, PhaseRegister, 90, "Registering it in the cluster")
@@ -663,7 +784,7 @@ func (c *Converter) register(jc *jobs.Context, self cluster.Node, r *Record, p T
 		}
 	case cluster.KindApp:
 		var h priv.SpecHashResult
-		if err := c.Priv.Call(jc, priv.OpAppsClusterAdopt, apps.HAAdoptArgs{ID: w.ID, From: r.Options.Dir}, &h); err != nil {
+		if err := c.Priv.Call(jc, priv.OpAppsClusterAdopt, apps.HAAdoptArgs{ID: w.ID, From: r.Options.Dir, Shares: sharePaths(r)}, &h); err != nil {
 			return err
 		}
 		// The rewritten compose file (its folder on cluster storage) is
@@ -724,6 +845,7 @@ func (c *Converter) startHA(jc *jobs.Context, self cluster.Node, r *Record, p To
 	if err := c.keepFor(jc, hacopy.SideLocal, r.Options.ParkedPool, r.Options.ParkedName, c.grace(), p.Actor); err != nil {
 		c.log().Warn("convert: setting the kept copy's grace period", "err", err)
 	}
+	c.keepShares(jc, r, p.Actor)
 	r.State, r.Phase, r.Finished = StateDone, PhaseDone, c.now().UTC()
 	_ = c.save(jc, r)
 	c.alert("cluster.ha.convert", notify.SeverityInfo, r.Name+" is highly available",

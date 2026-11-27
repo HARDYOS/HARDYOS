@@ -87,15 +87,16 @@ try {
   )
   Set-Content -LiteralPath $conf -Value $lines -Encoding ASCII
 
-  # Sunshine's web page and API (47990) only for this PC and the HardyOS
-  # server: a block rule wins over the installer's allow rules.
+  # Sunshine's web page and API (47990, and where it is on every other
+  # port set HardyOS may give this VM later) only for this PC and the
+  # HardyOS server: a block rule wins over the installer's allow rules.
   $s = $server.GetAddressBytes(); [Array]::Reverse($s); $n = [BitConverter]::ToUInt32($s, 0)
   function Ip([uint32]$v) { $b = [BitConverter]::GetBytes($v); [Array]::Reverse($b); return ([System.Net.IPAddress]$b).ToString() }
   $ranges = @()
   if ($n -gt 0) { $ranges += ('0.0.0.0-' + (Ip ($n - 1))) }
   if ($n -lt [uint32]::MaxValue) { $ranges += ((Ip ($n + 1)) + '-255.255.255.255') }
   Get-NetFirewallRule -Name 'HardyOS-Sunshine-WebUI' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-  New-NetFirewallRule -Name 'HardyOS-Sunshine-WebUI' -DisplayName 'Sunshine web UI: HardyOS server only (HardyOS)' -Direction Inbound -Protocol TCP -LocalPort 47990 -RemoteAddress $ranges -Action Block -Profile Any | Out-Null
+  New-NetFirewallRule -Name 'HardyOS-Sunshine-WebUI' -DisplayName 'Sunshine web UI: HardyOS server only (HardyOS)' -Direction Inbound -Protocol TCP -LocalPort {{.WebUIPorts}} -RemoteAddress $ranges -Action Block -Profile Any | Out-Null
 
   # The web UI's account (random, kept sealed by HardyOS), set before the
   # service runs, so nobody on the network can take Sunshine's first-run page.

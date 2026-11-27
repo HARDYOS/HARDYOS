@@ -28,6 +28,7 @@ import (
 	"time"
 	"unicode/utf16"
 
+	"github.com/hardyos/hardyos/daemon/internal/ports"
 	"github.com/hardyos/hardyos/daemon/internal/rootfile"
 )
 
@@ -64,6 +65,13 @@ type Streaming struct {
 	// WebUIFrom is the server's home network address the VM's firewall
 	// lets reach Sunshine's web page and API (decision 401).
 	WebUIFrom string `json:"webUIFrom,omitempty"`
+	// Slot is the port set the VM's Sunshine uses (ports.StreamingSlot;
+	// 0: Sunshine's standard ports), given when it is published
+	// (decision 506). AllSlots: its firewall rule keeps every slot's web
+	// UI port to the HardyOS server (set up since decision 506); a VM set
+	// up before can use slot 0 only.
+	Slot     int  `json:"slot,omitempty"`
+	AllSlots bool `json:"allSlots,omitempty"`
 }
 
 // Pinned streaming downloads (decision 402). A new version is a change to
@@ -200,7 +208,18 @@ func (st *Streaming) problems(s *Spec) []string {
 			p = append(p, "the server's home network address for Sunshine isn't a private IPv4 address")
 		}
 	}
+	if !ports.ValidStreamingSlot(st.Slot) || (st.Slot != 0 && !st.AllSlots) {
+		p = append(p, "the VM's game streaming ports aren't one of HardyOS's port sets")
+	}
 	return p
+}
+
+// StreamingPorts is a VM's streaming port set (decision 506).
+func (s *Spec) StreamingPorts() ports.StreamingSet {
+	if s.Streaming == nil {
+		return ports.StreamingSlot(0)
+	}
+	return ports.StreamingSlot(s.Streaming.Slot)
 }
 
 // HasStreamingMedia reports whether the streaming disc is in a drive.
@@ -299,7 +318,9 @@ func (m *Manager) prepareStreaming(ctx context.Context, s *Spec, password string
 	if err != nil {
 		return nil, err
 	}
-	s.Streaming = &Streaming{Sunshine: true, User: SunshineUser, CertSHA256: fp, WebUIFrom: brAddr.Addr().String()}
+	// AllSlots: this setup's firewall rule covers every port set's web UI
+	// port (decision 506).
+	s.Streaming = &Streaming{Sunshine: true, User: SunshineUser, CertSHA256: fp, WebUIFrom: brAddr.Addr().String(), AllSlots: true}
 	return &streamKit{certPEM: certPEM, keyPEM: keyPEM, password: password}, nil
 }
 
@@ -372,6 +393,10 @@ type SetupScriptVars struct {
 	Label, VDDSigner                              string
 	SunshineVersion, SunshineFile, SunshineSHA256 string
 	VDDVersion, VDDFile, VDDSHA256                string
+	// WebUIPorts are every streaming port set's web UI port (filled by
+	// SetupScript): the firewall rule keeps each to the HardyOS server,
+	// so the VM may later be given any set (decision 506).
+	WebUIPorts string
 }
 
 var (
@@ -394,6 +419,11 @@ func SetupScript(v SetupScriptVars) ([]byte, error) {
 	if !sha1HexRE.MatchString(v.VDDSigner) {
 		return nil, errors.New("the setup script needs the driver signer's thumbprint")
 	}
+	web := make([]string, 0, ports.StreamingSlots)
+	for _, p := range ports.StreamingWebUIPorts() {
+		web = append(web, fmt.Sprint(p))
+	}
+	v.WebUIPorts = strings.Join(web, ",")
 	var b bytes.Buffer
 	if err := setupScript.Execute(&b, v); err != nil {
 		return nil, err

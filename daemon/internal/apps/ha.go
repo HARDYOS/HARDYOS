@@ -39,6 +39,19 @@ type HACheckResult struct {
 	// conversion records the rewritten one after it is attached.
 	Hash     string   `json:"hash"`
 	Problems []string `json:"problems"`
+	// Shares are the shared folders the app was given: they move to the
+	// storage server with it (decision 500). Path is where this server
+	// has each now (what its compose file names).
+	Shares []HAShare `json:"shares"`
+	// HeldBy is the conversion holding the app ("" none).
+	HeldBy string `json:"heldBy,omitempty"`
+}
+
+// HAShare is one shared folder an app uses.
+type HAShare struct {
+	ID    string `json:"id"`
+	Path  string `json:"path,omitempty"`
+	Write bool   `json:"write"`
 }
 
 // HACheck says whether a local app can move to cluster storage.
@@ -48,7 +61,10 @@ func (m *Manager) HACheck(ctx context.Context, id string) (*HACheckResult, error
 		return nil, err
 	}
 	res := &HACheckResult{ID: id, Name: ia.manifest.Name, Dir: ia.dir, UID: ia.state.UID, MemoryMB: ia.state.Limits.MemoryMB,
-		Images: []string{}, Problems: []string{}}
+		Images: []string{}, Problems: []string{}, Shares: []HAShare{}}
+	for _, l := range shareLevelsSorted(ia.state.Shares) {
+		res.Shares = append(res.Shares, HAShare{ID: l.id, Write: l.write})
+	}
 	if ia.remote {
 		res.Problems = append(res.Problems, ia.manifest.Name+" is on cluster storage already")
 		return res, nil
@@ -60,13 +76,29 @@ func (m *Manager) HACheck(ctx context.Context, id string) (*HACheckResult, error
 	if ia.state.Blocked != "" {
 		res.Problems = append(res.Problems, "it may not start: "+ia.state.Blocked)
 	}
-	if len(ia.state.Shares) > 0 {
-		names := make([]string, 0, len(ia.state.Shares))
-		for n := range ia.state.Shares {
-			names = append(names, n)
+	// Its shared folders move with it (decision 500): each one's folder
+	// here, as its compose file names it; hardyd checks the rest (who else
+	// uses them, the storage server's side).
+	for i := range res.Shares {
+		sh := &res.Shares[i]
+		if m.Shares == nil {
+			res.Problems = append(res.Problems, "shared folders aren't available on this server")
+			break
 		}
-		sort.Strings(names)
-		res.Problems = append(res.Problems, "it uses shared folders ("+strings.Join(names, ", ")+"); apps with shared folders stay on their server for now")
+		p, err := m.Shares.Resolve(ctx, sh.ID, "")
+		if err != nil {
+			res.Problems = append(res.Problems, fmt.Sprintf("shared folder %s: %v", sh.ID, err))
+			continue
+		}
+		sh.Path = filepath.Clean(p)
+		if err := validSharePath(sh.Path, sh.ID); err != nil {
+			res.Problems = append(res.Problems, fmt.Sprintf("shared folder %s: %v", sh.ID, err))
+		}
+	}
+	for name, ch := range ia.state.Shares {
+		if ch.Share != "" && ch.Path != "" {
+			res.Problems = append(res.Problems, fmt.Sprintf("%s has a subfolder of shared folder %s for %s; choose the shared folder itself in its settings first", ia.manifest.Name, ch.Share, name))
+		}
 	}
 	if ia.state.UID < FirstAppUID || ia.state.UID > LastAppUID {
 		res.Problems = append(res.Problems, "it has no app user id")
@@ -91,6 +123,7 @@ func (m *Manager) HACheck(ctx context.Context, id string) (*HACheckResult, error
 	} else {
 		res.Problems = append(res.Problems, "its compose file doesn't pass the checks now: "+err.Error())
 	}
+	res.HeldBy = m.heldBy(ctx, c.Pool+"/apps/"+id)
 	if res.Hash, err = m.clusterHash(ia); err != nil {
 		return nil, err
 	}
@@ -130,6 +163,12 @@ func (m *Manager) HARelease(ctx context.Context, id string, park func() error) e
 // conversion gives up and starts it again, nothing may start or write it.
 const PropHAHold = "org.hardyos:ha-hold"
 
+// PropHAHoldRunning records, with a hold, whether the app ran before its
+// conversion stopped it ("on"): the hold outlives hardyd and its record,
+// so whatever ends the hold (Abandon, Undo) starts it again only then
+// (decision 504).
+const PropHAHoldRunning = "org.hardyos:ha-hold-running"
+
 var convRE = regexp.MustCompile(`^[a-z0-9]{8,32}$`)
 
 // HAHoldArgs is apps.ha.hold.
@@ -138,6 +177,16 @@ type HAHoldArgs struct {
 	Conv string `json:"conv"`
 	// Release ends the hold (its own conversion's only).
 	Release bool `json:"release,omitempty"`
+	// WasRunning: the app ran before the conversion stopped it (recorded
+	// with the hold; root also counts containers still running then).
+	WasRunning bool `json:"wasRunning,omitempty"`
+}
+
+// HAHoldResult says what a release found: whether the conversion held the
+// app, and whether it ran before the hold (its recorded state).
+type HAHoldResult struct {
+	Held       bool `json:"held"`
+	WasRunning bool `json:"wasRunning"`
 }
 
 // ErrHeld: a conversion holds the app (it is being moved).
@@ -148,46 +197,78 @@ var ErrHeld = errors.New("it is being moved to or from cluster storage")
 // marked, so Start, Restart and updates refuse (Up) until the hold ends.
 // The hold is on the dataset, so it outlives restarts of hardyd-priv.
 func (m *Manager) HAHold(ctx context.Context, a HAHoldArgs) error {
+	_, err := m.HAHoldState(ctx, a)
+	return err
+}
+
+// HAHoldState is HAHold; a release reports what the hold recorded.
+func (m *Manager) HAHoldState(ctx context.Context, a HAHoldArgs) (*HAHoldResult, error) {
+	res := &HAHoldResult{}
 	if !convRE.MatchString(a.Conv) {
-		return Problems{"bad conversion id"}
+		return nil, Problems{"bad conversion id"}
 	}
 	ia, c, err := m.app(ctx, a.ID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if ia.remote {
-		return ErrClusterPlaced
+		return nil, ErrClusterPlaced
 	}
 	ds := c.Pool + "/apps/" + a.ID
 	cur := m.heldBy(ctx, ds)
 	if a.Release {
 		if cur == "" {
-			return nil
+			return res, nil
 		}
 		if cur != a.Conv {
-			return Problems{"another conversion holds it"}
+			return nil, Problems{"another conversion holds it"}
 		}
-		for _, p := range []string{"readonly", PropHAHold} {
+		res.Held = true
+		res.WasRunning = m.heldRunning(ctx, ds)
+		for _, p := range []string{"readonly", PropHAHold, PropHAHoldRunning} {
 			if _, err := m.run(ctx, "zfs", "inherit", p, ds); err != nil {
-				return err
+				return nil, err
 			}
 		}
-		m.log().Info("apps: an app's conversion let go of it", "app", a.ID, "conv", a.Conv)
-		return nil
+		m.log().Info("apps: an app's conversion let go of it", "app", a.ID, "conv", a.Conv, "ranBefore", res.WasRunning)
+		return res, nil
 	}
 	if cur != "" && cur != a.Conv {
-		return Problems{"another conversion holds it"}
+		return nil, Problems{"another conversion holds it"}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	running := a.WasRunning
+	if cur == a.Conv {
+		// Held already (a resumed conversion): what was recorded stays.
+		running = running || m.heldRunning(ctx, ds)
+	}
+	for _, ct := range m.containers(ctx)[a.ID] {
+		if ct.State == "running" || ct.State == "restarting" {
+			running = true
+		}
+	}
 	if _, err := m.runCompose(ctx, m.composeArgs(ia, "down", "--remove-orphans")...); err != nil {
-		return err
+		return nil, err
 	}
-	if _, err := m.run(ctx, "zfs", "set", "readonly=on", PropHAHold+"="+a.Conv, ds); err != nil {
-		return err
+	if _, err := m.run(ctx, "zfs", "set", "readonly=on", PropHAHold+"="+a.Conv, PropHAHoldRunning+"="+onOff(running), ds); err != nil {
+		return nil, err
 	}
-	m.log().Warn("apps: held for a conversion (read-only, no containers)", "app", a.ID, "conv", a.Conv)
-	return nil
+	m.log().Warn("apps: held for a conversion (read-only, no containers)", "app", a.ID, "conv", a.Conv, "ranBefore", running)
+	return res, nil
+}
+
+func onOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
+}
+
+// heldRunning is the state a hold recorded (only "on" counts).
+func (m *Manager) heldRunning(ctx context.Context, ds string) bool {
+	out, err := m.run(ctx, "zfs", "get", "-H", "-p", "-s", "local", "-o", "value", PropHAHoldRunning, ds)
+	return err == nil && strings.TrimSpace(string(out)) == "on"
 }
 
 // heldBy is the conversion holding an app's dataset ("" none).
@@ -261,12 +342,46 @@ func validDir(dir, id string) error {
 	return nil
 }
 
+type shareLevel struct {
+	id    string
+	write bool
+}
+
+// shareLevelsSorted is shareLevels in id order.
+func shareLevelsSorted(ch map[string]ShareChoice) []shareLevel {
+	lv := shareLevels(ch)
+	ids := make([]string, 0, len(lv))
+	for id := range lv {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]shareLevel, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, shareLevel{id: id, write: lv[id]})
+	}
+	return out
+}
+
 // HAAdoptArgs rewrites a moved app's resolved compose file for the folder
 // it is in now.
 type HAAdoptArgs struct {
 	ID string `json:"id"`
 	// From is the folder the app was in before it moved.
 	From string `json:"from"`
+	// Shares are, for each shared folder that moved with it (decision
+	// 500), the folder this server had it in: its compose file names that
+	// one, and it is now the storage server's, mounted here.
+	Shares map[string]string `json:"shares,omitempty"`
+}
+
+// validSharePath checks a shared folder's old folder: an absolute, clean
+// path ending in shares/<id> (as shares.Manager mounts them).
+func validSharePath(p, id string) error {
+	if !filepath.IsAbs(p) || filepath.Clean(p) != p || filepath.Base(p) != id || filepath.Base(filepath.Dir(p)) != "shares" ||
+		strings.ContainsAny(p, "'\n\r\x00") {
+		return Problems{fmt.Sprintf("%q isn't shared folder %s's folder", p, id)}
+	}
+	return nil
 }
 
 // ClusterAdopt rewrites a newly converted cluster app's resolved compose
@@ -281,6 +396,9 @@ func (m *Manager) ClusterAdopt(ctx context.Context, a HAAdoptArgs) (string, erro
 		return "", err
 	}
 	if err := m.rewriteResolved(ia, a.From); err != nil {
+		return "", err
+	}
+	if err := m.rewriteShares(ctx, ia, a.Shares); err != nil {
 		return "", err
 	}
 	if err := m.clusterRecheck(ctx, ia); err != nil {
@@ -307,6 +425,67 @@ func (m *Manager) HALocal(ctx context.Context, a HAAdoptArgs) error {
 	}
 	_, err = m.resolved(ctx, ia)
 	return err
+}
+
+// rewriteShares points a moved app's compose file at its shared folders
+// on the storage server (mounted here): every shared folder it was given
+// must be named, with the folder this server had it in, and must be
+// mounted from the storage server now.
+func (m *Manager) rewriteShares(ctx context.Context, ia *installedApp, old map[string]string) error {
+	want := shareLevels(ia.state.Shares)
+	if len(old) != len(want) {
+		return Problems{fmt.Sprintf("%s uses %d shared folders; %d were named", ia.manifest.Name, len(want), len(old))}
+	}
+	if len(want) == 0 {
+		return nil
+	}
+	res := m.sharesFor(ia)
+	if res == nil || !ia.remote {
+		return Problems{"shared folders on cluster storage aren't available here"}
+	}
+	b, err := readStateFile(ia.meta(resolvedFile))
+	if err != nil {
+		return err
+	}
+	ids := make([]string, 0, len(want))
+	for id := range want {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	total := 0
+	for _, id := range ids {
+		from, ok := old[id]
+		if !ok {
+			return Problems{fmt.Sprintf("shared folder %s wasn't named", id)}
+		}
+		if err := validSharePath(from, id); err != nil {
+			return err
+		}
+		to, err := res.Resolve(ctx, id, "")
+		if err != nil {
+			return fmt.Errorf("shared folder %s: %w", id, err)
+		}
+		to = filepath.Clean(to)
+		if !filepath.IsAbs(to) || strings.ContainsAny(to, "'\n\r\x00") {
+			return Problems{fmt.Sprintf("shared folder %s's path can't be used", id)}
+		}
+		if from == to {
+			continue
+		}
+		out, n, err := rewriteDir(b, from, to)
+		if err != nil {
+			return fmt.Errorf("the resolved compose file: %w", err)
+		}
+		b, total = out, total+n
+	}
+	if _, err := ParseResolved(b); err != nil {
+		return err
+	}
+	if err := writeFileAtomic(ia.meta(resolvedFile), b, 0o600); err != nil {
+		return err
+	}
+	m.log().Info("apps: moved app's shared folders written in its compose file", "app", ia.state.ID, "shares", len(ids), "paths", total)
+	return nil
 }
 
 func (m *Manager) rewriteResolved(ia *installedApp, from string) error {

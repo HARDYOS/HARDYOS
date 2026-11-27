@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/apps"
@@ -77,6 +78,21 @@ func (c *Converter) StartToLocal(ctx context.Context, p ToLocalParams, confirm s
 	if p.Conv == "" {
 		if err := c.localTarget(ctx, w, p.Pool); err != nil {
 			return nil, err
+		}
+		if w.Kind == cluster.KindApp {
+			// Its shared folders moved to the storage server with it
+			// (decision 500); a server's own app can't use them there.
+			l, err := c.appShares(ctx, w.ID)
+			if err != nil {
+				return nil, fmt.Errorf("can't tell whether %s uses shared folders: %w", name, err)
+			}
+			if len(l) > 0 {
+				ids := make([]string, 0, len(l))
+				for _, s := range l {
+					ids = append(ids, s.ID)
+				}
+				return nil, fmt.Errorf("%s uses shared folders that are the storage server's now (%s); it stays highly available (take them away from it first to make it local)", name, strings.Join(ids, ", "))
+			}
 		}
 		p.Conv = newID()
 	}
@@ -418,8 +434,25 @@ func (c *Converter) runUndo(jc *jobs.Context) (any, error) {
 	return map[string]string{"conv": r.ID}, nil
 }
 
+// sharesCanComeBack: every one of this server's copies of r's shared
+// folders is there to come back, parked here (its pool imported) or still
+// its own shared folder: checked before anything changes in the cluster
+// or on the storage server (decision 508).
+func (c *Converter) sharesCanComeBack(ctx context.Context, r *Record) error {
+	for i := range r.Options.Shares {
+		s := &r.Options.Shares[i]
+		if !c.localShareThere(ctx, s) && !c.localParkedThere(ctx, s) {
+			return fmt.Errorf("this server's copy of the shared folder %s isn't here (is its pool %s imported?); nothing was changed", s.Name, s.Pool)
+		}
+	}
+	return nil
+}
+
 func (c *Converter) undo(jc *jobs.Context, self cluster.Node, r *Record, actor cluster.Actor) error {
 	w := r.Ref()
+	if err := c.sharesCanComeBack(jc, r); err != nil {
+		return err
+	}
 	if pl := c.snapshot().Placements[w]; pl != nil {
 		if pl.Owner != self.ID && pl.Owner != "" {
 			return fmt.Errorf("it is placed on %s now; make it local again from there", pl.Owner)
@@ -452,7 +485,32 @@ func (c *Converter) undo(jc *jobs.Context, self cluster.Node, r *Record, actor c
 	}
 	// This server's copy back first, and seen to be there, before the
 	// cluster copy is touched: if it can't come back, nothing else
-	// changes.
+	// changes. Its shared folders come back with it (decision 503), once
+	// the storage server's copies of them are out of the cluster and put
+	// aside (never two copies anyone can write; putting aside deletes
+	// nothing, and one the storage server shared, which may have been
+	// written there, is kept until an administrator deletes it).
+	if len(r.Options.Shares) > 0 {
+		if err := c.sharesCanComeBack(jc, r); err != nil {
+			return err
+		}
+		if err := c.asideShares(jc, r, actor, true); err != nil {
+			_ = c.save(jc, r)
+			return fmt.Errorf("putting its shared folders' cluster copies aside: %w", err)
+		}
+		if clusterChanged(r) {
+			r.Options.ClusterChanged = true
+		}
+		_ = c.save(jc, r)
+	}
+	if err := c.unparkShares(jc, r); err != nil {
+		return fmt.Errorf("the storage server's copies are put aside (kept); %w", err)
+	}
+	for i := range r.Options.Shares {
+		if s := &r.Options.Shares[i]; !c.localShareThere(jc, s) {
+			return fmt.Errorf("this server's shared folder %s didn't come back; the storage server's copy is kept aside", s.Name)
+		}
+	}
 	if err := c.putLocalBack(jc, r); err != nil {
 		return err
 	}
@@ -470,7 +528,7 @@ func (c *Converter) undo(jc *jobs.Context, self cluster.Node, r *Record, actor c
 		r.Options.Storage = nil
 		// Changed since the final snapshot, or it may have run from there:
 		// kept until an administrator deletes it.
-		r.Options.ClusterChanged = pr.Changed || (r.WasRunning && phaseAt(haPhases, r.Phase) >= phaseAt(haPhases, PhaseStart))
+		r.Options.ClusterChanged = r.Options.ClusterChanged || pr.Changed || (r.WasRunning && phaseAt(haPhases, r.Phase) >= phaseAt(haPhases, PhaseStart))
 		r.Options.AwaitStart = !r.Options.ClusterChanged
 		_ = c.save(jc, r)
 	}
@@ -498,6 +556,7 @@ func (c *Converter) undo(jc *jobs.Context, self cluster.Node, r *Record, actor c
 		if err := c.keepFor(jc, hacopy.SideCluster, r.Options.ParkedPool, r.Options.ParkedName, c.grace(), actor); err == nil {
 			r.Options.AwaitStart = false
 			_ = c.save(jc, r)
+			c.keepShares(jc, r, actor)
 		}
 	}
 	if r.Options.ClusterChanged {
@@ -523,8 +582,13 @@ func (c *Converter) putLocalBack(jc *jobs.Context, r *Record) error {
 	if name != "" {
 		jc.Progress(40, "Putting this server's copy back")
 		ref := hacopy.Ref{Kind: w.Kind, ID: w.ID, Pool: pool, Side: hacopy.SideLocal}
-		if err := c.Priv.Call(jc, hacopy.OpUnpark, hacopy.UnparkArgs{Ref: ref, Name: name}, nil); err != nil {
+		var ur hacopy.UnparkResult
+		if err := c.Priv.Call(jc, hacopy.OpUnpark, hacopy.UnparkArgs{Ref: ref, Name: name}, &ur); err != nil {
 			return fmt.Errorf("putting this server's copy back: %w", err)
+		}
+		if ur.Held && ur.WasRunning {
+			// The hold recorded that it ran before (decision 504).
+			r.WasRunning = true
 		}
 		r.Options.ParkedPool, r.Options.ParkedName, r.Options.ParkedSide = "", "", ""
 		_ = c.save(jc, r)
@@ -562,6 +626,10 @@ func (c *Converter) StartAbandon(ctx context.Context, p AbandonParams, confirm s
 	if phaseAt(list, r.Phase) >= phaseAt(list, limit) {
 		return nil, errors.New("this conversion has gone too far to abandon; undo or resume it")
 	}
+	if l := c.sharesParkedHere(ctx, r); len(l) > 0 {
+		// Never parked on both servers (decision 508).
+		return nil, fmt.Errorf("its shared folders %s are put aside on this server; undo or resume it instead", strings.Join(l, ", "))
+	}
 	if !confirmed(confirm, r.Name, r.Workload) {
 		return nil, errTyped
 	}
@@ -580,6 +648,14 @@ func (c *Converter) runAbandon(jc *jobs.Context) (any, error) {
 	w := r.Ref()
 	unlock := jc.Lock(localLock(w))
 	defer unlock()
+	if r.Direction == DirHA && len(r.Options.Shares) > 0 {
+		// A shared folder parked here comes back first; one that can't
+		// stops the abandon (never parked on both servers, decision 508).
+		_ = c.unparkShares(jc, r)
+		if l := c.sharesParkedHere(jc, r); len(l) > 0 {
+			return nil, fmt.Errorf("its shared folders %s are put aside on this server and couldn't be put back; undo or resume it instead", strings.Join(l, ", "))
+		}
+	}
 	if r.Direction == DirHA {
 		// A copy this conversion adopted (never registered, so never
 		// exported) is put aside for an hour; this server's copy is the
@@ -592,6 +668,13 @@ func (c *Converter) runAbandon(jc *jobs.Context) (any, error) {
 		} else {
 			err = fmt.Errorf("putting the copy it set up on cluster storage aside: %w", perr)
 		}
+		if err == nil && len(r.Options.Shares) > 0 {
+			// Its shared folders' copies there too: adopted ones (held, never
+			// shared) put aside for an hour, what was still arriving dropped.
+			if serr := c.asideShares(jc, r, p.Actor, true); serr != nil {
+				err = serr
+			}
+		}
 		if err == nil && w.Kind == cluster.KindApp && c.snapshot().Placements[w] == nil {
 			if u, ok := c.snapshot().AppUIDs[w.ID]; ok && u == r.Options.UID {
 				if uerr := c.propose(jc, cluster.CmdAppUID, state.AppUIDBody{App: w.ID, UID: u, Release: true}, p.Actor); uerr != nil {
@@ -600,9 +683,19 @@ func (c *Converter) runAbandon(jc *jobs.Context) (any, error) {
 			}
 		}
 		if err == nil {
-			// The app is this server's again: its hold ends (it isn't
-			// started; it was off when the conversion stopped).
-			c.releaseLocal(r)
+			// The app is this server's again: its hold ends, and its shared
+			// folders' holds. It starts again when the hold recorded that it
+			// ran before the conversion stopped it (decision 504): a
+			// conversion that crashed after the stop leaves it held, and
+			// only the hold knows.
+			c.releaseShares(r)
+			if held := c.releaseLocal(r); held != nil && held.Held && held.WasRunning && c.snapshot().Placements[w] == nil {
+				if serr := c.Priv.Call(jc, priv.OpAppsStart, priv.AppRef{ID: w.ID}, nil); serr != nil {
+					c.log().Warn("convert: starting an abandoned conversion's app again", "app", w.ID, "err", serr)
+					c.alert("cluster.ha.abandon", notify.SeverityWarning, r.Name+" didn't start again",
+						"Its conversion was abandoned, but starting it again failed: "+serr.Error()+". Start it from the App Store.")
+				}
+			}
 			// The conversion's own snapshots on this server go too.
 			ref := hacopy.Ref{Kind: w.Kind, ID: w.ID, Pool: r.LocalPool, Side: hacopy.SideLocal}
 			for a := 1; a <= r.Options.Attempt; a++ {
@@ -610,6 +703,7 @@ func (c *Converter) runAbandon(jc *jobs.Context) (any, error) {
 					_ = c.Priv.Call(jc, hacopy.OpSnapDestroy, hacopy.SnapArgs{Ref: ref, Name: snapName(r.ID, s, a)}, nil)
 				}
 			}
+			c.destroyShareSnaps(jc, r)
 		}
 	} else {
 		ref := hacopy.Ref{Kind: w.Kind, ID: w.ID, Pool: r.LocalPool, Side: hacopy.SideLocal}

@@ -278,8 +278,10 @@ func main() {
 		// client; the VM and app engines find cluster workloads' storage
 		// through part B's backends (part C's runtime ops start them).
 		clusterStorage := wireClusterB(ctx, s, log, am.PreBackup)
-		wireHACopy(s, clusterStorage, vmm, am, log)
+		wireHACopy(s, clusterStorage, vmm, am, shm, shareHooks, log)
 		vmm.Backend = clusterStorage.VMs
+		// Streaming port sets stay off apps' host ports (decision 509).
+		vmm.AppHostPorts = am.AppHostPorts
 		am.Backend = clusterStorage.Apps
 		am.ClusterShares = clusterStorage.Shares
 		go am.OnStart(ctx) // after its cluster backend is set

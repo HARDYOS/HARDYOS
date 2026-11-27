@@ -186,10 +186,23 @@ export const useKept = () =>
  */
 export const isLastCopy = (k: Pick<KeptCopy, "keepUntil">): boolean => !k.keepUntil;
 
+/**
+ * Delete a kept copy now: through the API of the member that holds it when
+ * it says so (deleteOn: another member's copies, with that member's own
+ * guards), else through this server's (its own and the storage server's).
+ */
 export async function deleteKept(k: KeptCopy, confirm: string, lastCopy = false): Promise<Job> {
-  const r = await unwrap(api.POST("/cluster/kept/delete", { body: { node: k.node, pool: k.pool, name: k.name, confirm, lastCopy: lastCopy || undefined } }));
+  const r = await unwrap(
+    keptDeleteApi(k).POST("/cluster/kept/delete", { body: { node: k.node, pool: k.pool, name: k.name, confirm, lastCopy: lastCopy || undefined } }),
+  );
   return r.job;
 }
+
+/** The API a kept copy is deleted through (its deleteOn member's, else this server's). */
+export const keptDeleteApi = (k: Pick<KeptCopy, "deleteOn">) => (k.deleteOn ? nodeApi(k.deleteOn) : api);
+
+/** What a kept copy is a copy of. */
+export const keptKind = (k: Pick<KeptCopy, "kind">): string => (k.kind === "vm" ? "VM" : k.kind === "share" ? "shared folder" : "app");
 
 export const useFailovers = () =>
   useQuery<Failover[]>({ queryKey: convertKeys.failovers, queryFn: () => unwrap(api.GET("/cluster/ha/failovers")), refetchInterval: 15_000 });

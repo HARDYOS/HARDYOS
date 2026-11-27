@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hardyos/hardyos/daemon/internal/apps"
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/ha/clustertest"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/hacopy"
@@ -23,6 +24,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/cluster/storagesvc"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
+	"github.com/hardyos/hardyos/daemon/internal/shares"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 	"github.com/hardyos/hardyos/daemon/internal/vms"
 )
@@ -168,6 +170,12 @@ type fakePriv struct {
 	// incoming is what "make local" received here (child -> labels).
 	incoming map[string][]string
 	recvs    sync.WaitGroup
+	// appHold is a local app's hold (apps.ha.hold) and what it recorded.
+	appHold *apps.HAHoldResult
+	// shareList is this server's shared folders; realm its file sharing
+	// domain ("" not joined).
+	shareList []shares.Share
+	realm     string
 }
 
 func (p *fakePriv) Call(_ context.Context, op string, args, out any) error {
@@ -313,6 +321,43 @@ func (p *fakePriv) Call(_ context.Context, op string, args, out any) error {
 		return set(hacopy.StreamState{Done: true, OK: true})
 	case hacopy.OpCancel:
 		return nil
+	case priv.OpAppsHAHold:
+		var a apps.HAHoldArgs
+		_ = json.Unmarshal(b, &a)
+		if !a.Release {
+			p.r.log("hold app")
+			p.appHold = &apps.HAHoldResult{Held: true, WasRunning: a.WasRunning || p.running}
+			return nil
+		}
+		p.r.log("release app")
+		res := apps.HAHoldResult{}
+		if p.appHold != nil {
+			res = *p.appHold
+		}
+		p.appHold = nil
+		return set(res)
+	case priv.OpAppsStart:
+		p.r.log("start app")
+		p.running = true
+		return nil
+	case priv.OpSharesHAHold:
+		var a shares.HAHoldArgs
+		_ = json.Unmarshal(b, &a)
+		if a.Release {
+			p.r.log("release share " + a.ID)
+		} else {
+			p.r.log("hold share " + a.ID)
+		}
+		return nil
+	case hacopy.OpSnapDestroy:
+		return nil
+	case priv.OpSharesList:
+		return set(priv.SharesResult{Shares: p.shareList})
+	case priv.OpFilesStatus:
+		if p.realm == "" {
+			return set(map[string]any{"joined": false})
+		}
+		return set(map[string]any{"joined": true, "domain": map[string]string{"realm": p.realm}})
 	}
 	return errors.New("fake priv: " + op)
 }
@@ -375,6 +420,8 @@ type fakeStorage struct {
 	clusterChanged bool
 	keeps          []storagesvc.HARequest
 	cancels        int
+	// sharesInfo is the storage server's shared folders and domain.
+	sharesInfo *storagesvc.HASharesInfo
 }
 
 func (s *fakeStorage) HAPool(context.Context) (string, error) { return "nas", nil }
@@ -476,6 +523,16 @@ func (s *fakeStorage) HAParked(context.Context) ([]hacopy.Parked, error) { retur
 func (s *fakeStorage) HAParkedDestroy(context.Context, storagesvc.HAParkedDestroy) error {
 	return nil
 }
+func (s *fakeStorage) HAShares(context.Context) (*storagesvc.HASharesInfo, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sharesInfo != nil {
+		return s.sharesInfo, nil
+	}
+	return &storagesvc.HASharesInfo{Shares: []storagesvc.HAShareName{}}, nil
+}
+func (s *fakeStorage) HAShareRelease(context.Context, storagesvc.HARequest) error     { return nil }
+func (s *fakeStorage) SetShareCluster(context.Context, storagesvc.ShareRequest) error { return nil }
 func (s *fakeStorage) SwitchAppMode(context.Context, storagesvc.ModeRequest) (*storagesvc.ModeResult, error) {
 	return nil, errors.New("not here")
 }

@@ -4,6 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"regexp"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/apps"
@@ -18,37 +22,140 @@ import (
 // KeptCopy is a parked copy and where it is.
 type KeptCopy struct {
 	hacopy.Parked
-	// Node holds it (this server, or the storage server).
+	// Node holds it.
 	Node cluster.NodeID `json:"node"`
+	// DeleteOn is the server whose API deletes it ("": this one, which
+	// deletes its own and, through the storage server's peer API, the
+	// storage server's; another member's is deleted through that member's
+	// own API, with its own guards).
+	DeleteOn cluster.NodeID `json:"deleteOn,omitempty"`
 }
 
-// Kept lists the parked copies on this server and on the storage server.
+// Peer paths of conversions (between members).
+const (
+	// PathKept is a member's own kept copies.
+	PathKept = "ha/kept"
+	// PathAppShares is the shared folders a cluster app placed on that
+	// member uses (make local refuses apps that use any).
+	PathAppShares = "ha/app-shares"
+)
+
+// ownKept lists this server's own parked copies.
+func (c *Converter) ownKept(ctx context.Context) ([]hacopy.Parked, error) {
+	var mine struct {
+		Parked []hacopy.Parked `json:"parked"`
+	}
+	if err := c.Priv.Call(ctx, hacopy.OpParkedList, struct{}{}, &mine); err != nil {
+		return nil, err
+	}
+	if mine.Parked == nil {
+		mine.Parked = []hacopy.Parked{}
+	}
+	return mine.Parked, nil
+}
+
+// Kept lists the parked copies of every member (decision 505): this
+// server's, the storage server's (through its storage peer API, as
+// before) and every other member's (asked over the peer API, as the
+// failover history is merged); a member that doesn't answer is left out.
 func (c *Converter) Kept(ctx context.Context) ([]KeptCopy, error) {
 	out := []KeptCopy{}
 	self, err := c.Cluster.Self()
 	if err != nil {
 		return out, nil
 	}
-	var mine struct {
-		Parked []hacopy.Parked `json:"parked"`
-	}
-	if err := c.Priv.Call(ctx, hacopy.OpParkedList, struct{}{}, &mine); err == nil {
-		for _, p := range mine.Parked {
+	if l, err := c.ownKept(ctx); err == nil {
+		for _, p := range l {
 			out = append(out, KeptCopy{Parked: p, Node: self.ID})
 		}
 	}
-	if self.Role != cluster.RoleStorage {
-		snap := c.snapshot()
-		if sn, ok := storagesvc.StorageNode(snap); ok {
-			if l, err := c.Storage.HAParked(ctx); err == nil {
-				for _, p := range l {
-					out = append(out, KeptCopy{Parked: p, Node: sn.ID})
-				}
+	snap := c.snapshot()
+	sn, hasStorage := storagesvc.StorageNode(snap)
+	if self.Role != cluster.RoleStorage && hasStorage {
+		if l, err := c.Storage.HAParked(ctx); err == nil {
+			for _, p := range l {
+				out = append(out, KeptCopy{Parked: p, Node: sn.ID})
 			}
 		}
 	}
+	if c.Peers == nil {
+		return out, nil
+	}
+	for id, n := range snap.Nodes {
+		if id == self.ID || n.Role == cluster.RoleWitness || n.State == cluster.NodeRemoved || (hasStorage && id == sn.ID) {
+			continue
+		}
+		var l []hacopy.Parked
+		cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := c.Peers.Call(cctx, id, http.MethodGet, cluster.PeerPathPrefix+PathKept, nil, &l)
+		cancel()
+		if err != nil {
+			continue
+		}
+		for _, p := range l {
+			if len(out) >= 2000 {
+				break
+			}
+			out = append(out, KeptCopy{Parked: p, Node: id, DeleteOn: id})
+		}
+	}
+	slices.SortStableFunc(out, func(a, b KeptCopy) int {
+		if x := strings.Compare(string(a.Node), string(b.Node)); x != 0 {
+			return x
+		}
+		return strings.Compare(a.Pool+"/"+a.Name, b.Pool+"/"+b.Name)
+	})
 	return out, nil
 }
+
+// RegisterPeer serves this member's own kept copies and its cluster apps'
+// shared folders to the other members (any member but the witness; both
+// only read).
+func (c *Converter) RegisterPeer(mux cluster.PeerMux) {
+	if mux == nil {
+		return
+	}
+	member := func(r *http.Request) bool {
+		n, ok := mux.Caller(r)
+		return ok && n.Role != cluster.RoleWitness
+	}
+	mux.Handle("GET "+cluster.PeerPathPrefix+PathKept, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !member(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		l, err := c.ownKept(r.Context())
+		if err != nil {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(l)
+	}))
+	mux.Handle("GET "+cluster.PeerPathPrefix+PathAppShares, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !member(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		id := r.URL.Query().Get("id")
+		if !appIDRE.MatchString(id) {
+			http.Error(w, "bad id", http.StatusBadRequest)
+			return
+		}
+		var res apps.HACheckResult
+		if err := c.Priv.Call(r.Context(), priv.OpAppsHACheck, priv.AppRef{ID: id}, &res); err != nil {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if res.Shares == nil {
+			res.Shares = []apps.HAShare{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"shares": res.Shares})
+	}))
+}
+
+var appIDRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}[a-z0-9]$`)
 
 // DropParams delete a kept copy now (Confirm: the workload's id;
 // LastCopy: one without an expiry, which may be the only good copy).
@@ -184,6 +291,8 @@ func (c *Converter) Cleanup(ctx context.Context) {
 		if err := c.keepFor(ctx, hacopy.Side(r.Options.ParkedSide), r.Options.ParkedPool, r.Options.ParkedName, c.grace(), cluster.Actor{Kind: "system", Name: "HardyOS"}); err != nil {
 			continue
 		}
+		// The shared folders kept with it (decision 503).
+		c.keepShares(ctx, r, cluster.Actor{Kind: "system", Name: "HardyOS"})
 		r.Options.AwaitStart = false
 		_ = c.save(ctx, r)
 	}

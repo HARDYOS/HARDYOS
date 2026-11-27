@@ -6,7 +6,10 @@
 // (decision 303).
 package ports
 
-import "net/netip"
+import (
+	"fmt"
+	"net/netip"
+)
 
 const (
 	// HTTP and HTTPS are hardyd's own (the desktop, the API, ACME).
@@ -91,6 +94,75 @@ var (
 	SunshineUDP = []int{SunshineVideo, SunshineControl, SunshineAudio, SunshineMic, SunshineRTSP}
 )
 
+// Game streaming port sets (decision 506). Several VMs of one server may
+// be published to NetBird devices at once: each published VM gets a slot,
+// its Sunshine runs with the slot's base port (Sunshine's `port` setting:
+// every port it uses is an offset of it, and it tells Moonlight its own
+// numbers, so the server forwards each number to the same number in the
+// VM) and Moonlight adds the server as <NetBird address>:<base>. Slot 0 is
+// Sunshine's standard set (base SunshineHTTP). Slots are StreamingSlotStride
+// apart, so their sets never overlap; each slot is a registered range
+// (StreamingRanges, decision 510), so no app is given one as a host port.
+const (
+	StreamingSlots      = 8
+	StreamingSlotStride = 100
+)
+
+// Sunshine's ports as offsets of its base port (SunshineHTTP in slot 0).
+const (
+	sunshineOffHTTPS   = SunshineHTTPS - SunshineHTTP
+	sunshineOffWebUI   = SunshineWebUI - SunshineHTTP
+	sunshineOffRTSP    = SunshineRTSP - SunshineHTTP
+	sunshineOffVideo   = SunshineVideo - SunshineHTTP
+	sunshineOffControl = SunshineControl - SunshineHTTP
+	sunshineOffAudio   = SunshineAudio - SunshineHTTP
+	sunshineOffMic     = SunshineMic - SunshineHTTP
+)
+
+// StreamingSet is one slot's ports.
+type StreamingSet struct {
+	Slot int
+	// Base is Sunshine's `port` (HTTP; what Moonlight is given).
+	Base int
+	// WebUI is Sunshine's web page and API (never forwarded).
+	WebUI int
+	TCP   []int
+	UDP   []int
+}
+
+// ValidStreamingSlot reports whether slot is one of the slots.
+func ValidStreamingSlot(slot int) bool { return slot >= 0 && slot < StreamingSlots }
+
+// StreamingSlot is slot's port set (slot 0 for an invalid one).
+func StreamingSlot(slot int) StreamingSet {
+	if !ValidStreamingSlot(slot) {
+		slot = 0
+	}
+	b := SunshineHTTP + slot*StreamingSlotStride
+	return StreamingSet{Slot: slot, Base: b, WebUI: b + sunshineOffWebUI,
+		TCP: []int{b + sunshineOffHTTPS, b, b + sunshineOffRTSP},
+		UDP: []int{b + sunshineOffVideo, b + sunshineOffControl, b + sunshineOffAudio, b + sunshineOffMic, b + sunshineOffRTSP}}
+}
+
+// StreamingSlotOfBase is the slot whose base port is base (false: none).
+func StreamingSlotOfBase(base int) (int, bool) {
+	d := base - SunshineHTTP
+	if d < 0 || d%StreamingSlotStride != 0 || !ValidStreamingSlot(d/StreamingSlotStride) {
+		return 0, false
+	}
+	return d / StreamingSlotStride, true
+}
+
+// StreamingWebUIPorts are every slot's web UI port (the VM's firewall
+// keeps them to the HardyOS server, decision 401).
+func StreamingWebUIPorts() []int {
+	out := make([]int, 0, StreamingSlots)
+	for s := 0; s < StreamingSlots; s++ {
+		out = append(out, StreamingSlot(s).WebUI)
+	}
+	return out
+}
+
 // NetBirdStandbyApp is the app id that owns the NetBird standby ports.
 const NetBirdStandbyApp = "netbird-standby"
 
@@ -119,9 +191,35 @@ var (
 	Migrate = Range{Name: "live migration", First: MigrateFirst, Last: MigrateFirst + MigrateCount - 1}
 )
 
+// StreamingRanges are the game streaming port sets, one range per slot
+// (its lowest port, Sunshine's HTTPS, to its highest, RTSP): Sunshine's
+// ports are fixed ports of slot 0's range, and every slot's set is
+// registered like any range so nothing else takes a port of it.
+var StreamingRanges = streamingRanges()
+
+func streamingRanges() []Range {
+	out := make([]Range, 0, StreamingSlots)
+	for s := 0; s < StreamingSlots; s++ {
+		b := SunshineHTTP + s*StreamingSlotStride
+		out = append(out, Range{Name: fmt.Sprintf("game streaming set %d", s), First: b + sunshineOffHTTPS, Last: b + sunshineOffRTSP})
+	}
+	return out
+}
+
+// InStreamingRange reports whether p is in a game streaming port set's
+// range (any slot).
+func InStreamingRange(p int) bool {
+	for _, r := range StreamingRanges {
+		if r.Contains(p) {
+			return true
+		}
+	}
+	return false
+}
+
 // Ranges lists every registered range; a test checks that they and Fixed
 // are pairwise disjoint.
-var Ranges = []Range{AppProxy, Migrate}
+var Ranges = append([]Range{AppProxy, Migrate}, StreamingRanges...)
 
 // InRange returns the registered range p is in, if any.
 func InRange(p int) (Range, bool) {
@@ -153,38 +251,31 @@ func TakenOutside(p int, r Range) bool {
 // Ranges), including ports services HardyOS runs take that no Go code
 // listens on itself.
 var Fixed = map[string]int{
-	"http":                       HTTP,
-	"https":                      HTTPS,
-	"mail submissions":           MailSubmissions,
-	"mail submission":            MailSubmission,
-	"mail imaps":                 MailIMAPS,
-	"mail relay":                 MailRelay,
-	"mail proxied submissions":   MailProxySubmissions,
-	"mail proxied submission":    MailProxySubmission,
-	"mail proxied imaps":         MailProxyIMAPS,
-	"ups (nut)":                  NUT,
-	"app gateway":                AppGateway,
-	"office origin":              Office,
-	"office internal":            OfficeInternal,
-	"replication":                Replication,
-	"cluster":                    Cluster,
-	"netbird standby http":       NetBirdStandbyHTTP,
-	"netbird standby https":      NetBirdStandbyHTTPS,
-	"netbird standby stun":       NetBirdStandbySTUN,
-	"sunshine https (netbird)":   SunshineHTTPS,
-	"sunshine http (netbird)":    SunshineHTTP,
-	"sunshine rtsp (netbird)":    SunshineRTSP,
-	"sunshine video (netbird)":   SunshineVideo,
-	"sunshine control (netbird)": SunshineControl,
-	"sunshine audio (netbird)":   SunshineAudio,
-	"sunshine mic (netbird)":     SunshineMic,
-	"socks (netbird)":            1080,
-	"nfs":                        NFS,
-	"iscsi":                      ISCSI,
-	"global catalog":             3268,
-	"global catalog (tls)":       3269,
-	"mdns":                       5353,
-	"https (alternative, apps)":  8443,
+	"http":                      HTTP,
+	"https":                     HTTPS,
+	"mail submissions":          MailSubmissions,
+	"mail submission":           MailSubmission,
+	"mail imaps":                MailIMAPS,
+	"mail relay":                MailRelay,
+	"mail proxied submissions":  MailProxySubmissions,
+	"mail proxied submission":   MailProxySubmission,
+	"mail proxied imaps":        MailProxyIMAPS,
+	"ups (nut)":                 NUT,
+	"app gateway":               AppGateway,
+	"office origin":             Office,
+	"office internal":           OfficeInternal,
+	"replication":               Replication,
+	"cluster":                   Cluster,
+	"netbird standby http":      NetBirdStandbyHTTP,
+	"netbird standby https":     NetBirdStandbyHTTPS,
+	"netbird standby stun":      NetBirdStandbySTUN,
+	"socks (netbird)":           1080,
+	"nfs":                       NFS,
+	"iscsi":                     ISCSI,
+	"global catalog":            3268,
+	"global catalog (tls)":      3269,
+	"mdns":                      5353,
+	"https (alternative, apps)": 8443,
 }
 
 // Reserved reports whether p is one of the fixed ports: allocators (app
@@ -195,7 +286,7 @@ func Reserved(p int) bool {
 			return true
 		}
 	}
-	return false
+	return InStreamingRange(p)
 }
 
 // owned are fixed ports one app may publish (and no other).

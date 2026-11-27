@@ -1197,6 +1197,30 @@ func (m *Manager) SuggestPorts(ctx context.Context, wanted []PortCheck, forID st
 }
 
 // usedPorts lists ports taken by other apps or anything listening on the server.
+// AppHostPorts are the host ports installed apps have ("<port>/<proto>"):
+// the VM engine keeps game streaming port sets off them (decision 509;
+// an app installed before the sets were reserved may hold one).
+func (m *Manager) AppHostPorts(ctx context.Context) map[string]bool {
+	used := map[string]bool{}
+	c, err := m.engine()
+	if err != nil || c == nil {
+		return used
+	}
+	l, err := m.installed(ctx, c)
+	if err != nil {
+		return used
+	}
+	for _, ia := range l {
+		if ia.state.Removed {
+			continue
+		}
+		for name, p := range ia.state.Ports {
+			used[fmt.Sprintf("%d/%s", p, portProto(ia.manifest, name))] = true
+		}
+	}
+	return used
+}
+
 func (m *Manager) usedPorts(ctx context.Context, exceptID string) (map[string]bool, error) {
 	used := map[string]bool{}
 	own := map[string]bool{}

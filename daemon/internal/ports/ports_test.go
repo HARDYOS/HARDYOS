@@ -60,6 +60,24 @@ func TestRegistryIsDisjoint(t *testing.T) {
 	if AppProxy.Size() != AppProxyCount || AppProxy.First != AppProxyBase || !slices.Contains(Ranges, AppProxy) || !slices.Contains(Ranges, Migrate) {
 		t.Fatalf("ranges %+v", Ranges)
 	}
+	// Every streaming slot is a registered range holding all its ports.
+	if len(StreamingRanges) != StreamingSlots {
+		t.Fatalf("streaming ranges %+v", StreamingRanges)
+	}
+	for s, r := range StreamingRanges {
+		if !slices.Contains(Ranges, r) {
+			t.Errorf("streaming set %d isn't registered", s)
+		}
+		set := StreamingSlot(s)
+		for _, p := range append(append([]int{set.WebUI}, set.TCP...), set.UDP...) {
+			if got, ok := InRange(p); !ok || got != r {
+				t.Errorf("slot %d's port %d is in %+v", s, p, got)
+			}
+		}
+	}
+	if StreamingRanges[0].First != 47984 || StreamingRanges[StreamingSlots-1].Last != 48710 {
+		t.Fatalf("streaming ranges %d-%d", StreamingRanges[0].First, StreamingRanges[StreamingSlots-1].Last)
+	}
 	// The replication and cluster ports sit right after the window range.
 	if AppProxy.Contains(Replication) || AppProxy.Contains(Cluster) || !AppProxy.Contains(AppProxy.Last) {
 		t.Fatal("app proxy range")
@@ -163,6 +181,72 @@ func portName(n string) bool {
 	}
 	for _, not := range []string{"report", "transport", "export", "import", "support", "portal", "passport", "portable"} {
 		if strings.Contains(l, not) {
+			return false
+		}
+	}
+	return true
+}
+
+// Game streaming slots (decision 506): slot 0 is Sunshine's standard set,
+// no two slots share a port, no slot reaches into another fixed port,
+// the app proxy range or the migration range, and every slot's ports are
+// reserved.
+func TestStreamingSlots(t *testing.T) {
+	s0 := StreamingSlot(0)
+	if s0.Base != SunshineHTTP || s0.WebUI != SunshineWebUI {
+		t.Fatalf("slot 0 %+v", s0)
+	}
+	if !equalSets(s0.TCP, SunshineTCP) || !equalSets(s0.UDP, SunshineUDP) {
+		t.Fatalf("slot 0's ports aren't Sunshine's own: %+v", s0)
+	}
+	owner := map[string]int{}
+	for s := 0; s < StreamingSlots; s++ {
+		set := StreamingSlot(s)
+		if got, ok := StreamingSlotOfBase(set.Base); !ok || got != s {
+			t.Errorf("slot %d's base %d maps back to %d", s, set.Base, got)
+		}
+		all := append(append([]int{set.WebUI}, set.TCP...), set.UDP...)
+		for i, p := range all {
+			proto := "tcp"
+			if i > len(set.TCP) {
+				proto = "udp"
+			}
+			key := proto + strconv.Itoa(p)
+			if o, dup := owner[key]; dup && o != s {
+				t.Errorf("slots %d and %d share %s", o, s, key)
+			}
+			owner[key] = s
+			if !Reserved(p) {
+				t.Errorf("slot %d's port %d isn't reserved", s, p)
+			}
+			if p >= AppProxyBase && p < AppProxyBase+AppProxyCount || p >= MigrateFirst && p < MigrateFirst+MigrateCount || p > 65535 {
+				t.Errorf("slot %d's port %d is in another range", s, p)
+			}
+			for name, f := range Fixed {
+				if f == p {
+					t.Errorf("slot %d's port %d is %s's", s, p, name)
+				}
+			}
+		}
+	}
+	if _, ok := StreamingSlotOfBase(SunshineHTTP + 1); ok {
+		t.Fatal("a base between slots")
+	}
+	if len(StreamingWebUIPorts()) != StreamingSlots {
+		t.Fatal("web UI ports")
+	}
+}
+
+func equalSets(a, b []int) bool {
+	m := map[int]int{}
+	for _, x := range a {
+		m[x]++
+	}
+	for _, x := range b {
+		m[x]--
+	}
+	for _, v := range m {
+		if v != 0 {
 			return false
 		}
 	}

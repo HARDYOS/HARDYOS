@@ -71,7 +71,8 @@ after the install (decision 413).
   VM (nft table `ip hardyos_streaming`: DNAT, masquerade; iptables chain
   `HARDYOS-STREAM` because Docker's FORWARD policy drops). 47990 is never
   forwarded. Rules exist only while the VM runs, is published and NetBird is
-  connected; resynced every 30 s and on stop/delete. One VM at a time.
+  connected; resynced every 30 s and on stop/delete. Several VMs, each on its
+  own port set, since decision 506 (docs/plans/cluster-gaps-2.md §4).
 
 ## 5. UI
 

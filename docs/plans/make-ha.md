@@ -52,9 +52,10 @@ mode). The app's user id is claimed cluster-wide (`storage.appuid` with
 its own id; refused if another cluster app has it). Apps with a database
 then move to block mode with part B's `SwitchAppMode` (stopped), as their
 default says. After attach root rewrites the resolved compose file's data
-folder (`apps.ha.adopt`) and the hash is approved. Apps with shared
-folders, node-local apps (decision 472) and custom compose apps stay
-local (refused, a reason shown).
+folder (`apps.ha.adopt`) and the hash is approved. Node-local apps
+(decision 472) and custom compose apps stay local (refused, a reason
+shown). Apps with shared folders take them along since decisions 500-503
+(docs/plans/cluster-gaps-2.md).
 
 **Make local again** (`cluster.ha.local`, on the chosen compute server):
 requested stopped, wait stopped (block-mode apps go back to NFS mode

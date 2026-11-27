@@ -120,13 +120,19 @@ type Manager struct {
 	// network (game streaming forwards to NetBird peers only); nil: no
 	// NetBird, nothing is forwarded.
 	NetBird func(ctx context.Context) NetBirdInfo
+	// AppHostPorts are the host ports apps have ("<port>/<proto>"; nil:
+	// none): a streaming port set an app holds a port of is never given
+	// nor forwarded (decision 509).
+	AppHostPorts func(ctx context.Context) map[string]bool
+	// streamPick serializes choosing and saving port sets (decision 509).
+	streamPick sync.Mutex
 	// streamDial replaces dialling a VM to fill the ARP table (tests).
 	streamDial func(ctx context.Context, addr string) error
 
 	streamMu      sync.Mutex
-	streamSynced  bool   // the forwarding rules were set at least once
-	streamApplied string // the ruleset in place ("" none)
-	streamActive  string // the VM forwarded to
+	streamSynced  bool            // the forwarding rules were set at least once
+	streamApplied string          // the ruleset in place ("" none)
+	streamActive  map[string]bool // the VMs forwarded to
 
 	// grant replaces grantQEMU in tests (some test file systems have no
 	// POSIX ACLs); verify replaces verifyPath.

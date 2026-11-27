@@ -21,6 +21,7 @@ import {
   deleteKept,
   isLastCopy,
   keptID,
+  keptKind,
   makeClusterTemplate,
   makeLocal,
   undoConversion,
@@ -197,7 +198,7 @@ export function KeptCard({ onJob }: { onJob: (j: Job) => void }) {
           {l.map((k) => (
             <tr key={`${k.node}/${k.pool}/${k.name}`}>
               <td>
-                {k.id} <span className="muted">{k.kind === "vm" ? "VM" : "app"}</span>
+                {k.id} <span className="muted">{keptKind(k)}</span>
               </td>
               <td>
                 {k.node} <span className="mono muted">{k.pool}</span>
