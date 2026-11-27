@@ -28,7 +28,8 @@ func TestInstallCompletionIsApproved(t *testing.T) {
 	var mu sync.Mutex
 	stored := after
 	pending := []map[string]string{{"id": "win", "before": before, "after": after}}
-	ps := &priv.Server{}
+	// The test's own user may connect (CI doesn't run unit tests as root).
+	ps := &priv.Server{AllowedUIDs: []uint32{uint32(os.Getuid())}}
 	ps.Handle(priv.OpVMsClusterInstall, func(_ context.Context, raw json.RawMessage) (any, error) {
 		var a struct {
 			Ack []string `json:"ack"`
