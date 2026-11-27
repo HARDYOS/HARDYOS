@@ -1,6 +1,7 @@
 import { relativeTime } from "../../format";
 import { Alert, Badge, Card, Dot, PageHeader, Stat } from "../../ui";
 import { type ClusterNodeStatus, type ClusterStatus, rtt } from "../../cluster/scope";
+import { NetCheckCard } from "./NetCheck";
 
 const PATHS = ["lan", "storage", "netbird"] as const;
 const PATH_LABEL: Record<string, string> = { lan: "LAN", storage: "Storage", netbird: "NetBird", none: "none" };
@@ -62,6 +63,7 @@ export function Overview({ st }: { st: ClusterStatus }) {
           ))}
         </div>
       </Card>
+      <NetCheckCard />
       <Card title="Witness">
         {witness ? (
           <NodeCard st={st} n={witness} />

@@ -48,6 +48,10 @@ type Mover struct {
 	HoldFor time.Duration
 	Log     *slog.Logger
 	Now     func() time.Time
+	// LocalNetwork is the local-network check (decision 492): a live
+	// migration needs the servers to share the LAN and the storage network.
+	// Nil: not checked.
+	LocalNetwork func(ctx context.Context) (ok bool, reason string)
 
 	// applied is the highest log index this mover's proposals reached:
 	// every step names it, and the node waits until it has applied it
@@ -203,6 +207,11 @@ func (m *Mover) MoveWith(ctx context.Context, r cluster.MoveRequest, actor clust
 		}
 		if p.State != cluster.PlacementRunning {
 			return nil, fmt.Errorf("%w: it isn't running (move it offline)", ErrNotLive)
+		}
+		if m.LocalNetwork != nil {
+			if ok, why := m.LocalNetwork(ctx); !ok {
+				return nil, fmt.Errorf("%w: the servers don't share a local network yet (%s)", ErrNotLive, why)
+			}
 		}
 		return m.live(ctx, s, p, to, actor, o)
 	}

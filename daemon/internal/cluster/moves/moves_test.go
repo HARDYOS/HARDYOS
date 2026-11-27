@@ -360,6 +360,26 @@ func TestLiveMigration(t *testing.T) {
 	}
 }
 
+// The local-network check (decision 492): no live move while the servers
+// don't share the LAN and the storage network; nothing changes.
+func TestLiveMigrationNeedsLocalNetwork(t *testing.T) {
+	e := newEnv(t)
+	vm := e.w.AddVM("web", "c1", true, 50)
+	e.w.Run(2 * time.Second)
+	e.mover.LocalNetwork = func(context.Context) (bool, string) { return false, "c2 → c1 on the storage network: not reachable" }
+	_, err := e.mover.Move(context.Background(), cluster.MoveRequest{Workload: vm, To: "c2", Mode: cluster.MoveLive, Generation: 1}, actor)
+	if !errors.Is(err, moves.ErrNotLive) || !strings.Contains(err.Error(), "local network") {
+		t.Fatalf("%v", err)
+	}
+	if p := e.w.Snapshot().Placements[vm]; p.Owner != "c1" || p.Generation != 1 || p.Target != "" {
+		t.Fatalf("%+v", p)
+	}
+	// An offline move is still allowed.
+	if _, err := e.mover.Move(context.Background(), cluster.MoveRequest{Workload: vm, To: "c2", Mode: cluster.MoveOffline, Generation: 1}, actor); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLiveMigrationFailureKeepsSource(t *testing.T) {
 	e := newEnv(t)
 	vm := e.w.AddVM("web", "c1", true, 50)

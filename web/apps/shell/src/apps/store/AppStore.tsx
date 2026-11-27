@@ -12,6 +12,7 @@ import { JobProgress } from "../shared";
 import { AppDetails, BlockedAlert, LogsView, type Tab as DetailTab } from "./AppDetails";
 import { appWindowId, openInNewTab } from "./AppFrame";
 import { CatalogsPage, ImportedSections } from "./Catalogs";
+import { OtherServers } from "./OtherServers";
 import { AppIcon, STATE, SourceBadge, appNotes, isRunning, jobSnapshot, useApps, useCatalog } from "./common";
 import { CreateApp } from "./CreateApp";
 import { InstallDialog } from "./InstallDialog";
@@ -19,19 +20,20 @@ import { InstallDialog } from "./InstallDialog";
 export { appUrl } from "./common";
 
 type Section = "installed" | "discover" | "catalogs" | "create";
-type OpenApp = (app: Pick<InstalledApp, "id" | "name">) => void;
+/** Opens an app's window; node is the server it is on ("": this one, whose apps the store lists). */
+type OpenApp = (app: Pick<InstalledApp, "id" | "name">, node?: string) => void;
 
 export default function AppStore(_: AppProps) {
   const shell = useShell();
   return (
     <AppStoreView
       isAdmin={shell.user.role === "admin"}
-      onOpen={(app) => shell.openApp(appWindowId(app.id), { id: app.id, title: app.name })}
+      onOpen={(app, node) => shell.openApp(appWindowId(app.id), { id: app.id, title: app.name, node: node ?? "" })}
     />
   );
 }
 
-export function AppStoreView({ isAdmin, onOpen = (a) => void openInNewTab(a.id, a.name) }: { isAdmin: boolean; onOpen?: OpenApp }) {
+export function AppStoreView({ isAdmin, onOpen = (a, node) => void openInNewTab(a.id, a.name, node) }: { isAdmin: boolean; onOpen?: OpenApp }) {
   const [section, setSection] = useState<Section>("installed");
   const [installing, setInstalling] = useState<{ ref: AppPackageRef; plan?: AppPlan } | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -197,6 +199,7 @@ function Installed({
             ))}
           </div>
         )}
+        <OtherServers onOpen={onOpen} />
         {isAdmin && o.keptData.length > 0 && <KeptData o={o} />}
       </div>
     </>

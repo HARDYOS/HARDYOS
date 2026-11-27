@@ -31,6 +31,13 @@ type clusterNode struct {
 
 func newClusterNode(t *testing.T, net *clustertest.Net, host string, addrs cluster.Addresses) *clusterNode {
 	t.Helper()
+	return newClusterNodeWith(t, net, host, addrs, nil, nil)
+}
+
+// newClusterNodeWith is newClusterNode with the server's config and the
+// membership service changed before they start (a root helper, appliers).
+func newClusterNodeWith(t *testing.T, net *clustertest.Net, host string, addrs cluster.Addresses, cfg func(*Config), svcMod func(*member.Service)) *clusterNode {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "api.db"))
 	if err != nil {
@@ -41,7 +48,11 @@ func newClusterNode(t *testing.T, net *clustertest.Net, host string, addrs clust
 	if err := m.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	s := New(Config{DB: db, Jobs: m, Events: broker, Insecure: true})
+	conf := Config{DB: db, Jobs: m, Events: broker, Insecure: true}
+	if cfg != nil {
+		cfg(&conf)
+	}
+	s := New(conf)
 	timings := cluster.Timings{Heartbeat: 50 * time.Millisecond, Suspect: 500 * time.Millisecond, QuorumLease: 800 * time.Millisecond,
 		SelfStop: 100 * time.Millisecond, Watchdog: 200 * time.Millisecond, Dead: 2 * time.Second, StorageIsolated: time.Second,
 		LANIsolated: 2 * time.Second, FenceAck: time.Second}
@@ -50,6 +61,9 @@ func newClusterNode(t *testing.T, net *clustertest.Net, host string, addrs clust
 		Raft:  cluster.RaftTimings{Heartbeat: 300 * time.Millisecond, Election: 300 * time.Millisecond, LeaderLease: 150 * time.Millisecond, Commit: 5 * time.Millisecond},
 		Paths: cluster.PathTimings{Interval: 30 * time.Millisecond}}
 	ca := s.AttachCluster(svc)
+	if svcMod != nil {
+		svcMod(svc)
+	}
 	if err := svc.Init(ctx); err != nil {
 		t.Fatal(err)
 	}

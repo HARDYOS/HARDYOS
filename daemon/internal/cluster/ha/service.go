@@ -17,6 +17,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/fence"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/moves"
+	"github.com/hardyos/hardyos/daemon/internal/cluster/netcheck"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/placement"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/runtime"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/state"
@@ -56,6 +57,9 @@ type Service struct {
 	Log     *slog.Logger
 	// BootID is this boot's id (default /proc/sys/kernel/random/boot_id).
 	BootID func() string
+	// NetCheck is the cluster's local-network check (decision 492): live
+	// moves and turning HA on need it OK. Nil: not checked (tests).
+	NetCheck func(ctx context.Context) netcheck.Result
 
 	Scheduler   *placement.Scheduler
 	Mover       *moves.Mover
@@ -138,7 +142,7 @@ func (s *Service) Init() {
 	s.Reconciler.CleanFence = s.Agent.CleanFence
 	images := runtime.PrivImages{Priv: s.Priv}
 	if s.Parts.Peers != nil {
-		s.Mover = &moves.Mover{Cluster: m, Peers: s.Parts.Peers, Scheduler: s.Scheduler, Log: s.Log}
+		s.Mover = &moves.Mover{Cluster: m, Peers: s.Parts.Peers, Scheduler: s.Scheduler, Log: s.Log, LocalNetwork: s.localNetwork}
 		s.Prepuller = &runtime.Prepuller{Cluster: m, Images: images, Log: s.Log,
 			Source: moves.PeerImages{Peers: s.Parts.Peers, Priv: s.Priv, Self: func() cluster.NodeID {
 				n, _ := m.Self()
@@ -579,9 +583,41 @@ func (s *Service) applied(check func(*cluster.Snapshot) error) error {
 	return check(s.Parts.Membership.State().Snapshot())
 }
 
+// localNetwork reports whether the servers share the LAN and the storage
+// network (decision 492; OK when the check isn't wired).
+func (s *Service) localNetwork(ctx context.Context) (bool, string) {
+	if s.NetCheck == nil {
+		return true, ""
+	}
+	r := s.NetCheck(ctx)
+	return r.OK, r.Reason
+}
+
+// ErrNetwork: the servers don't share a local network yet (HA refused).
+var ErrNetwork = errors.New("the servers don't share a local network")
+
+// CheckHA refuses turning high availability on for w while the local-network
+// check fails ("warn, block HA only": a policy already on may be changed or
+// turned off, and HA workloads keep failing over).
+func (s *Service) CheckHA(ctx context.Context, w cluster.WorkloadRef, pol cluster.HAPolicy) error {
+	if !pol.Enabled || s.Parts.Membership == nil {
+		return nil
+	}
+	if p, ok := s.Parts.Membership.State().Placement(w); ok && p != nil && p.HA.Enabled {
+		return nil
+	}
+	if ok, why := s.localNetwork(ctx); !ok {
+		return fmt.Errorf("%w yet, so high availability can't be turned on: %s", ErrNetwork, why)
+	}
+	return nil
+}
+
 func (s *Service) runPolicy(jc *jobs.Context) (any, error) {
 	var p PolicyParams
 	if err := jc.Params(&p); err != nil {
+		return nil, err
+	}
+	if err := s.CheckHA(jc, p.Workload, p.Policy); err != nil {
 		return nil, err
 	}
 	if err := s.propose(jc, cluster.CmdHAPolicy, state.HAPolicySet{Workload: p.Workload, Policy: p.Policy}, p.Actor); err != nil {
@@ -876,6 +912,11 @@ func (s *Service) Candidates(ctx context.Context, w cluster.WorkloadRef) (*Candi
 		out.LiveReason = "it isn't running"
 	case out.OwnerDown:
 		out.LiveReason = "its server is down"
+	}
+	if out.Live {
+		if ok, why := s.localNetwork(ctx); !ok {
+			out.Live, out.LiveReason = false, "the servers don't share a local network yet: "+why
+		}
 	}
 	for _, n := range computeNodes(snap) {
 		if n.ID == p.Owner {

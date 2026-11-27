@@ -361,6 +361,15 @@ type AppOpen struct {
 }
 
 func (s *Server) handleAppOpen(w http.ResponseWriter, r *http.Request, u *auth.User) {
+	// A cluster app runs on one member: its window opens there, through
+	// this server's window proxy and the cluster relay (decision 493). A
+	// relayed request is always this server's own.
+	if s.cluster != nil && relayedFrom(r) == nil && apps.ValidID(r.PathValue("id")) == nil {
+		if owner, ok := s.cluster.placed(r.PathValue("id")); ok {
+			s.cluster.openOn(w, r, u, owner, r.PathValue("id"))
+			return
+		}
+	}
 	a, ok := s.installedApp(w, r)
 	if !ok {
 		return

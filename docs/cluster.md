@@ -4,7 +4,9 @@ Phase 8. Join three or more HardyOS servers into one cluster: sign in once
 and manage every server from one desktop, keep VM and app data on one
 storage server, move workloads between servers and restart them elsewhere
 when a server dies. Architecture: [architecture.md](architecture.md#cluster);
-design: [plans/cluster.md](plans/cluster.md); decisions 320-359 and 365-398.
+design: [plans/cluster.md](plans/cluster.md) and
+[plans/cluster-gaps.md](plans/cluster-gaps.md); decisions 320-359, 365-399,
+470-475 and 490-495.
 
 This guide covers the cluster core (part A: creating and joining a
 cluster, the witness on the VPS, the server switcher and how the servers
@@ -47,6 +49,29 @@ leaves the path in use after 3 missed checks and goes back to a better one
 after 10 good checks in a row, so a flapping link doesn't make it jump back
 and forth. Cluster › Overview shows the path in use (highlighted) and the
 round-trip time for each server.
+
+**The local-network check** (decisions 490-492). A cluster works when its
+servers reach each other only over NetBird, but **high availability and
+live moves need a local network**: every compute server and the storage
+server must reach each other directly on the LAN *and* on the storage
+network. Every 30 seconds each server sends signed probes on the cluster
+port (no other port) to every other one, on each of the two paths, and
+checks:
+
+- the probe is answered, by the server's own key;
+- it leaves from this server's own address on that path and arrives as
+  coming from it (no NAT, no detour through NetBird or another port);
+- the best round trip is at most 5 ms (same subnet or routed both count);
+- a 64 KiB probe gets through (jumbo frames the switch drops stall it);
+- on the storage network, both ports have the same MTU.
+
+Cluster › Overview › **Local network** shows each server's probes of the
+others per path, with round trip, MTU, same subnet or routed, and what
+failed; **Check now** probes at once. While it fails, turning high
+availability on (Workloads and HA) and live moves are refused with the
+reason, offline moves still work, and workloads that already are highly
+available keep failing over. Each server sends a notification when its own
+result changes.
 
 ## Creating the cluster
 
@@ -137,9 +162,20 @@ to vote or delay changes, but can't forge or replay changes.
     server to use it.
 - Live views (events, VM screens) are forwarded too and close within 15
   seconds of signing out, or of the account being turned off or losing its
-  administrator role. App windows for apps on another server open through
-  the entry server's window proxy, after that server confirmed you may use
-  the app; idle ones close after 30 minutes. Documents on another server
+  administrator role. **App windows from any server** (decisions
+  493-495): an app's window opens on the server that runs it, through the
+  entry server's window proxy and the cluster relay, after that server
+  confirmed you may use the app. A cluster app opens wherever it runs now,
+  whatever server the window was opened for; App Store › My apps lists the
+  apps of the other servers you may open under **On other servers**. The
+  server running the app checks its access list on every request and every
+  15 seconds on an open WebSocket; the entry server's two-factor rules hold
+  as for every relayed request. Idle windows close after 30 minutes. With
+  per-app hostnames, `<app>.<base>` works on every server: it serves the
+  app wherever it runs (its own app first, then the cluster app's server,
+  then the one other server that has it; an app on several other servers
+  says which, open it from the desktop). Webmail stays each server's own.
+  Documents on another server
   open in that server's editor at its LAN address (if the browser warns
   about its certificate, accept it once for that address).
 - Each person has at most 16 requests and 8 live views to other servers
@@ -239,7 +275,8 @@ watchdog, devices) and why not.
   between servers with different CPUs; a VM set to the host's exact CPU
   migrates only between servers with an identical CPU (same model, vendor
   and features). Live migration needs the cluster port's own connection
-  (LAN or storage network); it never falls back to NetBird.
+  (LAN or storage network); it never falls back to NetBird, and it waits
+  until the local-network check passes (Networks, above).
 - **VMs with passthrough devices** (GPU, USB) are pinned to their server:
   never HA, never migrated live. An offline move to a server you pick is
   possible once that server confirms it has matching devices (typed
@@ -254,7 +291,9 @@ watchdog, devices) and why not.
 Turn HA on per VM or app in Cluster › Workloads and HA: priority (higher
 recovers first), restarts in place per hour before it moves elsewhere,
 preferred servers (optionally *only* those), an anti-affinity group (kept
-on different servers when possible) and fail back.
+on different servers when possible) and fail back. Turning it on needs the
+local-network check to pass (Networks, above); changing or turning off a
+policy doesn't.
 
 **When a compute server dies** (default timings):
 
@@ -321,14 +360,19 @@ app's published name after a move or a failover.
 
 **Not there yet.** Nothing in the desktop or the API turns a VM or app into
 a cluster workload yet (the plan's "Move to cluster storage", section
-6.5); cluster workloads exist only once that conversion is built. The LAN
-check (a server whose LAN alone fails) reports the LAN as always working
-until its probe is built, so LAN isolation never triggers.
+6.5); cluster workloads exist only once that conversion is built. The HA
+coordinator's LAN isolation (a server whose own LAN alone fails while the
+others' works) still reports the LAN as always working, so it never
+triggers; the local-network check above is about how the servers are
+connected, and doesn't fail anything over.
 
 ## Alerts
 
 - *This server lost the cluster's quorum* (warning) after 30 seconds
   without a majority, and *has quorum again* when it's back.
+- *This server doesn't share the cluster's local network* (warning,
+  `cluster.netcheck`) with the first problem, and *shares … again* (info)
+  when it's back; sent after two checks in a row agree.
 - *This server stopped following the cluster* (critical): the log holds a
   change this version doesn't understand. Update HardyOS on this server.
 - High-availability actions (a server declared dead or isolated,

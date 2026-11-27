@@ -2565,6 +2565,46 @@ The plan is `docs/plans/cluster.md` sections 6.3-7.6; decisions 350-359.
   and are never "home" for two-factor sign-in; the entry node's 2FA gate is
   re-applied to long relays.
 
+### The local-network check (decisions 490-492)
+
+`internal/cluster/netcheck`: each compute and storage server's `Monitor`
+probes every other one every 30 s on the LAN and on the storage network
+(`Prober`: a dial straight to the peer's address on that path through
+`member.Live.DialPeer`, hardyos-peer/1, 5 small and one 64 KiB
+`POST /cluster/v1/netcheck/probe`; the `Responder` answers a statement
+signed under `hardyos-netcheck/1\n` with the nonce, the source and
+destination it saw and its interface MTU). `Judge` turns one path's
+measurements into OK and a reason (answered, left from and seen as this
+server's path address, ≤ 5 ms, the large probe through, equal storage
+MTUs); `Evaluate` judges every member's latest report (`GET
+/cluster/v1/netcheck/report`, ≤ 2 minutes old) the same way; `Status(ctx,
+src)` is that for a `Source` (the monitor; cached 5 s).
+`ha.Service.NetCheck` feeds the Move dialog's candidates, the mover's live
+moves (`Mover.LocalNetwork`) and `CheckHA` (turning HA on, in the handler
+and its job). `GET /api/v1/cluster/netcheck` (`?fresh=1`: `POST
+/cluster/v1/netcheck/run` on every member, at most every 10 s each); the
+`cluster.netcheck` notification comes from hardyd's wiring
+(`cmd/hardyd/cluster_netcheck.go`) when this server's own result changes
+twice in a row.
+
+### App windows from any member (decisions 493-495)
+
+`api/clusterwindows.go`: `windowRouter` (the clusterAPI; a fake in tests)
+answers where an app's window is: `placed` (a cluster app's owner) and
+`route` (that, else the one other member listing the app in its peer
+`GET /cluster/v1/windows`, cached 30 s), `check` (the owner's relayed
+`windowcheck` as the person, with the web path in `X-Hardyos-Window-Path`)
+and `transport` (a `remoteWindow` relaying as the window session's
+person). `POST /apps/{id}/open` and the node proxy's `apps/{id}/open` open
+a cluster app on its owner. Host routing (`hostnames.go`): a label that
+isn't a local app goes to `route`; `bind` asks the owner before the code;
+host sessions carry `remote` and `session()` only matches the current
+route; `serveRemote` proxies through `transport` with the hostnames'
+cookie handling. The owner's `serveWindow` sets `X-Forwarded-Proto/Host`,
+rewrites the app's own redirects, and rechecks a relayed WebSocket every
+15 s (`hijackWatch`). `GET /cluster/windows` merges each member's relayed
+`windowlist` (filtered by its access list) for App Store › My apps.
+
 ## Hostnames (per-app origins)
 
 User guide: [hostnames.md](hostnames.md); plan `docs/plans/hostnames.md`;

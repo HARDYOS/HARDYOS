@@ -340,6 +340,11 @@ export type ClusterNodes = S["ClusterNodes"];
 export type ClusterNode = S["ClusterNode"];
 export type ClusterJoinOffer = S["ClusterJoinOffer"];
 export type ClusterJoinCode = S["ClusterJoinCode"];
+// Phase 10: the local-network check and app windows on other members
+export type ClusterNetcheck = S["ClusterNetcheck"];
+export type ClusterNetcheckMember = S["ClusterNetcheckMember"];
+export type ClusterNetcheckPath = S["ClusterNetcheckPath"];
+export type ClusterWindow = S["ClusterWindow"];
 export type HostnamesStatus = S["HostnamesStatus"];
 export type HostnamesSettings = S["HostnamesSettings"];
 export type HostnameEntry = S["HostnameEntry"];

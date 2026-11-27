@@ -10,6 +10,7 @@ import { Alert, Badge, Button, Card, EmptyState, ErrorBox, Field, Loading, PageH
 import { ConfirmDialog, Dialog } from "../../../ui/Dialog";
 import { toast } from "../../../ui/toasts";
 import { JobProgress } from "../../shared";
+import { useNetcheck } from "../NetCheck";
 import { MoveDialog } from "./MoveDialog";
 import {
   type HAPolicy,
@@ -31,6 +32,7 @@ import {
 
 export function HAPanel() {
   const q = useHAStatus();
+  const net = useNetcheck(q.data?.member === true);
   const qc = useQueryClient();
   const [job, setJob] = useState<Job | null>(null);
   const onJob = (j: Job) => setJob(j);
@@ -58,6 +60,12 @@ export function HAPanel() {
             setJob(null);
           }}
         />
+      )}
+      {net.data && !net.data.ok && (
+        <Alert tone="warn" title="Turning high availability on and live moves wait">
+          The servers don't share a local network yet: {net.data.reason}. Workloads that already are highly available keep failing over; see
+          Overview › Local network.
+        </Alert>
       )}
       {s.coordinator?.storageLost && (
         <Alert tone="bad" title="Cluster storage is unreachable">
