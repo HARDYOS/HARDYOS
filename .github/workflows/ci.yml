@@ -112,6 +112,7 @@ jobs:
           go test -c -o "$RUNNER_TEMP/hacopy.test" ./internal/cluster/hacopy
           go test -race -c -o "$RUNNER_TEMP/e2e.test" ./internal/cluster/e2e
           go test -c -o "$RUNNER_TEMP/netcheck.test" ./internal/cluster/netcheck
+          go test -c -o "$RUNNER_TEMP/vms.test" ./internal/vms
           go test -race -c -o "$RUNNER_TEMP/api.test" ./internal/api
       - name: parts A, B and C together - join, storage grants, VM and app placed, offline move, node death, fence, recovery
         working-directory: daemon/internal/cluster/e2e
@@ -119,6 +120,11 @@ jobs:
       - name: local-network check - three servers in namespaces on a LAN and a storage bridge, a storage port unplugged, jumbo frames behind a 1500 switch
         working-directory: daemon/internal/cluster/netcheck
         run: sudo HARDYOS_NETCHECK_NETNS=1 "$RUNNER_TEMP/netcheck.test" -test.run 'TestNetcheckNamespaces$' -test.v -test.count 1 -test.timeout 5m
+      - name: VM cards' IPv6 anti-spoofing rules - a VM and another computer on a bridge in namespaces, crafted SLAAC, ND, RA, DHCPv6 and fragment frames, learned LAN addresses, netlink events
+        working-directory: daemon/internal/vms
+        run: |
+          command -v nft >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nftables
+          sudo HARDYOS_NFT_TEST=1 "$RUNNER_TEMP/vms.test" -test.run 'TestGuard6InNamespaces$|TestNetlinkWatchKicks$' -test.v -test.count 1 -test.timeout 5m
       - name: app windows across members - a window on nas for an app on c1 over the kernel's TCP in a namespace (HTTP, WebSocket, hostnames)
         working-directory: daemon/internal/api
         run: |
@@ -370,6 +376,8 @@ jobs:
         run: sudo HARDYOS_VM_INTEGRATION=1 "$RUNNER_TEMP/vms.test" -test.run TestLibvirtIntegration -test.v -test.timeout 20m
       - name: verified Debian image, sound and clipboard, scheduled snapshot, template, Windows answer disc
         run: sudo HARDYOS_VM_INTEGRATION=1 "$RUNNER_TEMP/vms.test" -test.run TestLibvirtPolishIntegration -test.v -test.timeout 30m
+      - name: libvirt accepts HardyOS's anti-spoofing filter (clean-traffic with IPv6 handed to nftables)
+        run: sudo HARDYOS_VM_INTEGRATION=1 "$RUNNER_TEMP/vms.test" -test.run 'TestHardyOSFilterDefines$' -test.v -test.timeout 5m
       - name: libvirt logs
         if: failure()
         run: |

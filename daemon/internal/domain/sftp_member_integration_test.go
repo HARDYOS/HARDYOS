@@ -5,19 +5,23 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/fileworker"
 	"github.com/hardyos/hardyos/daemon/internal/sftp"
+	"github.com/hardyos/hardyos/daemon/internal/sftpauth"
 	"github.com/hardyos/hardyos/daemon/internal/shares"
 	"github.com/hardyos/hardyos/daemon/internal/smb"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
@@ -182,7 +186,13 @@ func TestSFTPMemberIntegration(t *testing.T) {
 	mr := newMemberRunner(t, tmp, "NASIT", dom)
 	sr := &sshdRunner{inner: mr, sshd: sshd, conf: mainConf, key: key, pam: pamDir, log: sub("log", "sshd.out")}
 	t.Cleanup(sr.stop)
-	sm := &sftp.Manager{Runner: sr, Root: views, DropIn: sub("sshd_config.d", "hardyos-sftp.conf"), PAMPath: pamPath, CommonAuth: sub("common-auth")}
+	// hardyd's SFTP sign-in socket, answered here (decision 514): the PAM
+	// block runs this test binary as `hardyctl pam-sftp <op>` (the real
+	// pam_exec, the real PAM environment and the real socket protocol).
+	fake := &fakeSFTPAuth{ownOK: true, appPassword: "abcd-efgh-jkmn-pqrs-tuvw"}
+	helper := fake.start(t, tmp)
+	sm := &sftp.Manager{Runner: sr, Root: views, DropIn: sub("sshd_config.d", "hardyos-sftp.conf"), PAMPath: pamPath, CommonAuth: sub("common-auth"),
+		Helper: helper}
 	m := &smb.Manager{
 		Runner: mr, Shares: src, ServerName: "NASIT", Port: 4455, NoDataset: true,
 		DataDir: sub("data"), ConfPath: conf, Krb5Conf: sub("krb5.conf"), NSSwitch: sub("nsswitch.conf"), AvahiService: sub("avahi", "hardyos-smb.service"),
@@ -287,6 +297,69 @@ func TestSFTPMemberIntegration(t *testing.T) {
 	}
 	if _, err := dial("alice", "Wrong-Passw0rd"); err == nil {
 		t.Error("a wrong password got in")
+	}
+	if !fake.saw(sftpauth.OpOwn) || !fake.saw(sftpauth.OpAfter) || !fake.saw(sftpauth.OpFail) {
+		t.Errorf("hardyd wasn't asked as it should be: %v", fake.ops())
+	}
+	// App passwords (decision 514): hardyd says yes, winbind isn't asked.
+	if c, err := dial("alice", fake.appPassword); err != nil {
+		t.Errorf("alice with an app password: %v", err)
+	} else {
+		c.Close()
+	}
+	// Where the account's own password isn't allowed (outside, or two-factor
+	// sign-in), hardyd says no before winbind sees it; app passwords still
+	// work, and refused passwords don't count in faillock.
+	fake.setOwn(false)
+	before, _ := exec.Command("faillock", "--user", `HOME\alice`).CombinedOutput()
+	if c, err := dial("alice", users["alice"]); err == nil {
+		c.Close()
+		t.Error("alice's own password got in where hardyd refused it")
+	}
+	if c, err := dial("alice", "zzzz-zzzz-zzzz-zzzz-zzzz"); err == nil {
+		c.Close()
+		t.Error("a wrong app password got in")
+	}
+	if after, _ := exec.Command("faillock", "--user", `HOME\alice`).CombinedOutput(); strings.Count(string(after), "RHOST") != strings.Count(string(before), "RHOST") {
+		t.Errorf("refused own passwords counted in faillock:\n%s", after)
+	}
+	if c, err := dial("alice", fake.appPassword); err != nil {
+		t.Errorf("alice's app password with own passwords refused: %v", err)
+	} else {
+		c.Close()
+	}
+	fake.setOwn(true)
+	_ = exec.Command("faillock", "--user", `HOME\alice`, "--reset").Run()
+	// Ending alice's sessions (an app password revoked, decision 519)
+	// closes an open one, and only hers.
+	if c, err := dial("alice", fake.appPassword); err != nil {
+		t.Errorf("alice before her sessions end: %v", err)
+	} else {
+		sc, err := newSFTPClient(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command("id", "-u", `HOME\alice`).Output()
+		if err != nil {
+			t.Fatalf("id -u: %v", err)
+		}
+		uid, _ := strconv.Atoi(strings.TrimSpace(string(out)))
+		if n, err := sm.EndSessions(uid, time.Time{}); err != nil || n < 1 {
+			t.Errorf("ending alice's sessions: %d %v", n, err)
+		}
+		gone := false
+		for i := 0; i < 50 && !gone; i++ {
+			_, err := sc.list("/")
+			gone = err != nil
+			time.Sleep(100 * time.Millisecond)
+		}
+		if !gone {
+			t.Error("alice's SFTP session outlived the end of her sessions")
+		}
+		c.Close()
+		if names, err := bs.list("/"); err != nil || !has(names, "Family Docs") {
+			t.Errorf("bob's session ended with alice's: %v %v", names, err)
+		}
 	}
 	if _, err := dial("carol", users["carol"]); err == nil {
 		t.Error("carol, with nothing to see, got in")
@@ -648,4 +721,81 @@ func (s *sftpClient) write(p string, data []byte) error {
 		return werr
 	}
 	return statusErr(t, b)
+}
+
+// fakeSFTPAuth stands in for hardyd on the SFTP sign-in socket.
+type fakeSFTPAuth struct {
+	mu          sync.Mutex
+	ownOK       bool
+	appPassword string
+	seen        []string
+}
+
+func (f *fakeSFTPAuth) setOwn(ok bool) { f.mu.Lock(); f.ownOK = ok; f.mu.Unlock() }
+
+func (f *fakeSFTPAuth) ops() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string{}, f.seen...)
+}
+
+func (f *fakeSFTPAuth) saw(op string) bool {
+	for _, o := range f.ops() {
+		if o == op {
+			return true
+		}
+	}
+	return false
+}
+
+// start serves the socket and writes the helper the PAM block runs: a
+// script that runs this test binary in helper mode.
+func (f *fakeSFTPAuth) start(t *testing.T, dir string) string {
+	t.Helper()
+	sock := filepath.Join(dir, "sftp-auth.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() {
+		_ = sftpauth.Serve(ctx, ln, func(_ context.Context, r sftpauth.Request) sftpauth.Answer {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			f.seen = append(f.seen, r.Op)
+			switch r.Op {
+			case sftpauth.OpApp:
+				return sftpauth.Answer{OK: r.User == `HOME\alice` && r.Password == f.appPassword}
+			case sftpauth.OpOwn, sftpauth.OpAfter:
+				return sftpauth.Answer{OK: f.ownOK}
+			}
+			return sftpauth.Answer{OK: true}
+		}, sftpauth.PeerUID)
+	}()
+	bin, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(dir, "hardyctl")
+	body := fmt.Sprintf("#!/bin/sh\nHARDYOS_TEST_SFTP_SOCKET=%s exec %s -test.run '^TestSFTPPAMHelperMode$' -- \"$@\"\n", sock, bin)
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
+// TestSFTPPAMHelperMode is `hardyctl pam-sftp <op>` for the integration
+// test's sshd (run by its PAM block through the script above); on its own
+// it does nothing.
+func TestSFTPPAMHelperMode(t *testing.T) {
+	sock := os.Getenv("HARDYOS_TEST_SFTP_SOCKET")
+	if sock == "" || os.Getenv("PAM_TYPE") == "" {
+		t.Skip("run by the SFTP integration test's PAM block")
+	}
+	args := flag.Args()
+	if len(args) != 2 || args[0] != "pam-sftp" {
+		os.Exit(2)
+	}
+	os.Exit(sftpauth.PAM(context.Background(), args[1], os.Getenv, os.Stdin, sock, io.Discard))
 }

@@ -1,0 +1,18 @@
+[Unit]
+Description=HardyOS SFTP sign-in socket (sshd's PAM asks hardyd)
+Documentation=https://github.com/HARDYOS/HARDYOS/blob/main/docs/file-sharing.md
+# Decisions 514-516: for a domain account's SFTP sign-in, sshd's PAM stack
+# runs `hardyctl pam-sftp` (pam_exec, as root), which asks hardyd over this
+# socket whether an app password is right and whether the account's own
+# password may be used from where the sign-in comes. Only hardyd's user
+# owns it (root connects anyway); hardyd answers root alone (SO_PEERCRED).
+# hardyd gets it as "sftp-auth".
+
+[Socket]
+ListenStream=/run/hardyos-sftp-auth.sock
+SocketUser=hardyd
+SocketGroup=hardyd
+SocketMode=0600
+RemoveOnStop=yes
+FileDescriptorName=sftp-auth
+Service=hardyd.service

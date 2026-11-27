@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/hardyos/hardyos/daemon/internal/appstore"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
+	"github.com/hardyos/hardyos/daemon/internal/ports"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 	"github.com/hardyos/hardyos/daemon/internal/tlscert"
 )
@@ -88,7 +90,7 @@ func startProxy(t *testing.T, e *appsEnv, interval time.Duration) func() {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		e.server.RunAppProxy(ctx, AppProxyOptions{TLS: &tls.Config{Certificates: []tls.Certificate{cert}}, BasePort: base,
+		e.server.RunAppProxy(ctx, AppProxyOptions{TLS: &tls.Config{Certificates: []tls.Certificate{cert}}, portRange: ports.Range{Name: "test", First: base, Last: base + ports.AppProxyCount - 1},
 			ListenHost: "127.0.0.1", DesktopPort: 443, Interval: interval})
 	}()
 	deadline := time.Now().Add(5 * time.Second)
@@ -495,5 +497,27 @@ func TestPeekSessionMatchesValidate(t *testing.T) {
 	}
 	if _, err := s.peekSession(ctx, tok); err != auth.ErrNoSession {
 		t.Errorf("expired: %v", err)
+	}
+}
+
+// A window recorded on the replication port (allocated before the window
+// range was fixed) is moved into the range when the proxy starts, and its
+// window opens there (decision 510).
+func TestAppProxyMovesStrayPorts(t *testing.T) {
+	withProxyTimes(t, 0, time.Hour)
+	e := newAppsEnv(t)
+	e.stub.webPortFrom = secBackend(t)
+	e.installNotes(t, nil)
+	st := e.server.appStore()
+	if _, err := st.DB.ExecContext(e.ctx, `INSERT INTO app_proxy_ports (app_id, port) VALUES ('notes', ?)
+		ON CONFLICT(app_id) DO UPDATE SET port = excluded.port`, ports.Replication); err != nil {
+		t.Fatal(err)
+	}
+	startProxy(t, e, time.Hour)
+	u := mustURL(openApp(t, e.admin, "notes"))
+	_, p, _ := net.SplitHostPort(u.Host)
+	rec, err := st.ProxyPorts(e.ctx)
+	if err != nil || rec["notes"] == ports.Replication || p != strconv.Itoa(rec["notes"]) {
+		t.Fatalf("window on %s, recorded %v %v", p, rec, err)
 	}
 }

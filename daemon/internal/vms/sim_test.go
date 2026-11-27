@@ -32,17 +32,21 @@ type sim struct {
 	defined  map[string]string // name -> last XML
 	fail     map[string]string // command prefix -> stderr (exit 1)
 
-	available int64            // the pool's free space
-	secmodels []string         // libvirt's security drivers
-	filters   bool             // clean-traffic exists
-	vlans     map[string][]int // tap -> VLANs
-	pvid      map[string]int   // tap -> untagged PVID
-	filtering int              // the bridge's vlan_filtering
-	vlanAdd   string           // a VLAN `bridge vlan add` ignores (fails silently)
-	agent     bool             // the guest agent answers
-	neigh     string           // ip -j -4 neigh show dev br0 (JSON)
-	fdb       string           // bridge -j fdb show br br0 (JSON)
-	nftLive   string           // the loaded game streaming ruleset
+	available   int64            // the pool's free space
+	secmodels   []string         // libvirt's security drivers
+	filters     bool             // clean-traffic exists
+	vlans       map[string][]int // tap -> VLANs
+	pvid        map[string]int   // tap -> untagged PVID
+	filtering   int              // the bridge's vlan_filtering
+	vlanAdd     string           // a VLAN `bridge vlan add` ignores (fails silently)
+	agent       bool             // the guest agent answers
+	neigh       string           // ip -j -4 neigh show dev br0 (JSON)
+	fdb         string           // bridge -j fdb show br br0 (JSON)
+	nftLive     string           // the loaded game streaming ruleset
+	nft6        string           // the loaded VM cards' IPv6 table
+	nft6Fail    bool             // loading it fails (not the emergency table)
+	nft6Learned string           // nft -j list set (the learned sets)
+	nwfilters   map[string]string
 }
 
 type simDomain struct {
@@ -115,9 +119,29 @@ func (s *sim) Run(_ context.Context, stdin []byte, name string, args ...string) 
 		return s.bridge(args)
 	case "nft":
 		switch {
+		case len(args) == 2 && args[0] == "-f" && args[1] == "-":
+			// The VM cards' IPv6 table; nft6Fail refuses all but the
+			// emergency one.
+			if s.nft6Fail && strings.Contains(string(stdin), "lanaddrs") {
+				return bad("Error: Could not process rule: No such file or directory")
+			}
+			s.nft6 = string(stdin)
 		case len(args) == 2 && args[0] == "-f":
 			b, _ := os.ReadFile(filepath.Join(s.root, args[1]))
 			s.nftLive = string(b)
+		case len(args) >= 5 && args[0] == "-j" && args[3] == "bridge":
+			if s.nft6Learned == "" || s.nft6 == "" {
+				return bad("Error: No such file or directory")
+			}
+			return ok(s.nft6Learned)
+		case len(args) >= 4 && args[0] == "list" && args[2] == "bridge":
+			// nft list chain bridge hardyos_vmguard6 <chain>
+			i := strings.Index(s.nft6, "chain "+args[len(args)-1]+" {")
+			if i < 0 {
+				return bad("Error: No such file or directory")
+			}
+			j := strings.Index(s.nft6[i:], "\n\t}")
+			return ok(s.nft6[i : i+j])
 		case len(args) >= 2 && args[0] == "list":
 			if s.nftLive == "" {
 				return bad("Error: No such file or directory")
@@ -128,6 +152,20 @@ func (s *sim) Run(_ context.Context, stdin []byte, name string, args ...string) 
 		}
 		return ok("")
 	case "ip":
+		if len(args) > 2 && args[1] == "-6" {
+			// ip -j -6 route|addr|neigh show dev br0
+			dev := args[len(args)-1]
+			if dev != "br0" {
+				return bad("Cannot find device \"" + dev + "\"")
+			}
+			switch args[2] {
+			case "route":
+				return ok(`[{"dst":"2001:db8:1::/64","protocol":"ra","metric":100},{"dst":"fe80::/64","protocol":"kernel"},{"dst":"default","gateway":"fe80::1","protocol":"ra"}]`)
+			case "neigh":
+				return ok(`[{"dst":"fe80::4","lladdr":"aa:bb:cc:dd:ee:01","router":null,"state":["STALE"]}]`)
+			}
+			return ok(`[{"ifname":"br0","addr_info":[{"family":"inet6","local":"2001:db8:1::10","prefixlen":64,"scope":"global"},{"family":"inet6","local":"fe80::10","prefixlen":64,"scope":"link"}]}]`)
+		}
 		if len(args) > 2 && args[2] == "neigh" {
 			if s.neigh == "" {
 				return ok(`[{"dst":"192.168.1.77","lladdr":"52:54:00:12:34:56","state":["REACHABLE"]}]`)
@@ -466,6 +504,16 @@ func (s *sim) virsh(args []string) (sysexec.Result, error) {
 			return ok(" 11111111-2222-3333-4444-555555555555   allow-arp\n")
 		}
 		return ok(" 11111111-2222-3333-4444-555555555555   allow-arp\n 11111111-2222-3333-4444-555555555556   clean-traffic\n")
+	case "nwfilter-define":
+		b, err := os.ReadFile(filepath.Join(s.root, args[len(args)-1]))
+		if err != nil || !s.filters {
+			return bad("error: Failed to define filter")
+		}
+		if s.nwfilters == nil {
+			s.nwfilters = map[string]string{}
+		}
+		s.nwfilters[between(string(b), "name='", "'")] = string(b)
+		return ok("Network filter defined")
 	case "net-dumpxml":
 		return ok(`<network><name>default</name><bridge name="virbr0" stp="on"/></network>`)
 	case "destroy":

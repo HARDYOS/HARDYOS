@@ -161,8 +161,16 @@ Server: the server's name (`hardyos.home.example.net`) or address, port
   read only. Nothing else on the server is reachable.
 
 Limits: SFTP accounts can't open a shell, run commands, or forward ports
-(no tunnels); only the password works (SSH keys aren't used, so changing
+(no tunnels); only passwords work (SSH keys aren't used, so changing
 your domain password or turning the account off always locks it out).
+Your own domain password works **at home only, and only without
+two-factor sign-in**; from outside (and once you have two-factor sign-in)
+use an **app password** with *Shared folders (SFTP)* ticked (account menu ›
+*Two-factor sign-in* › *App passwords*), as for WebDAV. SSH keys of the
+server's own Linux accounts are unchanged. Open SFTP sessions end when an
+app password of the account is revoked, when its two-factor sign-in is
+set up or reset, when it is turned off, and when its domain password
+changes; the SFTP app then asks for a password again.
 A new account, a new rule or a new folder shows up within 10 minutes;
 an account with no folder to see can't sign in. Ten wrong passwords in
 15 minutes lock that name out of SFTP for 15 minutes (the domain isn't

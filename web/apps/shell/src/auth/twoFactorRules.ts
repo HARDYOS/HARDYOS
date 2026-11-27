@@ -50,6 +50,7 @@ export function graceText(st: TwoFactorStatus | undefined, now: Date = new Date(
 
 export const SCOPE_LABELS: Record<AppPasswordScope, string> = {
   files: "Files (WebDAV)",
+  sftp: "Shared folders (SFTP)",
   mail: "Mail (IMAP and SMTP)",
   calendars: "Calendars and contacts",
 };

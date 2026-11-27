@@ -46,6 +46,8 @@ type rule struct {
 	extra map[string]*rule
 	// text: incoming text that may differ from the rendering's.
 	text func(string) bool
+	// alt: a rendered attribute's incoming value that may stand for it.
+	alt map[string]func(in, ex string) bool
 }
 
 func anyValue(string) bool { return true }
@@ -118,8 +120,11 @@ var deviceRules = map[string]*rule{
 	},
 	// Network cards: MAC, bridge, tap name, model and filter (with its
 	// parameters) exactly; no VLAN, ROM, bandwidth or anything else that
-	// wasn't rendered.
-	"interface": {extra: withExtras(nil)},
+	// wasn't rendered. A server one release older renders clean-traffic
+	// where this one renders HardyOS's filter: stricter (no IPv6 at all),
+	// so it may come in (decision 512).
+	"interface": {extra: withExtras(nil), kids: map[string]*rule{"filterref": {alt: map[string]func(in, ex string) bool{
+		"filter": func(in, ex string) bool { return in == CleanTraffic && ex == HardyOSFilter }}}}},
 	// The guest agent: libvirt binds the socket in its own folder.
 	"channel": {
 		kids: map[string]*rule{"target": {attrs: map[string]func(string) bool{"state": oneOf("connected", "disconnected")}}},
@@ -233,6 +238,9 @@ func compare(in, ex *xnode, r *rule, where string, bad func(string, ...any)) {
 	}
 	for k, v := range ex.Attrs {
 		if got, ok := in.Attrs[k]; !ok || got != v {
+			if alt := r.alt[k]; ok && alt != nil && alt(got, v) {
+				continue
+			}
 			bad("%s: %s is %q, expected %q", where, k, got, v)
 		}
 	}

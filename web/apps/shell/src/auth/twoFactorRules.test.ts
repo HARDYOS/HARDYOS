@@ -1,6 +1,6 @@
 import type { TwoFactorStatus } from "@hardy/api-client";
 import { describe, expect, it } from "vitest";
-import { cleanCode, codeReady, graceText, isChallenge, recoveryCodesText, routerTrustText, setupCodeReady, totpReady, twoFactorLabel } from "./twoFactorRules";
+import { SCOPE_LABELS, cleanCode, codeReady, graceText, isChallenge, recoveryCodesText, routerTrustText, setupCodeReady, totpReady, twoFactorLabel } from "./twoFactorRules";
 
 const off: TwoFactorStatus = {
   enabled: false, enabledAt: null, recoveryCodesLeft: 0, required: false, graceUntil: null, locked: false, outsideFailures: 0, setupCodeExpires: null, mustEnroll: false,
@@ -56,5 +56,10 @@ describe("two-factor rules", () => {
     expect(t).toContain("Cade on nas.local");
     expect(t).toContain(" 1. aaaa-bbbb-cccc-dddd");
     expect(t).toContain(" 2. eeee-ffff-gggg-hhhh");
+  });
+
+  it("offers every app password scope, SFTP included", () => {
+    expect(Object.keys(SCOPE_LABELS)).toEqual(["files", "sftp", "mail", "calendars"]);
+    expect(SCOPE_LABELS.sftp).toMatch(/SFTP/);
   });
 });

@@ -427,7 +427,7 @@ func TestSpoofingFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(string(x), `<filterref filter="clean-traffic">`); n != 1 {
+	if n := strings.Count(string(x), `<filterref filter="hardyos-clean-traffic">`); n != 1 {
 		t.Fatalf("%d filters:\n%s", n, x)
 	}
 	r := fromTemplate(t, "fw", "opnsense")

@@ -290,7 +290,7 @@ export function TwoFactorDialog({ user, onClose }: { user: User; onClose: () => 
   );
 }
 
-/** Per-device passwords for WebDAV, mail and calendars. */
+/** Per-device passwords for WebDAV, SFTP, mail and calendars. */
 function AppPasswords({ enrolled }: { enrolled: boolean }) {
   const qc = useQueryClient();
   const list = useQuery({ queryKey: ["app-passwords"], queryFn: () => unwrap(api.GET("/auth/app-passwords")) });
@@ -305,9 +305,10 @@ function AppPasswords({ enrolled }: { enrolled: boolean }) {
         </Button>
       </div>
       <p className="small muted" style={{ margin: 0 }}>
-        For mail apps, mapped drives (WebDAV) and calendar apps, which can't ask for a code. From outside your home network only app passwords work there
-        {enrolled ? ", and with two-factor sign-in on, your own password no longer works there at all" : ""}. Shared folders over SMB and SFTP keep using your
-        domain password.
+        For mail apps, mapped drives (WebDAV), SFTP apps and calendar apps, which can't ask for a code. From outside your home network only app passwords
+        work there
+        {enrolled ? ", and with two-factor sign-in on, your own password no longer works there at all" : ""}. Shared folders over SMB keep using your domain
+        password.
       </p>
       {list.isPending ? (
         <Loading />

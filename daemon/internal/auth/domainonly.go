@@ -102,3 +102,60 @@ func (s *SignIn) AuthenticateDomain(ctx context.Context, typed, pw string) (*Use
 	}
 	return u, nil
 }
+
+// SyncDomainAccount makes or brings up to date the row of a domain account
+// whose password another service just checked with the domain (sshd's
+// pam_winbind, decision 519), from the directory, as a desktop sign-in
+// would after Kerberos: the account must exist and be usable, its groups
+// and role are refreshed, its identity anchor is checked and what was
+// signed in with an older password ends. Local accounts' names and other
+// domains are refused.
+func (s *SignIn) SyncDomainAccount(ctx context.Context, typed string) (*User, error) {
+	if s.Domain == nil {
+		return nil, ErrNoLocalDC
+	}
+	part, name, form := splitName(typed)
+	if !samRE.MatchString(name) || strings.HasSuffix(name, ".") {
+		return nil, ErrBadCredentials
+	}
+	if form == formBare {
+		if u, err := s.Users.GetByName(ctx, name); err == nil && u.Source == SourceLocal {
+			return nil, ErrLocalAccount
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, domainCheckTimeout)
+	defer cancel()
+	info, err := s.Domain.Info(ctx)
+	if err != nil {
+		return nil, ErrDomainUnavailable
+	}
+	if info == nil {
+		return nil, ErrNoLocalDC
+	}
+	if form != formBare && !ourDomain(info, part, form) {
+		return nil, ErrUnknownDomain
+	}
+	a, err := s.Domain.Account(ctx, name)
+	if err != nil {
+		return nil, ErrDomainUnavailable
+	}
+	if err := accountUsable(a); err != nil {
+		return nil, err
+	}
+	if a.LockedOut {
+		return nil, ErrAccountLocked
+	}
+	u, err := s.Users.UpsertDomain(ctx, domainUpdate(info, a))
+	if err != nil {
+		return nil, err
+	}
+	if u.Disabled {
+		return nil, ErrDisabledHere
+	}
+	if err := s.checkDirectory(ctx, u, a, true); err != nil {
+		s.log().Warn("domain sign-in: recording the account's identity", "user", name, "err", err)
+		return nil, ErrDomainUnavailable
+	}
+	s.Users.touchLogin(ctx, u.ID)
+	return u, nil
+}

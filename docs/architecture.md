@@ -97,8 +97,10 @@ undo only writes the network files).
 - Services without a code step (WebDAV, mail through Dovecot, calendars) go
   through `servicePassword`: a scoped app password always, the account's own
   password only from inside and only without 2FA.
-- SMB, Kerberos, LDAP and SFTP check domain passwords in Samba/winbind
-  themselves and are not covered (decision 447).
+- SMB, Kerberos and LDAP check domain passwords in Samba/winbind
+  themselves and are not covered (decision 447). SFTP asks hardyd first
+  from sshd's PAM stack (app passwords with the `sftp` scope; own
+  passwords at home only; decision 514).
 - Recovery: recovery codes, an administrator's reset, `hardyctl reset-2fa`.
 
 ## Jobs and events
@@ -852,7 +854,9 @@ section 3; decisions 65-69, security review 80-82):
   Compose file and a generated icon into a `.hardyapp` (source `custom`,
   stored like an upload) and answers with an install plan.
 - **Window proxy** (`api/appproxy.go`). For every installed app with a web
-  page hardyd listens on its own port (44300 + n, kept in the database) with
+  page hardyd listens on its own port (44300-44399, `ports.AppProxy`, kept in
+  the database; a recorded port outside it is reassigned when the proxy
+  starts, decision 510) with
   the desktop's certificate and reverse-proxies to `127.0.0.1:<web port>`,
   WebSockets included. `X-Frame-Options` and `frame-ancestors` from the app
   are removed and replaced with `frame-ancestors` for the desktop's origin;
@@ -1130,7 +1134,7 @@ them on (`settings.json`: `sftpEnabled`, `webdavEnabled`) and per folder
 (`services.sftp`, `services.webdav`, off for new folders).
 
 ```
- SFTP client ──22──► sshd (host) ── PAM: pam_winbind for uid 100000-999999 only
+ SFTP client ──22──► sshd (host) ── PAM for uid 100000-999999 only: hardyctl pam-sftp ─unix─► hardyd, then pam_winbind
                        │ Match Group *\* / User *\*,*@*: internal-sftp, chroot /srv/hardyos/sftp/%U
                        ▼
                /srv/hardyos/sftp/101103/{Home,Media,...}   root's 0755, bind mounts (ro for read access)
@@ -1175,8 +1179,27 @@ them on (`settings.json`: `sftpEnabled`, `webdavEnabled`) and per folder
   PAM a deliberately wrong password for accounts AllowGroups refuses;
   that must not count towards their lockout in AD), then
   `pam_faillock preauth/authfail/authsucc deny=10 unlock_time=900` around
-  `pam_winbind`, which decides alone (wrong password, turned off,
-  expired, must-change all refused); the account block has the same
+  hardyd's rule and `pam_winbind` (decision 514): `pam_exec
+  /usr/bin/hardyctl pam-sftp app` (with `expose_authtok`; the password
+  leaves sshd only when it has an app password's shape) jumps to authsucc
+  when hardyd says it's an app password with the `sftp` scope; otherwise
+  `pam-sftp own` must say the account's own password may be used from
+  `PAM_RHOST` (home by decision 441, no two-factor sign-in) before
+  `pam_winbind try_first_pass` sees it, and `pam-sftp after` again once
+  winbind said yes; a wrong password runs `pam-sftp fail` (recorded,
+  counted like WebDAV's) before authfail, and a refused own password dies
+  without counting in faillock. hardyctl asks over
+  `/run/hardyos-sftp-auth.sock` (`hardyd-sftp-auth.socket`, owner hardyd,
+  0600), one JSON line each way, and hardyd answers root alone
+  (SO_PEERCRED; `internal/sftpauth`, `api/sftpauth.go`). Without hardyd
+  nobody signs in to SFTP. After winbind's yes hardyd syncs the account's
+  row from the directory (`SyncDomainAccount`) and checks the rule on it.
+  Revoking an app password, signing an account out everywhere and a
+  password change end its SFTP sessions through `files.sftp.end_sessions`
+  (`sftp.Manager.EndSessions`: sshd/sshd-session processes whose user IDs
+  are all the account's; decision 519). winbind still decides the domain password
+  (wrong password, turned off, expired, must-change all refused); the
+  account block has the same
   membership check. A third block before `@include common-session` gives
   domain accounts `pam_limits` and ends their session stack
   (`pam_permit`, `done`), so common-session's `pam_systemd` (a
@@ -2100,8 +2123,11 @@ hardyd ── /s/-/ds/* ──▶ Document Server  <container address>:80  (cata
   from the desktop's address) or on `files.<base>`; participants of kind
   `link` read and write as the link's creator.
 - **Ports.** 44250 and 44251, like every fixed port of HardyOS's own
-  listeners (app gateway 44200, app windows 44300 and up, replication
-  44400), are in `internal/ports`, whose test refuses duplicates.
+  listeners (app gateway 44200, replication 44400), are in `internal/ports`,
+  with the registered ranges (`ports.Ranges`: app windows 44300-44399, live
+  migration 49152-49215); its tests refuse duplicates and any overlap
+  between a fixed port and a range or between two ranges, and no app may
+  publish a port of a range (decision 510).
 - **Notes** is web only: Markdown files through `/files/*` as the person
   (list, download, chunked upload with overwrite after a stat check),
   rendered by a React-element Markdown renderer without HTML.
