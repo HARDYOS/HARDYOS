@@ -202,6 +202,11 @@ func (m *Manager) startStored(ctx context.Context, st *stored) (*Result, error) 
 		if err := m.tagVLANs(ctx, &st.spec); err != nil {
 			return nil, fmt.Errorf("the VM's VLAN couldn't be set, so it stays paused: %w", err)
 		}
+		if st.spec.NeedsFilter() {
+			if err := m.guardVM(ctx, &st.spec); err != nil {
+				return nil, fmt.Errorf("the VM stays paused: %w", err)
+			}
+		}
 		if _, err := m.virsh(ctx, "resume", id); err != nil {
 			return nil, err
 		}
@@ -221,6 +226,11 @@ func (m *Manager) startStored(ctx context.Context, st *stored) (*Result, error) 
 	}
 	if s.NeedsFilter() && !m.hasFilter(ctx) {
 		return nil, Problems{"the network filter that stops VMs on the home network from using other computers' addresses (libvirt's clean-traffic) isn't installed; turn on \"allow address spoofing\" for the VM's network cards, or reinstall HardyOS's virtualization packages"}
+	}
+	if s.NeedsFilter() {
+		if err := m.ensureFilter(ctx); err != nil {
+			return nil, err
+		}
 	}
 	warnings := m.memoryWarnings(ctx, s, false)
 	if s.NeedsBridge() && (m.Network == nil || m.Network.BridgeName() == "") {
@@ -314,6 +324,13 @@ func (m *Manager) startStored(ctx context.Context, st *stored) (*Result, error) 
 	}
 	if s.NeedsBridge() {
 		m.allowBridged(ctx)
+		// IPv6 of filtered cards (and none for cards that may spoof):
+		// in place before the VM sends anything (decision 512).
+		if err := m.guardVM(ctx, s); err != nil && s.NeedsFilter() {
+			undefineDevices()
+			release()
+			return nil, err
+		}
 	}
 	if s.NeedsNAT() {
 		if err := m.guardNAT(ctx); err != nil {
@@ -771,6 +788,9 @@ func (m *Manager) Watch(ctx context.Context) {
 		}
 		tick++
 		m.check(ctx, tick%10 == 0)
+		if tick%10 == 0 {
+			m.refreshGuard6(ctx)
+		}
 	}
 }
 
@@ -852,10 +872,12 @@ func (m *Manager) OnStart(ctx context.Context) {
 	}
 	stats := m.stats(ctx)
 	var auto []*stored
+	var guarded []*Spec
 	for _, st := range l {
 		s := stats[st.spec.ID]
 		if s.State == "running" || s.State == "paused" {
 			m.setRunning(st.spec.ID, true)
+			guarded = append(guarded, &st.spec)
 			continue
 		}
 		if st.cluster != nil {
@@ -875,6 +897,11 @@ func (m *Manager) OnStart(ctx context.Context) {
 		if st.spec.Autostart.Enabled {
 			auto = append(auto, st)
 		}
+	}
+	// VMs that kept running while hardyd-priv restarted keep their IPv6
+	// rules (the table is loaded again, as it is after a reboot).
+	if len(guarded) > 0 {
+		m.seedGuard6(ctx, guarded)
 	}
 	sort.SliceStable(auto, func(i, j int) bool { return auto[i].spec.Autostart.Order < auto[j].spec.Autostart.Order })
 	for _, st := range auto {

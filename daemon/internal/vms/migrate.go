@@ -264,6 +264,16 @@ func (m *Manager) MigrateAccept(ctx context.Context, a MigrateAcceptArgs) (*os.F
 	if err := m.migrationReady(); err != nil {
 		return nil, err
 	}
+	if st.spec.NeedsFilter() {
+		// The incoming domain references the filter, and its filtered
+		// cards' IPv6 rules are in place before it runs here.
+		if err := m.ensureFilter(ctx); err != nil {
+			return nil, err
+		}
+		if err := m.guardVM(ctx, &st.spec); err != nil {
+			return nil, err
+		}
+	}
 	mg := m.migs()
 	mg.mu.Lock()
 	for id, ad := range mg.in {

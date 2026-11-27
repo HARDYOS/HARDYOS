@@ -224,7 +224,7 @@ func TestCheckMigrationXMLRefuses(t *testing.T) {
 		},
 		"host CPU": func(x string) string { return strings.Replace(x, `mode="custom"`, `mode="host-passthrough"`, 1) },
 		"no traffic filter": func(x string) string {
-			return strings.Replace(x, `<filterref filter="clean-traffic"></filterref>`, "", 1)
+			return strings.Replace(x, `<filterref filter="hardyos-clean-traffic"></filterref>`, "", 1)
 		},
 		"another MAC": func(x string) string { return strings.Replace(x, "52:54:00:12:34:56", "52:54:00:66:66:66", 1) },
 		"console on the LAN": func(x string) string {

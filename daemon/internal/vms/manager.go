@@ -135,6 +135,12 @@ type Manager struct {
 	// onLink replaces hostPrefixes (tests).
 	onLink func() []netip.Prefix
 
+	// The IPv6 side of the anti-spoofing filter (netguard6.go).
+	guard6Mu      sync.Mutex
+	guard6VMs     map[string]guard6NIC // tap -> a filtered card
+	guard6Applied string               // the ruleset in place
+	filterDefined bool                 // HardyOSFilter was defined by this process
+
 	mu     sync.Mutex // creates, deletes and renames
 	vmMu   sync.Mutex
 	vmLock map[string]*vmLockEntry

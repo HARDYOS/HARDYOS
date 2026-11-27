@@ -630,7 +630,7 @@ func DomainXML(s *Spec, a ArchInfo, p Paths, devs []devices.Prepared) ([]byte, e
 			// On the home network a card may only use its own MAC and the
 			// IP address it was given (decision 137), unless it's a router.
 			if !n.AllowSpoofing {
-				ifc.FilterRef = &filterRefXML{Filter: CleanTraffic}
+				ifc.FilterRef = &filterRefXML{Filter: HardyOSFilter}
 			}
 		}
 		ifc.Target = &ifaceTargetXML{Dev: tapName(s.UUID, i)}

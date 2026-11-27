@@ -43,6 +43,8 @@ type sim struct {
 	neigh     string           // ip -j -4 neigh show dev br0 (JSON)
 	fdb       string           // bridge -j fdb show br br0 (JSON)
 	nftLive   string           // the loaded game streaming ruleset
+	nft6      string           // the loaded VM cards' IPv6 table
+	nwfilters map[string]string
 }
 
 type simDomain struct {
@@ -115,6 +117,8 @@ func (s *sim) Run(_ context.Context, stdin []byte, name string, args ...string) 
 		return s.bridge(args)
 	case "nft":
 		switch {
+		case len(args) == 2 && args[0] == "-f" && args[1] == "-":
+			s.nft6 = string(stdin) // the VM cards' IPv6 table
 		case len(args) == 2 && args[0] == "-f":
 			b, _ := os.ReadFile(filepath.Join(s.root, args[1]))
 			s.nftLive = string(b)
@@ -133,6 +137,17 @@ func (s *sim) Run(_ context.Context, stdin []byte, name string, args ...string) 
 				return ok(`[{"dst":"192.168.1.77","lladdr":"52:54:00:12:34:56","state":["REACHABLE"]}]`)
 			}
 			return ok(s.neigh)
+		}
+		if len(args) > 2 && args[1] == "-6" {
+			// ip -j -6 route|addr show dev br0
+			dev := args[len(args)-1]
+			if dev != "br0" {
+				return bad("Cannot find device \"" + dev + "\"")
+			}
+			if args[2] == "route" {
+				return ok(`[{"dst":"2001:db8:1::/64","protocol":"ra","metric":100},{"dst":"fe80::/64","protocol":"kernel"},{"dst":"default","gateway":"fe80::1","protocol":"ra"}]`)
+			}
+			return ok(`[{"ifname":"br0","addr_info":[{"family":"inet6","local":"2001:db8:1::10","prefixlen":64,"scope":"global"},{"family":"inet6","local":"fe80::10","prefixlen":64,"scope":"link"}]}]`)
 		}
 		if len(args) > 2 && args[2] == "addr" {
 			// ip -j -4 addr show dev br0
@@ -466,6 +481,16 @@ func (s *sim) virsh(args []string) (sysexec.Result, error) {
 			return ok(" 11111111-2222-3333-4444-555555555555   allow-arp\n")
 		}
 		return ok(" 11111111-2222-3333-4444-555555555555   allow-arp\n 11111111-2222-3333-4444-555555555556   clean-traffic\n")
+	case "nwfilter-define":
+		b, err := os.ReadFile(filepath.Join(s.root, args[len(args)-1]))
+		if err != nil || !s.filters {
+			return bad("error: Failed to define filter")
+		}
+		if s.nwfilters == nil {
+			s.nwfilters = map[string]string{}
+		}
+		s.nwfilters[between(string(b), "name='", "'")] = string(b)
+		return ok("Network filter defined")
 	case "net-dumpxml":
 		return ok(`<network><name>default</name><bridge name="virbr0" stp="on"/></network>`)
 	case "destroy":
