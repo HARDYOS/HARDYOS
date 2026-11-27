@@ -97,6 +97,14 @@ func TestHookChecksEveryStartOfAClusterVM(t *testing.T) {
 	}
 	good := incoming(string(exp))
 	hostdev := strings.Replace(good, "</devices>", `<hostdev mode="subsystem" type="pci"><source><address domain="0" bus="1" slot="0" function="0"/></source></hostdev></devices>`, 1)
+	// Its filtered card's IPv6 rules aren't loaded yet: refused (decision
+	// 518). A start loads them before QEMU runs.
+	if err := e.m.MigrateCheck(ctx, MigrateCheckArgs{VM: "web", Op: HookPrepare, XML: good}); err == nil || !strings.Contains(err.Error(), "IPv6") {
+		t.Fatalf("a filtered card without its rules: %v", err)
+	}
+	if err := e.m.guardVM(ctx, &st.spec); err != nil {
+		t.Fatal(err)
+	}
 	for _, op := range []string{HookPrepare, HookStart, HookRestore} {
 		if err := e.m.MigrateCheck(ctx, MigrateCheckArgs{VM: "web", Op: op, XML: good}); err != nil {
 			t.Fatalf("%s of the rendering: %v", op, err)

@@ -24,6 +24,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/hardyos/hardyos/daemon/internal/apps"
+	"github.com/hardyos/hardyos/daemon/internal/appstore"
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
@@ -1006,16 +1007,19 @@ func (p *appProxy) ensureRemote(ctx context.Context, rw *remoteWindow) (int, err
 	}
 	st := p.s.appStore()
 
-	ports, err := st.ProxyPorts(ctx)
+	recorded, err := st.ProxyPorts(ctx)
 	if err != nil {
 		return 0, err
 	}
-	port := ports[key]
+	port := recorded[key]
+	if !appstore.ProxyPortUsable(port, p.opts.portRange) {
+		port = 0 // never listen outside the window range (decision 510)
+	}
 	avoid := map[int]bool{}
 	var ln net.Listener
 	for try := 0; try < 20; try++ {
 		if port == 0 {
-			if port, err = st.AllocateProxyPort(ctx, key, p.opts.BasePort, avoid); err != nil {
+			if port, err = st.AllocateProxyPort(ctx, key, p.opts.portRange, avoid); err != nil {
 				return 0, err
 			}
 		}

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 	"github.com/hardyos/hardyos/daemon/internal/vms"
 )
 
@@ -121,6 +122,12 @@ func LibvirtHookMain(args []string, stdin io.Reader, stderr io.Writer, socket st
 	return libvirtHook(args, stdin, stderr, socket, "/")
 }
 
+// hookGuardCheck checks the live IPv6 rules when hardyd-priv doesn't
+// answer (root runs nft itself; tests replace it).
+var hookGuardCheck = func(ctx context.Context, domXML string) error {
+	return (&vms.Manager{Runner: sysexec.Exec{}, Root: "/"}).CheckGuardedStart(ctx, domXML)
+}
+
 func libvirtHook(args []string, stdin io.Reader, stderr io.Writer, socket, root string) int {
 	if len(args) < 2 {
 		return 0
@@ -149,6 +156,11 @@ func libvirtHook(args []string, stdin io.Reader, stderr io.Writer, socket, root 
 			admitted = serr == nil
 		}
 		if op != vms.HookMigrate && !admitted && !vms.LooksClustered(b) {
+			// Still: no filtered card starts without its IPv6 rules.
+			if gerr := hookGuardCheck(ctx, string(b)); gerr != nil {
+				fmt.Fprintf(stderr, "HardyOS refused to start %s (%s): %v\n", vm, op, gerr)
+				return 1
+			}
 			return 0
 		}
 	}

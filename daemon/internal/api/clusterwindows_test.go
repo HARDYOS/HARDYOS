@@ -23,6 +23,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/cluster/clustertest"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/member"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/state"
+	"github.com/hardyos/hardyos/daemon/internal/ports"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/tlscert"
 	"github.com/hardyos/hardyos/daemon/internal/updates"
@@ -160,7 +161,7 @@ func windowClusterWith(t *testing.T, nasApps map[string]apps.App) (nas, c1 *clus
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		nas.s.RunAppProxy(pctx, AppProxyOptions{TLS: &tls.Config{Certificates: []tls.Certificate{cert}}, BasePort: base,
+		nas.s.RunAppProxy(pctx, AppProxyOptions{TLS: &tls.Config{Certificates: []tls.Certificate{cert}}, portRange: ports.Range{Name: "test", First: base, Last: base + ports.AppProxyCount - 1},
 			ListenHost: "127.0.0.1", DesktopPort: 443, Interval: time.Hour})
 	}()
 	t.Cleanup(func() { pcancel(); <-done })

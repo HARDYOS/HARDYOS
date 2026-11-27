@@ -40,7 +40,12 @@ type Manager struct {
 	Log    *slog.Logger
 	// Paths; empty means the defaults (tests change them).
 	Root, DropIn, PAMPath, CommonAuth string
-	Unit                              string
+	// Helper replaces PAMHelper in sshd's PAM block (tests).
+	Helper string
+	// ProcRoot replaces /proc and Kill sending SIGTERM (tests).
+	ProcRoot string
+	Kill     func(pid int) error
+	Unit     string
 	// Mounter; nil means SysMounter.
 	Mounter Mounter
 	// NoChown skips making the views root's (tests without root).
@@ -569,7 +574,7 @@ func (m *Manager) setPAM(on bool) error {
 	if err != nil {
 		return err
 	}
-	text, err := EditPAM(string(b), on)
+	text, err := EditPAMWith(string(b), on, or(m.Helper, PAMHelper))
 	if err != nil {
 		return err
 	}

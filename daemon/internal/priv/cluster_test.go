@@ -65,6 +65,19 @@ func TestLibvirtHookChecksMigrationsAndStarts(t *testing.T) {
 	if rc := libvirtHook([]string{"local", "prepare", "begin", "-"}, strings.NewReader("<domain><name>local</name></domain>"), &stderr, gone, root); rc != 0 {
 		t.Fatal("a local VM couldn't start while hardyd-priv was down")
 	}
+	// ... unless a filtered card has no IPv6 rules loaded (decision 518).
+	oldGuard := hookGuardCheck
+	t.Cleanup(func() { hookGuardCheck = oldGuard })
+	hookGuardCheck = func(_ context.Context, x string) error {
+		if strings.Contains(x, "hardyos-clean-traffic") {
+			return errors.New("no IPv6 rules")
+		}
+		return nil
+	}
+	filtered := `<domain><name>local</name><devices><interface><target dev="hvabcdef0"/><filterref filter="hardyos-clean-traffic"/></interface></devices></domain>`
+	if rc := libvirtHook([]string{"local", "prepare", "begin", "-"}, strings.NewReader(filtered), &stderr, gone, root); rc == 0 {
+		t.Fatal("a filtered card started without its IPv6 rules while hardyd-priv was down")
+	}
 	clustered := `<domain><devices><disk><source dev="/dev/disk/by-id/wwn-0x6001405a1b2c3d4e5f60718293a4b5c6"/></disk></devices></domain>`
 	if rc := libvirtHook([]string{"other", "prepare", "begin", "-"}, strings.NewReader(clustered), &stderr, gone, root); rc == 0 {
 		t.Fatal("a domain on cluster storage started without root's check")

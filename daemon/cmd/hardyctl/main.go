@@ -25,6 +25,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/install"
 	"github.com/hardyos/hardyos/daemon/internal/oidc"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
+	"github.com/hardyos/hardyos/daemon/internal/sftpauth"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
 	"github.com/hardyos/hardyos/daemon/internal/syslock"
@@ -65,6 +66,9 @@ Cluster storage (run as root on the storage server):
   cluster-storage repin <server>  accept a compute server's changed storage address or key
   cluster-storage repin --subnet  accept a changed storage network
   cluster-storage forget <server> clear what is kept of a removed server (its fence too)
+SFTP (run by sshd's PAM stack, not by hand):
+  pam-sftp app|own|after|fail ask hardyd about a domain account's SFTP sign-in (app passwords,
+                             own passwords at home only; decision 514)
 NetBird standby (run as root):
   netbird-standby fingerprint  show HardyOS's VPS key and the VPS host key it trusts,
                                to compare with what the VPS script prints
@@ -128,6 +132,12 @@ func main() {
 		err = bootSync(args)
 	case "cluster-storage":
 		err = clusterStorage(*socket, args, os.Stdin)
+	case "pam-sftp":
+		// Run by sshd's PAM (pam_exec) for domain accounts' SFTP sign-ins.
+		if len(args) != 1 {
+			os.Exit(2)
+		}
+		os.Exit(sftpauth.PAM(context.Background(), args[0], os.Getenv, os.Stdin, sftpauth.Socket, os.Stderr))
 	case "netbird-standby":
 		err = standbyCmd(args)
 	default:

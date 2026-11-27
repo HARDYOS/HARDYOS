@@ -12,7 +12,7 @@ func live(x string) string {
 	r := strings.NewReplacer(
 		`<source dev="`+testWWN+`"></source>`, `<source dev="`+testWWN+`" index="1"></source><backingStore/>`,
 		`<serial>web-disk0</serial>`, `<serial>web-disk0</serial><alias name="scsi0-0-0-0"/><address type="drive" controller="0" bus="0" target="0" unit="0"/>`,
-		`<filterref filter="clean-traffic"></filterref>`, `<filterref filter="clean-traffic"></filterref><alias name="net0"/><address type="pci" domain="0x0000" bus="0x01" slot="0x00" function="0x0"/>`,
+		`<filterref filter="hardyos-clean-traffic"></filterref>`, `<filterref filter="hardyos-clean-traffic"></filterref><alias name="net0"/><address type="pci" domain="0x0000" bus="0x01" slot="0x00" function="0x0"/>`,
 		`<target type="virtio" name="org.qemu.guest_agent.0"></target>`, `<source mode="bind" path="/var/lib/libvirt/qemu/channel/target/domain-7-web/org.qemu.guest_agent.0"/><target type="virtio" name="org.qemu.guest_agent.0" state="connected"></target><alias name="channel0"/><address type="virtio-serial" controller="0" bus="0" port="1"/>`,
 		`<graphics type="vnc">`, `<graphics type="vnc" socket="/var/lib/libvirt/qemu/domain-7-web/vnc.sock">`,
 		`<listen type="socket"></listen>`, `<listen type="socket" socket="/var/lib/libvirt/qemu/domain-7-web/vnc.sock"></listen>`,
@@ -61,8 +61,8 @@ func TestCheckRefusesPerElement(t *testing.T) {
 		"channel connects":     {`mode="bind"`, `mode="connect"`},
 		"vnc socket elsewhere": {`<graphics type="vnc" socket="/var/lib/libvirt/qemu/domain-7-web/vnc.sock">`, `<graphics type="vnc" socket="/root/vnc.sock">`},
 		"vnc on a port":        {`<graphics type="vnc" socket="/var/lib/libvirt/qemu/domain-7-web/vnc.sock">`, `<graphics type="vnc" port="5900">`},
-		"filter parameter":     {`<filterref filter="clean-traffic"></filterref>`, `<filterref filter="clean-traffic"><parameter name="IP" value="0.0.0.0/0"/></filterref>`},
-		"another filter":       {`filter="clean-traffic"`, `filter="allow-all"`},
+		"filter parameter":     {`<filterref filter="hardyos-clean-traffic"></filterref>`, `<filterref filter="hardyos-clean-traffic"><parameter name="IP" value="0.0.0.0/0"/></filterref>`},
+		"another filter":       {`filter="hardyos-clean-traffic"`, `filter="allow-all"`},
 		"a VLAN":               {`<model type="virtio"></model>`, `<model type="virtio"></model><vlan><tag id="666"/></vlan>`},
 		"a ROM file":           {`<model type="virtio"></model>`, `<model type="virtio"></model><rom file="/etc/shadow"/>`},
 		"managed tap":          {`<target dev="hv6f1c2a0"></target>`, `<target dev="hv6f1c2a0" managed="no"></target>`},
@@ -96,5 +96,27 @@ func TestCheckRefusesPerElement(t *testing.T) {
 	noRNG = strings.Replace(noRNG, `</rng>`, `</rngx>`, 1)
 	if err := CheckMigrationXML([]byte(noRNG), exp); err == nil {
 		t.Error("a missing random number device was accepted")
+	}
+}
+
+// A server one release older renders clean-traffic (no IPv6 at all) where
+// this one renders HardyOS's filter: accepted, and only that way round
+// (decision 512).
+func TestCheckAcceptsTheOlderFilter(t *testing.T) {
+	exp := renderWeb(t)
+	base := live(string(exp))
+	older := strings.Replace(base, `filter="hardyos-clean-traffic"`, `filter="clean-traffic"`, 1)
+	if older == base {
+		t.Fatal("the test didn't change anything")
+	}
+	if err := CheckMigrationXML([]byte(older), exp); err != nil {
+		t.Fatalf("clean-traffic from an older server: %v", err)
+	}
+	if err := CheckMigrationXML([]byte(strings.Replace(base, `filter="hardyos-clean-traffic"`, `filter="no-mac-spoofing"`, 1)), exp); err == nil {
+		t.Fatal("a weaker filter was accepted")
+	}
+	oldExp := []byte(strings.Replace(string(exp), `filter="hardyos-clean-traffic"`, `filter="clean-traffic"`, 1))
+	if err := CheckMigrationXML([]byte(base), oldExp); err == nil {
+		t.Fatal("HardyOS's filter stood for clean-traffic")
 	}
 }

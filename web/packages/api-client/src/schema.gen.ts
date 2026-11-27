@@ -372,8 +372,9 @@ export interface paths {
         put?: never;
         /**
          * Make an app password for one device (domain accounts; needs your password)
-         * @description For services that can't ask for a code: `files` (WebDAV), `mail`
-         *     (IMAP and SMTP), `calendars` (CalDAV and CardDAV). From outside only
+         * @description For services that can't ask for a code: `files` (WebDAV), `sftp`
+         *     (shared folders over SFTP), `mail` (IMAP and SMTP), `calendars`
+         *     (CalDAV and CardDAV). From outside only
          *     app passwords work there, and once you have two-factor sign-in your
          *     own password stops working there too. Removed when the domain
          *     password changes.
@@ -7315,7 +7316,7 @@ export interface components {
             revokeAppPasswords: boolean;
         };
         /** @enum {string} */
-        AppPasswordScope: "files" | "mail" | "calendars";
+        AppPasswordScope: "files" | "sftp" | "mail" | "calendars";
         AppPassword: {
             /** Format: int64 */
             id: number;

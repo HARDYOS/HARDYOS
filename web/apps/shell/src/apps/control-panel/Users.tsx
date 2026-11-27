@@ -3,13 +3,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, errorMessage, unwrap } from "../../api";
 import { dateTime, initials, relativeTime } from "../../format";
-import { EditIcon, KeyIcon, PlusIcon, ShieldIcon, TrashIcon } from "../../icons";
+import { EditIcon, KeyIcon, LockIcon, PlusIcon, ShieldIcon, TrashIcon } from "../../icons";
 import { routerTrustText, twoFactorLabel } from "../../auth/twoFactorRules";
 
 import { useShell } from "../../shell";
 import { Alert, Badge, Button, Card, ErrorBox, Field, IconButton, Loading, PageHeader, Select, TextInput, Toggle } from "../../ui";
 import { ConfirmDialog, Dialog } from "../../ui/Dialog";
 import { toast } from "../../ui/toasts";
+import { UserAppPasswordsDialog } from "./UserAppPasswords";
 
 const useUsers = () => useQuery({ queryKey: ["users"], queryFn: () => unwrap(api.GET("/users")) });
 
@@ -22,6 +23,7 @@ export function Users() {
   const [deleting, setDeleting] = useState<User | null>(null);
   const [resetting2FA, setResetting2FA] = useState<User | null>(null);
   const [setupFor, setSetupFor] = useState<User | null>(null);
+  const [appPwFor, setAppPwFor] = useState<User | null>(null);
   const [revokeAppPw, setRevokeAppPw] = useState(true);
   const qc = useQueryClient();
 
@@ -105,6 +107,11 @@ export function Users() {
                         <ShieldIcon size={16} />
                       </IconButton>
                     )}
+                    {u.source === "domain" && (
+                      <IconButton label={`App passwords of ${u.username}`} onClick={() => setAppPwFor(u)}>
+                        <LockIcon size={16} />
+                      </IconButton>
+                    )}
                     <IconButton label={`Delete ${u.username}`} onClick={() => setDeleting(u)} disabled={u.id === me.id}>
                       <TrashIcon size={16} />
                     </IconButton>
@@ -120,6 +127,7 @@ export function Users() {
       {editing && <UserDialog user={editing} onClose={() => setEditing(null)} />}
       {resetting && <ResetPasswordDialog user={resetting} onClose={() => setResetting(null)} />}
       {setupFor && <SetupCodeDialog user={setupFor} onClose={() => setSetupFor(null)} />}
+      {appPwFor && <UserAppPasswordsDialog user={appPwFor} onClose={() => setAppPwFor(null)} />}
       {resetting2FA && (
         <ConfirmDialog
           title={`Reset two-factor sign-in for ${resetting2FA.username}?`}
@@ -145,7 +153,7 @@ export function Users() {
             Every app sign-in is revoked too. Type the username to confirm.
           </p>
           <label className="row small" style={{ gap: 6 }}>
-            <input type="checkbox" checked={revokeAppPw} onChange={(e) => setRevokeAppPw(e.target.checked)} /> Also revoke their app passwords (mail,
+            <input type="checkbox" checked={revokeAppPw} onChange={(e) => setRevokeAppPw(e.target.checked)} /> Also revoke their app passwords (mail, SFTP,
             WebDAV, calendars)
           </label>
         </ConfirmDialog>
@@ -344,7 +352,7 @@ export function TwoFactorPolicyCard() {
     <Card title="Two-factor sign-in">
       <p className="small muted" style={{ margin: 0 }}>
         Everyone needs an authenticator code to sign in from outside your home network (published desktop, published apps, HardyOS sign-in); mail, WebDAV and
-        calendar apps need app passwords there. Administrators must always use it. Shared folders over SMB and SFTP, and Kerberos, keep checking the domain
+        calendar apps and SFTP need app passwords there. Administrators must always use it. Shared folders over SMB, and Kerberos, keep checking the domain
         password only.
       </p>
       <form

@@ -114,6 +114,12 @@ func (s *Server) passwordSet(ctx context.Context, u *auth.User, at time.Time) {
 	if s.mfa != nil && s.mfa.ClearOutsideLock(ctx, u.ID, at) {
 		s.recordSystem(ctx, "auth.2fa.outside_unlock", u.Username, "the password was changed in the domain: two-factor codes from outside work again")
 	}
+	// SFTP sessions opened before the change end, once per change
+	// (decision 519).
+	if prev, ok := s.sftpPwSeen.Load(u.ID); !ok || !prev.(time.Time).Equal(at) {
+		s.sftpPwSeen.Store(u.ID, at)
+		s.endSFTPSessions(ctx, u, at, "the password was changed in the domain")
+	}
 	if s.appPw != nil {
 		if k := s.appPw.RevokeBefore(ctx, u.ID, at); k > 0 {
 			s.dav.dropUser(u.ID)

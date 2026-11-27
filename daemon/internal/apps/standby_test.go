@@ -27,6 +27,14 @@ func TestOwnedPortsKept(t *testing.T) {
 	if keptPort(8096, "jellyfin") {
 		t.Fatal("an ordinary port is kept")
 	}
+	// No app takes a port of a registered range (decision 510).
+	for _, r := range portreg.Ranges {
+		for _, p := range []int{r.First, r.Last} {
+			if !keptPort(p, "jellyfin") || !keptPort(p, "") {
+				t.Errorf("%s port %d given to an app", r.Name, p)
+			}
+		}
+	}
 }
 
 // The standby's subnet belongs to it (decision 426), and its app can't

@@ -194,6 +194,10 @@ migration range.
   the app only when it isn't a cluster workload.
 - L4: one lock around choosing and saving a port set; a set an app holds a
   host port of is never given to a VM nor forwarded (the VM panel says so).
+- After merging PR #49: each port set is a registered `ports.Range`
+  (`StreamingRanges`, 47984+100n to 48010+100n), so `TestRegistryIsDisjoint`
+  covers them and apps can't take any port inside one (Sunshine's single
+  ports left `ports.Fixed`, being slot 0's range).
 
 ## Tests
 

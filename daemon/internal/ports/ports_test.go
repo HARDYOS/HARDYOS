@@ -1,11 +1,13 @@
 package ports
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"io/fs"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -21,15 +23,94 @@ func TestNoPortIsUsedTwice(t *testing.T) {
 			t.Errorf("%s and %s both use %d", name, other, p)
 		}
 		seen[p] = name
-		if p >= AppProxyBase && p < AppProxyBase+AppProxyCount {
-			t.Errorf("%s (%d) is inside the app window proxy range %d-%d", name, p, AppProxyBase, AppProxyBase+AppProxyCount-1)
-		}
-		if p >= MigrateFirst && p < MigrateFirst+MigrateCount {
-			t.Errorf("%s (%d) is inside the live migration range %d-%d", name, p, MigrateFirst, MigrateFirst+MigrateCount-1)
-		}
 	}
 	if !Reserved(MailRelay) || Reserved(AppProxyBase) {
 		t.Fatal("Reserved")
+	}
+}
+
+// overlaps lists every clash between the fixed ports and the ranges, and
+// between two ranges.
+func overlaps(fixed map[string]int, ranges []Range) []string {
+	var bad []string
+	for i, r := range ranges {
+		if r.First < 1 || r.Last > 65535 || r.First > r.Last || r.Name == "" {
+			bad = append(bad, fmt.Sprintf("range %q %d-%d isn't valid", r.Name, r.First, r.Last))
+		}
+		for name, p := range fixed {
+			if r.Contains(p) {
+				bad = append(bad, fmt.Sprintf("%s (%d) is inside %s %d-%d", name, p, r.Name, r.First, r.Last))
+			}
+		}
+		for _, o := range ranges[i+1:] {
+			if r.Overlaps(o) {
+				bad = append(bad, fmt.Sprintf("%s %d-%d and %s %d-%d overlap", r.Name, r.First, r.Last, o.Name, o.First, o.Last))
+			}
+		}
+	}
+	return bad
+}
+
+// Every range and fixed port in the registry is disjoint from every other
+// (decision 510).
+func TestRegistryIsDisjoint(t *testing.T) {
+	for _, b := range overlaps(Fixed, Ranges) {
+		t.Error(b)
+	}
+	if AppProxy.Size() != AppProxyCount || AppProxy.First != AppProxyBase || !slices.Contains(Ranges, AppProxy) || !slices.Contains(Ranges, Migrate) {
+		t.Fatalf("ranges %+v", Ranges)
+	}
+	// Every streaming slot is a registered range holding all its ports.
+	if len(StreamingRanges) != StreamingSlots {
+		t.Fatalf("streaming ranges %+v", StreamingRanges)
+	}
+	for s, r := range StreamingRanges {
+		if !slices.Contains(Ranges, r) {
+			t.Errorf("streaming set %d isn't registered", s)
+		}
+		set := StreamingSlot(s)
+		for _, p := range append(append([]int{set.WebUI}, set.TCP...), set.UDP...) {
+			if got, ok := InRange(p); !ok || got != r {
+				t.Errorf("slot %d's port %d is in %+v", s, p, got)
+			}
+		}
+	}
+	if StreamingRanges[0].First != 47984 || StreamingRanges[StreamingSlots-1].Last != 48710 {
+		t.Fatalf("streaming ranges %d-%d", StreamingRanges[0].First, StreamingRanges[StreamingSlots-1].Last)
+	}
+	// The replication and cluster ports sit right after the window range.
+	if AppProxy.Contains(Replication) || AppProxy.Contains(Cluster) || !AppProxy.Contains(AppProxy.Last) {
+		t.Fatal("app proxy range")
+	}
+	// The checker itself catches clashes.
+	bad := overlaps(map[string]int{"replication": Replication}, []Range{
+		{Name: "a", First: Replication - 10, Last: Replication},
+		{Name: "b", First: Replication - 1, Last: Replication + 5},
+		{Name: "c", First: 10, Last: 9},
+	})
+	if len(bad) != 4 {
+		t.Fatalf("%q", bad)
+	}
+}
+
+func TestInRangeAndTakenOutside(t *testing.T) {
+	if r, ok := InRange(AppProxyBase + 5); !ok || r != AppProxy {
+		t.Fatal("app proxy")
+	}
+	if r, ok := InRange(MigrateFirst); !ok || r != Migrate {
+		t.Fatal("migrate")
+	}
+	if _, ok := InRange(Replication); ok {
+		t.Fatal("replication isn't a range")
+	}
+	for p := AppProxy.First; p <= AppProxy.Last; p++ {
+		if TakenOutside(p, AppProxy) {
+			t.Fatalf("%d is in the window range but taken", p)
+		}
+	}
+	made := Range{Name: "test", First: Replication - 2, Last: MigrateFirst}
+	if !TakenOutside(Replication, made) || !TakenOutside(MigrateFirst, made) || TakenOutside(Replication+1, made) || !TakenOutside(AppProxy.Last, made) {
+		t.Fatal("made-up range")
 	}
 }
 
@@ -118,8 +199,6 @@ func TestStreamingSlots(t *testing.T) {
 	if !equalSets(s0.TCP, SunshineTCP) || !equalSets(s0.UDP, SunshineUDP) {
 		t.Fatalf("slot 0's ports aren't Sunshine's own: %+v", s0)
 	}
-	sunshine := map[int]bool{SunshineHTTPS: true, SunshineHTTP: true, SunshineWebUI: true, SunshineRTSP: true, SunshineVideo: true,
-		SunshineControl: true, SunshineAudio: true, SunshineMic: true}
 	owner := map[string]int{}
 	for s := 0; s < StreamingSlots; s++ {
 		set := StreamingSlot(s)
@@ -144,7 +223,7 @@ func TestStreamingSlots(t *testing.T) {
 				t.Errorf("slot %d's port %d is in another range", s, p)
 			}
 			for name, f := range Fixed {
-				if f == p && !sunshine[p] {
+				if f == p {
 					t.Errorf("slot %d's port %d is %s's", s, p, name)
 				}
 			}

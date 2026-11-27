@@ -61,6 +61,7 @@ import (
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/apps"
+	"github.com/hardyos/hardyos/daemon/internal/appstore"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
 	"github.com/hardyos/hardyos/daemon/internal/events"
@@ -70,11 +71,10 @@ import (
 
 // Window proxy settings.
 const (
-	DefaultAppProxyBase = ports.AppProxyBase
-	proxyAuthPath       = "/__hardyos/auth"
-	proxyCookiePrefix   = "hardyos_app_"
-	proxyTokenTTL       = time.Minute
-	proxySessionTTL     = 12 * time.Hour
+	proxyAuthPath     = "/__hardyos/auth"
+	proxyCookiePrefix = "hardyos_app_"
+	proxyTokenTTL     = time.Minute
+	proxySessionTTL   = 12 * time.Hour
 )
 
 // proxyRecheck is how often a proxy session checks the desktop session and
@@ -89,8 +89,6 @@ var (
 type AppProxyOptions struct {
 	// TLS is the desktop's certificate; nil serves plain HTTP (development).
 	TLS *tls.Config
-	// BasePort is the first proxy port (default 44300).
-	BasePort int
 	// ListenHost is the address to listen on ("" = every address); hardyd
 	// passes the desktop's own listen host.
 	ListenHost string
@@ -99,6 +97,11 @@ type AppProxyOptions struct {
 	DesktopPort int
 	// Interval between checks for installed and removed apps (default 20s).
 	Interval time.Duration
+
+	// portRange is where windows listen: always ports.AppProxy, the fixed,
+	// registered range (decision 510); tests in this package set another
+	// so they don't need the real ports free.
+	portRange ports.Range
 }
 
 type appProxy struct {
@@ -176,11 +179,21 @@ func randomToken() string {
 // RunAppProxy serves every installed app's window proxy until ctx ends.
 func (s *Server) RunAppProxy(ctx context.Context, opts AppProxyOptions) {
 	p := s.proxy
-	if opts.BasePort == 0 {
-		opts.BasePort = DefaultAppProxyBase
+	if opts.portRange == (ports.Range{}) {
+		opts.portRange = ports.AppProxy
 	}
 	if opts.Interval == 0 {
 		opts.Interval = 20 * time.Second
+	}
+	// Windows allocated before the range was fixed may sit on or past the
+	// replication port: forget them, so each gets a port of the range when
+	// it next listens (decision 510).
+	if gone, err := s.appStore().ReleaseStrayProxyPorts(ctx, opts.portRange); err != nil {
+		s.cfg.Logger.Warn("app windows: checking recorded ports", "err", err)
+	} else {
+		for id, port := range gone {
+			s.cfg.Logger.Info("app windows: moving a window into the window port range", "app", id, "old_port", port)
+		}
 	}
 	// Finished app jobs change what the proxy serves: watch for them.
 	sub := s.cfg.Events.Subscribe(0, true, 256)
@@ -465,16 +478,19 @@ func (p *appProxy) ensure(ctx context.Context, a apps.App) (int, error) {
 		return l.port, nil
 	}
 	st := p.s.appStore()
-	ports, err := st.ProxyPorts(ctx)
+	recorded, err := st.ProxyPorts(ctx)
 	if err != nil {
 		return 0, err
 	}
-	port := ports[a.ID]
+	port := recorded[a.ID]
+	if !appstore.ProxyPortUsable(port, p.opts.portRange) {
+		port = 0 // never listen outside the window range (decision 510)
+	}
 	avoid := map[int]bool{}
 	var ln net.Listener
 	for try := 0; try < 20; try++ {
 		if port == 0 {
-			if port, err = st.AllocateProxyPort(ctx, a.ID, p.opts.BasePort, avoid); err != nil {
+			if port, err = st.AllocateProxyPort(ctx, a.ID, p.opts.portRange, avoid); err != nil {
 				return 0, err
 			}
 		}

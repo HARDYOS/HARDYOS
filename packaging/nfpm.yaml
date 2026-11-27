@@ -54,6 +54,8 @@ contents:
     dst: /lib/systemd/system/hardyd-priv.service
   - src: ./systemd/hardyd-mail-auth.socket
     dst: /lib/systemd/system/hardyd-mail-auth.socket
+  - src: ./systemd/hardyd-sftp-auth.socket
+    dst: /lib/systemd/system/hardyd-sftp-auth.socket
   - src: ./systemd/hardyos-issue.service
     dst: /lib/systemd/system/hardyos-issue.service
   - src: ./systemd/hardyos-setup-code.service
