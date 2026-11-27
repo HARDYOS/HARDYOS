@@ -21,7 +21,10 @@ func HACopyShares(r *hacopy.Root, m *shares.Manager, hooks []ShareHook) {
 	if r == nil || m == nil {
 		return
 	}
-	r.ShareRelease = func(ctx context.Context, id string) { runBeforeDelete(ctx, hooks, id) }
+	r.ShareRelease = func(ctx context.Context, id string) func() {
+		runBeforeDelete(ctx, hooks, id)
+		return func() { runAfterDelete(context.WithoutCancel(ctx), hooks, id) }
+	}
 	r.ShareChanged = func(ctx context.Context) { runChanged(ctx, hooks) }
 	r.ShareTaken = m.Taken
 }
@@ -32,14 +35,19 @@ func RegisterShareHold(s *Server, m *shares.Manager, hooks []ShareHook) {
 		return
 	}
 	s.Handle(OpSharesHAHold, typed(func(ctx context.Context, a shares.HAHoldArgs) (any, error) {
+		if err := shares.ValidID(a.ID); err != nil {
+			return nil, sharesErr(err)
+		}
 		if !a.Release {
 			// SMB closes it (its open files too), NFS stops exporting it,
 			// SFTP lets go: an unmount of a folder in use fails.
 			runBeforeDelete(ctx, hooks, a.ID)
 		}
 		err := m.HAHold(ctx, a)
-		if !a.Release && err != nil {
-			// Not held: file sharing takes it up again as it was.
+		if !a.Release {
+			// File sharing's own holds end (as after a delete): a held
+			// folder lists as not mounted, so nothing serves it, and one
+			// that wasn't held is taken up again as it was.
 			runAfterDelete(ctx, hooks, a.ID)
 		}
 		runChanged(ctx, hooks)

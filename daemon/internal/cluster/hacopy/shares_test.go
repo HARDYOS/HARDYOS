@@ -64,7 +64,7 @@ func TestShareParkRules(t *testing.T) {
 	f.add("tank/shares/media", "filesystem", shares.PropShare, "1", "written", "0")
 	var released, changed int
 	busy := true
-	r := &Root{Runner: f, ShareRelease: func(context.Context, string) { released++ }, ShareChanged: func(context.Context) { changed++ },
+	r := &Root{Runner: f, ShareRelease: func(context.Context, string) func() { released++; return nil }, ShareChanged: func(context.Context) { changed++ },
 		ShareBusy: func(context.Context, string, string) (bool, error) { return busy, nil }}
 	ctx := context.Background()
 	a := ParkArgs{Ref: shareRef(SideLocal), Confirm: "media", Conv: "abcdefgh12s0"}

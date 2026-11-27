@@ -256,7 +256,9 @@ type Root struct {
 	// put back), ShareTaken refuses adopting a folder whose id or name this
 	// server has already, and ShareBusy reports a cluster share still
 	// exported to compute servers (the storage server's NFS exports).
-	ShareRelease func(ctx context.Context, id string)
+	// ShareRelease's answer is called once the park is over, whatever it
+	// did (file sharing's own holds end then, as after a delete).
+	ShareRelease func(ctx context.Context, id string) (done func())
 	ShareChanged func(ctx context.Context)
 	ShareTaken   func(ctx context.Context, id, name string) error
 	ShareBusy    func(ctx context.Context, pool, id string) (bool, error)
@@ -1142,9 +1144,13 @@ func (r *Root) Park(ctx context.Context, a ParkArgs) (*ParkResult, error) {
 	}
 	name := string(a.Kind) + "-" + a.ID + "-" + strconv.FormatInt(r.now().Unix(), 10)
 	if a.Kind == KindShare && r.ShareRelease != nil {
-		// SMB, NFS and SFTP let go of it, as before a delete.
-		r.ShareRelease(ctx, a.ID)
+		// SMB, NFS and SFTP let go of it, as before a delete, and take the
+		// change up after.
+		done := r.ShareRelease(ctx, a.ID)
 		defer r.shareChanged(ctx, a.Ref)
+		if done != nil {
+			defer done()
+		}
 	}
 	if _, err := r.zfs(ctx, "set", "canmount=noauto", top); err != nil {
 		return nil, err

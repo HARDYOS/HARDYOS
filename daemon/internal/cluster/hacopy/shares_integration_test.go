@@ -80,7 +80,7 @@ func TestHAShareIntegration(t *testing.T) {
 
 	run := sysexec.Exec{}
 	var released, changed int
-	compute := &Root{Runner: run, ShareRelease: func(context.Context, string) { released++ }, ShareChanged: func(context.Context) { changed++ }}
+	compute := &Root{Runner: run, ShareRelease: func(context.Context, string) func() { released++; return nil }, ShareChanged: func(context.Context) { changed++ }}
 	busy := false
 	storage := &Root{Runner: run, ShareTaken: func(context.Context, string, string) error { return nil }, ShareChanged: func(context.Context) {},
 		ShareBusy: func(context.Context, string, string) (bool, error) { return busy, nil }}
