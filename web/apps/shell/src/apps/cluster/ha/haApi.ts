@@ -3,6 +3,7 @@
 import type { Job, components } from "@hardy/api-client";
 import { useQuery } from "@tanstack/react-query";
 import { ApiFailure, api, unwrap } from "../../../api";
+import { nodeApi } from "../../../cluster/scope";
 import type { Tone } from "../../../ui";
 
 type S = components["schemas"];
@@ -127,3 +128,109 @@ export function timingProblems(t: Timings): string[] {
 }
 
 export const notMember = (err: unknown) => err instanceof ApiFailure && err.code === "not_member";
+
+// ---- Phase 10: Make highly available / Make local again -------------------------
+
+export type Readiness = S["ClusterConvertReadiness"];
+export type Conversion = S["ClusterConversion"];
+export type KeptCopy = S["ClusterKeptCopy"];
+export type Failover = S["ClusterFailover"];
+
+export const convertKeys = {
+  check: (kind: WorkloadKind, id: string, cpu: string) => ["cluster", "convert", kind, id, cpu] as const,
+  conversions: ["cluster", "conversions"] as const,
+  kept: ["cluster", "kept"] as const,
+  failovers: ["cluster", "failovers"] as const,
+};
+
+/** Whether a workload on this server can be made highly available now. */
+export const useConvertCheck = (kind: WorkloadKind, id: string, cpu: "baseline" | "keep", enabled = true) =>
+  useQuery<Readiness>({
+    queryKey: convertKeys.check(kind, id, cpu),
+    queryFn: () => unwrap(api.GET("/cluster/convert/{kind}/{id}", { params: { path: { kind, id }, query: { cpu } } })),
+    enabled,
+    retry: false,
+  });
+
+export async function makeHA(kind: WorkloadKind, id: string, body: { priority?: number; cpu?: "baseline" | "keep"; confirm: string }): Promise<Job> {
+  const r = await unwrap(api.POST("/cluster/convert/{kind}/{id}", { params: { path: { kind, id } }, body }));
+  return r.job;
+}
+
+/** Make a cluster workload local again on node (its own API, through this server). */
+export async function makeLocal(node: string, kind: WorkloadKind, id: string, body: { pool?: string; confirm: string }): Promise<Job> {
+  const r = await unwrap(nodeApi(node).POST("/cluster/workloads/{kind}/{id}/local", { params: { path: { kind, id } }, body }));
+  return r.job;
+}
+
+export const useConversions = (poll = 3_000) =>
+  useQuery<Conversion[]>({ queryKey: convertKeys.conversions, queryFn: () => unwrap(api.GET("/cluster/conversions")), refetchInterval: poll });
+
+export async function undoConversion(conv: string, confirm: string): Promise<Job> {
+  const r = await unwrap(api.POST("/cluster/conversions/{conv}/undo", { params: { path: { conv } }, body: { confirm } }));
+  return r.job;
+}
+
+export async function abandonConversion(conv: string, confirm: string): Promise<Job> {
+  const r = await unwrap(api.POST("/cluster/conversions/{conv}/abandon", { params: { path: { conv } }, body: { confirm } }));
+  return r.job;
+}
+
+export const useKept = () =>
+  useQuery<KeptCopy[]>({ queryKey: convertKeys.kept, queryFn: () => unwrap(api.GET("/cluster/kept")), refetchInterval: 30_000 });
+
+/**
+ * A kept copy without an expiry: its workload hasn't run from its other
+ * copy since, so it may be the only good one (deleting it takes a second
+ * confirmation).
+ */
+export const isLastCopy = (k: Pick<KeptCopy, "keepUntil">): boolean => !k.keepUntil;
+
+export async function deleteKept(k: KeptCopy, confirm: string, lastCopy = false): Promise<Job> {
+  const r = await unwrap(api.POST("/cluster/kept/delete", { body: { node: k.node, pool: k.pool, name: k.name, confirm, lastCopy: lastCopy || undefined } }));
+  return r.job;
+}
+
+export const useFailovers = () =>
+  useQuery<Failover[]>({ queryKey: convertKeys.failovers, queryFn: () => unwrap(api.GET("/cluster/ha/failovers")), refetchInterval: 15_000 });
+
+/** Save a stopped HA VM as a template on the storage server. */
+export async function makeClusterTemplate(storageNode: string, id: string, body: { templateId: string; name: string; description?: string }): Promise<Job> {
+  const r = await unwrap(nodeApi(storageNode).POST("/cluster/workloads/vm/{id}/template", { params: { path: { id } }, body }));
+  return r.job;
+}
+
+/** Human names of a conversion's phases. */
+export const CONVERSION_PHASE: Record<string, string> = {
+  check: "Checking",
+  copy: "Copying",
+  stop: "Stopping",
+  final: "Final copy",
+  adopt: "Setting up on cluster storage",
+  park: "Putting the local copy aside",
+  register: "Registering",
+  attach: "Attaching",
+  start: "Starting",
+  mode: "Moving data out of its block volume",
+  snapshot: "Snapshot",
+  remove: "Removing from the cluster",
+  "park-storage": "Putting the cluster copy aside",
+  done: "Done",
+};
+
+/** Whether a failed conversion only copied so far (it can be abandoned). */
+export function canAbandon(c: Conversion): boolean {
+  const early = c.direction === "ha" ? ["check", "copy", "stop", "final", "adopt"] : ["check", "stop", "mode", "snapshot", "copy"];
+  return c.state === "failed" && early.includes(c.phase);
+}
+
+/** Whether a failed conversion to cluster storage can be undone. */
+export function canUndo(c: Conversion): boolean {
+  return c.direction === "ha" && c.state === "failed" && !canAbandon(c);
+}
+
+/** The kept copy's workload id from its name (<kind>-<id>-<time>). */
+export function keptID(name: string): string {
+  const parts = name.split("-");
+  return parts.slice(1, -1).join("-");
+}

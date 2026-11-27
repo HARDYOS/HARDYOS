@@ -103,6 +103,14 @@ type Coordinator struct {
 	EvacuateLANIsolated *bool
 	Now                 func() time.Time
 	Log                 *slog.Logger
+	// OnFailover hears about every recovery decision (a workload placed on
+	// a new server, or nowhere to run): history and alerts (decision 484).
+	OnFailover func(Failover)
+	// LiveOK is the network check of a live move between two servers
+	// (decision 487: every live move, the coordinator's own evacuations
+	// too; restarts and failovers never wait for it). nil: no check yet
+	// (the cluster's netcheck supplies the pair-scoped one).
+	LiveOK func(ctx context.Context, from, to cluster.NodeID) (bool, string)
 
 	mu           sync.Mutex
 	leader       bool
@@ -111,6 +119,7 @@ type Coordinator struct {
 	storageBad   map[cluster.NodeID]time.Time
 	lanBad       map[cluster.NodeID]time.Time
 	evacuated    map[cluster.NodeID]bool
+	evacRetry    map[cluster.NodeID]time.Time // an evacuation that failed is tried again after
 	fenceSeen    map[cluster.NodeID]time.Time // first time this leader saw a node's current fence
 	relocations  map[cluster.WorkloadRef][]time.Time
 	pendingTry   map[cluster.WorkloadRef]time.Time
@@ -254,6 +263,7 @@ func (c *Coordinator) Tick(ctx context.Context) {
 		c.storageBad = map[cluster.NodeID]time.Time{}
 		c.lanBad = map[cluster.NodeID]time.Time{}
 		c.evacuated = map[cluster.NodeID]bool{}
+		c.evacRetry = map[cluster.NodeID]time.Time{}
 		c.fenceSeen = map[cluster.NodeID]time.Time{}
 		for id := range s.Nodes {
 			c.lastHeard[id] = now
@@ -428,11 +438,12 @@ func (c *Coordinator) detectIsolation(ctx context.Context, self cluster.NodeID, 
 		if h.LANOK || lanOK == 0 {
 			delete(c.lanBad, id)
 			delete(c.evacuated, id)
+			delete(c.evacRetry, id)
 		} else if _, ok := c.lanBad[id]; !ok {
 			c.lanBad[id] = now
 		}
 		lanSince, lanIsBad := c.lanBad[id]
-		evac := c.evacuated[id]
+		evac := c.evacuated[id] || now.Before(c.evacRetry[id])
 		c.mu.Unlock()
 		n := s.Nodes[id]
 		if bad && now.Sub(since) >= t.StorageIsolated && n.State == cluster.NodeActive && id != self {
@@ -488,12 +499,45 @@ func (c *Coordinator) background(ctx context.Context, self cluster.NodeID, p *cl
 			delete(c.moving, p.Workload)
 			c.mu.Unlock()
 		}()
-		_ = c.act(lead, kind, title, string(p.Workload.Kind)+":"+p.Workload.ID, func(ctx context.Context) error {
+		err := c.act(lead, kind, title, string(p.Workload.Kind)+":"+p.Workload.ID, func(ctx context.Context) error {
+			if kind == JobEvacuate {
+				// Off a server that lost its LAN: the LAN can't be asked
+				// of it; the Mover checks the storage network with each
+				// destination it chooses (decision 487).
+				if ev, ok := c.Mover.(Evacuator); ok {
+					_, err := ev.Evacuate(ctx, req, c.actor(self))
+					return err
+				}
+			} else if c.LiveOK != nil {
+				if ok, why := c.LiveOK(ctx, p.Owner, to); !ok {
+					return fmt.Errorf("not moved live: the network check fails (%s)", why)
+				}
+			}
 			_, err := c.Mover.Move(ctx, req, c.actor(self))
 			return err
 		})
+		if err != nil && kind == JobEvacuate {
+			// Not marked evacuated: tried again later while its LAN stays
+			// down; meanwhile it keeps running where it is (decision 359:
+			// a LAN-isolated server still has cluster storage).
+			c.mu.Lock()
+			if c.evacuated != nil {
+				delete(c.evacuated, p.Owner)
+				c.evacRetry[p.Owner] = c.now().Add(EvacuateRetry)
+			}
+			c.mu.Unlock()
+		}
 	}()
 }
+
+// Evacuator moves a VM live off a LAN-isolated server, checking only the
+// storage network with the destination it chooses (moves.Mover).
+type Evacuator interface {
+	Evacuate(ctx context.Context, r cluster.MoveRequest, actor cluster.Actor) (*cluster.MoveResult, error)
+}
+
+// EvacuateRetry is how soon a failed evacuation is tried again.
+var EvacuateRetry = 30 * time.Second
 
 // fenceHolds: n's current fence is confirmed by the storage node, and for
 // an isolated node (which may still be running, stuck in I/O) the
@@ -670,11 +714,42 @@ func (c *Coordinator) recover(ctx context.Context, self cluster.NodeID, s *clust
 			c.relocations[p.Workload] = append(c.relocations[p.Workload], now)
 			c.mu.Unlock()
 		}
-		_ = c.act(ctx, kind, title, ref(p.Workload), func(ctx context.Context) error {
+		err = c.act(ctx, kind, title, ref(p.Workload), func(ctx context.Context) error {
 			_, err := c.Cluster.Propose(ctx, cluster.CmdPlacementSet, body, c.actor(self))
 			return err
 		})
+		if c.OnFailover != nil {
+			f := Failover{At: now, Workload: p.Workload, Name: p.Name, From: p.Owner, To: body.Owner, Priority: p.HA.Priority,
+				Coordinator: self, Outcome: FailoverRestarted, Problem: body.Problem}
+			switch {
+			case err != nil:
+				f.Outcome, f.Problem = FailoverFailed, err.Error()
+			case body.State == cluster.PlacementPending:
+				f.Outcome = FailoverPending
+			}
+			c.OnFailover(f)
+		}
 	}
+}
+
+// Failover outcomes.
+const (
+	FailoverRestarted = "restarted" // placed on a new server, which starts it
+	FailoverPending   = "pending"   // no server can run it now
+	FailoverFailed    = "failed"    // the cluster didn't take the decision
+)
+
+// Failover is one recovery decision of the coordinator.
+type Failover struct {
+	At          time.Time           `json:"at"`
+	Workload    cluster.WorkloadRef `json:"workload"`
+	Name        string              `json:"name"`
+	From        cluster.NodeID      `json:"from,omitempty"`
+	To          cluster.NodeID      `json:"to,omitempty"`
+	Outcome     string              `json:"outcome"`
+	Problem     string              `json:"problem,omitempty"`
+	Priority    int                 `json:"priority"`
+	Coordinator cluster.NodeID      `json:"coordinator"`
 }
 
 func summarize(skipped map[cluster.NodeID]string) string {

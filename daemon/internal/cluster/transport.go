@@ -78,6 +78,8 @@ type Transport struct {
 	Peer, Relay, Bootstrap http.Handler
 	// Migrate takes a live migration connection (part C); nil refuses.
 	Migrate func(conn *tls.Conn, from Node)
+	// Copy takes an HA conversion's stream (ALPNCopy); nil refuses.
+	Copy func(conn *tls.Conn, from Node)
 	// RaftAdmit decides whether a Raft request read from a member's
 	// connection reaches Raft (raftguard.go); nil refuses every request.
 	RaftAdmit func(peer Node, rpc RaftRPC) error
@@ -112,7 +114,7 @@ func (t *Transport) port() int {
 	return Port
 }
 
-var serverProtos = []string{ALPNRaft, ALPNPeer, ALPNRelay, ALPNMigrate, "http/1.1"}
+var serverProtos = []string{ALPNRaft, ALPNPeer, ALPNRelay, ALPNMigrate, ALPNCopy, "http/1.1"}
 
 func (t *Transport) serverTLS() *tls.Config {
 	return &tls.Config{
@@ -310,6 +312,20 @@ func (t *Transport) serveConn(c net.Conn) {
 			return
 		}
 		t.Migrate(tc, peer)
+	case ALPNCopy:
+		// The bytes of one zfs stream, and nothing else: the connection is
+		// mutually authenticated TLS like every cluster ALPN, but what it
+		// may carry is decided by the token. Only an unfenced compute
+		// member dials; the handler (storagesvc.ServeCopy, set only on the
+		// storage node) takes a one-time 24-byte token that the same
+		// member's signed request opened within the last minute, and an
+		// unused one is dropped (its root stream cancelled) at its expiry.
+		// Copy connections never take the NetBird path (dialing below).
+		if !member || isFenced(peer) || peer.Role != RoleCompute || t.Copy == nil {
+			tc.Close()
+			return
+		}
+		t.Copy(tc, peer)
 	default:
 		if t.Bootstrap == nil || !t.boot.push(tc) {
 			tc.Close()
@@ -402,8 +418,8 @@ func (t *Transport) DialNode(ctx context.Context, id NodeID, alpn string) (net.C
 	paths := t.Paths.DialOrder(id)
 	var lastErr error = fmt.Errorf("no path to %s", id)
 	for i, p := range paths {
-		if alpn == ALPNMigrate && p == PathNetBird {
-			continue
+		if (alpn == ALPNMigrate || alpn == ALPNCopy) && p == PathNetBird {
+			continue // bulk traffic never goes over NetBird
 		}
 		a := pathAddr(n.Addresses, p)
 		if !a.IsValid() {
@@ -420,7 +436,7 @@ func (t *Transport) DialNode(ctx context.Context, id NodeID, alpn string) (net.C
 			cancel()
 		}
 		if err == nil {
-			return t.track(id, c), p, nil
+			return t.track(id, c, alpn), p, nil
 		}
 		lastErr = fmt.Errorf("%s over %s: %w", id, p, err)
 		if ctx.Err() != nil {
@@ -434,6 +450,7 @@ type trackedConn struct {
 	*tls.Conn
 	t    *Transport
 	id   NodeID
+	alpn string
 	once sync.Once
 }
 
@@ -446,8 +463,8 @@ func (c *trackedConn) Close() error {
 	return c.Conn.Close()
 }
 
-func (t *Transport) track(id NodeID, c *tls.Conn) net.Conn {
-	tc := &trackedConn{Conn: c, t: t, id: id}
+func (t *Transport) track(id NodeID, c *tls.Conn, alpn string) net.Conn {
+	tc := &trackedConn{Conn: c, t: t, id: id, alpn: alpn}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.closed {
@@ -461,15 +478,22 @@ func (t *Transport) track(id NodeID, c *tls.Conn) net.Conn {
 	return tc
 }
 
-// DropConns closes every outgoing connection to a node (its path changed:
-// the next dial takes the new one; Raft reconnects by itself).
+// DropConns closes the outgoing connections to a node (its path changed:
+// the next dial takes the new one; Raft reconnects by itself). Peer API
+// connections (ALPNPeer) are left to the peer client, which drains them
+// (peerClient.drain): closing one would cut the requests in flight on it,
+// such as a storage server provisioning a workload's storage, which a path
+// switch (a few slow probes) must not do.
 func (t *Transport) DropConns(id NodeID) {
 	t.mu.Lock()
 	var l []net.Conn
 	for c := range t.conns[id] {
+		if tc, ok := c.(*trackedConn); ok && tc.alpn == ALPNPeer {
+			continue
+		}
 		l = append(l, c)
+		delete(t.conns[id], c)
 	}
-	delete(t.conns, id)
 	t.mu.Unlock()
 	for _, c := range l {
 		c.Close()

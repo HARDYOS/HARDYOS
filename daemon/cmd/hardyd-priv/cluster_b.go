@@ -5,11 +5,14 @@ import (
 	"log/slog"
 	"path/filepath"
 
+	"github.com/hardyos/hardyos/daemon/internal/apps"
+	"github.com/hardyos/hardyos/daemon/internal/cluster/hacopy"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/san"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/sanclient"
 	"github.com/hardyos/hardyos/daemon/internal/nfs"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/sysexec"
+	"github.com/hardyos/hardyos/daemon/internal/vms"
 )
 
 // clusterB is part B's root side (docs/plans/cluster.md sections 5, 6.1):
@@ -38,4 +41,13 @@ func wireClusterB(ctx context.Context, s *priv.Server, log *slog.Logger, dump fu
 	c := &sanclient.Client{Runner: sysexec.Exec{}, Sys: "/", Log: log, Dump: dump}
 	priv.RegisterSANClient(s, c)
 	return &clusterB{SAN: sr, Client: c, VMs: sanclient.VMBackend{C: c}, Apps: sanclient.AppBackend{C: c}, Shares: sanclient.ShareResolver{C: c}}
+}
+
+// wireHACopy registers "Make highly available" and "Make local again"
+// (ha.*, vms.ha.*, apps.ha.*; docs/plans/make-ha.md): the copy of a
+// workload's datasets between this server's pool and cluster storage,
+// with the storage server's own rules for what is still mapped.
+func wireHACopy(s *priv.Server, b *clusterB, vmm *vms.Manager, am *apps.Manager, log *slog.Logger) {
+	r := &hacopy.Root{Runner: sysexec.Exec{}, Log: log, Busy: b.SAN.InUse, EnsureParent: b.SAN.EnsureParent}
+	priv.RegisterHACopy(s, r, vmm, am)
 }

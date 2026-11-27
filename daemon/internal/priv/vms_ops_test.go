@@ -34,7 +34,7 @@ func vmServer(t *testing.T, fake *sysexec.Fake) *Client {
 
 func TestVMOps(t *testing.T) {
 	fake := &sysexec.Fake{}
-	fake.On("zfs list -H -p -t filesystem -o name,mountpoint,org.hardyos:vm", "tank\t/mnt/tank\t-\ntank/vms\t/mnt/tank/vms\t-\n")
+	fake.On("zfs list -H -p -t filesystem -o name,mountpoint,org.hardyos:vm,org.hardyos:role", "tank\t/mnt/tank\t-\t-\ntank/vms\t/mnt/tank/vms\t-\t-\n")
 	fake.On("zfs list -H -p -t filesystem -o name,used,org.hardyos:kept", "tank/vms/old-kept-20261026-120000\t1024\told\n")
 	fake.OnPrefix("virsh -c qemu:///system -q domstats", sysexec.Result{})
 	fake.On("zpool list -H -o name,health", "tank\tONLINE\n")

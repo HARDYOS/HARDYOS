@@ -7339,6 +7339,214 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
   #
+  # ---- Phase 10: Make highly available / Make local again (docs/plans/make-ha.md, tag cluster-ha)
+  #
+  /cluster/ha/failovers:
+    get:
+      operationId: listClusterFailovers
+      summary: Failovers the HA coordinator decided (a workload restarted elsewhere, or nowhere to run), from every member, newest first
+      tags: [cluster-ha]
+      responses:
+        "200":
+          description: Failovers
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ClusterFailover" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /cluster/convert/{kind}/{id}:
+    get:
+      operationId: checkClusterConvert
+      summary: Whether a VM or app on this server can be made highly available now, what it takes, and any unfinished conversion of it
+      tags: [cluster-ha]
+      parameters:
+        - { name: kind, in: path, required: true, schema: { type: string, enum: [vm, app] } }
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: cpu, in: query, schema: { type: string, enum: [baseline, keep] } }
+      responses:
+        "200":
+          description: Readiness
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClusterConvertReadiness" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    post:
+      operationId: makeClusterHA
+      summary: Make a VM or app on this server highly available - copy its storage (and snapshots) to cluster storage, register it, start it there; resumes an unfinished conversion (confirm = its name; a job)
+      tags: [cluster-ha]
+      parameters:
+        - { name: kind, in: path, required: true, schema: { type: string, enum: [vm, app] } }
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                priority: { type: integer, minimum: 0, maximum: 100, description: "HA priority (higher recovers first; 0: 50)" }
+                cpu: { type: string, enum: [baseline, keep], description: "A VM's CPU model on cluster storage" }
+                confirm: { type: string, description: "The workload's name, typed" }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /cluster/workloads/{kind}/{id}/local:
+    post:
+      operationId: makeClusterLocal
+      summary: Make a cluster workload local again on this server - stop it, copy its storage (and snapshots) to this server's pool, remove it from the cluster, run it here (confirm = its name; a job)
+      tags: [cluster-ha]
+      parameters:
+        - { name: kind, in: path, required: true, schema: { type: string, enum: [vm, app] } }
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                pool: { type: string, description: "This server's pool (VMs; apps go to the apps' pool)" }
+                confirm: { type: string }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /cluster/workloads/vm/{id}/template:
+    post:
+      operationId: makeClusterVMTemplate
+      summary: Save a stopped HA VM as a template on the storage server (call it on the storage server; a job)
+      tags: [cluster-ha]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [templateId, name]
+              properties:
+                templateId: { type: string }
+                name: { type: string }
+                description: { type: string }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /cluster/conversions:
+    get:
+      operationId: listClusterConversions
+      summary: Conversions run on this server (to cluster storage and back), newest first, with their progress
+      tags: [cluster-ha]
+      responses:
+        "200":
+          description: Conversions
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ClusterConversion" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /cluster/conversions/{conv}/undo:
+    post:
+      operationId: undoClusterConversion
+      summary: Undo a failed "Make highly available" - the cluster copy is put aside, this server's copy comes back (confirm = the workload's name; a job)
+      tags: [cluster-ha]
+      parameters:
+        - { name: conv, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { type: string }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /cluster/conversions/{conv}/abandon:
+    post:
+      operationId: abandonClusterConversion
+      summary: Abandon an unfinished conversion that only copied so far - its copy is destroyed, nothing else changes (confirm = the workload's name; a job)
+      tags: [cluster-ha]
+      parameters:
+        - { name: conv, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { type: string }
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /cluster/kept:
+    get:
+      operationId: listClusterKeptCopies
+      summary: Copies kept after a conversion (on this server and on the storage server), with when they are deleted
+      tags: [cluster-ha]
+      responses:
+        "200":
+          description: Kept copies
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ClusterKeptCopy" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /cluster/kept/delete:
+    post:
+      operationId: deleteClusterKeptCopy
+      summary: Delete a kept copy now (confirm = the workload's id; a job)
+      tags: [cluster-ha]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [node, pool, name, confirm]
+              properties:
+                node: { type: string }
+                pool: { type: string }
+                name: { type: string }
+                confirm: { type: string }
+                lastCopy:
+                  type: boolean
+                  description: >-
+                    Confirms deleting a copy without an expiry: its workload hasn't run from its
+                    other copy since, so this may be its only good copy (refused with 409 last_copy otherwise).
+      responses:
+        "202": { $ref: "#/components/responses/JobAccepted" }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  #
 components:
   securitySchemes:
     session:
@@ -12648,6 +12856,99 @@ components:
         problem: { type: string }
         actor: { type: string }
     # ---- end of Phase 8 part C schemas ----
+    # ---- Phase 10: Make highly available ----
+    ClusterFailover:
+      type: object
+      required: [at, workload, name, outcome, priority, coordinator]
+      properties:
+        at: { type: string, format: date-time }
+        workload:
+          type: object
+          required: [kind, id]
+          properties:
+            kind: { type: string, enum: [vm, app] }
+            id: { type: string }
+        name: { type: string }
+        from: { type: string, description: "The server it ran on (empty: it was waiting)" }
+        to: { type: string, description: "The server it restarts on (empty: nowhere)" }
+        outcome: { type: string, enum: [restarted, pending, failed] }
+        problem: { type: string }
+        priority: { type: integer }
+        coordinator: { type: string }
+    ClusterConversion:
+      type: object
+      required: [id, direction, kind, workload, name, storagePool, localPool, phase, state, jobId, wasRunning, options, bytesDone, bytesTotal, actor, started, updated]
+      properties:
+        id: { type: string }
+        direction: { type: string, enum: [ha, local] }
+        kind: { type: string, enum: [vm, app] }
+        workload: { type: string }
+        name: { type: string }
+        storagePool: { type: string }
+        localPool: { type: string }
+        phase: { type: string }
+        state: { type: string, enum: [running, done, failed, undone, abandoned] }
+        problem: { type: string }
+        jobId: { type: string }
+        wasRunning: { type: boolean }
+        options:
+          type: object
+          properties:
+            priority: { type: integer }
+            cpu: { type: string }
+            parkedPool: { type: string }
+            parkedName: { type: string }
+            parkedSide: { type: string }
+            awaitStart: { type: boolean }
+          additionalProperties: true
+        bytesDone: { type: integer }
+        bytesTotal: { type: integer }
+        actor: { type: string }
+        started: { type: string, format: date-time }
+        updated: { type: string, format: date-time }
+        finished: { type: string, format: date-time }
+    ClusterConvertReadiness:
+      type: object
+      required: [workload, name, running, storagePool, localPool, sizeBytes, memoryMB, problems]
+      properties:
+        workload:
+          type: object
+          required: [kind, id]
+          properties:
+            kind: { type: string, enum: [vm, app] }
+            id: { type: string }
+        name: { type: string }
+        running: { type: boolean }
+        storagePool: { type: string }
+        localPool: { type: string }
+        sizeBytes: { type: integer }
+        memoryMB: { type: integer }
+        cpuBaseline: { type: string }
+        cpuModel: { type: string }
+        mode: { type: string, enum: [nfs, block] }
+        modeReason: { type: string }
+        problems: { type: array, items: { type: string } }
+        open: { $ref: "#/components/schemas/ClusterConversion" }
+    ClusterKeptCopy:
+      type: object
+      required: [pool, name, kind, id, side, used, created, node]
+      properties:
+        pool: { type: string }
+        name: { type: string }
+        kind: { type: string, enum: [vm, app] }
+        id: { type: string }
+        side: { type: string, enum: [local, cluster] }
+        used: { type: integer }
+        created: { type: string, format: date-time }
+        keepUntil:
+          type: string
+          format: date-time
+          description: >-
+            When it is deleted (absent: kept until an administrator deletes it; its workload hasn't run from its
+            other copy since, so deleting it needs lastCopy)
+        conv: { type: string, description: "The conversion that put it aside" }
+        node: { type: string }
+    # ---- end of Phase 10 make-HA schemas ----
     ClusterNetcheckPath:
       type: object
       description: One server's probes of one other server over one path (lan or storage).

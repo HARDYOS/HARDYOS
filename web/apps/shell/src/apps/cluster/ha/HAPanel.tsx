@@ -10,7 +10,9 @@ import { Alert, Badge, Button, Card, EmptyState, ErrorBox, Field, Loading, PageH
 import { ConfirmDialog, Dialog } from "../../../ui/Dialog";
 import { toast } from "../../../ui/toasts";
 import { JobProgress } from "../../shared";
+import { useClusterNodes } from "../../../cluster/scope";
 import { useNetcheck } from "../NetCheck";
+import { ClusterTemplateDialog, ConversionsCard, FailoversCard, KeptCard, MakeLocalDialog } from "./Conversions";
 import { MoveDialog } from "./MoveDialog";
 import {
   type HAPolicy,
@@ -78,7 +80,9 @@ export function HAPanel() {
         <Stat label="CPU baseline" value={s.cpuBaseline || "host CPU"} sub="for live migration" />
       </div>
       <Nodes nodes={s.nodes} self={s.self} onJob={onJob} />
-      <Workloads placements={s.placements} grants={s.grants} onJob={onJob} />
+      <Workloads placements={s.placements} grants={s.grants} nodes={s.nodes} onJob={onJob} />
+      <ConversionsCard onJob={onJob} />
+      <KeptCard onJob={onJob} />
       {s.prepull.length > 0 && (
         <Card title="Images kept for failover on this server">
           <ul className="list">
@@ -93,6 +97,7 @@ export function HAPanel() {
           </ul>
         </Card>
       )}
+      <FailoversCard />
       <Recent events={s.coordinator?.recent ?? []} />
       <MovesHistory />
       <TimingsCard timings={timingsFromStatus(s.timings as Record<string, number>)} onJob={onJob} />
@@ -232,9 +237,23 @@ function DrainDialog({ node, onClose, onJob }: { node: NodeHA; onClose: () => vo
   );
 }
 
-function Workloads({ placements, grants, onJob }: { placements: Placement[]; grants: Record<string, { applied: boolean; nodes: string[] }>; onJob: (j: Job) => void }) {
+function Workloads({
+  placements,
+  grants,
+  nodes,
+  onJob,
+}: {
+  placements: Placement[];
+  grants: Record<string, { applied: boolean; nodes: string[] }>;
+  nodes: NodeHA[];
+  onJob: (j: Job) => void;
+}) {
   const [editing, setEditing] = useState<Placement | null>(null);
   const [moving, setMoving] = useState<Placement | null>(null);
+  const [local, setLocal] = useState<Placement | null>(null);
+  const [template, setTemplate] = useState<Placement | null>(null);
+  const members = useClusterNodes();
+  const storageNode = members.data?.nodes.find((n) => n.role === "storage")?.id ?? "";
   if (placements.length === 0) {
     return (
       <Card title="Workloads">
@@ -251,6 +270,7 @@ function Workloads({ placements, grants, onJob }: { placements: Placement[]; gra
             <th>Server</th>
             <th>State</th>
             <th>HA</th>
+            <th>Preferred</th>
             <th>Generation</th>
             <th />
           </tr>
@@ -275,6 +295,7 @@ function Workloads({ placements, grants, onJob }: { placements: Placement[]; gra
                   {p.problem && <div className="muted">{p.problem}</div>}
                 </td>
                 <td>{p.ha.enabled ? <Badge tone="accent">Priority {p.ha.priority}</Badge> : <span className="muted">Off</span>}</td>
+                <td>{p.ha.preferred && p.ha.preferred.length > 0 ? p.ha.preferred.join(", ") : <span className="muted">Any</span>}</td>
                 <td className="mono" title={g ? `granted to ${g.nodes.join(", ")}${g.applied ? "" : " (not applied yet)"}` : undefined}>
                   {p.generation}
                   {g && !g.applied && " …"}
@@ -286,6 +307,14 @@ function Workloads({ placements, grants, onJob }: { placements: Placement[]; gra
                   <Button size="sm" onClick={() => setMoving(p)} disabled={!!p.target}>
                     Move…
                   </Button>
+                  <Button size="sm" onClick={() => setLocal(p)} disabled={!!p.target} title="Back to one server's own storage (no failover)">
+                    Make local…
+                  </Button>
+                  {p.workload.kind === "vm" && storageNode && (
+                    <Button size="sm" variant="ghost" onClick={() => setTemplate(p)} disabled={p.state !== "stopped" || p.requested !== "stopped"} title="Stop it first">
+                      Template…
+                    </Button>
+                  )}
                   <Button
                     size="sm"
                     variant="ghost"
@@ -307,6 +336,8 @@ function Workloads({ placements, grants, onJob }: { placements: Placement[]; gra
       </table>
       {editing && <PolicyDialog p={editing} onClose={() => setEditing(null)} onJob={onJob} />}
       {moving && <MoveDialog kind={moving.workload.kind} id={moving.workload.id} name={moving.name} onClose={() => setMoving(null)} onJob={onJob} />}
+      {local && <MakeLocalDialog p={local} nodes={nodes} onClose={() => setLocal(null)} onJob={onJob} />}
+      {template && <ClusterTemplateDialog p={template} storageNode={storageNode} onClose={() => setTemplate(null)} onJob={onJob} />}
     </Card>
   );
 }

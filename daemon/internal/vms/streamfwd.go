@@ -522,10 +522,11 @@ func (m *Manager) SetStreamingRemote(ctx context.Context, a StreamingPublishArgs
 	}
 	peers := []string{}
 	if a.Enabled {
-		if err := perServer(st, "Publishing game streaming to NetBird devices"); err != nil {
-			unlock()
-			return nil, err
-		}
+		// A cluster VM may be published too (decision 485, amending 471):
+		// the server running it forwards (desiredForward lists the VMs
+		// attached here), and hardyd records the changed settings as
+		// approved. A live move stays refused while it is published
+		// (decision 470).
 		if _, err := streamingNIC(&st.spec); err != nil {
 			unlock()
 			return nil, err

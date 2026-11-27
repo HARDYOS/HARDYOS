@@ -22,6 +22,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/cluster/runtime"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/state"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/notify"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 	"github.com/hardyos/hardyos/daemon/internal/vms"
@@ -57,6 +58,8 @@ type Service struct {
 	Log     *slog.Logger
 	// BootID is this boot's id (default /proc/sys/kernel/random/boot_id).
 	BootID func() string
+	// Notify raises failover alerts (decision 484); nil: none.
+	Notify notify.Notifier
 	// NetCheck is the cluster's local-network check (decision 492): live
 	// moves and turning HA on need it OK. Nil: not checked (tests).
 	NetCheck func(ctx context.Context, members ...cluster.NodeID) netcheck.Result
@@ -144,7 +147,7 @@ func (s *Service) Init() {
 	if s.Parts.Peers != nil {
 		s.Mover = &moves.Mover{Cluster: m, Peers: s.Parts.Peers, Scheduler: s.Scheduler, Log: s.Log, LocalNetwork: func(ctx context.Context, from, to cluster.NodeID) (bool, string) {
 			return s.localNetwork(ctx, from, to)
-		}}
+		}, StorageNetwork: s.storagePath}
 		s.Prepuller = &runtime.Prepuller{Cluster: m, Images: images, Log: s.Log,
 			Source: moves.PeerImages{Peers: s.Parts.Peers, Priv: s.Priv, Self: func() cluster.NodeID {
 				n, _ := m.Self()
@@ -162,7 +165,15 @@ func (s *Service) Init() {
 		s.Node.Register(s.Parts.Mux)
 	}
 	s.Coordinator = &Coordinator{Cluster: m, Scheduler: s.Scheduler, Actions: s, Requirements: s.cachedRequirements,
-		Power: s.Parts.Power, Log: s.Log}
+		Power: s.Parts.Power, Log: s.Log, OnFailover: s.recordFailover,
+		// Its evacuations are live moves: the same pair check as the
+		// Mover's (decision 487/492), asked before it starts one.
+		LiveOK: func(ctx context.Context, from, to cluster.NodeID) (bool, string) {
+			return s.localNetwork(ctx, from, to)
+		}}
+	if s.Parts.Mux != nil {
+		s.registerFailovers(s.Parts.Mux)
+	}
 	if s.Priv != nil {
 		s.Announcer = &Announcer{Cluster: m, Priv: s.Priv, BootID: boot}
 	}
@@ -196,6 +207,7 @@ func (s *Service) Start(ctx context.Context) {
 	if s.Priv != nil {
 		run(s.watchPolkit)
 		run(s.setupMigration)
+		run(s.approveInstalls)
 	}
 	wg.Wait()
 }
@@ -531,6 +543,7 @@ func (s *Service) runMove(jc *jobs.Context) (any, error) {
 	if s.Mover == nil {
 		return nil, ErrNotMember
 	}
+	// A live move's network check is the Mover's (LocalNetwork, below).
 	started := time.Now()
 	res, err := s.Mover.MoveWith(jc, cluster.MoveRequest{Workload: p.Workload, To: p.To, Mode: p.Mode, Generation: p.Generation}, p.Actor,
 		moves.Options{Confirm: p.Confirm, Progress: jc.Progress})
@@ -597,6 +610,51 @@ func (s *Service) localNetwork(ctx context.Context, members ...cluster.NodeID) (
 	}
 	r := s.NetCheck(ctx, members...)
 	return r.OK, r.Reason
+}
+
+// storagePath reports whether two servers reach each other over the
+// storage network, both ways (an evacuation's check, decision 487: the
+// owner lost its LAN, so the LAN rule can't apply; a live migration then
+// runs over the storage network). OK when the check isn't wired.
+func (s *Service) storagePath(ctx context.Context, from, to cluster.NodeID) (bool, string) {
+	if s.NetCheck == nil {
+		return true, ""
+	}
+	return StoragePathOK(s.NetCheck(ctx, from, to), from, to)
+}
+
+// StoragePathOK judges only the storage-network paths between a and b in
+// a check's result: each must have probed the other there, successfully.
+func StoragePathOK(r netcheck.Result, a, b cluster.NodeID) (bool, string) {
+	seen := map[cluster.NodeID]bool{}
+	for _, m := range r.PerMember {
+		if m.Node != a && m.Node != b {
+			continue
+		}
+		peer := b
+		if m.Node == b {
+			peer = a
+		}
+		for _, p := range m.Paths {
+			if p.Peer != peer || p.Path != cluster.PathStorage {
+				continue
+			}
+			if !p.OK {
+				why := p.Reason
+				if why == "" {
+					why = "not reachable"
+				}
+				return false, fmt.Sprintf("%s → %s on the storage network: %s", m.Node, peer, why)
+			}
+			seen[m.Node] = true
+		}
+	}
+	for _, n := range []cluster.NodeID{a, b} {
+		if !seen[n] {
+			return false, fmt.Sprintf("%s hasn't checked the storage network to the other server", n)
+		}
+	}
+	return true, ""
 }
 
 // ErrNetwork: the servers don't share a local network (HA refused).

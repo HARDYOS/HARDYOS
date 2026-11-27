@@ -1511,6 +1511,9 @@ func (m *Manager) up(ctx context.Context, ia *installedApp, c *EngineConfig) err
 	if err := checkBlocked(ia); err != nil {
 		return err
 	}
+	if err := m.checkHeld(ctx, ia, c); err != nil {
+		return err
+	}
 	if err := m.startEngine(ctx, c); err != nil {
 		return err
 	}
@@ -1542,7 +1545,7 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 
 // Restart restarts the app's containers.
 func (m *Manager) Restart(ctx context.Context, id string) error {
-	ia, _, err := m.app(ctx, id)
+	ia, c, err := m.app(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -1550,6 +1553,9 @@ func (m *Manager) Restart(ctx context.Context, id string) error {
 		return ErrClusterPlaced
 	}
 	if err := checkBlocked(ia); err != nil {
+		return err
+	}
+	if err := m.checkHeld(ctx, ia, c); err != nil {
 		return err
 	}
 	if _, err := m.resolved(ctx, ia); err != nil {

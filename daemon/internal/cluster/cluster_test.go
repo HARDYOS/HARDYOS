@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/netip"
@@ -398,6 +399,68 @@ func TestPathFailoverLANStorageNetBird(t *testing.T) {
 	// The witness is only ever reached over NetBird.
 	if p := nas.core.Paths().Current("witness"); p != cluster.PathNetBird {
 		t.Fatalf("witness path %s", p)
+	}
+}
+
+// A path switch never cuts a peer API request in flight (a storage
+// server provisioning storage, say): the request finishes on the
+// connection it started on, and the next one dials the new path. (Seen in
+// CI as "can't reach the server nas: unexpected EOF" when a few slow
+// probes under load switched the path mid-request.)
+func TestPathSwitchKeepsPeerRequestsInFlight(t *testing.T) {
+	h, nas, c1, _, _ := build4(t)
+	path := func() cluster.Path { return c1.core.Paths().Current("nas") }
+	h.net.Cut(c1.addrs.LAN, nas.addrs.LAN)
+	h.eventually("storage network in use", 5*time.Second, func() error {
+		if p := path(); p != cluster.PathStorage {
+			return fmt.Errorf("path %s", p)
+		}
+		return nil
+	})
+	started, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	nas.core.Mux().Handle("POST /test/slow", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(started) })
+		<-release
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	done := make(chan error, 1)
+	go func() {
+		var out struct {
+			OK bool `json:"ok"`
+		}
+		err := c1.core.Peers().Call(ctx(t), "nas", http.MethodPost, "/test/slow", map[string]string{"x": "y"}, &out)
+		if err == nil && !out.OK {
+			err = errors.New("no answer")
+		}
+		done <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the request never arrived")
+	}
+	// The LAN is back: control switches to it while the request runs on
+	// the storage network.
+	h.net.Heal(c1.addrs.LAN, nas.addrs.LAN)
+	h.eventually("back to LAN", 5*time.Second, func() error {
+		if p := path(); p != cluster.PathLAN {
+			return fmt.Errorf("path %s", p)
+		}
+		return nil
+	})
+	close(release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the request in flight was cut by the path switch: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the request in flight never finished")
+	}
+	// The next request goes over the new path.
+	if err := c1.core.Peers().Call(ctx(t), "nas", http.MethodGet, "/ping", nil, nil); err != nil {
+		t.Fatalf("after the switch: %v", err)
 	}
 }
 

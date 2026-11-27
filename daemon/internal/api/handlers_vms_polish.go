@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/auth"
+	"github.com/hardyos/hardyos/daemon/internal/cluster"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/vms"
@@ -133,9 +134,30 @@ func (s *Server) handleVMSchedule(w http.ResponseWriter, r *http.Request, u *aut
 		writeError(w, http.StatusBadRequest, "invalid", fmt.Sprintf("keep at most %d hourly, %d daily, %d weekly and %d monthly snapshots", vms.MaxHourly, vms.MaxDaily, vms.MaxWeekly, vms.MaxMonthly))
 		return
 	}
-	// A quick answer here; hardyd-priv checks it again.
+	// An HA VM's schedule is in its settings like any VM's: it is changed
+	// on the server it is placed on and approved there; its snapshots
+	// are the storage server's (decision 485).
+	clusterActor, ok := s.clusterSettings(w, u, cluster.WorkloadRef{Kind: cluster.KindVM, ID: v.ID})
+	if !ok {
+		return
+	}
+	// A quick answer here; hardyd-priv checks it again (for an HA VM this
+	// is the only check: root sees no snapshots of it here).
 	var snaps priv.VMSnapshotsResult
-	if err := s.vmCall(r, priv.OpVMsSnapshots, priv.VMRef{ID: v.ID}, &snaps); err != nil {
+	if clusterActor != nil {
+		if s.convert.storage == nil {
+			writeError(w, http.StatusConflict, "unavailable", "cluster storage isn't available on this server")
+			return
+		}
+		l, err := s.convert.storage.Snapshots(r.Context(), cluster.WorkloadRef{Kind: cluster.KindVM, ID: v.ID})
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "storage", err.Error())
+			return
+		}
+		for _, x := range l {
+			snaps.Snapshots = append(snaps.Snapshots, vms.Snapshot{Name: x.Name, Created: x.Created})
+		}
+	} else if err := s.vmCall(r, priv.OpVMsSnapshots, priv.VMRef{ID: v.ID}, &snaps); err != nil {
 		s.writePrivError(w, err)
 		return
 	}
@@ -145,8 +167,15 @@ func (s *Server) handleVMSchedule(w http.ResponseWriter, r *http.Request, u *aut
 			fmt.Sprintf("these counts delete %d automatic snapshots %s has now; type the VM's name (%s) to confirm", pruned, v.Name, v.Name))
 		return
 	}
-	s.submit(w, r, u, JobKindVMSchedule, "Snapshot schedule of "+v.Name, vms.SetScheduleArgs{ID: v.ID, Schedule: &sc, Confirm: req.Confirm},
+	s.submit(w, r, u, JobKindVMSchedule, "Snapshot schedule of "+v.Name, vmScheduleJob{SetScheduleArgs: vms.SetScheduleArgs{ID: v.ID, Schedule: &sc, Confirm: req.Confirm}, Cluster: clusterActor},
 		"vms.schedule.set", fmt.Sprintf("%s hourly=%d daily=%d weekly=%d monthly=%d prunes=%d", v.ID, sc.Hourly, sc.Daily, sc.Weekly, sc.Monthly, pruned), nil)
+}
+
+// vmScheduleJob is the schedule job's parameters: for an HA VM placed
+// here, the person's cluster actor approves the changed settings.
+type vmScheduleJob struct {
+	vms.SetScheduleArgs
+	Cluster *cluster.Actor `json:"cluster,omitempty"`
 }
 
 var (
@@ -225,13 +254,18 @@ func registerVMPolishJobs(m *jobs.Manager, pc *priv.Client) {
 		return map[string]bool{"deleted": true}, call(jc, pc, 10*time.Minute, priv.OpVMsUserTemplateDelete, p, nil)
 	})
 	reg(JobKindVMSchedule, vmKey, func(jc *jobs.Context) (any, error) {
-		var p vms.SetScheduleArgs
+		var p vmScheduleJob
 		if err := jc.Params(&p); err != nil {
 			return nil, err
 		}
 		var v vms.VM
-		if err := call(jc, pc, time.Minute, priv.OpVMsScheduleSet, p, &v); err != nil {
+		if err := call(jc, pc, time.Minute, priv.OpVMsScheduleSet, p.SetScheduleArgs, &v); err != nil {
 			return nil, err
+		}
+		if p.Cluster != nil {
+			if err := approveClusterVM(jc, p.ID, *p.Cluster); err != nil {
+				return nil, err
+			}
 		}
 		return VMJobResult{VM: &v, Warnings: []string{}}, nil
 	})

@@ -6610,6 +6610,160 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/cluster/ha/failovers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Failovers the HA coordinator decided (a workload restarted elsewhere, or nowhere to run), from every member, newest first */
+        get: operations["listClusterFailovers"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/convert/{kind}/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Whether a VM or app on this server can be made highly available now, what it takes, and any unfinished conversion of it */
+        get: operations["checkClusterConvert"];
+        put?: never;
+        /** Make a VM or app on this server highly available - copy its storage (and snapshots) to cluster storage, register it, start it there; resumes an unfinished conversion (confirm = its name; a job) */
+        post: operations["makeClusterHA"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/workloads/{kind}/{id}/local": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Make a cluster workload local again on this server - stop it, copy its storage (and snapshots) to this server's pool, remove it from the cluster, run it here (confirm = its name; a job) */
+        post: operations["makeClusterLocal"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/workloads/vm/{id}/template": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Save a stopped HA VM as a template on the storage server (call it on the storage server; a job) */
+        post: operations["makeClusterVMTemplate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/conversions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Conversions run on this server (to cluster storage and back), newest first, with their progress */
+        get: operations["listClusterConversions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/conversions/{conv}/undo": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Undo a failed "Make highly available" - the cluster copy is put aside, this server's copy comes back (confirm = the workload's name; a job) */
+        post: operations["undoClusterConversion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/conversions/{conv}/abandon": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Abandon an unfinished conversion that only copied so far - its copy is destroyed, nothing else changes (confirm = the workload's name; a job) */
+        post: operations["abandonClusterConversion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/kept": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Copies kept after a conversion (on this server and on the storage server), with when they are deleted */
+        get: operations["listClusterKeptCopies"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cluster/kept/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Delete a kept copy now (confirm = the workload's id; a job) */
+        post: operations["deleteClusterKeptCopy"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -11843,6 +11997,101 @@ export interface components {
             ok: boolean;
             problem?: string;
             actor: string;
+        };
+        ClusterFailover: {
+            /** Format: date-time */
+            at: string;
+            workload: {
+                /** @enum {string} */
+                kind: "vm" | "app";
+                id: string;
+            };
+            name: string;
+            /** @description The server it ran on (empty: it was waiting) */
+            from?: string;
+            /** @description The server it restarts on (empty: nowhere) */
+            to?: string;
+            /** @enum {string} */
+            outcome: "restarted" | "pending" | "failed";
+            problem?: string;
+            priority: number;
+            coordinator: string;
+        };
+        ClusterConversion: {
+            id: string;
+            /** @enum {string} */
+            direction: "ha" | "local";
+            /** @enum {string} */
+            kind: "vm" | "app";
+            workload: string;
+            name: string;
+            storagePool: string;
+            localPool: string;
+            phase: string;
+            /** @enum {string} */
+            state: "running" | "done" | "failed" | "undone" | "abandoned";
+            problem?: string;
+            jobId: string;
+            wasRunning: boolean;
+            options: {
+                priority?: number;
+                cpu?: string;
+                parkedPool?: string;
+                parkedName?: string;
+                parkedSide?: string;
+                awaitStart?: boolean;
+            } & {
+                [key: string]: unknown;
+            };
+            bytesDone: number;
+            bytesTotal: number;
+            actor: string;
+            /** Format: date-time */
+            started: string;
+            /** Format: date-time */
+            updated: string;
+            /** Format: date-time */
+            finished?: string;
+        };
+        ClusterConvertReadiness: {
+            workload: {
+                /** @enum {string} */
+                kind: "vm" | "app";
+                id: string;
+            };
+            name: string;
+            running: boolean;
+            storagePool: string;
+            localPool: string;
+            sizeBytes: number;
+            memoryMB: number;
+            cpuBaseline?: string;
+            cpuModel?: string;
+            /** @enum {string} */
+            mode?: "nfs" | "block";
+            modeReason?: string;
+            problems: string[];
+            open?: components["schemas"]["ClusterConversion"];
+        };
+        ClusterKeptCopy: {
+            pool: string;
+            name: string;
+            /** @enum {string} */
+            kind: "vm" | "app";
+            id: string;
+            /** @enum {string} */
+            side: "local" | "cluster";
+            used: number;
+            /** Format: date-time */
+            created: string;
+            /**
+             * Format: date-time
+             * @description When it is deleted (absent: kept until an administrator deletes it; its workload hasn't run from its other copy since, so deleting it needs lastCopy)
+             */
+            keepUntil?: string;
+            /** @description The conversion that put it aside */
+            conv?: string;
+            node: string;
         };
         /** @description One server's probes of one other server over one path (lan or storage). */
         ClusterNetcheckPath: {
@@ -22046,6 +22295,265 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listClusterFailovers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Failovers */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClusterFailover"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    checkClusterConvert: {
+        parameters: {
+            query?: {
+                cpu?: "baseline" | "keep";
+            };
+            header?: never;
+            path: {
+                kind: "vm" | "app";
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Readiness */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClusterConvertReadiness"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    makeClusterHA: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: "vm" | "app";
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description HA priority (higher recovers first; 0: 50) */
+                    priority?: number;
+                    /**
+                     * @description A VM's CPU model on cluster storage
+                     * @enum {string}
+                     */
+                    cpu?: "baseline" | "keep";
+                    /** @description The workload's name, typed */
+                    confirm: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    makeClusterLocal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: "vm" | "app";
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description This server's pool (VMs; apps go to the apps' pool) */
+                    pool?: string;
+                    confirm: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    makeClusterVMTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    templateId: string;
+                    name: string;
+                    description?: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listClusterConversions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Conversions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClusterConversion"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    undoClusterConversion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conv: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    confirm: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    abandonClusterConversion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conv: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    confirm: string;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listClusterKeptCopies: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Kept copies */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClusterKeptCopy"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    deleteClusterKeptCopy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    node: string;
+                    pool: string;
+                    name: string;
+                    confirm: string;
+                    /** @description Confirms deleting a copy without an expiry: its workload hasn't run from its other copy since, so this may be its only good copy (refused with 409 last_copy otherwise). */
+                    lastCopy?: boolean;
+                };
+            };
+        };
+        responses: {
+            202: components["responses"]["JobAccepted"];
+            400: components["responses"]["Invalid"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             409: components["responses"]["Conflict"];
         };
     };

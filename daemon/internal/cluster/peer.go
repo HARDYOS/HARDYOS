@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -135,15 +136,32 @@ func decodePeer(r *http.Request, v any) error {
 
 // ---- the client -------------------------------------------------------------
 
-// peerClient implements PeerClient over HTTP/2 on ALPNPeer.
+// peerClient implements PeerClient over HTTP/2 on ALPNPeer, with one
+// HTTP/2 transport (its pooled connections) per member, so a path switch
+// drains that member's connections (drain) without cutting requests in
+// flight.
 type peerClient struct {
-	t  *Transport
-	h2 *http2.Transport
+	t      *Transport
+	mu     sync.Mutex
+	byNode map[NodeID]*http2.Transport
 }
 
+// peerIdleTimeout closes a pooled peer connection idle this long (and a
+// drained one once its last request ended).
+const peerIdleTimeout = 90 * time.Second
+
 func newPeerClient(t *Transport) *peerClient {
-	c := &peerClient{t: t}
-	c.h2 = &http2.Transport{
+	return &peerClient{t: t, byNode: map[NodeID]*http2.Transport{}}
+}
+
+func (c *peerClient) transport(node NodeID) *http2.Transport {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if h := c.byNode[node]; h != nil {
+		return h
+	}
+	t := c.t
+	h := &http2.Transport{
 		DialTLSContext: func(ctx context.Context, _, addr string, _ *tls.Config) (net.Conn, error) {
 			host, _, err := net.SplitHostPort(addr)
 			if err != nil {
@@ -154,8 +172,24 @@ func newPeerClient(t *Transport) *peerClient {
 		},
 		ReadIdleTimeout: 5 * time.Second,
 		PingTimeout:     3 * time.Second,
+		IdleConnTimeout: peerIdleTimeout,
 	}
-	return c
+	c.byNode[node] = h
+	return h
+}
+
+// drain makes the next requests to node dial again (on its current path)
+// and lets the requests in flight on the old connections finish: those
+// close once idle (at once if idle now), or when their path stops
+// answering pings.
+func (c *peerClient) drain(node NodeID) {
+	c.mu.Lock()
+	h := c.byNode[node]
+	delete(c.byNode, node)
+	c.mu.Unlock()
+	if h != nil {
+		h.CloseIdleConnections()
+	}
 }
 
 // Call implements PeerClient.
@@ -205,7 +239,7 @@ func (c *peerClient) Do(ctx context.Context, node NodeID, r *http.Request) (*htt
 	if !strings.HasPrefix(r.URL.Path, PeerPathPrefix) {
 		r.URL.Path = withPrefix(r.URL.Path)
 	}
-	resp, err := c.h2.RoundTrip(r)
+	resp, err := c.transport(node).RoundTrip(r)
 	if err != nil {
 		return nil, unreachable(node, err)
 	}
@@ -219,4 +253,12 @@ func unreachable(node NodeID, err error) error {
 	return fmt.Errorf("%w %s: %v", ErrUnreachable, node, err)
 }
 
-func (c *peerClient) close() { c.h2.CloseIdleConnections() }
+func (c *peerClient) close() {
+	c.mu.Lock()
+	l := c.byNode
+	c.byNode = map[NodeID]*http2.Transport{}
+	c.mu.Unlock()
+	for _, h := range l {
+		h.CloseIdleConnections()
+	}
+}

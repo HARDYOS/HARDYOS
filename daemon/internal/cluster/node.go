@@ -515,7 +515,7 @@ func (n *Core) Stop() {
 	n.closeStores()
 	// A new transport for a later start (listeners can't be reopened).
 	tr := &Transport{ID: n.cfg.Identity, Net: n.cfg.Net, Book: n, Paths: n.path, Port: n.cfg.Port, Log: n.log,
-		Peer: n.mux, Relay: oldTr.Relay, Bootstrap: oldTr.Bootstrap, Migrate: oldTr.Migrate}
+		Peer: n.mux, Relay: oldTr.Relay, Bootstrap: oldTr.Bootstrap, Migrate: oldTr.Migrate, Copy: oldTr.Copy}
 	n.swapMu.Lock()
 	n.tr, n.pc = tr, newPeerClient(tr)
 	n.swapMu.Unlock()
@@ -528,6 +528,10 @@ func (n *Core) SetRelay(h http.Handler) { n.trn().Relay = h }
 
 // SetMigrate sets part C's live migration hook. Call before Start.
 func (n *Core) SetMigrate(f func(conn *tls.Conn, from Node)) { n.trn().Migrate = f }
+
+// SetCopy sets the HA conversions' stream hook (ALPNCopy). Call before
+// Start.
+func (n *Core) SetCopy(f func(conn *tls.Conn, from Node)) { n.trn().Copy = f }
 
 // ---- raft glue ----------------------------------------------------------------
 

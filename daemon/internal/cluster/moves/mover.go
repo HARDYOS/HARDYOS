@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -52,6 +53,10 @@ type Mover struct {
 	// migration needs the servers to share the LAN and the storage network.
 	// Nil: not checked.
 	LocalNetwork func(ctx context.Context, from, to cluster.NodeID) (ok bool, reason string)
+	// StorageNetwork is an evacuation's check (decision 487): the owner
+	// lost its LAN, so only the storage network between it and the
+	// destination is judged. Nil: not checked.
+	StorageNetwork func(ctx context.Context, from, to cluster.NodeID) (ok bool, reason string)
 
 	// applied is the highest log index this mover's proposals reached:
 	// every step names it, and the node waits until it has applied it
@@ -89,11 +94,26 @@ type Options struct {
 	// down somewhere else.
 	Confirm  string
 	Progress Progress
+	// Evacuation: the HA coordinator moving a VM off a server that lost
+	// its LAN (decision 359). The LAN can't be required of it, so only
+	// the storage network between it and the destination is (decision
+	// 487, StorageNetwork), and the next candidate is tried when one
+	// doesn't pass.
+	Evacuation bool
 }
+
+// MaxEvacuationCandidates bounds the destinations an evacuation tries.
+const MaxEvacuationCandidates = 8
 
 // Move implements cluster.Mover (no confirmation: forced moves refuse).
 func (m *Mover) Move(ctx context.Context, r cluster.MoveRequest, actor cluster.Actor) (*cluster.MoveResult, error) {
 	return m.MoveWith(ctx, r, actor, Options{})
+}
+
+// Evacuate moves a VM live off a LAN-isolated server (Options.Evacuation).
+func (m *Mover) Evacuate(ctx context.Context, r cluster.MoveRequest, actor cluster.Actor) (*cluster.MoveResult, error) {
+	r.Mode = cluster.MoveLive
+	return m.MoveWith(ctx, r, actor, Options{Evacuation: true})
 }
 
 func (m *Mover) propose(ctx context.Context, t cluster.CommandType, body any, actor cluster.Actor) error {
@@ -189,7 +209,32 @@ func (m *Mover) MoveWith(ctx context.Context, r cluster.MoveRequest, actor clust
 		}
 	}
 	to := r.To
-	if to == "" {
+	evacuating := o.Evacuation && r.Mode == cluster.MoveLive
+	if to == "" && evacuating {
+		// The scheduler's choices in turn, until one shares the storage
+		// network with the owner.
+		exclude := []cluster.NodeID{p.Owner}
+		var refused []string
+		for range MaxEvacuationCandidates {
+			cand, _, perr := m.Scheduler.Place(s, health, r.Workload, *req, exclude)
+			if perr != nil {
+				if len(refused) == 0 {
+					return nil, perr
+				}
+				break
+			}
+			ok, why := m.storageNetwork(ctx, p.Owner, cand)
+			if ok {
+				to = cand
+				break
+			}
+			refused = append(refused, string(cand)+": "+why)
+			exclude = append(exclude, cand)
+		}
+		if to == "" {
+			return nil, fmt.Errorf("%w: %w with any server that could take it (%s)", ErrNotLive, ErrNoLocalNetwork, strings.Join(refused, "; "))
+		}
+	} else if to == "" {
 		to, _, err = m.Scheduler.Place(s, health, r.Workload, *req, []cluster.NodeID{p.Owner})
 		if err != nil {
 			return nil, err
@@ -208,7 +253,13 @@ func (m *Mover) MoveWith(ctx context.Context, r cluster.MoveRequest, actor clust
 		if p.State != cluster.PlacementRunning {
 			return nil, fmt.Errorf("%w: it isn't running (move it offline)", ErrNotLive)
 		}
-		if m.LocalNetwork != nil {
+		if evacuating {
+			if r.To != "" {
+				if ok, why := m.storageNetwork(ctx, p.Owner, to); !ok {
+					return nil, fmt.Errorf("%w: %w yet (%s)", ErrNotLive, ErrNoLocalNetwork, why)
+				}
+			}
+		} else if m.LocalNetwork != nil {
 			if ok, why := m.LocalNetwork(ctx, p.Owner, to); !ok {
 				return nil, fmt.Errorf("%w: %w yet (%s)", ErrNotLive, ErrNoLocalNetwork, why)
 			}
@@ -216,6 +267,14 @@ func (m *Mover) MoveWith(ctx context.Context, r cluster.MoveRequest, actor clust
 		return m.live(ctx, s, p, to, actor, o)
 	}
 	return m.offline(ctx, p, to, req, devs, pinned, actor, o)
+}
+
+// storageNetwork: an evacuation's check (OK when none is wired).
+func (m *Mover) storageNetwork(ctx context.Context, from, to cluster.NodeID) (bool, string) {
+	if m.StorageNetwork == nil {
+		return true, ""
+	}
+	return m.StorageNetwork(ctx, from, to)
 }
 
 func ownerDown(s *cluster.Snapshot, n cluster.NodeID) bool {

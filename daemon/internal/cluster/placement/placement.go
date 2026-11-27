@@ -92,6 +92,10 @@ func (sc *Scheduler) Candidates(s *cluster.Snapshot, health []cluster.Health, w 
 		pref  int // index in Preferred, len() if not listed
 		anti  int // workloads of the same anti-affinity group already there
 		freeM int
+		// load is the node's busier resource after placing w, in
+		// thousandths: the larger of committed memory and committed CPUs
+		// over what it has (decision 484: the least-loaded server).
+		load int
 	}
 	var cands []cand
 	ids := make([]cluster.NodeID, 0, len(s.Nodes))
@@ -121,6 +125,7 @@ func (sc *Scheduler) Candidates(s *cluster.Snapshot, health []cluster.Health, w 
 			}
 		}
 		c.freeM = n.Compute.MemoryMB - sc.reserved() - committed[id].MemoryMB
+		c.load = loadAfter(n.Compute, sc.reserved(), committed[id], req)
 		cands = append(cands, c)
 	}
 	sort.SliceStable(cands, func(i, j int) bool {
@@ -130,6 +135,9 @@ func (sc *Scheduler) Candidates(s *cluster.Snapshot, health []cluster.Health, w 
 		}
 		if a.anti != b.anti {
 			return a.anti < b.anti
+		}
+		if a.load != b.load {
+			return a.load < b.load
 		}
 		if a.freeM != b.freeM {
 			return a.freeM > b.freeM
@@ -141,6 +149,21 @@ func (sc *Scheduler) Candidates(s *cluster.Snapshot, health []cluster.Health, w 
 		out[i] = c.id
 	}
 	return out, skipped
+}
+
+// loadAfter is a node's load with w placed on it: the larger share of its
+// memory (after the host's reserve) and of its CPUs that placed workloads
+// would commit, in thousandths.
+func loadAfter(ci *cluster.ComputeInfo, reserved int, committed, req cluster.Requirements) int {
+	share := func(used, have int) int {
+		if have <= 0 {
+			return 1000
+		}
+		return used * 1000 / have
+	}
+	mem := share(committed.MemoryMB+req.MemoryMB, ci.MemoryMB-reserved)
+	cpu := share(committed.CPUs+req.CPUs, ci.CPUs)
+	return max(mem, cpu)
 }
 
 func (sc *Scheduler) unfit(s *cluster.Snapshot, n *cluster.Node, hv map[cluster.NodeID]cluster.Health, committed map[cluster.NodeID]cluster.Requirements,

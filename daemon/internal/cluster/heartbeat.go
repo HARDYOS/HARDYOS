@@ -645,8 +645,10 @@ func (n *Core) pathSwitched(id NodeID, from, to Path) {
 	n.log.Info("cluster: control path changed", "node", id, "from", from, "to", to)
 	if from != PathNone {
 		// Connections on the path left behind are redialled on the new one
-		// (the first choice keeps what is already connected).
+		// (the first choice keeps what is already connected); peer API
+		// requests in flight finish on theirs.
 		n.trn().DropConns(id)
+		n.peerc().drain(id)
 	}
 	n.events.publish(Event{Index: n.cfg.Machine.Index(), Node: id})
 }

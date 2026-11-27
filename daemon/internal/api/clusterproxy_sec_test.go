@@ -79,6 +79,16 @@ func TestClusterAdminMay(t *testing.T) {
 		{"POST", "/api/v1/netbird-standby/takeover", false},
 		{"POST", "/api/v1/netbird-standby/handback", false},
 		{"PUT", "/api/v1/netbird-standby/settings", false},
+		// Phase 10 (decision 488): making workloads highly available and
+		// local again, kept copies and the failover history are the
+		// cluster desktop's (the workloads area), like moves.
+		{"POST", "/api/v1/cluster/convert/vm/web", true},
+		{"GET", "/api/v1/cluster/convert/app/notes", true},
+		{"POST", "/api/v1/cluster/workloads/vm/web/local", true},
+		{"POST", "/api/v1/cluster/conversions/abc/undo", true},
+		{"POST", "/api/v1/cluster/kept/delete", true},
+		{"GET", "/api/v1/cluster/ha/failovers", true},
+		{"POST", "/api/v1/cluster/workloads/vm/web/template", true},
 	} {
 		if got := clusterAdminMay(tc.method, tc.path); got != tc.want {
 			t.Errorf("%s %s = %v", tc.method, tc.path, got)

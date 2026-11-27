@@ -51,6 +51,8 @@ func wireClusterB(ctx context.Context, log *slog.Logger, db *store.DB, pc *priv.
 	agent := storagesvc.NewAgent(svc)
 	if parts.M != nil {
 		go agent.Run(ctx)
+		// HA VMs' snapshot schedules run on the storage server (decision 485).
+		go svc.RunClusterSchedules(ctx)
 	}
 	if parts.Mux != nil {
 		svc.RegisterPeer(parts.Mux)

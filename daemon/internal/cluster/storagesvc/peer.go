@@ -236,6 +236,8 @@ func (s *Service) RegisterPeer(mux cluster.PeerMux) {
 		}
 		return map[string]bool{"received": true}, nil
 	})))
+	// HA conversions (ha.go).
+	s.registerHAPeer(h, storage, decode)
 	// Compute side: asked by the storage node.
 	h("freeze", func(r *http.Request, c cluster.Node, q asked, b []byte) (any, error) {
 		var p freezeReq

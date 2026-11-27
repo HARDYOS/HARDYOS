@@ -20,6 +20,7 @@ import { Alert, Badge, Button, Card, EmptyState, ErrorBox, Field, IconButton, Lo
 import { AreaChart } from "../../ui/Chart";
 import { ConfirmDialog, Dialog } from "../../ui/Dialog";
 import { toast } from "../../ui/toasts";
+import { MakeHAButton } from "../cluster/ha/MakeHA";
 import { MoveButton } from "../cluster/ha/MoveButton";
 import { DevicePicker } from "./devices";
 import { AnswerDiscNotice, LiveUSBCard, MakeTemplateCard, ProtectionNote, ScheduleCard } from "./polish";
@@ -117,6 +118,7 @@ export function VMPage({
         </div>
         <div className="row" style={{ gap: 6 }}>
           <MoveButton kind="vm" id={vm.id} name={vm.name} onJob={jobs.start} disabled={busy} />
+          <MakeHAButton kind="vm" id={vm.id} name={vm.name} onJob={jobs.start} disabled={busy} />
           {on ? (
             <>
               <Button onClick={() => onOpenConsole(vm)}>

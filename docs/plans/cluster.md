@@ -497,7 +497,9 @@ committed memory. The reasons a node was skipped are returned for the UI.
 "Move to cluster storage" for a local VM or app: replication's stream machinery
 sends its datasets to the storage node (incremental while running, a final
 increment with the workload stopped), the storage node adopts them with the
-`cluster` role, and the workload is defined on a compute node.
+`cluster` role, and the workload is defined on a compute node. Built in
+Phase 10 as "Make highly available" and "Make local again":
+[make-ha.md](make-ha.md), decisions 480-489.
 
 ### 6.6 Addresses after a move
 

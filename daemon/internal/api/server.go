@@ -150,6 +150,7 @@ type Config struct {
 // Server is hardyd's HTTP handler.
 type Server struct {
 	cfg      Config
+	convert  convertState
 	users    *auth.Users
 	stream   *vmStreaming
 	sessions *auth.Sessions

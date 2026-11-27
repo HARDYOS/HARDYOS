@@ -7,6 +7,7 @@ import { ExternalIcon, PlayIcon, RefreshIcon, RestartIcon, StopIcon, TrashIcon }
 import { Alert, Badge, Button, ErrorBox, Loading, PageHeader } from "../../ui";
 import { ConfirmDialog, Dialog } from "../../ui/Dialog";
 import { toast } from "../../ui/toasts";
+import { MakeHAButton } from "../cluster/ha/MakeHA";
 import { MoveButton } from "../cluster/ha/MoveButton";
 import { JobProgress } from "../shared";
 import { PublishEditor } from "../control-panel/RemoteAccessPublish";
@@ -185,6 +186,7 @@ function Overview({
           </Button>
         )}
         <MoveButton kind="app" id={app.id} name={app.name} onJob={(j) => setJob(j.id)} disabled={!!job} />
+        <MakeHAButton kind="app" id={app.id} name={app.name} onJob={(j) => setJob(j.id)} disabled={!!job} />
         <span className="app-card__spacer" />
         <Button variant="ghost" onClick={onRemove} disabled={!!job}>
           <TrashIcon size={14} /> Remove

@@ -278,6 +278,7 @@ func main() {
 		// client; the VM and app engines find cluster workloads' storage
 		// through part B's backends (part C's runtime ops start them).
 		clusterStorage := wireClusterB(ctx, s, log, am.PreBackup)
+		wireHACopy(s, clusterStorage, vmm, am, log)
 		vmm.Backend = clusterStorage.VMs
 		am.Backend = clusterStorage.Apps
 		am.ClusterShares = clusterStorage.Shares

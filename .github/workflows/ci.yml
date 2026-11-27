@@ -109,6 +109,7 @@ jobs:
         working-directory: daemon
         run: |
           go test -c -o "$RUNNER_TEMP/san.test" ./internal/cluster/san
+          go test -c -o "$RUNNER_TEMP/hacopy.test" ./internal/cluster/hacopy
           go test -race -c -o "$RUNNER_TEMP/e2e.test" ./internal/cluster/e2e
           go test -c -o "$RUNNER_TEMP/netcheck.test" ./internal/cluster/netcheck
           go test -race -c -o "$RUNNER_TEMP/api.test" ./internal/api
@@ -134,6 +135,8 @@ jobs:
           trap 'sudo pkill -f "dmesg -W" || true; sudo pkill -f "journalctl -f" || true' EXIT
           # Its own session: nothing the iSCSI tools signal reaches the runner.
           sudo HARDYOS_CLUSTER_INTEGRATION=1 setsid -w "$RUNNER_TEMP/san.test" -test.run 'TestClusterStorageIntegration|TestFirewallSyntax' -test.v -test.timeout 10m
+      - name: make a VM highly available and local again - its disk and snapshots sent to the storage pool (a cut stream resumed), adopted, LIO export, iSCSI read, sent back
+        run: sudo HARDYOS_CLUSTER_INTEGRATION=1 setsid -w "$RUNNER_TEMP/hacopy.test" -test.run TestHAConvertIntegration -test.v -test.timeout 10m
       - name: LIO and NFS state
         if: failure()
         run: |
