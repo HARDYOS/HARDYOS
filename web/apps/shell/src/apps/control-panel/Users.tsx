@@ -145,7 +145,7 @@ export function Users() {
             Every app sign-in is revoked too. Type the username to confirm.
           </p>
           <label className="row small" style={{ gap: 6 }}>
-            <input type="checkbox" checked={revokeAppPw} onChange={(e) => setRevokeAppPw(e.target.checked)} /> Also revoke their app passwords (mail,
+            <input type="checkbox" checked={revokeAppPw} onChange={(e) => setRevokeAppPw(e.target.checked)} /> Also revoke their app passwords (mail, SFTP,
             WebDAV, calendars)
           </label>
         </ConfirmDialog>
@@ -344,7 +344,7 @@ export function TwoFactorPolicyCard() {
     <Card title="Two-factor sign-in">
       <p className="small muted" style={{ margin: 0 }}>
         Everyone needs an authenticator code to sign in from outside your home network (published desktop, published apps, HardyOS sign-in); mail, WebDAV and
-        calendar apps need app passwords there. Administrators must always use it. Shared folders over SMB and SFTP, and Kerberos, keep checking the domain
+        calendar apps and SFTP need app passwords there. Administrators must always use it. Shared folders over SMB, and Kerberos, keep checking the domain
         password only.
       </p>
       <form

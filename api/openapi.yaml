@@ -418,8 +418,9 @@ paths:
       operationId: createAppPassword
       summary: Make an app password for one device (domain accounts; needs your password)
       description: |
-        For services that can't ask for a code: `files` (WebDAV), `mail`
-        (IMAP and SMTP), `calendars` (CalDAV and CardDAV). From outside only
+        For services that can't ask for a code: `files` (WebDAV), `sftp`
+        (shared folders over SFTP), `mail` (IMAP and SMTP), `calendars`
+        (CalDAV and CardDAV). From outside only
         app passwords work there, and once you have two-factor sign-in your
         own password stops working there too. Removed when the domain
         password changes.
@@ -8189,7 +8190,7 @@ components:
         revokeAppPasswords: { type: boolean, default: true, description: Also revoke the account's app passwords }
     AppPasswordScope:
       type: string
-      enum: [files, mail, calendars]
+      enum: [files, sftp, mail, calendars]
     AppPassword:
       type: object
       required: [id, name, scopes, createdAt, lastUsedAt, lastUsedIp]

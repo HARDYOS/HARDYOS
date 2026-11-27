@@ -164,10 +164,15 @@ func TestEditPAM(t *testing.T) {
 	// The auth block: domain uids only, members of hardyos-sftp only (others
 	// fail before winbind), faillock around winbind; jumps land inside it.
 	wantAuth := []string{
-		"auth\t[success=ignore default=5]\tpam_succeed_if.so quiet uid >= 100000 uid <= 999999",
+		"auth\t[success=ignore default=10]\tpam_succeed_if.so quiet uid >= 100000 uid <= 999999",
 		"auth\t[success=ignore default=die]\tpam_succeed_if.so quiet user ingroup hardyos-sftp",
 		"auth\t[success=ignore default=die]\tpam_faillock.so preauth silent deny=10 unlock_time=900",
-		"auth\t[success=1 default=ignore]\tpam_winbind.so",
+		"auth\t[success=6 default=ignore]\tpam_exec.so quiet expose_authtok /usr/bin/hardyctl pam-sftp app",
+		"auth\t[success=ignore default=die]\tpam_exec.so quiet /usr/bin/hardyctl pam-sftp own",
+		"auth\t[success=ignore default=2]\tpam_winbind.so try_first_pass",
+		"auth\t[success=ignore default=die]\tpam_exec.so quiet /usr/bin/hardyctl pam-sftp after",
+		"auth\t[success=2 default=die]\tpam_permit.so",
+		"auth\t[default=ignore]\tpam_exec.so quiet /usr/bin/hardyctl pam-sftp fail",
 		"auth\t[default=die]\tpam_faillock.so authfail deny=10 unlock_time=900",
 		"auth\t[success=done default=die]\tpam_faillock.so authsucc deny=10 unlock_time=900",
 	}

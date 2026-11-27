@@ -97,8 +97,10 @@ undo only writes the network files).
 - Services without a code step (WebDAV, mail through Dovecot, calendars) go
   through `servicePassword`: a scoped app password always, the account's own
   password only from inside and only without 2FA.
-- SMB, Kerberos, LDAP and SFTP check domain passwords in Samba/winbind
-  themselves and are not covered (decision 447).
+- SMB, Kerberos and LDAP check domain passwords in Samba/winbind
+  themselves and are not covered (decision 447). SFTP asks hardyd first
+  from sshd's PAM stack (app passwords with the `sftp` scope; own
+  passwords at home only; decision 514).
 - Recovery: recovery codes, an administrator's reset, `hardyctl reset-2fa`.
 
 ## Jobs and events
@@ -1132,7 +1134,7 @@ them on (`settings.json`: `sftpEnabled`, `webdavEnabled`) and per folder
 (`services.sftp`, `services.webdav`, off for new folders).
 
 ```
- SFTP client ──22──► sshd (host) ── PAM: pam_winbind for uid 100000-999999 only
+ SFTP client ──22──► sshd (host) ── PAM for uid 100000-999999 only: hardyctl pam-sftp ─unix─► hardyd, then pam_winbind
                        │ Match Group *\* / User *\*,*@*: internal-sftp, chroot /srv/hardyos/sftp/%U
                        ▼
                /srv/hardyos/sftp/101103/{Home,Media,...}   root's 0755, bind mounts (ro for read access)
@@ -1177,8 +1179,22 @@ them on (`settings.json`: `sftpEnabled`, `webdavEnabled`) and per folder
   PAM a deliberately wrong password for accounts AllowGroups refuses;
   that must not count towards their lockout in AD), then
   `pam_faillock preauth/authfail/authsucc deny=10 unlock_time=900` around
-  `pam_winbind`, which decides alone (wrong password, turned off,
-  expired, must-change all refused); the account block has the same
+  hardyd's rule and `pam_winbind` (decision 514): `pam_exec
+  /usr/bin/hardyctl pam-sftp app` (with `expose_authtok`; the password
+  leaves sshd only when it has an app password's shape) jumps to authsucc
+  when hardyd says it's an app password with the `sftp` scope; otherwise
+  `pam-sftp own` must say the account's own password may be used from
+  `PAM_RHOST` (home by decision 441, no two-factor sign-in) before
+  `pam_winbind try_first_pass` sees it, and `pam-sftp after` again once
+  winbind said yes; a wrong password runs `pam-sftp fail` (recorded,
+  counted like WebDAV's) before authfail, and a refused own password dies
+  without counting in faillock. hardyctl asks over
+  `/run/hardyos-sftp-auth.sock` (`hardyd-sftp-auth.socket`, owner hardyd,
+  0600), one JSON line each way, and hardyd answers root alone
+  (SO_PEERCRED; `internal/sftpauth`, `api/sftpauth.go`). Without hardyd
+  nobody signs in to SFTP. winbind still decides the domain password
+  (wrong password, turned off, expired, must-change all refused); the
+  account block has the same
   membership check. A third block before `@include common-session` gives
   domain accounts `pam_limits` and ends their session stack
   (`pam_permit`, `done`), so common-session's `pam_systemd` (a

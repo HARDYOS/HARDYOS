@@ -40,18 +40,45 @@ var pamMember = "pam_succeed_if.so quiet user ingroup " + Group
 
 var faillockArgs = fmt.Sprintf("deny=%d unlock_time=%d", FaillockDeny, FaillockUnlock)
 
+// PAMHelper is what pam_exec runs: `hardyctl pam-sftp <op>` asks hardyd
+// over its local SFTP sign-in socket (internal/sftpauth).
+const PAMHelper = "/usr/bin/hardyctl"
+
+// pamHelper is a pam_exec module line for op; withPassword hands it the
+// typed password on stdin (only the app op).
+func pamHelper(helper, op string, withPassword bool) string {
+	args := "pam_exec.so quiet "
+	if withPassword {
+		args += "expose_authtok "
+	}
+	return args + helper + " pam-sftp " + op
+}
+
 // pamBlock is one of HardyOS's blocks. Jumps (default=N) count the lines
 // after the condition, so each block is self-contained and never jumps
 // over an @include (whose length PAM decides).
-func pamBlock(kind string) []string {
+func pamBlock(kind string) []string { return pamBlockWith(kind, PAMHelper) }
+
+// pamBlockWith is pamBlock with another helper (tests).
+func pamBlockWith(kind, helper string) []string {
 	head := pamBegin + ": domain accounts sign in to SFTP with their domain password (docs/file-sharing.md)"
 	switch kind {
 	case "auth":
+		// hardyd decides with WebDAV's rule (decisions 445, 514): an app
+		// password with the sftp scope always works (straight to
+		// authsucc); the domain password only when hardyd says it may be
+		// used from where the sign-in comes, asked before winbind sees it
+		// and again after winbind said yes. Wrong ones are recorded.
 		return []string{head,
-			"auth\t[success=ignore default=5]\t" + pamCond,
+			"auth\t[success=ignore default=10]\t" + pamCond,
 			"auth\t[success=ignore default=die]\t" + pamMember,
 			"auth\t[success=ignore default=die]\tpam_faillock.so preauth silent " + faillockArgs,
-			"auth\t[success=1 default=ignore]\tpam_winbind.so",
+			"auth\t[success=6 default=ignore]\t" + pamHelper(helper, "app", true),
+			"auth\t[success=ignore default=die]\t" + pamHelper(helper, "own", false),
+			"auth\t[success=ignore default=2]\tpam_winbind.so try_first_pass",
+			"auth\t[success=ignore default=die]\t" + pamHelper(helper, "after", false),
+			"auth\t[success=2 default=die]\tpam_permit.so",
+			"auth\t[default=ignore]\t" + pamHelper(helper, "fail", false),
 			"auth\t[default=die]\tpam_faillock.so authfail " + faillockArgs,
 			"auth\t[success=done default=die]\tpam_faillock.so authsucc " + faillockArgs,
 			pamEnd}
@@ -80,12 +107,23 @@ var ErrPAMLayout = fmt.Errorf("the SSH server's PAM settings (%s) were changed b
 
 // EditPAM takes HardyOS's blocks out of an sshd PAM file and, with on, puts
 // them back in front of the common-auth, common-account and common-session
-// includes. A domain account's password is then checked by winbind and
-// nothing else (wrong = denied, too many wrong = locked for a while), only
-// if the account is in hardyos-sftp; its account state too (turned off,
+// includes. A domain account in hardyos-sftp then signs in with an app
+// password hardyd accepts, or with its domain password where hardyd allows
+// it, checked by winbind (wrong = denied, too many wrong = locked for a
+// while); its account state too (turned off,
 // expired, a password that must be changed = denied); and its session
 // skips common-session. Everyone else's path is unchanged.
-func EditPAM(text string, on bool) (string, error) {
+func EditPAM(text string, on bool) (string, error) { return EditPAMWith(text, on, PAMHelper) }
+
+// helperRE: an absolute path without spaces (a PAM line is split on them).
+var helperRE = regexp.MustCompile(`^/[A-Za-z0-9._/+-]+$`)
+
+// EditPAMWith is EditPAM with helper in place of PAMHelper (tests run a
+// stand-in).
+func EditPAMWith(text string, on bool, helper string) (string, error) {
+	if !helperRE.MatchString(helper) || strings.Contains(helper, "..") {
+		return "", fmt.Errorf("the PAM helper %q isn't an absolute path", helper)
+	}
 	lines := strings.Split(text, "\n")
 	var kept []string
 	skip := false
@@ -109,7 +147,7 @@ func EditPAM(text string, on bool) (string, error) {
 	auth, account, session := false, false, false
 	for _, l := range kept {
 		if !auth && includeAuthRE.MatchString(l) {
-			out = append(out, pamBlock("auth")...)
+			out = append(out, pamBlockWith("auth", helper)...)
 			auth = true
 		}
 		if !account && includeAccountRE.MatchString(l) {

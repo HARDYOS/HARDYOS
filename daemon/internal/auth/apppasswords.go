@@ -18,10 +18,11 @@ const (
 	ScopeFiles     = "files"     // WebDAV (/dav/)
 	ScopeMail      = "mail"      // IMAP and SMTP
 	ScopeCalendars = "calendars" // CalDAV and CardDAV (/dav-mail/)
+	ScopeSFTP      = "sftp"      // shared folders over SFTP (decision 514)
 )
 
 // AppPasswordScopes lists every scope.
-var AppPasswordScopes = []string{ScopeFiles, ScopeMail, ScopeCalendars}
+var AppPasswordScopes = []string{ScopeFiles, ScopeSFTP, ScopeMail, ScopeCalendars}
 
 // MaxAppPasswords is how many one account may have.
 const MaxAppPasswords = 25
@@ -29,9 +30,9 @@ const MaxAppPasswords = 25
 // Errors.
 var (
 	ErrAppPasswordName   = errors.New("give the app password a name of 1-64 characters (the device or app it's for)")
-	ErrAppPasswordScopes = errors.New("pick at least one of files, mail and calendars")
+	ErrAppPasswordScopes = errors.New("pick at least one of files, sftp, mail and calendars")
 	ErrTooManyAppPw      = errors.New("this account has too many app passwords; remove some first")
-	ErrAppPasswordLocal  = errors.New("app passwords are for domain accounts (WebDAV, mail and calendars); HardyOS accounts don't use those services")
+	ErrAppPasswordLocal  = errors.New("app passwords are for domain accounts (WebDAV, SFTP, mail and calendars); HardyOS accounts don't use those services")
 )
 
 // AppPassword is one per-device password (never its value).

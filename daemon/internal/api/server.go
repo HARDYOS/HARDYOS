@@ -176,6 +176,8 @@ type Server struct {
 	// pubLimiter slows down failed sign-ins from the internet (through the
 	// app gateway) in buckets of their own: decision 156.
 	pubLimiter *auth.DelayLimiter
+	// sftpNotes keeps "rate limited" SFTP sign-ins from filling the audit log.
+	sftpNotes sftpLimited
 	// waits hands a job's in-memory outcome (a new client secret) back to
 	// the request that started it.
 	waits jobWaits

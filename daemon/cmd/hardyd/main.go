@@ -55,6 +55,9 @@ import (
 // mailOptions is the mail sign-in socket (from systemd, or -mail-auth-socket).
 var mailOptions api.MailOptions
 
+// sftpAuth is the SFTP sign-in socket from systemd (hardyd-sftp-auth.socket).
+var sftpAuth net.Listener
+
 func main() {
 	var (
 		httpsAddr   = flag.String("https", ":443", "HTTPS address (empty disables HTTPS and serves the app over -http)")
@@ -82,6 +85,7 @@ func main() {
 		log.Warn("sockets from systemd", "err", sockErr)
 	}
 	mailOptions = api.MailOptions{Listener: sockets["mail-auth"], Socket: *mailAuth}
+	sftpAuth = sockets["sftp-auth"]
 	slog.SetDefault(log)
 	trusted, err := clientip.ParseTrusted(*proxies)
 	if err != nil {
@@ -328,6 +332,9 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		go mon.Run(ctx)       // checks, self-test schedule, UPS, resource history
 		// Dovecot's sign-ins, mailboxes for new accounts, mail alerts.
 		go handler.RunMail(ctx, mailOptions)
+		// sshd's PAM asks whether an SFTP sign-in may go ahead (app
+		// passwords, own passwords at home only; decision 514).
+		go handler.RunSFTPAuth(ctx, sftpAuth)
 		if p := handler.OIDC(); p != nil {
 			go p.Start(ctx) // sign-in provider: signing keys on schedule, expired sign-ins removed
 		}

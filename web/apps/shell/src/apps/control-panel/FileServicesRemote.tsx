@@ -40,7 +40,7 @@ export function RemoteAccessCard({ st, admin }: { st: FileServicesStatus; admin:
         {admin && (
           <Toggle
             label="SFTP"
-            description="Domain accounts can sign in with their domain password and use only SFTP, inside their own view of the folders they may use. They never get a shell or tunnels; SSH for this server's own Linux accounts is unchanged."
+            description="Domain accounts can sign in with their domain password (at home, without two-factor sign-in) or an app password with the SFTP scope, and use only SFTP, inside their own view of the folders they may use. They never get a shell or tunnels; SSH for this server's own Linux accounts is unchanged."
             checked={st.settings.sftpEnabled}
             disabled={set.isPending}
             onChange={(v) => set.mutate({ sftpEnabled: v })}
