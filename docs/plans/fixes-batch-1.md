@@ -37,7 +37,7 @@ IPv4-only). libvirt's ebtables filters can't express what IPv6 needs, so:
   network (the server's own routes on the bridge or `<bridge>.<vlan>`), and
   the server's and the routers' addresses as a protected set. Allowed:
   link-local (fe80::/64), addresses in those prefixes (SLAAC, privacy),
-  `::` only for DAD and MLD. Dropped: RA, redirect, router renumbering,
+  `::` only for DAD and MLD. Dropped: RA, redirect, router renumbering, MLD queries,
   DHCPv6 server/relay replies, NA whose target is protected, NS/NA whose
   first option isn't the card's own link-layer address, VLAN-tagged
   frames.

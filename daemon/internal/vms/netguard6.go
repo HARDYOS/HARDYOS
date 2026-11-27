@@ -192,8 +192,9 @@ func RenderGuard6(g Guard6) (string, error) {
 		fmt.Fprintf(&b, "\tchain g_%s {\n", c.Tap)
 		fmt.Fprintf(&b, "\t\tether saddr != %s drop\n", c.MAC)
 		b.WriteString("\t\tip6 saddr @protected drop\n")
-		// Router advertisements, redirects and router renumbering.
-		b.WriteString("\t\tmeta l4proto ipv6-icmp icmpv6 type { nd-router-advert, nd-redirect, router-renumbering } drop\n")
+		// Router advertisements, redirects, router renumbering and
+		// multicast listener queries (a router's, or a querier's).
+		b.WriteString("\t\tmeta l4proto ipv6-icmp icmpv6 type { nd-router-advert, nd-redirect, router-renumbering, mld-listener-query } drop\n")
 		// DHCPv6 servers and relays answer from 547 to 546.
 		b.WriteString("\t\tmeta l4proto udp udp sport 547 drop\n")
 		b.WriteString("\t\tmeta l4proto udp udp dport 546 drop\n")
