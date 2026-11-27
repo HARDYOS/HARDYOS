@@ -6,10 +6,13 @@ import (
 	"errors"
 	"time"
 
+	"github.com/hardyos/hardyos/daemon/internal/apps"
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/hacopy"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/storagesvc"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
+	"github.com/hardyos/hardyos/daemon/internal/priv"
+	"github.com/hardyos/hardyos/daemon/internal/vms"
 )
 
 // KeptCopy is a parked copy and where it is.
@@ -47,13 +50,15 @@ func (c *Converter) Kept(ctx context.Context) ([]KeptCopy, error) {
 	return out, nil
 }
 
-// DropParams delete a kept copy now (Confirm: the workload's id).
+// DropParams delete a kept copy now (Confirm: the workload's id;
+// LastCopy: one without an expiry, which may be the only good copy).
 type DropParams struct {
-	Node    cluster.NodeID `json:"node"`
-	Pool    string         `json:"pool"`
-	Name    string         `json:"name"`
-	Confirm string         `json:"confirm"`
-	Actor   cluster.Actor  `json:"actor"`
+	Node     cluster.NodeID `json:"node"`
+	Pool     string         `json:"pool"`
+	Name     string         `json:"name"`
+	Confirm  string         `json:"confirm"`
+	LastCopy bool           `json:"lastCopy,omitempty"`
+	Actor    cluster.Actor  `json:"actor"`
 }
 
 func (c *Converter) runDrop(jc *jobs.Context) (any, error) {
@@ -66,13 +71,13 @@ func (c *Converter) runDrop(jc *jobs.Context) (any, error) {
 		return nil, err
 	}
 	if p.Node == self.ID {
-		err = c.Priv.Call(jc, hacopy.OpParkedDestroy, hacopy.ParkedDestroyArgs{Pool: p.Pool, Name: p.Name, Confirm: p.Confirm}, nil)
+		err = c.Priv.Call(jc, hacopy.OpParkedDestroy, hacopy.ParkedDestroyArgs{Pool: p.Pool, Name: p.Name, Confirm: p.Confirm, LastCopy: p.LastCopy}, nil)
 	} else {
 		sn, ok := storagesvc.StorageNode(c.snapshot())
 		if !ok || sn.ID != p.Node {
 			return nil, errors.New("kept copies are deleted on their own server or on the storage server")
 		}
-		err = c.Storage.HAParkedDestroy(jc, storagesvc.HAParkedDestroy{Pool: p.Pool, Name: p.Name, Confirm: p.Confirm, Actor: p.Actor})
+		err = c.Storage.HAParkedDestroy(jc, storagesvc.HAParkedDestroy{Pool: p.Pool, Name: p.Name, Confirm: p.Confirm, LastCopy: p.LastCopy, Actor: p.Actor})
 	}
 	c.audit(p.Actor, "cluster.ha.parked.delete", string(p.Node)+":"+p.Pool+"/"+p.Name, "", err)
 	if err != nil {
@@ -160,17 +165,36 @@ func (c *Converter) Cleanup(ctx context.Context) {
 	snap := c.snapshot()
 	for i := range l {
 		r := &l[i]
-		if r.Direction != DirHA || r.State != StateDone || !r.Options.AwaitStart {
+		if !r.Options.AwaitStart || r.Options.ParkedName == "" || r.Options.ClusterChanged {
 			continue
 		}
-		pl := snap.Placements[r.Ref()]
-		if pl == nil || pl.State != cluster.PlacementRunning {
+		var ran bool
+		switch {
+		case r.Direction == DirHA && r.State == StateDone:
+			// Made highly available while off: it ran from cluster storage.
+			pl := snap.Placements[r.Ref()]
+			ran = pl != nil && pl.State == cluster.PlacementRunning
+		case (r.Direction == DirHA && r.State == StateUndone) || (r.Direction == DirLocal && r.State == StateDone):
+			// Back on this server's own storage: it ran from there.
+			ran = c.localRunning(ctx, r.Ref())
+		}
+		if !ran {
 			continue
 		}
-		if err := c.keepFor(ctx, hacopy.SideLocal, r.Options.ParkedPool, r.Options.ParkedName, c.grace(), cluster.Actor{Kind: "system", Name: "HardyOS"}); err != nil {
+		if err := c.keepFor(ctx, hacopy.Side(r.Options.ParkedSide), r.Options.ParkedPool, r.Options.ParkedName, c.grace(), cluster.Actor{Kind: "system", Name: "HardyOS"}); err != nil {
 			continue
 		}
 		r.Options.AwaitStart = false
 		_ = c.save(ctx, r)
 	}
+}
+
+// localRunning: this server runs w from its own storage.
+func (c *Converter) localRunning(ctx context.Context, w cluster.WorkloadRef) bool {
+	if w.Kind == cluster.KindApp {
+		var res apps.HACheckResult
+		return c.Priv.Call(ctx, priv.OpAppsHACheck, priv.AppRef{ID: w.ID}, &res) == nil && res.Running
+	}
+	var v vms.VM
+	return c.Priv.Call(ctx, priv.OpVMsGet, priv.VMRef{ID: w.ID}, &v) == nil && v.Backend != vms.BackendCluster && v.State == "running"
 }

@@ -9,6 +9,7 @@ package storagesvc
 
 import (
 	"context"
+	"crypto/subtle"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
@@ -50,6 +51,12 @@ func (s *Service) TickClusterSchedules(ctx context.Context, now time.Time) {
 		w := cluster.WorkloadRef{Kind: cluster.KindVM, ID: sch.ID}
 		p := snap.Placements[w]
 		if p == nil || p.Storage.Pool != sch.Pool {
+			continue
+		}
+		if p.SpecHash == "" || subtle.ConstantTimeCompare([]byte(p.SpecHash), []byte(sch.Hash)) != 1 {
+			// Only the approved settings' schedule: a vm.json changed on
+			// cluster storage behind its owner's back isn't followed.
+			s.log().Debug("storage: a cluster VM's stored settings aren't the approved ones; its schedule waits", "vm", sch.ID)
 			continue
 		}
 		have, err := s.Snapshots(ctx, w)

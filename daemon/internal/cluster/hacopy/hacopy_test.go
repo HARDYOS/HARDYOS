@@ -21,6 +21,8 @@ type fakeZFS struct {
 	mu   sync.Mutex
 	ds   map[string]map[string]string // name -> local props ("type" kept here)
 	cmds []string
+	// failSet makes a "zfs set" naming it fail.
+	failSet string
 }
 
 func newFake() *fakeZFS { return &fakeZFS{ds: map[string]map[string]string{}} }
@@ -34,6 +36,13 @@ func (f *fakeZFS) add(name, typ string, props ...string) {
 }
 
 func (f *fakeZFS) get(name, prop string, inherit bool) string {
+	if strings.HasPrefix(prop, "written@") {
+		// "written" on a dataset: bytes written since any snapshot.
+		if v := f.ds[name]["written"]; v != "" {
+			return v
+		}
+		return "0"
+	}
 	for n := name; n != ""; {
 		if v, ok := f.ds[n][prop]; ok {
 			return v
@@ -142,6 +151,9 @@ func (f *fakeZFS) Run(_ context.Context, _ []byte, name string, args ...string) 
 		}
 		return ok(strings.Join(out, "\n") + "\n")
 	case "set":
+		if f.failSet != "" && strings.Contains(strings.Join(args, " "), f.failSet) {
+			return bad("cannot set property")
+		}
 		for _, kv := range args[1 : len(args)-1] {
 			k, v, _ := strings.Cut(kv, "=")
 			f.ds[last][k] = v
@@ -314,6 +326,116 @@ func TestPark(t *testing.T) {
 	}
 }
 
+func clusterVM(f *fakeZFS) {
+	f.add("tank", "filesystem")
+	f.add("tank/vms", "filesystem")
+	f.add("tank/vms/web", "filesystem", "org.hardyos:vm", "web", "org.hardyos:role", "cluster")
+	f.add("tank/vms/web/disk0", "volume", "org.hardyos:vm", "web", "org.hardyos:role", "cluster")
+}
+
+// A park carries its conversion's mark and is idempotent for it; it
+// refuses (RefuseChanged) or reports (Changed) writes since the final
+// snapshot; a failure after the move puts everything back (H1, M2, M3).
+func TestParkConversion(t *testing.T) {
+	f := newFake()
+	clusterVM(f)
+	r := &Root{Runner: f, Busy: func(context.Context, cluster.WorkloadKind, string, string) (bool, error) { return false, nil },
+		Now: func() time.Time { return time.Unix(1000, 0) }}
+	ctx := context.Background()
+	ref := vmRef(SideCluster)
+	const conv = "abcdefgh12"
+	final := SnapPrefix + conv + "-final-1"
+
+	// Written since the final snapshot: refused, nothing moved.
+	f.ds["tank/vms/web/disk0"]["written"] = "4096"
+	if _, err := r.Park(ctx, ParkArgs{Ref: ref, Confirm: "web", Conv: conv, Since: final, RefuseChanged: true}); !errors.Is(err, ErrChanged) {
+		t.Fatalf("parked a copy written after its final snapshot: %v", err)
+	}
+	if _, there := f.ds["tank/vms/web"]; !there {
+		t.Fatal("a refused park moved the copy")
+	}
+	// Only what this conversion adopted, when asked so.
+	if _, err := r.Park(ctx, ParkArgs{Ref: ref, Confirm: "web", Conv: conv, Adopted: true}); err == nil {
+		t.Fatal("parked a copy another conversion (or none) set up")
+	}
+
+	// A failure after the move: put back, marks and all. (Access times
+	// written on the state folder by reading it don't count as a change.)
+	delete(f.ds["tank/vms/web/disk0"], "written")
+	f.ds["tank/vms/web"]["written"] = "4096"
+	f.failSet = PropParked
+	if _, err := r.Park(ctx, ParkArgs{Ref: ref, Confirm: "web", Conv: conv, Since: final}); err == nil {
+		t.Fatal("the park didn't fail")
+	}
+	f.failSet = ""
+	if p := f.ds["tank/vms/web"]; p == nil || p["org.hardyos:role"] != "cluster" || p["org.hardyos:vm"] != "web" || p[PropParked] != "" {
+		t.Fatalf("not put back as it was: %+v", p)
+	}
+	if f.ds["tank/vms/web/disk0"]["volmode"] != "dev" {
+		t.Fatalf("its disk wasn't put back: %+v", f.ds["tank/vms/web/disk0"])
+	}
+
+	pr, err := r.Park(ctx, ParkArgs{Ref: ref, Confirm: "web", Conv: conv, Since: final})
+	if err != nil || pr.Changed || pr.Existing {
+		t.Fatalf("park: %+v %v", pr, err)
+	}
+	ds := "tank/" + ParkedDir + "/" + pr.Name
+	if f.ds[ds][PropParkedConv] != conv || f.ds[ds][PropKeepUntil] != "" {
+		t.Fatalf("parked marks %+v", f.ds[ds])
+	}
+	// Asked again (its answer lost): the same copy, not a second park.
+	again, err := r.Park(ctx, ParkArgs{Ref: ref, Confirm: "web", Conv: conv, Since: final})
+	if err != nil || !again.Existing || again.Name != pr.Name {
+		t.Fatalf("asked again: %+v %v", again, err)
+	}
+	if _, ok := r.ParkedBy(ctx, ref, "otherconv12"); ok {
+		t.Fatal("another conversion's park was taken for this one's")
+	}
+	if l, _ := r.ParkedList(ctx); len(l) != 1 || l[0].Conv != conv {
+		t.Fatalf("parked list %+v", l)
+	}
+}
+
+// A kept copy without an expiry is deleted only as the possibly last copy
+// (H2); an expiry is never brought forward, nor set under an hour (L2).
+func TestKeptCopyRules(t *testing.T) {
+	f := newFake()
+	clusterVM(f)
+	now := time.Unix(100000, 0)
+	r := &Root{Runner: f, Busy: func(context.Context, cluster.WorkloadKind, string, string) (bool, error) { return false, nil },
+		Now: func() time.Time { return now }}
+	ctx := context.Background()
+	pr, err := r.Park(ctx, ParkArgs{Ref: vmRef(SideCluster), Confirm: "web"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.ParkedDestroy(ctx, ParkedDestroyArgs{Pool: "tank", Name: pr.Name, Confirm: "web"}); !errors.Is(err, ErrLastCopy) {
+		t.Fatalf("deleted a copy without an expiry: %v", err)
+	}
+	if err := r.ParkedKeep(ctx, ParkedKeepArgs{Pool: "tank", Name: pr.Name, KeepUntil: now.Add(time.Minute).Unix()}); err == nil {
+		t.Fatal("an expiry a minute away was set")
+	}
+	day := now.Add(24 * time.Hour).Unix()
+	if err := r.ParkedKeep(ctx, ParkedKeepArgs{Pool: "tank", Name: pr.Name, KeepUntil: day}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.ParkedKeep(ctx, ParkedKeepArgs{Pool: "tank", Name: pr.Name, KeepUntil: day - 3600}); err == nil {
+		t.Fatal("an expiry was brought forward")
+	}
+	if err := r.ParkedDestroy(ctx, ParkedDestroyArgs{Pool: "tank", Name: pr.Name, Confirm: "web"}); err != nil {
+		t.Fatalf("a copy with an expiry: %v", err)
+	}
+
+	clusterVM(f)
+	pr, _ = r.Park(ctx, ParkArgs{Ref: vmRef(SideCluster), Confirm: "web"})
+	if err := r.ParkedDestroy(ctx, ParkedDestroyArgs{Pool: "tank", Name: pr.Name, Confirm: "web", LastCopy: true}); err != nil {
+		t.Fatalf("deleting the last copy, confirmed: %v", err)
+	}
+	if _, there := f.ds["tank/"+ParkedDir+"/"+pr.Name]; there {
+		t.Fatal("still there")
+	}
+}
+
 // Adopting needs the conversion's own complete copy and never replaces a
 // dataset.
 func TestAdoptRules(t *testing.T) {
@@ -346,6 +468,16 @@ func TestAdoptRules(t *testing.T) {
 	}
 	if _, there := f.ds["tank/hardyos-ha-incoming/abcdefgh12"]; there {
 		t.Fatal("the incoming folder stayed")
+	}
+	if p["org.hardyos:ha-conv"] != "abcdefgh12" {
+		t.Fatalf("the adopted copy doesn't carry its conversion: %+v", p)
+	}
+	// Adopting again (its answer was lost): what this conversion adopted.
+	if again, err := r.Adopt(ctx, AdoptArgs{Ref: ref, Conv: "abcdefgh12", Cluster: cid}); err != nil || again.Dataset != "tank/vms/web" {
+		t.Fatalf("adopting again: %+v %v", again, err)
+	}
+	if _, err := r.Adopt(ctx, AdoptArgs{Ref: ref, Conv: "otherconv12", Cluster: cid}); err == nil {
+		t.Fatal("another conversion took this one's adopted copy for its own")
 	}
 	// Once adopted, Abort has nothing of it to remove.
 	if err := r.Abort(ctx, AbortArgs{Ref: ref, Conv: "abcdefgh12"}); err != nil {

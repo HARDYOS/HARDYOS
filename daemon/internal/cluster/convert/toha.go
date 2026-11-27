@@ -170,6 +170,9 @@ func (c *Converter) Check(ctx context.Context, w cluster.WorkloadRef, cpu string
 	var t hacopy.Tree
 	if err := c.Priv.Call(ctx, hacopy.OpTree, hacopy.TreeArgs{Ref: hacopy.Ref{Kind: w.Kind, ID: w.ID, Pool: li.localPool, Side: hacopy.SideLocal}}, &t); err == nil {
 		res.SizeBytes = treeBytes(&t)
+		if p := snapsProblem(&t); p != "" {
+			res.Problems = append(res.Problems, p)
+		}
 	} else if res.Open == nil || phaseAt(haPhases, res.Open.Phase) < phaseAt(haPhases, PhasePark) {
 		res.Problems = append(res.Problems, "its storage: "+err.Error())
 	}
@@ -267,11 +270,26 @@ func (c *Converter) toHA(jc *jobs.Context, self cluster.Node, snap *cluster.Snap
 	}
 	local := hacopy.Ref{Kind: w.Kind, ID: w.ID, Pool: r.LocalPool, Side: hacopy.SideLocal}
 	setCPU, model := r.Options.SetCPU, r.Options.CPUModel
+	if r.Options.Generation != 0 && snap.Placements[w] == nil {
+		// It was registered once and the cluster has forgotten it since:
+		// registering it again would start a second life of it.
+		return nil, errors.New("it left the cluster after it was registered; undo this conversion")
+	}
 	if at < phaseAt(haPhases, PhasePark) {
 		// Checks, then the copy while it runs.
 		c.phase(jc, jc, r, PhaseCheck, 1, "Checking")
 		if snap.Placements[w] != nil {
 			return nil, errors.New("it is a cluster workload already")
+		}
+		if r.Options.Storage != nil {
+			// An earlier attempt's adopted copy is still there (its park
+			// failed): put aside before copying afresh.
+			if _, err := c.Storage.HAPark(jc, storagesvc.HARequest{Workload: w, Pool: r.StoragePool, Confirm: w.ID, Conv: asideConv(r),
+				KeepUntil: c.now().Add(time.Hour).Unix(), Actor: p.Actor}); err != nil {
+				return nil, fmt.Errorf("putting the earlier attempt's cluster copy aside: %w", err)
+			}
+			r.Options.Storage = nil
+			_ = c.save(jc, r)
 		}
 		if ok, why := state.HAEligible(snap, self.ID); !ok {
 			return nil, errors.New("this server " + why)
@@ -353,21 +371,14 @@ func (c *Converter) toHA(jc *jobs.Context, self cluster.Node, snap *cluster.Snap
 		}
 		r.Options.Storage = ws
 		c.phase(jc, jc, r, PhasePark, 88, "Putting this server's copy aside")
-		var pr hacopy.ParkResult
-		if err := c.Priv.Call(jc, hacopy.OpPark, hacopy.ParkArgs{Ref: local, Confirm: w.ID}, &pr); err != nil {
-			// The local copy is still the workload: it runs again. The
-			// adopted cluster copy (never registered, so never exported)
-			// is put aside for an hour; a retry copies afresh.
-			c.restartLocal(r)
-			if _, perr := c.Storage.HAPark(context.WithoutCancel(jc), storagesvc.HARequest{Workload: w, Pool: r.StoragePool, Confirm: w.ID,
-				KeepUntil: c.now().Add(time.Hour).Unix(), Actor: p.Actor}); perr == nil {
-				r.Options.Storage = nil
-				r.Phase = PhaseCheck
-			}
-			return nil, fmt.Errorf("putting this server's copy aside: %w", err)
+	}
+	if r.Phase == PhasePark || r.Options.ParkedName == "" {
+		// Park the local copy (or find it parked: a resume after root's
+		// answer, or hardyd itself, was lost). Past this phase only once
+		// the parked copy's name is saved.
+		if err := c.parkLocal(jc, r, local, p.Actor); err != nil {
+			return nil, err
 		}
-		r.Options.ParkedPool, r.Options.ParkedName, r.Options.ParkedSide = pr.Pool, pr.Name, string(hacopy.SideLocal)
-		_ = c.save(jc, r)
 	}
 	if r.Options.Storage == nil {
 		return nil, errors.New("the conversion lost what the storage server set up; undo it")
@@ -381,6 +392,75 @@ func (c *Converter) toHA(jc *jobs.Context, self cluster.Node, snap *cluster.Snap
 		}
 	}
 	return c.startHA(jc, self, r, p)
+}
+
+// snapsProblem: a dataset has more snapshots than a conversion carries.
+func snapsProblem(t *hacopy.Tree) string {
+	if child, n, over := hacopy.TooManySnaps(t); over {
+		return fmt.Sprintf("%s has %d snapshots; a conversion carries at most %d, so delete some first", childName(child), n, hacopy.MaxSnaps)
+	}
+	return ""
+}
+
+// asideConv marks a cluster copy one attempt put aside (not the
+// conversion's own mark: a later park of the copy that stays must never
+// find this one in its place).
+func asideConv(r *Record) string { return fmt.Sprintf("%sx%d", r.ID, r.Options.Attempt) }
+
+// parkLocal parks this server's copy, refusing when it was written after
+// the final snapshot (it ran again: the cluster copy is stale). Root
+// answers with the copy this conversion parked when it is parked already,
+// and puts everything back when its park fails. On any failure the
+// conversion goes back before the park: the local copy runs again if it
+// ran, and the adopted cluster copy (never registered, never exported) is
+// put aside for an hour, so a retry copies afresh.
+func (c *Converter) parkLocal(jc *jobs.Context, r *Record, local hacopy.Ref, actor cluster.Actor) error {
+	w := r.Ref()
+	args := hacopy.ParkArgs{Ref: local, Confirm: w.ID, Conv: r.ID, Since: snapName(r.ID, "final", r.Options.Attempt), RefuseChanged: true}
+	var pr hacopy.ParkResult
+	err := c.Priv.Call(jc, hacopy.OpPark, args, &pr)
+	if err != nil {
+		// Root may have parked it and its answer got lost: look (only
+		// look) for the copy this conversion parked.
+		if found, ok := c.parkedHere(context.WithoutCancel(jc), w, r.ID); ok {
+			pr, err = *found, nil
+		}
+	}
+	if err == nil && pr.Name == "" {
+		err = errors.New("root didn't name the parked copy")
+	}
+	if err != nil {
+		ctx := context.WithoutCancel(jc)
+		r.Phase = PhaseAdopt
+		c.restartLocal(r)
+		if _, perr := c.Storage.HAPark(ctx, storagesvc.HARequest{Workload: w, Pool: r.StoragePool, Confirm: w.ID, Conv: asideConv(r),
+			KeepUntil: c.now().Add(time.Hour).Unix(), Actor: actor}); perr == nil {
+			r.Options.Storage = nil
+		} else {
+			c.log().Warn("convert: putting an unregistered cluster copy aside", "workload", w.ID, "err", perr)
+		}
+		_ = c.save(ctx, r)
+		return fmt.Errorf("putting this server's copy aside: %w", err)
+	}
+	r.Options.ParkedPool, r.Options.ParkedName, r.Options.ParkedSide = pr.Pool, pr.Name, string(hacopy.SideLocal)
+	r.Phase = PhaseRegister
+	return c.save(jc, r)
+}
+
+// parkedHere finds this server's copy of w that conversion conv parked.
+func (c *Converter) parkedHere(ctx context.Context, w cluster.WorkloadRef, conv string) (*hacopy.ParkResult, bool) {
+	var l struct {
+		Parked []hacopy.Parked `json:"parked"`
+	}
+	if err := c.Priv.Call(ctx, hacopy.OpParkedList, struct{}{}, &l); err != nil {
+		return nil, false
+	}
+	for _, p := range l.Parked {
+		if p.Conv == conv && p.Kind == w.Kind && p.ID == w.ID && p.Side == hacopy.SideLocal {
+			return &hacopy.ParkResult{Pool: p.Pool, Name: p.Name, Existing: true}, true
+		}
+	}
+	return nil, false
 }
 
 // claimUID gives an app its own user id cluster-wide (storage.appuid).
@@ -453,10 +533,10 @@ func (c *Converter) stopLocal(ctx context.Context, w cluster.WorkloadRef) error 
 }
 
 // restartLocal starts the local copy again when the conversion stopped it
-// and gave up before parking it.
-func (c *Converter) restartLocal(r *Record) {
+// and gave up before parking it; true when it started.
+func (c *Converter) restartLocal(r *Record) bool {
 	if !r.WasRunning {
-		return
+		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -469,14 +549,23 @@ func (c *Converter) restartLocal(r *Record) {
 	if err != nil {
 		c.log().Warn("convert: starting the local copy again", "workload", r.Workload, "err", err)
 	}
+	return err == nil
 }
 
 // register adds the cluster workload (generation 1, this server), attaches
 // its storage here, writes the converted settings and approves them.
 func (c *Converter) register(jc *jobs.Context, self cluster.Node, r *Record, p ToHAParams) error {
 	w := r.Ref()
+	if r.Options.ParkedName == "" || r.Options.ParkedSide != string(hacopy.SideLocal) {
+		// Never two copies: the cluster workload exists only once this
+		// server's copy is known to be parked.
+		return errors.New("this server's copy isn't recorded as put aside; resume the conversion")
+	}
 	snap := c.snapshot()
 	pl := snap.Placements[w]
+	if pl == nil && r.Options.Generation != 0 {
+		return errors.New("it left the cluster after it was registered; undo this conversion")
+	}
 	if pl == nil {
 		c.phase(jc, jc, r, PhaseRegister, 90, "Registering it in the cluster")
 		prio := r.Options.Priority
@@ -495,7 +584,12 @@ func (c *Converter) register(jc *jobs.Context, self cluster.Node, r *Record, p T
 		}
 	}
 	if pl.Owner != self.ID {
-		return fmt.Errorf("the cluster places it on %s; finish there", pl.Owner)
+		// Ownership lost mid-register (this server failed over meanwhile):
+		// it is requested stopped, and until its owner rewrites its
+		// settings for cluster storage they don't hash to the approved
+		// ones, so no server starts it. The conversion stops here; move it
+		// back to this server and resume, or undo it once it's here.
+		return fmt.Errorf("the cluster placed it on %s meanwhile; move it back to this server, then resume", pl.Owner)
 	}
 	r.Options.Generation = pl.Generation
 	c.phase(jc, jc, r, PhaseAttach, 92, "Attaching cluster storage")

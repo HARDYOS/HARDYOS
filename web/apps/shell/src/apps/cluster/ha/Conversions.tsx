@@ -19,6 +19,7 @@ import {
   canAbandon,
   canUndo,
   deleteKept,
+  isLastCopy,
   keptID,
   makeClusterTemplate,
   makeLocal,
@@ -35,6 +36,7 @@ function TypedConfirm({
   name,
   action,
   danger,
+  acknowledge,
   onClose,
   run,
   onJob,
@@ -44,15 +46,19 @@ function TypedConfirm({
   name: string;
   action: string;
   danger?: boolean;
+  /** A second, separate confirmation (a box to tick) when set. */
+  acknowledge?: string;
   onClose: () => void;
   run: (confirm: string) => Promise<Job>;
   onJob: (j: Job) => void;
 }) {
   const [confirm, setConfirm] = useState("");
+  const [ack, setAck] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const ready = confirm === name && (!acknowledge || ack);
   async function submit() {
-    if (confirm !== name) return;
+    if (!ready) return;
     setBusy(true);
     setError(null);
     try {
@@ -73,13 +79,19 @@ function TypedConfirm({
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant={danger ? "danger" : "primary"} type="submit" busy={busy} disabled={confirm !== name}>
+          <Button variant={danger ? "danger" : "primary"} type="submit" busy={busy} disabled={!ready}>
             {action}
           </Button>
         </>
       }
     >
       <Field label={`Type ${name} to confirm`}>{(fid) => <TextInput id={fid} value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="off" />}</Field>
+      {acknowledge && (
+        <label className="row" style={{ flexWrap: "nowrap", marginTop: 10 }}>
+          <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />
+          <span>{acknowledge}</span>
+        </label>
+      )}
       {error && <Alert tone="bad">{error}</Alert>}
     </Dialog>
   );
@@ -204,12 +216,17 @@ export function KeptCard({ onJob }: { onJob: (j: Job) => void }) {
       {deleting && (
         <TypedConfirm
           title={`Delete the kept copy of ${keptID(deleting.name)}`}
-          description={`The copy on ${deleting.node} (${bytes(deleting.used)}, with its snapshots) is deleted for good.`}
+          description={
+            isLastCopy(deleting)
+              ? `The copy on ${deleting.node} (${bytes(deleting.used)}, with its snapshots) has no expiry: ${keptID(deleting.name)} hasn't run from its other copy since, so this may be its only good copy. It is deleted for good.`
+              : `The copy on ${deleting.node} (${bytes(deleting.used)}, with its snapshots) is deleted for good.`
+          }
           name={keptID(deleting.name)}
           action="Delete"
           danger
+          acknowledge={isLastCopy(deleting) ? "I understand this may be the last good copy, and want it deleted." : undefined}
           onClose={() => setDeleting(null)}
-          run={(confirm) => deleteKept(deleting, confirm)}
+          run={(confirm) => deleteKept(deleting, confirm, isLastCopy(deleting))}
           onJob={onJob}
         />
       )}

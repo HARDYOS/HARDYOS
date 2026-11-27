@@ -106,6 +106,9 @@ func plan(src, dst *hacopy.Tree) ([]step, error) {
 			have[d.Child] = d
 		}
 	}
+	if p := snapsProblem(src); p != "" {
+		return nil, errors.New(p)
+	}
 	var out []step
 	for _, s := range src.Datasets {
 		if len(s.Snaps) == 0 {
@@ -202,12 +205,14 @@ func (c *Converter) pushStep(ctx context.Context, r *Record, local hacopy.Ref, s
 	var ss hacopy.StreamStart
 	f, err := c.Priv.CallFile(ctx, hacopy.OpSend, hacopy.SendArgs{Ref: local, Child: st.Child, From: st.From, To: st.To, Token: st.Token}, &ss)
 	if err != nil {
+		c.cancelRemote(open.Stream, actor)
 		return 0, err
 	}
 	defer f.Close()
 	conn, err := c.Storage.CopyConn(ctx, open.Token)
 	if err != nil {
 		c.cancelLocal(ss.Stream)
+		c.cancelRemote(open.Stream, actor)
 		return 0, err
 	}
 	defer conn.Close()
@@ -226,12 +231,14 @@ func (c *Converter) pushStep(ctx context.Context, r *Record, local hacopy.Ref, s
 		cerr = conn.Verdict()
 	}
 	if err := ctx.Err(); err != nil {
+		c.cancelRemote(open.Stream, actor)
 		return cnt.n.Load(), err
 	}
 	if lerr := c.waitLocal(ctx, ss.Stream); lerr != nil && cerr == nil {
 		cerr = lerr
 	}
 	if cerr != nil {
+		c.cancelRemote(open.Stream, actor)
 		return cnt.n.Load(), fmt.Errorf("copying %s: %w", childName(st.Child), cerr)
 	}
 	return cnt.n.Load(), nil
@@ -286,6 +293,7 @@ func (c *Converter) pullStep(ctx context.Context, r *Record, local hacopy.Ref, s
 	conn, err := c.Storage.CopyConn(ctx, open.Token)
 	if err != nil {
 		c.cancelLocal(ss.Stream)
+		c.cancelRemote(open.Stream, actor)
 		return 0, err
 	}
 	defer conn.Close()
@@ -297,8 +305,12 @@ func (c *Converter) pullStep(ctx context.Context, r *Record, local hacopy.Ref, s
 	defer stop()
 	cnt := &counter{tick: tick}
 	_, cerr := io.Copy(countWriter{w: f, c: cnt}, conn)
+	if cerr != nil {
+		c.cancelRemote(open.Stream, actor)
+	}
 	f.Close()
 	if err := ctx.Err(); err != nil {
+		c.cancelRemote(open.Stream, actor)
 		return cnt.n.Load(), err
 	}
 	if lerr := c.waitLocal(ctx, ss.Stream); lerr != nil {
@@ -311,6 +323,19 @@ func (c *Converter) pullStep(ctx context.Context, r *Record, local hacopy.Ref, s
 		return cnt.n.Load(), fmt.Errorf("copying %s: %w", childName(st.Child), cerr)
 	}
 	return cnt.n.Load(), nil
+}
+
+// cancelRemote gives up the storage server's side of a stream (its own
+// timer would, a minute later; this frees the dataset now).
+func (c *Converter) cancelRemote(stream string, actor cluster.Actor) {
+	if stream == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := c.Storage.HACancel(ctx, stream, actor); err != nil {
+		c.log().Debug("convert: cancelling the storage server's stream", "stream", stream, "err", err)
+	}
 }
 
 func (c *Converter) cancelLocal(stream string) {

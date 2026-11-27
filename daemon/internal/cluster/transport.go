@@ -313,8 +313,14 @@ func (t *Transport) serveConn(c net.Conn) {
 		}
 		t.Migrate(tc, peer)
 	case ALPNCopy:
-		// Only an unfenced compute member dials; the handler (the storage
-		// node's) checks the one-time token it handed out.
+		// The bytes of one zfs stream, and nothing else: the connection is
+		// mutually authenticated TLS like every cluster ALPN, but what it
+		// may carry is decided by the token. Only an unfenced compute
+		// member dials; the handler (storagesvc.ServeCopy, set only on the
+		// storage node) takes a one-time 24-byte token that the same
+		// member's signed request opened within the last minute, and an
+		// unused one is dropped (its root stream cancelled) at its expiry.
+		// Copy connections never take the NetBird path (dialing below).
 		if !member || isFenced(peer) || peer.Role != RoleCompute || t.Copy == nil {
 			tc.Close()
 			return

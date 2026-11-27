@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type Conversion, canAbandon, canUndo, keptID } from "./haApi";
+import { type Conversion, canAbandon, canUndo, isLastCopy, keptID } from "./haApi";
 
 const conv = (over: Partial<Conversion>): Conversion => ({
   id: "abc",
@@ -35,6 +35,10 @@ describe("conversions", () => {
     expect(canUndo(conv({ phase: "copy" }))).toBe(false);
     expect(canUndo(conv({ phase: "start", state: "done" }))).toBe(false);
     expect(canUndo(conv({ direction: "local", phase: "adopt" }))).toBe(false);
+  });
+  it("asks a second confirmation only for a kept copy without an expiry", () => {
+    expect(isLastCopy({ keepUntil: undefined })).toBe(true);
+    expect(isLastCopy({ keepUntil: "2026-11-28T10:00:00Z" })).toBe(false);
   });
   it("reads a kept copy's workload from its name", () => {
     expect(keptID("vm-web-1764240000")).toBe("web");

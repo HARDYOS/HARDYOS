@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/netip"
 	"os"
@@ -278,10 +279,18 @@ func TestHAConvertIntegration(t *testing.T) {
 	// secrets reads what the VM wrote.
 	exportAndRead(t, ctx, sh, must, sanRoot, cid, dir, res.Volumes[0], first)
 
-	// The local copy is parked: no longer a VM.
-	pr, err := compute.Park(ctx, ParkArgs{Ref: local, Confirm: "web"})
+	// The local copy is parked: no longer a VM. Compared with a snapshot
+	// it doesn't have, it counts as changed and isn't parked.
+	if _, err := compute.Park(ctx, ParkArgs{Ref: local, Confirm: "web", Conv: conv, Since: SnapPrefix + "nosuchsnap", RefuseChanged: true}); !errors.Is(err, ErrChanged) {
+		t.Fatalf("parked a copy not compared with its final snapshot: %v", err)
+	}
+	pr, err := compute.Park(ctx, ParkArgs{Ref: local, Confirm: "web", Conv: conv})
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Asked again (an answer lost): the same parked copy.
+	if again, err := compute.Park(ctx, ParkArgs{Ref: local, Confirm: "web", Conv: conv}); err != nil || !again.Existing || again.Name != pr.Name {
+		t.Fatalf("parking again: %+v %v", again, err)
 	}
 	if _, err := sh("zfs", "list", localPool+"/vms/web"); err == nil {
 		t.Fatal("the local copy is still a VM's dataset after parking")
@@ -338,12 +347,17 @@ func TestHAConvertIntegration(t *testing.T) {
 	if err := storage.ParkedDestroy(ctx, ParkedDestroyArgs{Pool: storePool, Name: cp.Name, Confirm: "nope"}); err == nil {
 		t.Fatal("a kept copy was deleted without its name typed")
 	}
+	// The local copy has no expiry: deleted only as the possibly last copy.
+	if err := compute.ParkedDestroy(ctx, ParkedDestroyArgs{Pool: localPool, Name: pr.Name, Confirm: "web"}); !errors.Is(err, ErrLastCopy) {
+		t.Fatalf("a copy without an expiry was deleted: %v", err)
+	}
 	for _, p := range []struct {
 		r    *Root
 		pool string
 		name string
-	}{{storage, storePool, cp.Name}, {compute, localPool, pr.Name}} {
-		if err := p.r.ParkedDestroy(ctx, ParkedDestroyArgs{Pool: p.pool, Name: p.name, Confirm: "web"}); err != nil {
+		last bool
+	}{{storage, storePool, cp.Name, false}, {compute, localPool, pr.Name, true}} {
+		if err := p.r.ParkedDestroy(ctx, ParkedDestroyArgs{Pool: p.pool, Name: p.name, Confirm: "web", LastCopy: p.last}); err != nil {
 			t.Fatal(err)
 		}
 	}

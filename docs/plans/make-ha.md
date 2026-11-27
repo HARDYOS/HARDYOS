@@ -117,3 +117,40 @@ coordinator alerts, API authz). CI's Cluster (namespaces) job runs
 pool, a VM disk and state with snapshots sent across through root's ops,
 adopted, exported through LIO, read by an iSCSI initiator, then sent back
 and adopted locally.
+
+## After the security review (PR #47)
+
+- **Park (H1, M2, M3)**: every park carries the conversion's mark
+  (`org.hardyos:ha-conv`) and is idempotent; root puts the datasets back
+  when a park fails after the rename; the local park refuses a copy
+  written after the final snapshot (`written@<final>`). Any park failure
+  sends the conversion back before the park (local copy restarted, the
+  unregistered cluster copy put aside for an hour under the attempt's own
+  mark); the phase moves past the park only once the parked copy's name is
+  saved, and `register` refuses without it. A lost answer is recovered by
+  looking (only looking) for the copy the conversion parked.
+- **Undo and kept copies (H2, M1, L2)**: Undo puts this server's copy back
+  first and checks it, then parks the cluster copy with no expiry; its
+  grace period starts once this server's copy ran again, never when the
+  cluster copy changed after the final snapshot or may have run. Root
+  deletes a copy without an expiry only with `lastCopy`; expiries are only
+  pushed back, never under an hour away. "Make local again" gives the
+  cluster copy its grace period once the workload ran here.
+- **Streams (M4)**: an unused copy session is dropped at its expiry (file
+  closed, root's stream cancelled); the compute side cancels the storage
+  server's stream when its own step fails (`storage/ha/cancel`, only for
+  the server that opened it); root cancels a stream that never moved a
+  byte for five minutes when another wants its dataset.
+- **Resumes (M5, L7)**: a conversion whose workload was registered and then
+  left the cluster isn't resumed; "make local" goes on after the cluster
+  forgot the workload only when it removed it itself (intent saved before
+  `workload.remove`). A cluster log marker for open "make local"
+  conversions wasn't added: the intent flag, the generation and change-time
+  check before the removal, and the conversion-marked park on the storage
+  server keep two servers from both adopting it.
+- **Smaller (L1, L5, L6)**: the storage server follows a cluster VM's
+  schedule only when its stored settings hash to the approved ones;
+  Abandon puts a copy it adopted aside and releases a claimed app user id;
+  a dataset with more than 512 snapshots is refused up front. Root's
+  install-completion records survive a hardyd-priv restart
+  (`/var/lib/hardyos/vms/cluster-installs.json`).

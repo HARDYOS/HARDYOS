@@ -179,8 +179,15 @@ export async function abandonConversion(conv: string, confirm: string): Promise<
 export const useKept = () =>
   useQuery<KeptCopy[]>({ queryKey: convertKeys.kept, queryFn: () => unwrap(api.GET("/cluster/kept")), refetchInterval: 30_000 });
 
-export async function deleteKept(k: KeptCopy, confirm: string): Promise<Job> {
-  const r = await unwrap(api.POST("/cluster/kept/delete", { body: { node: k.node, pool: k.pool, name: k.name, confirm } }));
+/**
+ * A kept copy without an expiry: its workload hasn't run from its other
+ * copy since, so it may be the only good one (deleting it takes a second
+ * confirmation).
+ */
+export const isLastCopy = (k: Pick<KeptCopy, "keepUntil">): boolean => !k.keepUntil;
+
+export async function deleteKept(k: KeptCopy, confirm: string, lastCopy = false): Promise<Job> {
+  const r = await unwrap(api.POST("/cluster/kept/delete", { body: { node: k.node, pool: k.pool, name: k.name, confirm, lastCopy: lastCopy || undefined } }));
   return r.job;
 }
 

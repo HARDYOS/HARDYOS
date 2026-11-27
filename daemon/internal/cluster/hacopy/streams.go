@@ -51,9 +51,14 @@ type StreamArgs struct {
 	Stream string `json:"stream"`
 }
 
+// StaleStream: a stream that moved nothing this long after it was opened
+// is cancelled when another wants its dataset.
+const StaleStream = 5 * time.Minute
+
 type stream struct {
 	id     string
 	target string
+	opened time.Time
 	bytes  atomic.Int64
 
 	mu     sync.Mutex
@@ -140,6 +145,12 @@ func (r *streams) add(target string) (*stream, error) {
 		}
 		running++
 		if target != "" && s.target == target {
+			// One that never moved a byte long after it was opened has
+			// nobody at its other end any more: cancelled, so the next
+			// attempt finds the dataset free.
+			if st.Bytes == 0 && time.Since(s.opened) > StaleStream {
+				s.cancel()
+			}
 			return nil, ErrTargetBusy
 		}
 	}
@@ -148,7 +159,7 @@ func (r *streams) add(target string) (*stream, error) {
 	}
 	b := make([]byte, 12)
 	_, _ = rand.Read(b)
-	s := &stream{id: hex.EncodeToString(b), target: target}
+	s := &stream{id: hex.EncodeToString(b), target: target, opened: time.Now()}
 	s.timer = time.AfterFunc(MaxStreamTime, s.cancel)
 	r.byID[s.id] = s
 	return s, nil

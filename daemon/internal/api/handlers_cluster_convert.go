@@ -19,6 +19,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/auth"
 	"github.com/hardyos/hardyos/daemon/internal/cluster"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/convert"
+	"github.com/hardyos/hardyos/daemon/internal/cluster/hacopy"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/storagesvc"
 	"github.com/hardyos/hardyos/daemon/internal/vms"
 )
@@ -251,6 +252,9 @@ type KeptDeleteRequest struct {
 	Pool    string         `json:"pool"`
 	Name    string         `json:"name"`
 	Confirm string         `json:"confirm"`
+	// LastCopy confirms deleting a copy without an expiry (its workload
+	// hasn't run from its other copy: it may be the only good one).
+	LastCopy bool `json:"lastCopy,omitempty"`
 }
 
 func (s *Server) handleKeptDelete(w http.ResponseWriter, r *http.Request, u *auth.User) {
@@ -267,11 +271,23 @@ func (s *Server) handleKeptDelete(w http.ResponseWriter, r *http.Request, u *aut
 		writeError(w, http.StatusBadRequest, "confirm_required", "type the workload's name to delete its kept copy")
 		return
 	}
-	if _, ok := s.converter(w); !ok {
+	c, ok := s.converter(w)
+	if !ok {
 		return
 	}
+	if !req.LastCopy {
+		// Root refuses too; this says so before a job is queued.
+		if l, err := c.Kept(r.Context()); err == nil {
+			for _, k := range l {
+				if k.Node == req.Node && k.Pool == req.Pool && k.Name == req.Name && k.KeepUntil.IsZero() {
+					writeError(w, http.StatusConflict, "last_copy", hacopy.ErrLastCopy.Error())
+					return
+				}
+			}
+		}
+	}
 	s.submit(w, r, u, convert.JobParkedDrop, "Delete the kept copy "+req.Name,
-		convert.DropParams{Node: req.Node, Pool: req.Pool, Name: req.Name, Confirm: req.Confirm, Actor: s.convertActor(u)},
+		convert.DropParams{Node: req.Node, Pool: req.Pool, Name: req.Name, Confirm: req.Confirm, LastCopy: req.LastCopy, Actor: s.convertActor(u)},
 		"cluster.ha.parked.delete", string(req.Node)+":"+req.Pool+"/"+req.Name, nil)
 }
 

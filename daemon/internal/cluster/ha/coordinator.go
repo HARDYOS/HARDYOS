@@ -106,6 +106,11 @@ type Coordinator struct {
 	// OnFailover hears about every recovery decision (a workload placed on
 	// a new server, or nowhere to run): history and alerts (decision 484).
 	OnFailover func(Failover)
+	// LiveOK is the network check of a live move between two servers
+	// (decision 487: every live move, the coordinator's own evacuations
+	// too; restarts and failovers never wait for it). nil: no check yet
+	// (the cluster's netcheck supplies the pair-scoped one).
+	LiveOK func(ctx context.Context, from, to cluster.NodeID) (bool, string)
 
 	mu           sync.Mutex
 	leader       bool
@@ -492,6 +497,11 @@ func (c *Coordinator) background(ctx context.Context, self cluster.NodeID, p *cl
 			c.mu.Unlock()
 		}()
 		_ = c.act(lead, kind, title, string(p.Workload.Kind)+":"+p.Workload.ID, func(ctx context.Context) error {
+			if c.LiveOK != nil {
+				if ok, why := c.LiveOK(ctx, p.Owner, to); !ok {
+					return fmt.Errorf("not moved live: the network check fails (%s)", why)
+				}
+			}
 			_, err := c.Mover.Move(ctx, req, c.actor(self))
 			return err
 		})

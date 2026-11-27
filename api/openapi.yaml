@@ -7497,6 +7497,11 @@ paths:
                 pool: { type: string }
                 name: { type: string }
                 confirm: { type: string }
+                lastCopy:
+                  type: boolean
+                  description: >-
+                    Confirms deleting a copy without an expiry: its workload hasn't run from its
+                    other copy since, so this may be its only good copy (refused with 409 last_copy otherwise).
       responses:
         "202": { $ref: "#/components/responses/JobAccepted" }
         "400": { $ref: "#/components/responses/Invalid" }
@@ -12895,6 +12900,12 @@ components:
         side: { type: string, enum: [local, cluster] }
         used: { type: integer }
         created: { type: string, format: date-time }
-        keepUntil: { type: string, format: date-time, description: "When it is deleted (absent: kept until an administrator deletes it)" }
+        keepUntil:
+          type: string
+          format: date-time
+          description: >-
+            When it is deleted (absent: kept until an administrator deletes it; its workload hasn't run from its
+            other copy since, so deleting it needs lastCopy)
+        conv: { type: string, description: "The conversion that put it aside" }
         node: { type: string }
     # ---- end of Phase 10 make-HA schemas ----

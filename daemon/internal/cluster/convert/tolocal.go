@@ -170,18 +170,34 @@ func (c *Converter) toLocal(jc *jobs.Context, self cluster.Node, r *Record, acto
 	if phaseAt(localPhases, r.Phase) <= phaseAt(localPhases, PhaseLRemove) {
 		c.phase(jc, jc, r, PhaseLRemove, 86, "Removing it from the cluster")
 		pl := c.snapshot().Placements[w]
+		if pl == nil && !r.Options.Removed {
+			// Gone, but not through this conversion (another server made
+			// it local, or it was removed): this copy isn't its latest.
+			return errors.New("the cluster no longer has it, and this conversion didn't remove it (another server made it local, or it was removed); this copy isn't used")
+		}
 		if pl != nil {
 			if pl.Generation != r.Options.Generation || !pl.Changed.Equal(r.Options.Changed) || pl.Requested != cluster.RequestStopped {
 				c.requestAgain(r, actor)
 				r.Phase = PhaseLStop
 				return errors.New("it changed in the cluster while it was copied; try again")
 			}
-			if err := c.propose(jc, cluster.CmdWorkloadRemove, state.WorkloadRemove{Workload: w, Generation: pl.Generation}, actor); err != nil {
+			// Saved before the removal is proposed, so a resume after an
+			// interruption knows the cluster forgot it through this
+			// conversion (while the cluster still has it, the checks above
+			// run again).
+			r.Options.Removed = true
+			if err := c.save(jc, r); err != nil {
 				c.requestAgain(r, actor)
 				return err
 			}
+			err := c.propose(jc, cluster.CmdWorkloadRemove, state.WorkloadRemove{Workload: w, Generation: pl.Generation}, actor)
 			if c.snapshot().Placements[w] != nil {
+				r.Options.Removed = false
+				_ = c.save(jc, r)
 				c.requestAgain(r, actor)
+				if err != nil {
+					return err
+				}
 				return errors.New("the cluster refused to remove it (see the server's log)")
 			}
 		}
@@ -190,7 +206,7 @@ func (c *Converter) toLocal(jc *jobs.Context, self cluster.Node, r *Record, acto
 	if phaseAt(localPhases, r.Phase) <= phaseAt(localPhases, PhaseLPark) {
 		c.phase(jc, jc, r, PhaseLPark, 88, "Putting the cluster copy aside")
 		err := c.waitFor(jc, 3*time.Minute, "the storage server letting go of it", func(*cluster.Snapshot) (bool, error) {
-			pr, err := c.Storage.HAPark(jc, storagesvc.HARequest{Workload: w, Pool: r.StoragePool, Confirm: w.ID, Actor: actor})
+			pr, err := c.Storage.HAPark(jc, storagesvc.HARequest{Workload: w, Pool: r.StoragePool, Confirm: w.ID, Conv: r.ID, Actor: actor})
 			if err != nil {
 				// Still unmapped or unexported moments after the removal:
 				// try again.
@@ -235,8 +251,16 @@ func (c *Converter) toLocal(jc *jobs.Context, self cluster.Node, r *Record, acto
 			return fmt.Errorf("it is on this server now but didn't start: %w", err)
 		}
 	}
-	if err := c.keepFor(jc, hacopy.SideCluster, r.Options.ParkedPool, r.Options.ParkedName, c.grace(), actor); err != nil {
-		c.log().Warn("convert: setting the cluster copy's grace period", "err", err)
+	if r.WasRunning {
+		// It runs from this server's storage: the cluster copy's grace
+		// period starts now.
+		if err := c.keepFor(jc, hacopy.SideCluster, r.Options.ParkedPool, r.Options.ParkedName, c.grace(), actor); err != nil {
+			c.log().Warn("convert: setting the cluster copy's grace period", "err", err)
+			r.Options.AwaitStart = true
+		}
+	} else {
+		// Off, as it was: the grace period starts once it first ran here.
+		r.Options.AwaitStart = true
 	}
 	r.State, r.Phase, r.Finished = StateDone, PhaseDone, c.now().UTC()
 	_ = c.save(jc, r)
@@ -418,31 +442,86 @@ func (c *Converter) undo(jc *jobs.Context, self cluster.Node, r *Record, actor c
 			}
 		}
 	}
+	// This server's copy back first, and seen to be there, before the
+	// cluster copy is touched: if it can't come back, nothing else
+	// changes.
+	if err := c.putLocalBack(jc, r); err != nil {
+		return err
+	}
+	// The cluster copy is put aside with no expiry: it may have run (it
+	// is newer than this server's then), and even if not, it is deleted
+	// only once this server's copy ran again (Cleanup).
+	req := storagesvc.HARequest{Workload: w, Pool: r.StoragePool, Confirm: w.ID, Conv: r.ID,
+		Since: snapName(r.ID, "final", r.Options.Attempt), Actor: actor}
+	parked := func(pr *hacopy.ParkResult) {
+		r.Options.ParkedPool, r.Options.ParkedName, r.Options.ParkedSide = pr.Pool, pr.Name, string(hacopy.SideCluster)
+		r.Options.Storage = nil
+		// Changed since the final snapshot, or it may have run from there:
+		// kept until an administrator deletes it.
+		r.Options.ClusterChanged = pr.Changed || (r.WasRunning && phaseAt(haPhases, r.Phase) >= phaseAt(haPhases, PhaseStart))
+		r.Options.AwaitStart = !r.Options.ClusterChanged
+		_ = c.save(jc, r)
+	}
 	if r.Options.Storage != nil {
-		jc.Progress(40, "Putting the cluster copy aside")
-		until := c.now().Add(c.grace()).Unix()
+		jc.Progress(60, "Putting the cluster copy aside")
+		var pr *hacopy.ParkResult
 		if err := c.waitFor(jc, 3*time.Minute, "the storage server letting go of it", func(*cluster.Snapshot) (bool, error) {
-			_, err := c.Storage.HAPark(jc, storagesvc.HARequest{Workload: w, Pool: r.StoragePool, Confirm: w.ID, KeepUntil: until, Actor: actor})
+			var err error
+			pr, err = c.Storage.HAPark(jc, req)
 			return err == nil, nil
 		}); err != nil {
 			return err
 		}
-		r.Options.Storage = nil
-		_ = c.save(jc, r)
+		parked(pr)
 	} else {
+		// One this conversion adopted and lost track of (its answer was
+		// lost), if any; then what it was still receiving.
+		req.Adopted = true
+		if pr, err := c.Storage.HAPark(jc, req); err == nil {
+			parked(pr)
+		}
 		_ = c.Storage.HAAbort(jc, storagesvc.HARequest{Workload: w, Pool: r.StoragePool, Conv: r.ID, Actor: actor})
 	}
-	if r.Options.ParkedName != "" && r.Options.ParkedSide == string(hacopy.SideLocal) {
-		jc.Progress(70, "Putting this server's copy back")
-		ref := hacopy.Ref{Kind: w.Kind, ID: w.ID, Pool: r.Options.ParkedPool, Side: hacopy.SideLocal}
-		if err := c.Priv.Call(jc, hacopy.OpUnpark, hacopy.UnparkArgs{Ref: ref, Name: r.Options.ParkedName}, nil); err != nil {
-			return err
+	if c.restartLocal(r) && r.Options.AwaitStart {
+		if err := c.keepFor(jc, hacopy.SideCluster, r.Options.ParkedPool, r.Options.ParkedName, c.grace(), actor); err == nil {
+			r.Options.AwaitStart = false
+			_ = c.save(jc, r)
 		}
-		r.Options.ParkedName = ""
+	}
+	if r.Options.ClusterChanged {
+		c.alert("cluster.ha.undo", notify.SeverityWarning, r.Name+"'s cluster copy is kept",
+			"It may have changed on cluster storage after this server's copy was put aside. That copy is kept until you delete it (Cluster › Workloads and HA › Kept copies).")
+	}
+	jc.Progress(100, r.Name+" is on this server's own storage again")
+	return nil
+}
+
+// putLocalBack puts this server's parked copy back (found by the record,
+// or by the conversion's mark when the record lost it), and checks that
+// the workload's own datasets are there.
+func (c *Converter) putLocalBack(jc *jobs.Context, r *Record) error {
+	w := r.Ref()
+	pool, name := r.Options.ParkedPool, r.Options.ParkedName
+	if name == "" || r.Options.ParkedSide != string(hacopy.SideLocal) {
+		pool, name = "", ""
+		if found, ok := c.parkedHere(jc, w, r.ID); ok {
+			pool, name = found.Pool, found.Name
+		}
+	}
+	if name != "" {
+		jc.Progress(40, "Putting this server's copy back")
+		ref := hacopy.Ref{Kind: w.Kind, ID: w.ID, Pool: pool, Side: hacopy.SideLocal}
+		if err := c.Priv.Call(jc, hacopy.OpUnpark, hacopy.UnparkArgs{Ref: ref, Name: name}, nil); err != nil {
+			return fmt.Errorf("putting this server's copy back: %w", err)
+		}
+		r.Options.ParkedPool, r.Options.ParkedName, r.Options.ParkedSide = "", "", ""
 		_ = c.save(jc, r)
 	}
-	c.restartLocal(r)
-	jc.Progress(100, r.Name+" is on this server's own storage again")
+	var t hacopy.Tree
+	local := hacopy.Ref{Kind: w.Kind, ID: w.ID, Pool: r.LocalPool, Side: hacopy.SideLocal}
+	if err := c.Priv.Call(jc, hacopy.OpTree, hacopy.TreeArgs{Ref: local}, &t); err != nil || !t.Exists {
+		return fmt.Errorf("this server's copy of %s isn't here (%v); the cluster copy is left as it is", r.Name, err)
+	}
 	return nil
 }
 
@@ -487,8 +566,27 @@ func (c *Converter) runAbandon(jc *jobs.Context) (any, error) {
 		return nil, err
 	}
 	w := r.Ref()
+	unlock := jc.Lock(localLock(w))
+	defer unlock()
 	if r.Direction == DirHA {
-		err = c.Storage.HAAbort(jc, storagesvc.HARequest{Workload: w, Pool: r.StoragePool, Conv: r.ID, Actor: p.Actor})
+		// A copy this conversion adopted (never registered, so never
+		// exported) is put aside for an hour; this server's copy is the
+		// workload and stays as it is.
+		_, perr := c.Storage.HAPark(jc, storagesvc.HARequest{Workload: w, Pool: r.StoragePool, Confirm: w.ID, Conv: r.ID, Adopted: true,
+			KeepUntil: c.now().Add(time.Hour).Unix(), Actor: p.Actor})
+		if perr == nil || r.Options.Storage == nil {
+			r.Options.Storage = nil
+			err = c.Storage.HAAbort(jc, storagesvc.HARequest{Workload: w, Pool: r.StoragePool, Conv: r.ID, Actor: p.Actor})
+		} else {
+			err = fmt.Errorf("putting the copy it set up on cluster storage aside: %w", perr)
+		}
+		if err == nil && w.Kind == cluster.KindApp && c.snapshot().Placements[w] == nil {
+			if u, ok := c.snapshot().AppUIDs[w.ID]; ok && u == r.Options.UID {
+				if uerr := c.propose(jc, cluster.CmdAppUID, state.AppUIDBody{App: w.ID, UID: u, Release: true}, p.Actor); uerr != nil {
+					c.log().Warn("convert: releasing an abandoned app's cluster user id", "app", w.ID, "err", uerr)
+				}
+			}
+		}
 		if err == nil {
 			// The conversion's own snapshots on this server go too.
 			ref := hacopy.Ref{Kind: w.Kind, ID: w.ID, Pool: r.LocalPool, Side: hacopy.SideLocal}

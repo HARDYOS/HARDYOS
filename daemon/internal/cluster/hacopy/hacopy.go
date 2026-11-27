@@ -395,6 +395,20 @@ type TreeDataset struct {
 	Used  int64  `json:"used"`
 }
 
+// MaxSnaps is the most snapshots of one dataset a conversion carries (a
+// stream each, and the lists between the servers stay bounded).
+const MaxSnaps = 512
+
+// TooManySnaps names a dataset of t with more than MaxSnaps snapshots.
+func TooManySnaps(t *Tree) (child string, n int, over bool) {
+	for _, d := range t.Datasets {
+		if len(d.Snaps) > MaxSnaps {
+			return d.Child, len(d.Snaps), true
+		}
+	}
+	return "", 0, false
+}
+
 // Tree is a workload's datasets.
 type Tree struct {
 	Exists   bool          `json:"exists"`
@@ -578,13 +592,22 @@ func (r *Root) Adopt(ctx context.Context, a AdoptArgs) (*AdoptResult, error) {
 	src := a.incomingTop(a.Conv)
 	top := a.Dataset()
 	if _, there := r.exists(ctx, src); !ok || !there {
-		if a.Side == SideCluster {
-			// Adopted already (a conversion resumed after its answer was
-			// lost): describe what is there, if it is the workload's
-			// cluster storage.
-			if kids, err := r.checkSource(ctx, a.Ref); err == nil {
-				return r.describe(ctx, a.Ref, top, kids, a.Cluster)
+		// Adopted already by this conversion (resumed after root's answer
+		// was lost): describe what is there, if it is the workload's
+		// storage on this side and carries this conversion's mark.
+		// An adopt cut short after the rename is finished here.
+		if r.localProp(ctx, top, PropParkedConv) == a.Conv {
+			kids, err := r.children(ctx, a.Ref, top)
+			if err != nil {
+				return nil, err
 			}
+			if err := r.applyProps(ctx, a.Ref, top, kids); err != nil {
+				return nil, err
+			}
+			if err := r.mount(ctx, top); err != nil {
+				return nil, err
+			}
+			return r.describe(ctx, a.Ref, top, kids, a.Cluster)
 		}
 		return nil, invalid("nothing was received for %s", a.ID)
 	}
@@ -612,6 +635,11 @@ func (r *Root) Adopt(ctx context.Context, a AdoptArgs) (*AdoptResult, error) {
 		}
 	}
 	if _, err := r.zfs(ctx, "rename", src, top); err != nil {
+		return nil, err
+	}
+	// The conversion's mark first: a retry finishes what this started,
+	// and Abandon finds it.
+	if _, err := r.zfs(ctx, "set", PropParkedConv+"="+a.Conv, top); err != nil {
 		return nil, err
 	}
 	if err := r.applyProps(ctx, a.Ref, top, kids); err != nil {
@@ -749,10 +777,34 @@ type ParkArgs struct {
 	Ref
 	Confirm   string `json:"confirm"`
 	KeepUntil int64  `json:"keepUntil,omitempty"`
+	// Conv marks the parked copy with the conversion that parked it, and
+	// makes parking idempotent: when the workload's datasets are gone and
+	// a copy this conversion parked is there, that copy is the answer (a
+	// conversion resumed after root's answer was lost).
+	Conv string `json:"conv,omitempty"`
+	// Since is a snapshot the datasets are compared with: ParkResult
+	// says whether anything was written after it (a missing snapshot
+	// counts as written), and RefuseChanged refuses to park then.
+	Since         string `json:"since,omitempty"`
+	RefuseChanged bool   `json:"refuseChanged,omitempty"`
+	// Adopted parks only what conversion Conv adopted (its mark on the
+	// datasets): a copy a conversion lost track of, never another's.
+	Adopted bool `json:"adopted,omitempty"`
 }
 
 // PropKeepUntil is a parked copy's expiry (unix seconds; unset: kept).
 const PropKeepUntil = "org.hardyos:ha-keep-until"
+
+// PropParkedConv is the conversion that parked a copy.
+const PropParkedConv = "org.hardyos:ha-conv"
+
+// MinKeep is the shortest expiry ha.parked.keep sets: a kept copy is
+// never made to expire sooner than this from now.
+const MinKeep = time.Hour
+
+// ErrChanged: the datasets were written since the snapshot they were
+// compared with.
+var ErrChanged = errors.New("it changed after the conversion's final snapshot")
 
 // ParkedKeepArgs is ha.parked.keep: a parked copy's new expiry (0: kept).
 type ParkedKeepArgs struct {
@@ -770,6 +822,16 @@ func (r *Root) ParkedKeep(ctx context.Context, a ParkedKeepArgs) error {
 	if a.KeepUntil < 0 {
 		return invalid("bad expiry")
 	}
+	if a.KeepUntil > 0 {
+		// Never sooner than an hour from now, nor sooner than it was set
+		// to expire already: an expiry is only ever pushed back.
+		if a.KeepUntil < r.now().Add(MinKeep).Unix() {
+			return invalid("a kept copy's expiry is at least %s from now", MinKeep)
+		}
+		if cur, err := strconv.ParseInt(r.localProp(ctx, ds, PropKeepUntil), 10, 64); err == nil && cur > 0 && a.KeepUntil < cur {
+			return invalid("a kept copy's expiry isn't brought forward")
+		}
+	}
 	if a.KeepUntil == 0 {
 		_, err = r.zfs(ctx, "inherit", PropKeepUntil, ds)
 		return err
@@ -782,17 +844,96 @@ func (r *Root) ParkedKeep(ctx context.Context, a ParkedKeepArgs) error {
 type ParkResult struct {
 	Pool string `json:"pool"`
 	Name string `json:"name"`
+	// Changed: something was written after ParkArgs.Since.
+	Changed bool `json:"changed,omitempty"`
+	// Existing: the conversion had parked it already.
+	Existing bool `json:"existing,omitempty"`
 }
 
 // ErrBusy: the storage is still in use.
 var ErrBusy = errors.New("the workload's storage is still in use")
 
+// ParkedBy finds the copy of ref that conversion conv parked, when ref's
+// own datasets are gone (ok false otherwise, or when there is none).
+func (r *Root) ParkedBy(ctx context.Context, ref Ref, conv string) (*ParkResult, bool) {
+	if conv == "" || !convRE.MatchString(conv) || ref.Validate() != nil {
+		return nil, false
+	}
+	if _, there := r.exists(ctx, ref.Dataset()); there {
+		return nil, false
+	}
+	dir := ref.Pool + "/" + ParkedDir
+	if _, ok := r.exists(ctx, dir); !ok {
+		return nil, false
+	}
+	o, err := r.zfs(ctx, "list", "-H", "-p", "-d", "1", "-t", "filesystem", "-o", "name,"+PropParked+","+PropParkedConv, dir)
+	if err != nil {
+		return nil, false
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(o)), "\n") {
+		f := strings.Split(line, "\t")
+		if len(f) != 3 || f[0] == dir || f[1] != ref.parkedValue() || f[2] != conv {
+			continue
+		}
+		name := strings.TrimPrefix(f[0], dir+"/")
+		if parkedRE.MatchString(name) {
+			return &ParkResult{Pool: ref.Pool, Name: name, Existing: true}, true
+		}
+	}
+	return nil, false
+}
+
+// MetadataSlack is what a file system may have written after a snapshot
+// without counting as changed: access times (pools with atime or relatime
+// on) and similar metadata when its files are only read. Disks (zvols)
+// get none: any write counts.
+const MetadataSlack = 128 << 10
+
+// writtenSince says whether any of the datasets was written after their
+// snapshot since (one without it counts as written).
+func (r *Root) writtenSince(ctx context.Context, all []string, since string) bool {
+	for _, ds := range all {
+		p, err := r.props(ctx, ds, "written@"+since, "type")
+		if err != nil {
+			return true
+		}
+		n, err := strconv.ParseInt(p["written@"+since], 10, 64)
+		if err != nil {
+			return true
+		}
+		slack := int64(0)
+		if p["type"] == "filesystem" {
+			slack = MetadataSlack
+		}
+		if n > slack {
+			return true
+		}
+	}
+	return false
+}
+
 // Park moves a workload's datasets out of the way: they are no longer a
 // VM, an app or cluster storage, and are kept until destroyed. The caller
-// (the VM or app engine) has stopped it and dropped its definition.
+// (the VM or app engine) has stopped it and dropped its definition. On a
+// failure after the move, everything is put back where it was.
 func (r *Root) Park(ctx context.Context, a ParkArgs) (*ParkResult, error) {
 	if a.Confirm != a.ID {
 		return nil, invalid("type the name to confirm")
+	}
+	if a.Conv != "" && !convRE.MatchString(a.Conv) {
+		return nil, invalid("bad conversion id")
+	}
+	if a.Since != "" && !ownSnap.MatchString(a.Since) {
+		return nil, invalid("bad snapshot name")
+	}
+	if a.KeepUntil < 0 {
+		return nil, invalid("bad expiry")
+	}
+	if pr, ok := r.ParkedBy(ctx, a.Ref, a.Conv); ok {
+		return pr, nil
+	}
+	if a.Adopted && (a.Conv == "" || r.localProp(ctx, a.Dataset(), PropParkedConv) != a.Conv) {
+		return nil, invalid("%s isn't what this conversion set up", a.Dataset())
 	}
 	kids, err := r.checkSource(ctx, a.Ref)
 	if err != nil {
@@ -810,13 +951,25 @@ func (r *Root) Park(ctx context.Context, a ParkArgs) (*ParkResult, error) {
 			return nil, fmt.Errorf("%w: %s is still mapped or exported", ErrBusy, a.ID)
 		}
 	}
+	top := a.Dataset()
+	res := &ParkResult{Pool: a.Pool}
+	if a.Since != "" {
+		all := []string{top}
+		for c := range kids {
+			all = append(all, top+"/"+c)
+		}
+		slices.Sort(all)
+		res.Changed = r.writtenSince(ctx, all, a.Since)
+		if res.Changed && a.RefuseChanged {
+			return nil, &ErrInvalid{fmt.Errorf("%w (%s); it wasn't put aside", ErrChanged, a.Since)}
+		}
+	}
 	parent := a.Pool + "/" + ParkedDir
 	if _, ok := r.exists(ctx, parent); !ok {
 		if _, err := r.zfs(ctx, "create", "-o", "canmount=off", "-o", propRole+"="+RoleParked, parent); err != nil {
 			return nil, err
 		}
 	}
-	top := a.Dataset()
 	name := string(a.Kind) + "-" + a.ID + "-" + strconv.FormatInt(r.now().Unix(), 10)
 	if _, err := r.zfs(ctx, "set", "canmount=noauto", top); err != nil {
 		return nil, err
@@ -833,13 +986,27 @@ func (r *Root) Park(ctx context.Context, a ParkArgs) (*ParkResult, error) {
 		_ = r.mount(context.WithoutCancel(ctx), top)
 		return nil, err
 	}
-	if _, err := r.zfs(ctx, "set", PropParked+"="+a.parkedValue(), dst); err != nil {
+	if err := r.parkMarks(ctx, a, dst, kids); err != nil {
+		// Back where it was, as it was: the caller still has its workload.
+		r.unpark(context.WithoutCancel(ctx), a.Ref, dst, top, kids)
 		return nil, err
 	}
+	r.log().Warn("ha: parked", "from", top, "to", dst)
+	res.Name = name
+	return res, nil
+}
+
+// parkMarks marks a moved copy parked and takes its workload marks away.
+func (r *Root) parkMarks(ctx context.Context, a ParkArgs, dst string, kids map[string]string) error {
+	set := []string{"set", PropParked + "=" + a.parkedValue()}
+	if a.Conv != "" {
+		set = append(set, PropParkedConv+"="+a.Conv)
+	}
 	if a.KeepUntil > 0 {
-		if _, err := r.zfs(ctx, "set", PropKeepUntil+"="+strconv.FormatInt(a.KeepUntil, 10), dst); err != nil {
-			return nil, err
-		}
+		set = append(set, PropKeepUntil+"="+strconv.FormatInt(a.KeepUntil, 10))
+	}
+	if _, err := r.zfs(ctx, append(set, dst)...); err != nil {
+		return err
 	}
 	// Nothing parked is a VM, an app or cluster storage any more.
 	all := []string{dst}
@@ -850,7 +1017,7 @@ func (r *Root) Park(ctx context.Context, a ParkArgs) (*ParkResult, error) {
 		for _, prop := range []string{propVM, propApp, propRole} {
 			if v := r.localProp(ctx, ds, prop); v != "" {
 				if _, err := r.zfs(ctx, "inherit", prop, ds); err != nil {
-					return nil, err
+					return err
 				}
 			}
 		}
@@ -860,8 +1027,25 @@ func (r *Root) Park(ctx context.Context, a ParkArgs) (*ParkResult, error) {
 			}
 		}
 	}
-	r.log().Warn("ha: parked", "from", top, "to", dst)
-	return &ParkResult{Pool: a.Pool, Name: name}, nil
+	return nil
+}
+
+// unpark puts a copy moved to src back at top with its workload's marks.
+func (r *Root) unpark(ctx context.Context, ref Ref, src, top string, kids map[string]string) {
+	if _, err := r.zfs(ctx, "rename", src, top); err != nil {
+		r.log().Error("ha: putting a copy back after a failed park", "from", src, "to", top, "err", err)
+		return
+	}
+	for _, p := range []string{PropParked, PropKeepUntil, PropParkedConv} {
+		_, _ = r.zfs(ctx, "inherit", p, top)
+	}
+	if err := r.applyProps(ctx, ref, top, kids); err != nil {
+		r.log().Error("ha: marking a copy put back after a failed park", "dataset", top, "err", err)
+	}
+	if err := r.mount(ctx, top); err != nil {
+		r.log().Error("ha: mounting a copy put back after a failed park", "dataset", top, "err", err)
+	}
+	r.log().Warn("ha: park failed; put back", "dataset", top)
 }
 
 // UnparkArgs is ha.unpark.
@@ -893,7 +1077,7 @@ func (r *Root) Unpark(ctx context.Context, a UnparkArgs) error {
 	if _, err := r.zfs(ctx, "rename", src, top); err != nil {
 		return err
 	}
-	for _, p := range []string{PropParked, PropKeepUntil} {
+	for _, p := range []string{PropParked, PropKeepUntil, PropParkedConv} {
 		if _, err := r.zfs(ctx, "inherit", p, top); err != nil {
 			return err
 		}
@@ -937,6 +1121,8 @@ type Parked struct {
 	// KeepUntil is when it may be destroyed (zero: kept until an
 	// administrator deletes it).
 	KeepUntil time.Time `json:"keepUntil,omitzero"`
+	// Conv is the conversion that parked it.
+	Conv string `json:"conv,omitempty"`
 }
 
 // ParkedList lists the parked copies on every pool.
@@ -954,13 +1140,13 @@ func (r *Root) ParkedList(ctx context.Context) ([]Parked, error) {
 		if _, ok := r.exists(ctx, dir); !ok {
 			continue
 		}
-		o, err := r.zfs(ctx, "list", "-H", "-p", "-d", "1", "-t", "filesystem", "-o", "name,"+PropParked+",used,creation,"+PropKeepUntil, dir)
+		o, err := r.zfs(ctx, "list", "-H", "-p", "-d", "1", "-t", "filesystem", "-o", "name,"+PropParked+",used,creation,"+PropKeepUntil+","+PropParkedConv, dir)
 		if err != nil {
 			continue
 		}
 		for _, line := range strings.Split(strings.TrimSpace(string(o)), "\n") {
 			f := strings.Split(line, "\t")
-			if len(f) != 5 || f[0] == dir {
+			if len(f) != 6 || f[0] == dir {
 				continue
 			}
 			name := strings.TrimPrefix(f[0], dir+"/")
@@ -975,20 +1161,31 @@ func (r *Root) ParkedList(ctx context.Context) ([]Parked, error) {
 			if ku, err := strconv.ParseInt(f[4], 10, 64); err == nil && ku > 0 {
 				p.KeepUntil = time.Unix(ku, 0).UTC()
 			}
+			if convRE.MatchString(f[5]) {
+				p.Conv = f[5]
+			}
 			l = append(l, p)
 		}
 	}
 	return l, nil
 }
 
-// ParkedDestroyArgs is ha.parked.destroy: Confirm is the workload's id.
+// ParkedDestroyArgs is ha.parked.destroy: Confirm is the workload's id;
+// LastCopy confirms deleting a copy that has no expiry.
 type ParkedDestroyArgs struct {
-	Pool    string `json:"pool"`
-	Name    string `json:"name"`
-	Confirm string `json:"confirm"`
+	Pool     string `json:"pool"`
+	Name     string `json:"name"`
+	Confirm  string `json:"confirm"`
+	LastCopy bool   `json:"lastCopy,omitempty"`
 }
 
-// ParkedDestroy destroys a parked copy with its snapshots.
+// ErrLastCopy: a copy without an expiry is deleted only when confirmed as
+// possibly the last one.
+var ErrLastCopy = errors.New("this kept copy has no expiry: its workload hasn't run from its other copy, so this may be its only good copy; confirm deleting the last copy to delete it")
+
+// ParkedDestroy destroys a parked copy with its snapshots. A copy gets
+// its expiry only once its workload ran from its other copy; one without
+// is deleted only with LastCopy.
 func (r *Root) ParkedDestroy(ctx context.Context, a ParkedDestroyArgs) error {
 	m := parkedRE.FindStringSubmatch(a.Name)
 	if m == nil {
@@ -1000,6 +1197,9 @@ func (r *Root) ParkedDestroy(ctx context.Context, a ParkedDestroyArgs) error {
 	ds, err := r.parked(ctx, a.Pool, a.Name, Ref{})
 	if err != nil {
 		return err
+	}
+	if r.localProp(ctx, ds, PropKeepUntil) == "" && !a.LastCopy {
+		return &ErrInvalid{ErrLastCopy}
 	}
 	if _, err := r.zfs(ctx, "destroy", "-r", ds); err != nil {
 		return err

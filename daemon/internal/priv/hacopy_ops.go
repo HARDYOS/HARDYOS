@@ -136,6 +136,14 @@ func RegisterHACopy(s *Server, r *hacopy.Root, vmm *vms.Manager, am *apps.Manage
 		return res, haErr(err)
 	}))
 	s.Handle(hacopy.OpPark, typed(func(ctx context.Context, a hacopy.ParkArgs) (any, error) {
+		if a.Confirm != a.ID {
+			return nil, Errorf(CodeBadArgs, "type the name to confirm")
+		}
+		// Parked by this conversion already (its answer was lost): that
+		// copy is the answer, whatever the engine knows of it now.
+		if pr, ok := r.ParkedBy(ctx, a.Ref, a.Conv); ok {
+			return pr, nil
+		}
 		var res *hacopy.ParkResult
 		park := func() error {
 			var err error

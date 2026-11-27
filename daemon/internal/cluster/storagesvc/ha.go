@@ -76,17 +76,24 @@ type HARequest struct {
 	Conv     string              `json:"conv,omitempty"`
 	Name     string              `json:"name,omitempty"`
 	// KeepUntil (unix seconds) is a parked copy's expiry (0: kept).
-	KeepUntil int64         `json:"keepUntil,omitempty"`
-	Confirm   string        `json:"confirm,omitempty"`
-	Actor     cluster.Actor `json:"actor"`
+	KeepUntil int64  `json:"keepUntil,omitempty"`
+	Confirm   string `json:"confirm,omitempty"`
+	// Since is the conversion's final snapshot a park compares the
+	// datasets with (ParkResult.Changed).
+	Since string `json:"since,omitempty"`
+	// Adopted parks only a copy conversion Conv adopted.
+	Adopted bool          `json:"adopted,omitempty"`
+	Actor   cluster.Actor `json:"actor"`
 }
 
-// HAParkedDestroy deletes a parked copy on the storage server now.
+// HAParkedDestroy deletes a parked copy on the storage server now;
+// LastCopy confirms deleting one without an expiry.
 type HAParkedDestroy struct {
-	Pool    string        `json:"pool"`
-	Name    string        `json:"name"`
-	Confirm string        `json:"confirm"`
-	Actor   cluster.Actor `json:"actor"`
+	Pool     string        `json:"pool"`
+	Name     string        `json:"name"`
+	Confirm  string        `json:"confirm"`
+	LastCopy bool          `json:"lastCopy,omitempty"`
+	Actor    cluster.Actor `json:"actor"`
 }
 
 // copySession is one open stream waiting for (or using) its connection.
@@ -97,6 +104,9 @@ type copySession struct {
 	file    *os.File
 	stream  string
 	expires time.Time
+	// timer drops the session (closing its file, cancelling root's
+	// stream) when no connection took it in time.
+	timer *time.Timer
 }
 
 type copySessions struct {
@@ -104,20 +114,53 @@ type copySessions struct {
 	m  map[string]*copySession
 }
 
-func (c *copySessions) add(cs *copySession) {
+// add keeps a session until its connection takes it; unused at its
+// expiry, its file is closed and drop runs (cancelling root's stream, so
+// the dataset isn't left busy).
+func (c *copySessions) add(cs *copySession, drop func(stream string)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.m == nil {
 		c.m = map[string]*copySession{}
 	}
-	now := time.Now()
-	for t, o := range c.m {
-		if now.After(o.expires) {
-			o.file.Close()
+	c.m[cs.token] = cs
+	cs.timer = time.AfterFunc(time.Until(cs.expires), func() {
+		if c.remove(cs.token) {
+			cs.file.Close()
+			if drop != nil {
+				drop(cs.stream)
+			}
+		}
+	})
+}
+
+// remove forgets a session; false when it was taken or removed already.
+func (c *copySessions) remove(token string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.m[token]; !ok {
+		return false
+	}
+	delete(c.m, token)
+	return true
+}
+
+// byStream removes the session of a stream (its file closed); false if
+// none is waiting.
+func (c *copySessions) byStream(stream string, node cluster.NodeID) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for t, cs := range c.m {
+		if cs.stream == stream && cs.node == node {
 			delete(c.m, t)
+			if cs.timer != nil {
+				cs.timer.Stop()
+			}
+			cs.file.Close()
+			return true
 		}
 	}
-	c.m[cs.token] = cs
+	return false
 }
 
 // take hands out a session once, to the node it was made for.
@@ -127,6 +170,9 @@ func (c *copySessions) take(token string, node cluster.NodeID) *copySession {
 	for t, cs := range c.m {
 		if subtle.ConstantTimeCompare([]byte(t), []byte(token)) == 1 {
 			delete(c.m, t)
+			if cs.timer != nil {
+				cs.timer.Stop()
+			}
 			if cs.node != node || time.Now().After(cs.expires) {
 				cs.file.Close()
 				return nil
@@ -138,6 +184,42 @@ func (c *copySessions) take(token string, node cluster.NodeID) *copySession {
 }
 
 var haCopies copySessions
+
+// openedStreams remembers which compute server opened each of root's
+// streams here (who may cancel it), for as long as a stream may run.
+type openedStreams struct {
+	mu sync.Mutex
+	m  map[string]openedStream
+}
+
+type openedStream struct {
+	node  cluster.NodeID
+	until time.Time
+}
+
+func (o *openedStreams) add(stream string, node cluster.NodeID) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.m == nil {
+		o.m = map[string]openedStream{}
+	}
+	now := time.Now()
+	for id, e := range o.m {
+		if now.After(e.until) {
+			delete(o.m, id)
+		}
+	}
+	o.m[stream] = openedStream{node: node, until: now.Add(hacopy.MaxStreamTime)}
+}
+
+func (o *openedStreams) owns(stream string, node cluster.NodeID) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	e, ok := o.m[stream]
+	return ok && e.node == node && time.Now().Before(e.until)
+}
+
+var haOpened openedStreams
 
 func newCopyToken() string {
 	b := make([]byte, 24)
@@ -243,6 +325,24 @@ func (s *Service) HAStream(ctx context.Context, stream string) (*hacopy.StreamSt
 	return &out, err
 }
 
+// cancelStream cancels one of root's streams here (a session nobody
+// used, or one its compute server gave up on).
+func (s *Service) cancelStream(stream string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.Priv.Call(ctx, hacopy.OpCancel, hacopy.StreamArgs{Stream: stream}, nil); err != nil {
+		s.log().Debug("storage: cancelling an HA stream", "stream", stream, "err", err)
+	}
+}
+
+// HACancel gives up an opened stream on the storage server (the compute
+// server's own step failed before or while using it).
+func (s *Service) HACancel(ctx context.Context, stream string, actor cluster.Actor) error {
+	return s.onStorage(ctx, "storage/ha/cancel", hacopy.StreamArgs{Stream: stream}, nil, actor, func(*cluster.Snapshot, cluster.Node) error {
+		return errors.New("the storage server can't convert its own workloads")
+	})
+}
+
 // HATree lists a workload's cluster datasets, or (Conv) its incoming copy.
 func (s *Service) HATree(ctx context.Context, r HARequest) (*hacopy.Tree, error) {
 	var out hacopy.Tree
@@ -306,7 +406,7 @@ func (s *Service) HAParked(ctx context.Context) ([]hacopy.Parked, error) {
 // HAParkedDestroy deletes a parked copy on the storage server.
 func (s *Service) HAParkedDestroy(ctx context.Context, r HAParkedDestroy) error {
 	return s.onStorage(ctx, "storage/ha/parked/destroy", r, nil, r.Actor, func(*cluster.Snapshot, cluster.Node) error {
-		err := s.Priv.Call(ctx, hacopy.OpParkedDestroy, hacopy.ParkedDestroyArgs{Pool: r.Pool, Name: r.Name, Confirm: r.Confirm}, nil)
+		err := s.Priv.Call(ctx, hacopy.OpParkedDestroy, hacopy.ParkedDestroyArgs{Pool: r.Pool, Name: r.Name, Confirm: r.Confirm, LastCopy: r.LastCopy}, nil)
 		s.audit(ctx, r.Actor, "cluster.ha.parked.destroy", r.Pool+"/"+r.Name, err)
 		return err
 	})
@@ -490,7 +590,7 @@ func (s *Service) registerHAPeer(h func(path string, fn func(r *http.Request, c 
 			_ = s.reconcile(r.Context())
 		}
 		var res hacopy.ParkResult
-		err = s.Priv.Call(r.Context(), hacopy.OpPark, hacopy.ParkArgs{Ref: ref, Confirm: p.Confirm, KeepUntil: p.KeepUntil}, &res)
+		err = s.Priv.Call(r.Context(), hacopy.OpPark, hacopy.ParkArgs{Ref: ref, Confirm: p.Confirm, KeepUntil: p.KeepUntil, Conv: p.Conv, Since: p.Since, Adopted: p.Adopted}, &res)
 		s.audit(r.Context(), q.Actor, "cluster.ha.park", string(p.Workload.Kind)+" "+p.Workload.ID, err)
 		if err != nil {
 			return nil, err
@@ -526,9 +626,22 @@ func (s *Service) registerHAPeer(h func(path string, fn func(r *http.Request, c 
 		if err := decode(b, &p); err != nil {
 			return nil, err
 		}
-		err := s.Priv.Call(r.Context(), hacopy.OpParkedDestroy, hacopy.ParkedDestroyArgs{Pool: p.Pool, Name: p.Name, Confirm: p.Confirm}, nil)
+		err := s.Priv.Call(r.Context(), hacopy.OpParkedDestroy, hacopy.ParkedDestroyArgs{Pool: p.Pool, Name: p.Name, Confirm: p.Confirm, LastCopy: p.LastCopy}, nil)
 		s.audit(r.Context(), q.Actor, "cluster.ha.parked.destroy", p.Pool+"/"+p.Name, err)
 		return ok(err)
+	}))
+	h("ha/cancel", admin("giving up a conversion's copy", func(r *http.Request, c cluster.Node, q asked, b []byte, snap *cluster.Snapshot) (any, error) {
+		var p hacopy.StreamArgs
+		if err := decode(b, &p); err != nil {
+			return nil, err
+		}
+		// Only the compute server that opened it: its waiting session, or
+		// (taken already) root's stream when a session of it was its.
+		if !haCopies.byStream(p.Stream, c.ID) && !haOpened.owns(p.Stream, c.ID) {
+			return nil, &forbidden{errors.New("that stream isn't this server's")}
+		}
+		s.cancelStream(p.Stream)
+		return ok(nil)
 	}))
 }
 
@@ -564,7 +677,8 @@ func (s *Service) openStream(ctx context.Context, node cluster.NodeID, recv bool
 		return nil, errors.New("root didn't hand over the stream")
 	}
 	cs := &copySession{token: newCopyToken(), node: node, recv: recv, file: f, stream: st.Stream, expires: time.Now().Add(HACopyTokenTTL)}
-	haCopies.add(cs)
+	haOpened.add(st.Stream, node)
+	haCopies.add(cs, s.cancelStream)
 	return &HAStreamOpened{Token: cs.token, Stream: st.Stream}, nil
 }
 

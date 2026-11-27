@@ -152,6 +152,13 @@ type fakePriv struct {
 	local   map[string][]string // child -> snapshots
 	sends   int
 	adoptOK int // OpVMsClusterAdopt fails while < 0
+	// parkFail: OpPark fails (nothing parked) while > 0; parkLost: OpPark
+	// parks but its answer is lost while > 0.
+	parkFail, parkLost int
+	parkConv           string // the conversion that parked it
+	parkCalls          []hacopy.ParkArgs
+	// changed: written after the final snapshot (RefuseChanged refuses).
+	changed bool
 	// incoming is what "make local" received here (child -> labels).
 	incoming map[string][]string
 	recvs    sync.WaitGroup
@@ -226,12 +233,47 @@ func (p *fakePriv) Call(_ context.Context, op string, args, out any) error {
 		p.running = true
 		return nil
 	case hacopy.OpPark:
+		var a hacopy.ParkArgs
+		_ = json.Unmarshal(b, &a)
+		p.parkCalls = append(p.parkCalls, a)
+		if p.parked && a.Conv != "" && a.Conv == p.parkConv {
+			// Root's idempotent answer: the copy this conversion parked.
+			return set(hacopy.ParkResult{Pool: "tank", Name: "vm-web-1", Existing: true})
+		}
+		if p.parked {
+			return errors.New("tank/vms/web doesn't exist")
+		}
 		if p.running {
 			return errors.New("parking a running VM")
 		}
+		if a.RefuseChanged && p.changed {
+			return &priv.Error{Code: priv.CodeBadArgs, Message: "it changed after the conversion's final snapshot"}
+		}
+		if p.parkFail > 0 {
+			p.parkFail--
+			p.r.log("park local failed")
+			return errors.New("zfs rename: dataset is busy")
+		}
 		p.r.log("park local")
-		p.parked = true
+		p.parked, p.parkConv = true, a.Conv
+		if p.parkLost > 0 {
+			p.parkLost--
+			return errors.New("the connection to root broke")
+		}
 		return set(hacopy.ParkResult{Pool: "tank", Name: "vm-web-1"})
+	case hacopy.OpParkedList:
+		l := []hacopy.Parked{}
+		if p.parked && p.parkConv != "" {
+			l = append(l, hacopy.Parked{Pool: "tank", Name: "vm-web-1", Kind: cluster.KindVM, ID: "web", Side: hacopy.SideLocal, Conv: p.parkConv})
+		}
+		return set(map[string]any{"parked": l})
+	case hacopy.OpUnpark:
+		if !p.parked {
+			return errors.New("nothing parked")
+		}
+		p.r.log("unpark local")
+		p.parked, p.parkConv = false, ""
+		return nil
 	case priv.OpVMsClusterAdopt:
 		if p.adoptOK < 0 {
 			p.adoptOK++
@@ -311,6 +353,16 @@ type fakeStorage struct {
 	pending  map[string]string // token -> child@label
 	// cluster are the cluster copy's snapshots (make local).
 	cluster map[string][]string
+	// adopted: the cluster copy is at its live dataset (by adoptedBy).
+	adopted   bool
+	adoptedBy string
+	// parkFail: HAPark fails while > 0; parks are its requests;
+	// clusterChanged: the cluster copy was written after its snapshot.
+	parkFail       int
+	parks          []storagesvc.HARequest
+	clusterChanged bool
+	keeps          []storagesvc.HARequest
+	cancels        int
 }
 
 func (s *fakeStorage) HAPool(context.Context) (string, error) { return "nas", nil }
@@ -350,12 +402,25 @@ func (s *fakeStorage) HATree(_ context.Context, r storagesvc.HARequest) (*hacopy
 	}
 	return t, nil
 }
-func (s *fakeStorage) HAAdopt(context.Context, storagesvc.HARequest) (*cluster.WorkloadStorage, error) {
+func (s *fakeStorage) HAAdopt(_ context.Context, r storagesvc.HARequest) (*cluster.WorkloadStorage, error) {
 	if s.adoptErr != nil {
 		return nil, s.adoptErr
 	}
+	s.mu.Lock()
+	if s.adopted {
+		s.mu.Unlock()
+		return nil, errors.New("nas/vms/web exists already; it isn't replaced")
+	}
+	s.adopted, s.adoptedBy = true, r.Conv
+	s.mu.Unlock()
 	s.r.log("adopt storage")
 	return &cluster.WorkloadStorage{Pool: "nas", Volumes: []cluster.Volume{{Dataset: "nas/vms/web/disk0", Disk: "disk0", SizeGB: 10, WWN: "6001405aabbccdd0"}}}, nil
+}
+func (s *fakeStorage) HACancel(context.Context, string, cluster.Actor) error {
+	s.mu.Lock()
+	s.cancels++
+	s.mu.Unlock()
+	return nil
 }
 func (s *fakeStorage) HAAbort(context.Context, storagesvc.HARequest) error { return nil }
 func (s *fakeStorage) HASnapshot(_ context.Context, r storagesvc.HARequest) error {
@@ -367,11 +432,33 @@ func (s *fakeStorage) HASnapshot(_ context.Context, r storagesvc.HARequest) erro
 	}
 	return nil
 }
-func (s *fakeStorage) HAUnpark(context.Context, storagesvc.HARequest) error     { return nil }
-func (s *fakeStorage) HAParkedKeep(context.Context, storagesvc.HARequest) error { return nil }
-func (s *fakeStorage) HAPark(context.Context, storagesvc.HARequest) (*hacopy.ParkResult, error) {
+func (s *fakeStorage) HAUnpark(context.Context, storagesvc.HARequest) error { return nil }
+func (s *fakeStorage) HAParkedKeep(_ context.Context, r storagesvc.HARequest) error {
+	s.mu.Lock()
+	s.keeps = append(s.keeps, r)
+	s.mu.Unlock()
+	if r.KeepUntil > 0 {
+		s.r.log("keep storage for a while")
+	}
+	return nil
+}
+func (s *fakeStorage) HAPark(_ context.Context, r storagesvc.HARequest) (*hacopy.ParkResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.parks = append(s.parks, r)
+	if s.parkFail > 0 {
+		s.parkFail--
+		s.r.log("park storage failed")
+		return nil, errors.New("the storage server didn't answer")
+	}
+	if r.Adopted && (!s.adopted || s.adoptedBy != r.Conv) {
+		return nil, errors.New("isn't what this conversion set up")
+	}
+	// Make local parks the cluster workload's copy (registered with
+	// workload.add in its test, never adopted here).
+	s.adopted = false
 	s.r.log("park storage")
-	return &hacopy.ParkResult{Pool: "nas", Name: "vm-web-2"}, nil
+	return &hacopy.ParkResult{Pool: "nas", Name: "vm-web-2", Changed: s.clusterChanged}, nil
 }
 func (s *fakeStorage) HAParked(context.Context) ([]hacopy.Parked, error) { return nil, nil }
 func (s *fakeStorage) HAParkedDestroy(context.Context, storagesvc.HAParkedDestroy) error {
@@ -542,6 +629,230 @@ func TestToHAResumesAfterPark(t *testing.T) {
 	}
 	if p := r.w.Snapshot().Placements[vmWeb]; p.State != cluster.PlacementRunning {
 		t.Fatalf("after resuming: %s", p.State)
+	}
+}
+
+// The reviewer's scenario (H1): parking the local copy fails, and so does
+// putting the adopted cluster copy aside. The conversion goes back before
+// the park (the local VM runs again, nothing is registered); resuming puts
+// the stale cluster copy aside first, copies afresh, and never has the
+// cluster workload and the local VM both there.
+func TestToHAParkFailureNeverRegisters(t *testing.T) {
+	r := newRig(t)
+	r.priv.parkFail, r.stor.parkFail = 1, 1
+	j, err := r.c.StartToHA(context.Background(), ToHAParams{Workload: vmWeb}, "Web", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.wait(j); got.State != jobs.Failed || !strings.Contains(got.Error, "putting this server's copy aside") {
+		t.Fatalf("the conversion: %s %s", got.State, got.Error)
+	}
+	if r.w.Snapshot().Placements[vmWeb] != nil {
+		t.Fatal("registered although this server's copy wasn't put aside")
+	}
+	recs, _ := r.c.List(context.Background(), 10)
+	rec := recs[0]
+	if rec.Phase != PhaseAdopt || rec.Options.Storage == nil || rec.Options.ParkedName != "" {
+		t.Fatalf("record after the failed park: phase %s storage %v parked %q", rec.Phase, rec.Options.Storage != nil, rec.Options.ParkedName)
+	}
+	if !r.priv.running || r.priv.parked {
+		t.Fatal("the local VM isn't running as it was")
+	}
+	// Resume: the earlier attempt's cluster copy goes aside (an hour, under
+	// its attempt's own mark), everything new is copied, then the park.
+	j, err = r.c.StartToHA(context.Background(), ToHAParams{Workload: vmWeb}, "Web", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.wait(j); got.State != jobs.Succeeded {
+		t.Fatalf("resuming: %s", got.Error)
+	}
+	ev := r.logged()
+	last := -1
+	for _, s := range []string{"park local failed", "start local", "park storage", "adopt storage", "park local", "attach"} {
+		i := slices.Index(ev[last+1:], s)
+		if i < 0 {
+			t.Fatalf("%q missing or out of order: %v", s, ev)
+		}
+		last += i + 1
+	}
+	aside := r.stor.parks[len(r.stor.parks)-1]
+	if aside.KeepUntil == 0 || aside.Conv == rec.ID || !strings.HasPrefix(aside.Conv, rec.ID) {
+		t.Fatalf("the stale cluster copy was put aside as %+v", aside)
+	}
+	p := r.w.Snapshot().Placements[vmWeb]
+	if p == nil || p.State != cluster.PlacementRunning || r.priv.running {
+		t.Fatalf("after resuming: placement %+v, local running %v", p, r.priv.running)
+	}
+	for _, a := range r.priv.parkCalls {
+		if a.Conv != rec.ID || !a.RefuseChanged || a.Since == "" {
+			t.Fatalf("a park without the conversion's mark or the change check: %+v", a)
+		}
+	}
+}
+
+// hardyd going away around the park (H1): root parked the copy but its
+// answer was lost; asking again names the copy this conversion parked,
+// and the conversion goes on without a second park.
+func TestToHAParkAnswerLost(t *testing.T) {
+	r := newRig(t)
+	r.priv.parkLost = 1
+	j, err := r.c.StartToHA(context.Background(), ToHAParams{Workload: vmWeb}, "Web", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.wait(j); got.State != jobs.Succeeded {
+		t.Fatalf("the conversion: %s", got.Error)
+	}
+	recs, _ := r.c.List(context.Background(), 10)
+	if recs[0].Options.ParkedName != "vm-web-1" {
+		t.Fatalf("the parked copy wasn't recorded: %+v", recs[0].Options)
+	}
+	if n := strings.Count(strings.Join(r.logged(), "\n"), "park local"); n != 1 {
+		t.Fatalf("parked %d times", n)
+	}
+}
+
+// hardyd restarted after saving the park phase (H1): the resume parks
+// this server's copy (or finds it parked) before anything is registered,
+// and refuses to register without a recorded parked copy.
+func TestToHAResumeAtParkPhase(t *testing.T) {
+	for _, parkedAlready := range []bool{false, true} {
+		r := newRig(t)
+		r.stor.adoptErr = errors.New("cut short")
+		j, _ := r.c.StartToHA(context.Background(), ToHAParams{Workload: vmWeb}, "Web", nil)
+		r.wait(j)
+		r.stor.adoptErr = nil
+		recs, _ := r.c.List(context.Background(), 10)
+		rec := recs[0]
+		// As a restart leaves it: the park phase saved, the cluster copy
+		// adopted, the local copy stopped (or parked by root already).
+		rec.Phase, rec.State = PhasePark, StateFailed
+		rec.Options.Storage = &cluster.WorkloadStorage{Pool: "nas", Volumes: []cluster.Volume{{Dataset: "nas/vms/web/disk0", Disk: "disk0", SizeGB: 10, WWN: "6001405aabbccdd0"}}}
+		r.stor.adopted, r.stor.adoptedBy = true, rec.ID
+		r.priv.running = false
+		if parkedAlready {
+			r.priv.parked, r.priv.parkConv = true, rec.ID
+		}
+		if err := r.c.save(context.Background(), &rec); err != nil {
+			t.Fatal(err)
+		}
+		r.mu.Lock()
+		r.events = nil
+		r.mu.Unlock()
+		j, err := r.c.StartToHA(context.Background(), ToHAParams{Workload: vmWeb}, "Web", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := r.wait(j); got.State != jobs.Succeeded {
+			t.Fatalf("parked already %v: resuming: %s", parkedAlready, got.Error)
+		}
+		ev := r.logged()
+		if parkedAlready == slices.Contains(ev, "park local") {
+			t.Fatalf("parked already %v: events %v", parkedAlready, ev)
+		}
+		if i, k := slices.Index(ev, "attach"), slices.Index(ev, "park local"); !parkedAlready && (k < 0 || k > i) {
+			t.Fatalf("registered before the park: %v", ev)
+		}
+	}
+}
+
+// register refuses without a recorded parked local copy.
+func TestRegisterNeedsParkedCopy(t *testing.T) {
+	r := newRig(t)
+	self, _ := r.w.Nodes["c1"].Self()
+	rec := &Record{ID: "abcdefghij", Direction: DirHA, Kind: cluster.KindVM, Workload: "web", Phase: PhaseRegister,
+		Options: Options{Storage: &cluster.WorkloadStorage{Pool: "nas"}}}
+	if err := r.c.register(nil, self, rec, ToHAParams{}); err == nil || !strings.Contains(err.Error(), "isn't recorded as put aside") {
+		t.Fatalf("registered without a parked copy: %v", err)
+	}
+	if r.w.Snapshot().Placements[vmWeb] != nil {
+		t.Fatal("it was registered")
+	}
+}
+
+// Undo (H2, M1): this server's copy comes back first; the cluster copy is
+// put aside with no expiry, and its grace period starts only once this
+// server's copy runs again and only if the cluster copy didn't change.
+func TestUndo(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		r := newRig(t)
+		r.priv.adoptOK = -1
+		r.stor.clusterChanged = changed
+		j, _ := r.c.StartToHA(context.Background(), ToHAParams{Workload: vmWeb}, "Web", nil)
+		if got := r.wait(j); got.State != jobs.Failed {
+			t.Fatalf("the conversion: %s", got.State)
+		}
+		recs, _ := r.c.List(context.Background(), 10)
+		if _, err := r.c.StartUndo(context.Background(), UndoParams{Conv: recs[0].ID}, "nope", nil); !errors.Is(err, errTyped) {
+			t.Fatalf("undone without the name typed: %v", err)
+		}
+		j, err := r.c.StartUndo(context.Background(), UndoParams{Conv: recs[0].ID}, "Web", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := r.wait(j); got.State != jobs.Succeeded {
+			t.Fatalf("undo: %s", got.Error)
+		}
+		ev := r.logged()
+		u, p := slices.Index(ev, "unpark local"), slices.Index(ev, "park storage")
+		if u < 0 || p < 0 || u > p {
+			t.Fatalf("the cluster copy went aside before this server's copy was back: %v", ev)
+		}
+		park := r.stor.parks[len(r.stor.parks)-1]
+		if park.KeepUntil != 0 || park.Conv != recs[0].ID || park.Since == "" {
+			t.Fatalf("the cluster copy was put aside as %+v", park)
+		}
+		if !r.priv.running || r.w.Snapshot().Placements[vmWeb] != nil {
+			t.Fatal("not back as it was")
+		}
+		kept := slices.Contains(ev, "keep storage for a while")
+		if kept == changed {
+			t.Fatalf("changed %v: the cluster copy's grace period started: %v", changed, kept)
+		}
+		got, _ := r.c.Get(context.Background(), recs[0].ID)
+		if got.State != StateUndone || got.Options.ClusterChanged != changed || got.Options.ParkedSide != string(hacopy.SideCluster) {
+			t.Fatalf("record %+v", got.Options)
+		}
+	}
+}
+
+// Abandon puts a copy the conversion adopted aside (an hour) instead of
+// leaving it in the way of the next conversion.
+func TestAbandonPutsAdoptedCopyAside(t *testing.T) {
+	r := newRig(t)
+	r.priv.parkFail, r.stor.parkFail = 1, 1
+	j, _ := r.c.StartToHA(context.Background(), ToHAParams{Workload: vmWeb}, "Web", nil)
+	r.wait(j)
+	recs, _ := r.c.List(context.Background(), 10)
+	j, err := r.c.StartAbandon(context.Background(), AbandonParams{Conv: recs[0].ID}, "Web", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.wait(j); got.State != jobs.Succeeded {
+		t.Fatalf("abandon: %s", got.Error)
+	}
+	park := r.stor.parks[len(r.stor.parks)-1]
+	if !park.Adopted || park.Conv != recs[0].ID || park.KeepUntil == 0 || r.stor.adopted {
+		t.Fatalf("the adopted copy: %+v (still there %v)", park, r.stor.adopted)
+	}
+}
+
+// A copy into the storage server that fails on this side gives up the
+// storage server's stream too (M4).
+func TestFailedCopyCancelsRemoteStream(t *testing.T) {
+	r := newRig(t)
+	r.stor.mu.Lock()
+	r.stor.cancels = 0
+	r.stor.mu.Unlock()
+	rec := &Record{ID: "abcdefghij", Direction: DirHA, Kind: cluster.KindVM, Workload: "web", StoragePool: "nas"}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _ = r.c.pushStep(ctx, rec, hacopy.Ref{Kind: cluster.KindVM, ID: "web", Pool: "tank", Side: hacopy.SideLocal}, step{To: "s1"}, cluster.Actor{}, func(int64) {})
+	r.stor.mu.Lock()
+	defer r.stor.mu.Unlock()
+	if r.stor.cancels == 0 {
+		t.Fatal("the storage server's stream wasn't cancelled")
 	}
 }
 

@@ -346,20 +346,27 @@ compute server of a cluster.
   until the workload has run from cluster storage, then for 24 hours.
   Cluster › HA › **Kept copies** lists these copies (on this server and on
   the storage server) with when they go; **Delete now…** (type the name)
-  frees the space sooner.
+  frees the space sooner. A copy marked *Kept until you delete it* has no
+  expiry because its workload hasn't run from its other copy yet, so it may
+  be the only good one: deleting it also asks you to confirm that.
 - **If it fails or is cancelled**: before the local copy is put aside
   nothing changed (it starts again if it ran); what was copied stays on the
   storage server so trying again copies only what's new (**Abandon…**
-  deletes it). After that, nothing is undone by itself: try again to carry
-  on, or **Undo…** (type the name) to put this server's copy back (the
-  cluster copy is kept for 24 hours). Cluster › HA › **Conversions** shows
+  deletes it). If this server's copy was used after its final snapshot,
+  it isn't put aside and the conversion starts over from the copy. After
+  that, nothing is undone by itself: try again to carry on, or **Undo…**
+  (type the name) to put this server's copy back. Undo puts this server's
+  copy back first; the cluster copy is then kept, and goes 24 hours after
+  this server's copy has run again, or is kept until you delete it if it
+  may have changed on cluster storage. Cluster › HA › **Conversions** shows
   each one and where it stopped.
 - **Apps** with a database move to a block volume (as their package or
   compose file says); their user id is kept, cluster-wide.
 - **Make local again…** (Cluster › HA › Workloads) brings a cluster
   workload to a compute server's own pool: it stops, its storage and
   snapshots are copied there, it leaves the cluster (no failover any
-  more) and runs there; the cluster copy is kept for 24 hours.
+  more) and runs there; the cluster copy is kept until it has run there,
+  then for 24 hours.
 - **HA VMs** keep their snapshot schedule (the storage server takes the
   snapshots), may publish game streaming (the server running the VM
   forwards it; it can't move live while published), and **Save as

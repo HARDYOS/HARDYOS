@@ -14,11 +14,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
-
-	"regexp"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/rootfile"
@@ -299,6 +299,9 @@ type ClusterSchedule struct {
 	Name     string    `json:"name"`
 	Pool     string    `json:"pool"`
 	Schedule *Schedule `json:"schedule"`
+	// Hash is the stored settings' spec hash: the storage server follows
+	// a schedule only when it is the approved one (placement SpecHash).
+	Hash string `json:"hash"`
 }
 
 // ClusterSchedules lists the schedules of the cluster VMs whose datasets
@@ -322,15 +325,15 @@ func (m *Manager) ClusterSchedules(ctx context.Context) ([]ClusterSchedule, erro
 		if err != nil {
 			continue
 		}
-		var s struct {
-			ID       string    `json:"id"`
-			Name     string    `json:"name"`
-			Schedule *Schedule `json:"schedule"`
-		}
+		var s Spec
 		if json.Unmarshal(b, &s) != nil || s.ID != f[3] || s.Schedule.Off() || len(s.Schedule.problems()) > 0 {
 			continue
 		}
-		res = append(res, ClusterSchedule{ID: s.ID, Name: s.Name, Pool: pool, Schedule: s.Schedule})
+		h, err := SpecHash(&s)
+		if err != nil {
+			continue
+		}
+		res = append(res, ClusterSchedule{ID: s.ID, Name: s.Name, Pool: pool, Schedule: s.Schedule, Hash: h})
 	}
 	return res, nil
 }
@@ -384,8 +387,13 @@ type InstalledArgs struct {
 func (m *Manager) ClusterInstalled(a InstalledArgs) []InstallDone {
 	m.statsMu.Lock()
 	defer m.statsMu.Unlock()
+	m.loadInstallDone()
+	n := len(m.installDone)
 	for _, id := range a.Ack {
 		delete(m.installDone, id)
+	}
+	if len(m.installDone) != n {
+		m.saveInstallDone()
 	}
 	out := []InstallDone{}
 	for _, d := range m.installDone {
@@ -398,8 +406,53 @@ func (m *Manager) ClusterInstalled(a InstalledArgs) []InstallDone {
 func (m *Manager) recordInstallDone(id, before, after string) {
 	m.statsMu.Lock()
 	defer m.statsMu.Unlock()
-	if m.installDone == nil {
-		m.installDone = map[string]InstallDone{}
-	}
+	m.loadInstallDone()
 	m.installDone[id] = InstallDone{ID: id, Before: before, After: after}
+	m.saveInstallDone()
+}
+
+// installDoneFile keeps the records until hardyd acknowledged them, so a
+// restart of hardyd-priv doesn't lose an install's approval.
+func (m *Manager) installDoneFile() string {
+	return m.sys("/var/lib/hardyos/vms/cluster-installs.json")
+}
+
+// loadInstallDone reads the records once (statsMu held).
+func (m *Manager) loadInstallDone() {
+	if m.installDone != nil {
+		return
+	}
+	m.installDone = map[string]InstallDone{}
+	b, err := rootfile.ReadFile(m.installDoneFile())
+	if err != nil {
+		return
+	}
+	var l []InstallDone
+	if json.Unmarshal(b, &l) != nil {
+		m.log().Warn("vms: unreadable cluster install records", "file", m.installDoneFile())
+		return
+	}
+	for _, d := range l {
+		if ValidID(d.ID) == nil {
+			m.installDone[d.ID] = d
+		}
+	}
+}
+
+// saveInstallDone writes the records (statsMu held).
+func (m *Manager) saveInstallDone() {
+	l := make([]InstallDone, 0, len(m.installDone))
+	for _, d := range m.installDone {
+		l = append(l, d)
+	}
+	slices.SortFunc(l, func(a, b InstallDone) int { return strings.Compare(a.ID, b.ID) })
+	b, err := json.Marshal(l)
+	if err == nil {
+		if err = os.MkdirAll(filepath.Dir(m.installDoneFile()), 0o700); err == nil {
+			err = writeAtomic(m.installDoneFile(), b, 0o600)
+		}
+	}
+	if err != nil {
+		m.log().Warn("vms: saving cluster install records", "err", err)
+	}
 }

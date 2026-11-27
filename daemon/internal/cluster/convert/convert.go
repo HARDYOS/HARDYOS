@@ -85,6 +85,8 @@ type Storage interface {
 	HAOpenRecv(ctx context.Context, r storagesvc.HAStreamRequest) (*storagesvc.HAStreamOpened, error)
 	HAOpenSend(ctx context.Context, r storagesvc.HAStreamRequest) (*storagesvc.HAStreamOpened, error)
 	HAStream(ctx context.Context, stream string) (*hacopy.StreamState, error)
+	// HACancel gives up a stream this server opened there.
+	HACancel(ctx context.Context, stream string, actor cluster.Actor) error
 	HATree(ctx context.Context, r storagesvc.HARequest) (*hacopy.Tree, error)
 	HAAdopt(ctx context.Context, r storagesvc.HARequest) (*cluster.WorkloadStorage, error)
 	HAAbort(ctx context.Context, r storagesvc.HARequest) error
@@ -227,6 +229,13 @@ type Options struct {
 	AwaitStart bool `json:"awaitStart,omitempty"`
 	// Attempt counts the runs that took snapshots (their names carry it).
 	Attempt int `json:"attempt,omitempty"`
+	// ClusterChanged: an undone conversion's cluster copy may be newer
+	// than this server's (written after the final snapshot, or it may have
+	// run): it is kept until an administrator deletes it.
+	ClusterChanged bool `json:"clusterChanged,omitempty"`
+	// Removed: this "make local" removed the cluster workload (only then
+	// does it go on once the cluster no longer has it).
+	Removed bool `json:"removed,omitempty"`
 }
 
 // Record is one conversion.

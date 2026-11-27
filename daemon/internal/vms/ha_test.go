@@ -126,8 +126,16 @@ func TestClusterInstalledRecords(t *testing.T) {
 	if len(l) != 1 || l[0].Before != "sha256:a" || l[0].After != "sha256:b" {
 		t.Fatalf("records %+v", l)
 	}
-	if l := e.m.ClusterInstalled(InstalledArgs{Ack: []string{"web"}}); len(l) != 0 {
+	// A restart of hardyd-priv (a new manager) still has it.
+	again := &Manager{Root: e.root}
+	if l := again.ClusterInstalled(InstalledArgs{}); len(l) != 1 || l[0].ID != "web" {
+		t.Fatalf("after a restart: %+v", l)
+	}
+	if l := again.ClusterInstalled(InstalledArgs{Ack: []string{"web"}}); len(l) != 0 {
 		t.Fatalf("acknowledged records stay: %+v", l)
+	}
+	if l := (&Manager{Root: e.root}).ClusterInstalled(InstalledArgs{}); len(l) != 0 {
+		t.Fatalf("an acknowledged record came back after a restart: %+v", l)
 	}
 }
 

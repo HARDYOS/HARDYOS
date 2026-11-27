@@ -12049,9 +12049,11 @@ export interface components {
             created: string;
             /**
              * Format: date-time
-             * @description When it is deleted (absent: kept until an administrator deletes it)
+             * @description When it is deleted (absent: kept until an administrator deletes it; its workload hasn't run from its other copy since, so deleting it needs lastCopy)
              */
             keepUntil?: string;
+            /** @description The conversion that put it aside */
+            conv?: string;
             node: string;
         };
     };
@@ -22399,6 +22401,8 @@ export interface operations {
                     pool: string;
                     name: string;
                     confirm: string;
+                    /** @description Confirms deleting a copy without an expiry: its workload hasn't run from its other copy since, so this may be its only good copy (refused with 409 last_copy otherwise). */
+                    lastCopy?: boolean;
                 };
             };
         };
