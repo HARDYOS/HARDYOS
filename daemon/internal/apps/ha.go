@@ -196,11 +196,12 @@ func (m *Manager) heldBy(ctx context.Context, ds string) string {
 	if err != nil {
 		return ""
 	}
-	v := strings.TrimSpace(string(out))
-	if v == "-" {
-		return ""
+	// Only a conversion id is a hold (the mark is ours; anything else
+	// there, or a tool answering something else, isn't).
+	if v := strings.TrimSpace(string(out)); convRE.MatchString(v) {
+		return v
 	}
-	return v
+	return ""
 }
 
 // checkHeld refuses starting a held app.

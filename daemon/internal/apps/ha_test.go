@@ -59,6 +59,11 @@ func TestHAHoldRefusesStarts(t *testing.T) {
 	if err := e.m.Up(ctx, "notes"); err != nil && strings.Contains(err.Error(), ErrHeld.Error()) {
 		t.Fatalf("still refused after the hold ended: %v", err)
 	}
+	// Only a conversion id is a hold: anything else there isn't.
+	e.fake.On(get, "/mnt/tank/apps/notes\n")
+	if err := e.m.Up(ctx, "notes"); err != nil && strings.Contains(err.Error(), ErrHeld.Error()) {
+		t.Fatalf("a stray value was taken for a hold: %v", err)
+	}
 }
 
 // A moved app's resolved compose file names its folder where it is now:
