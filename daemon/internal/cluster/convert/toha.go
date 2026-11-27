@@ -300,6 +300,8 @@ func (c *Converter) toHA(jc *jobs.Context, self cluster.Node, snap *cluster.Snap
 				return nil, err
 			}
 		}
+		r.Options.Attempt++
+		attempt := r.Options.Attempt
 		_ = c.save(jc, r)
 		report := func(lo, hi float64, what string) func(done, total int64) {
 			return func(done, total int64) {
@@ -313,7 +315,7 @@ func (c *Converter) toHA(jc *jobs.Context, self cluster.Node, snap *cluster.Snap
 		}
 		if li.running {
 			c.phase(jc, jc, r, PhaseCopy, 3, "Copying while it runs")
-			if err := c.ensureSnap(jc, local, snapName(r.ID, "pre")); err != nil {
+			if err := c.ensureSnap(jc, local, snapName(r.ID, "pre", attempt)); err != nil {
 				return nil, err
 			}
 			if err := c.sendToStorage(jc, r, local, p.Actor, report(3, 60, "Copying while it runs")); err != nil {
@@ -326,7 +328,7 @@ func (c *Converter) toHA(jc *jobs.Context, self cluster.Node, snap *cluster.Snap
 		}
 		c.phase(jc, jc, r, PhaseFinal, 63, "Copying what changed (it is off now)")
 		err = func() error {
-			if err := c.ensureSnap(jc, local, snapName(r.ID, "final")); err != nil {
+			if err := c.ensureSnap(jc, local, snapName(r.ID, "final", attempt)); err != nil {
 				return err
 			}
 			return c.sendToStorage(jc, r, local, p.Actor, report(63, 85, "Final copy"))

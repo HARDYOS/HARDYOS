@@ -225,6 +225,8 @@ type Options struct {
 	// AwaitStart: the workload wasn't running, so the kept copy's grace
 	// period starts once it first runs from its new storage.
 	AwaitStart bool `json:"awaitStart,omitempty"`
+	// Attempt counts the runs that took snapshots (their names carry it).
+	Attempt int `json:"attempt,omitempty"`
 }
 
 // Record is one conversion.
@@ -449,7 +451,13 @@ func localLock(w cluster.WorkloadRef) string {
 // requests, policies): conversions take it too.
 func ClusterLock(w cluster.WorkloadRef) string { return "cluster:" + string(w.Kind) + ":" + w.ID }
 
-func snapName(conv, what string) string { return "hardyos-ha-" + conv + "-" + what }
+// snapName is a conversion snapshot's name. Each attempt takes its own:
+// a workload that ran again after a failed attempt has changed since the
+// earlier attempt's snapshots, so a retry must not take those for its
+// final state.
+func snapName(conv, what string, attempt int) string {
+	return fmt.Sprintf("hardyos-ha-%s-%s%d", conv, what, attempt)
+}
 
 // fail records a failed phase; the job fails with err.
 func (c *Converter) fail(ctx context.Context, r *Record, err error) error {

@@ -290,7 +290,10 @@ func (c *Converter) localCopy(jc *jobs.Context, r *Record, local hacopy.Ref, act
 	if err != nil {
 		return err
 	}
-	final := snapName(r.ID, "final")
+	// Each attempt its own snapshot: after a failed attempt the workload
+	// may have run again (requestAgain).
+	r.Options.Attempt++
+	final := snapName(r.ID, "final", r.Options.Attempt)
 	has := false
 	for _, d := range tree.Datasets {
 		if d.Child == "" && slices.ContainsFunc(d.Snaps, func(s hacopy.Snap) bool { return s.Name == final }) {
@@ -489,8 +492,10 @@ func (c *Converter) runAbandon(jc *jobs.Context) (any, error) {
 		if err == nil {
 			// The conversion's own snapshots on this server go too.
 			ref := hacopy.Ref{Kind: w.Kind, ID: w.ID, Pool: r.LocalPool, Side: hacopy.SideLocal}
-			for _, s := range []string{"pre", "final"} {
-				_ = c.Priv.Call(jc, hacopy.OpSnapDestroy, hacopy.SnapArgs{Ref: ref, Name: snapName(r.ID, s)}, nil)
+			for a := 1; a <= r.Options.Attempt; a++ {
+				for _, s := range []string{"pre", "final"} {
+					_ = c.Priv.Call(jc, hacopy.OpSnapDestroy, hacopy.SnapArgs{Ref: ref, Name: snapName(r.ID, s, a)}, nil)
+				}
 			}
 		}
 	} else {

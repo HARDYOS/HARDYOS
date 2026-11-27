@@ -112,10 +112,6 @@ func (m *Manager) HACheck(ctx context.Context, a HACheckArgs) (*HACheckResult, e
 		res.Problems = append(res.Problems, "its Windows install isn't finished yet")
 	}
 	for _, d := range s.Disks {
-		if d.Import != nil {
-			res.Problems = append(res.Problems, "a disk is still being imported")
-			break
-		}
 		res.Disks = append(res.Disks, HADisk{Name: d.Name, SizeGB: d.SizeGB})
 	}
 	if len(res.Disks) == 0 {
