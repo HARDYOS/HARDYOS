@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -313,11 +314,15 @@ func TestPasswordPINAndSSOGroups(t *testing.T) {
 	if !strings.Contains(sent, `"password":"family-secret-1"`) || !strings.Contains(sent, `"pin":"4821"`) {
 		t.Fatalf("sent = %s", sent)
 	}
+	// The stored values hold random hex (sealed secrets, hashes), which can
+	// contain the 4-digit PIN by chance, so the PIN only counts when it isn't
+	// part of a longer run of hex digits.
+	pinClear := regexp.MustCompile(`(^|[^0-9A-Fa-f])` + regexp.QuoteMeta(pin) + `([^0-9A-Fa-f]|$)`)
 	rows, _ := e.db.QueryContext(e.ctx, `SELECT secret || applied FROM remote_services`)
 	for rows.Next() {
 		var v string
 		_ = rows.Scan(&v)
-		if strings.Contains(v, pw) || strings.Contains(v, pin) {
+		if strings.Contains(v, pw) || pinClear.MatchString(v) {
 			t.Fatalf("secret in the clear: %q", v)
 		}
 	}
