@@ -26,6 +26,7 @@ import (
 	"github.com/hardyos/hardyos/daemon/internal/backups"
 	"github.com/hardyos/hardyos/daemon/internal/clientip"
 	"github.com/hardyos/hardyos/daemon/internal/cloudbackups"
+	"github.com/hardyos/hardyos/daemon/internal/cluster/convert"
 	"github.com/hardyos/hardyos/daemon/internal/cluster/ha"
 	"github.com/hardyos/hardyos/daemon/internal/events"
 	"github.com/hardyos/hardyos/daemon/internal/files"
@@ -249,10 +250,16 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 	clusterCore := newClusterA(live, db, manager, broker, secrets, alerts, log)
 	var clusterHA *ha.Service
 	var clusterStorage *clusterB
+	var clusterConvert *convert.Converter
 	if !live {
 		parts := clusterCore.parts()
 		clusterStorage = wireClusterB(ctx, log, db, pc, secrets, &audit.Log{DB: db, Events: broker}, parts)
-		clusterHA = wireClusterC(db, pc, manager, broker, remote, parts, clusterStorage, log)
+		var al notify.Notifier
+		if alerts != nil {
+			al = alerts
+		}
+		clusterHA = wireClusterC(db, pc, manager, broker, remote, parts, clusterStorage, al, log)
+		clusterConvert = wireConvert(db, pc, manager, broker, parts, clusterStorage, clusterHA, al, log)
 		health := newHealth(parts, clusterStorage, clusterHA)
 		clusterCore.Service.Health = health.Get
 		go health.Run(ctx)
@@ -292,6 +299,10 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 
 	clusterCore.attach(handler)    // /cluster routes and the per-node API proxy (cluster_a.go)
 	clusterStorage.routes(handler) // /cluster/storage (cluster_b.go)
+	if clusterConvert != nil {
+		// Make highly available, make local again, kept copies, failovers.
+		handler.ClusterConvertRoutes(clusterConvert, clusterStorage.Service)
+	}
 	clusterCore.start(ctx, log)    // the cluster log, heartbeats and paths
 	go housekeeping(ctx, log, &auth.Sessions{DB: db})
 	go collector.Run(ctx) // CPU, memory and network history
@@ -313,6 +324,9 @@ func run(log *slog.Logger, httpsAddr, httpAddr, tlsDir, dbPath, privSocket, webR
 		}
 		go handler.RunPhotos(ctx, api.PhotosOptions{}) // Photos: keeps the Immich app set up
 		go clusterHA.Start(ctx)                        // cluster: reconciler, fence agent, HA coordinator, image pre-pull
+		if clusterConvert != nil {
+			go clusterConvert.Run(ctx) // kept copies of converted workloads: grace periods
+		}
 		go handler.RunHostnames(ctx)                   // per-app hostnames: state and certificate renewals
 		go handler.RunNetBirdStandby(ctx)              // NetBird standby: sync schedule and stale alerts
 	}

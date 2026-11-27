@@ -23,7 +23,23 @@ func (s *Server) clusterHARoutes() {
 	m.Handle("PUT /api/v1/cluster/ha/timings", s.admin(s.handleClusterTimings))
 	m.Handle("PUT /api/v1/cluster/workloads/{kind}/{id}/ha", s.admin(s.handleClusterPolicy))
 	m.Handle("POST /api/v1/cluster/workloads/{kind}/{id}/request", s.admin(s.handleClusterRequest))
+	m.Handle("GET /api/v1/cluster/ha/failovers", s.admin(s.handleClusterFailovers))
 	s.clusterMoveRoutes()
+}
+
+// handleClusterFailovers is the failover history of every member, merged
+// (decision 484).
+func (s *Server) handleClusterFailovers(w http.ResponseWriter, r *http.Request, _ *auth.User) {
+	if !s.cfg.ClusterHA.Member() {
+		writeJSON(w, http.StatusOK, []ha.Failover{})
+		return
+	}
+	l, err := s.cfg.ClusterHA.Failovers(r.Context(), 100)
+	if err != nil {
+		internalError(s, w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, l)
 }
 
 // clusterHA returns the service when this server is in a cluster, or

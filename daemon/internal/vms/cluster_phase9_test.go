@@ -45,9 +45,12 @@ func TestMigrationRefusesHotpluggedUSB(t *testing.T) {
 	}
 }
 
-// Per-server VM features are refused for a VM on cluster storage, and the
-// scheduler leaves its snapshots to the storage server (decision 471).
-func TestClusterVMRefusesPerServerFeatures(t *testing.T) {
+// Per-server VM features of a VM on cluster storage (decision 471 as
+// amended by 485): its schedule is kept in its settings (the storage
+// server takes the snapshots; the compute server's scheduler leaves them
+// alone), saving it as a template is the storage server's, and keeping a
+// hot-plugged USB device stays refused.
+func TestClusterVMPerServerFeatures(t *testing.T) {
 	e, _ := clusterEnv(t)
 	ctx := context.Background()
 	refused := func(what string, err error) {
@@ -56,10 +59,12 @@ func TestClusterVMRefusesPerServerFeatures(t *testing.T) {
 			t.Errorf("%s: %v", what, err)
 		}
 	}
-	_, err := e.m.SetSchedule(ctx, SetScheduleArgs{ID: "web", Schedule: &Schedule{Daily: 7}})
-	refused("schedule", err)
+	v, err := e.m.SetSchedule(ctx, SetScheduleArgs{ID: "web", Schedule: &Schedule{Daily: 7}})
+	if err != nil || v.Schedule == nil || v.Schedule.Daily != 7 {
+		t.Fatalf("an HA VM's schedule: %+v %v", v, err)
+	}
 	_, err = e.m.MakeTemplate(ctx, MakeTemplateArgs{VM: "web", ID: "web-tpl", Name: "Web"})
-	refused("template", err)
+	refused("template on a compute server", err)
 	e.m.Devices = &fakeHotplug{fakeDevices: e.devs}
 	a := USBArgs{ID: "web", Device: "046d:c52b", Persist: true}
 	_, err = e.m.AttachUSB(ctx, a)
@@ -68,14 +73,16 @@ func TestClusterVMRefusesPerServerFeatures(t *testing.T) {
 	refused("persisted USB detach", err)
 }
 
-func TestClusterVMRefusesStreamingPublish(t *testing.T) {
+// An HA VM's game streaming may be published (decision 485): root checks
+// it like any VM's (here: this test server has no NetBird).
+func TestClusterVMStreamingPublish(t *testing.T) {
 	e, _ := clusterEnv(t)
 	s := fromTemplate(t, "web", "windows11")
 	s.Streaming = &Streaming{Sunshine: true, User: SunshineUser, CertSHA256: strings.Repeat("a", 64)}
 	b, _ := json.Marshal(s)
 	write(t, filepath.Join(e.root, "/mnt/hc/tank/vms/web", specFile), string(b))
 	_, err := e.m.SetStreamingRemote(context.Background(), StreamingPublishArgs{ID: "web", Enabled: true, Peers: []string{"100.64.0.9"}})
-	if err == nil || !strings.Contains(err.Error(), "cluster storage") {
+	if err == nil || strings.Contains(err.Error(), "cluster storage") || !strings.Contains(err.Error(), "NetBird") {
 		t.Fatalf("publishing a cluster VM's streaming: %v", err)
 	}
 }

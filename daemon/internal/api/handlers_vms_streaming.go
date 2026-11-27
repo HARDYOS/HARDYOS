@@ -12,6 +12,7 @@ import (
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
+	"github.com/hardyos/hardyos/daemon/internal/cluster"
 	"github.com/hardyos/hardyos/daemon/internal/jobs"
 	"github.com/hardyos/hardyos/daemon/internal/ports"
 	"github.com/hardyos/hardyos/daemon/internal/priv"
@@ -395,8 +396,22 @@ func (s *Server) handleVMStreamingRemote(w http.ResponseWriter, r *http.Request,
 		}
 		peers = req.Peers
 	}
-	s.submit(w, r, u, JobKindVMStreamRemote, title, vms.StreamingPublishArgs{ID: v.ID, Enabled: req.Enabled, Peers: peers}, "vms.streaming.publish",
+	// An HA VM may be published (decision 485): from the server it is
+	// placed on, which forwards it, with the changed settings approved.
+	clusterActor, ok := s.clusterSettings(w, u, cluster.WorkloadRef{Kind: cluster.KindVM, ID: v.ID})
+	if !ok {
+		return
+	}
+	s.submit(w, r, u, JobKindVMStreamRemote, title, vmStreamRemoteJob{StreamingPublishArgs: vms.StreamingPublishArgs{ID: v.ID, Enabled: req.Enabled, Peers: peers},
+		Cluster: clusterActor}, "vms.streaming.publish",
 		fmt.Sprintf("%s enabled=%t devices=%s", v.ID, req.Enabled, strings.Join(peers, ",")), nil)
+}
+
+// vmStreamRemoteJob is the publish job's parameters, with the person's
+// cluster actor for an HA VM placed here.
+type vmStreamRemoteJob struct {
+	vms.StreamingPublishArgs
+	Cluster *cluster.Actor `json:"cluster,omitempty"`
 }
 
 func (s *Server) registerVMStreamingJobs(m *jobs.Manager, pc *priv.Client) {
@@ -457,14 +472,19 @@ func (s *Server) registerVMStreamingJobs(m *jobs.Manager, pc *priv.Client) {
 		return map[string]any{"unpaired": true}, nil
 	}})
 	m.Register(jobs.Kind{Name: JobKindVMStreamRemote, AdminOnly: true, LockKey: vmLock, Run: func(jc *jobs.Context) (any, error) {
-		var p vms.StreamingPublishArgs
+		var p vmStreamRemoteJob
 		if err := jc.Params(&p); err != nil {
 			return nil, err
 		}
 		jc.Progress(30, "Setting up forwarding")
 		var v vms.VM
-		if err := call(jc, pc, time.Minute, priv.OpVMsStreamingPublish, p, &v); err != nil {
+		if err := call(jc, pc, time.Minute, priv.OpVMsStreamingPublish, p.StreamingPublishArgs, &v); err != nil {
 			return nil, err
+		}
+		if p.Cluster != nil {
+			if err := approveClusterVM(jc, p.ID, *p.Cluster); err != nil {
+				return nil, err
+			}
 		}
 		return VMJobResult{VM: &v, Warnings: []string{}}, nil
 	}})
