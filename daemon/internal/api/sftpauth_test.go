@@ -6,6 +6,7 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
@@ -113,8 +114,9 @@ func TestSFTPAuthSocketOnlyRoot(t *testing.T) {
 	}
 	old := sftpPeerUID
 	t.Cleanup(func() { sftpPeerUID = old })
-	uid := uint32(1000)
-	sftpPeerUID = func(net.Conn) (uint32, error) { return uid, nil }
+	var uid atomic.Uint32
+	uid.Store(1000)
+	sftpPeerUID = func(net.Conn) (uint32, error) { return uid.Load(), nil }
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { e.server.RunSFTPAuth(ctx, ln); close(done) }()
@@ -125,7 +127,7 @@ func TestSFTPAuthSocketOnlyRoot(t *testing.T) {
 	if rc := sftpauth.PAM(ctx, sftpauth.OpOwn, env, nil, sock, io.Discard); rc != 1 {
 		t.Fatalf("not root: %d", rc)
 	}
-	uid = 0
+	uid.Store(0)
 	if rc := sftpauth.PAM(ctx, sftpauth.OpOwn, env, nil, sock, io.Discard); rc != 0 {
 		t.Fatalf("root at home: %d", rc)
 	}
