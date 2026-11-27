@@ -60,9 +60,11 @@ Click **New VM**. Seven short steps, with sensible choices already made:
    router template turns it on). Cards with the filter use IPv6 too: their
    link-local address and the addresses they make themselves (SLAAC and
    privacy addresses) in the prefixes your router advertises, but they
-   can't act as a router or DHCPv6 server or claim the server's or the
-   router's address. A prefix the server doesn't see (a VLAN the server
-   has no interface on) gives filtered cards link-local IPv6 only. VMs on **Private (NAT)** can reach the internet and
+   can't act as a router or DHCPv6 server, and can't claim the server's,
+   a router's, a DNS server's or another computer's address (one it was
+   seen using on your network). Cards on a VLAN the server has no
+   interface on get no IPv6 at all, and cards on **Private (NAT)** don't
+   either (that network is IPv4). VMs on **Private (NAT)** can reach the internet and
    ask the server for an address and names (DHCP, DNS), but nothing else
    on the server itself (not its web desktop, SSH or shared folders).
 

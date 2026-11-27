@@ -202,8 +202,8 @@ func (m *Manager) startStored(ctx context.Context, st *stored) (*Result, error) 
 		if err := m.tagVLANs(ctx, &st.spec); err != nil {
 			return nil, fmt.Errorf("the VM's VLAN couldn't be set, so it stays paused: %w", err)
 		}
-		if st.spec.NeedsFilter() {
-			if err := m.guardVM(ctx, &st.spec); err != nil {
+		if st.spec.NeedsBridge() {
+			if err := m.guardVM(ctx, &st.spec); err != nil && st.spec.NeedsFilter() {
 				return nil, fmt.Errorf("the VM stays paused: %w", err)
 			}
 		}
@@ -777,6 +777,8 @@ func parseDomIfAddr(s string) []string {
 // Watch notices VMs that stopped (shut down from inside, crashed) to give
 // their devices back, and keeps addresses fresh. It returns when ctx ends.
 func (m *Manager) Watch(ctx context.Context) {
+	// The VM cards' IPv6 rules follow address and route changes at once.
+	go m.watchGuard6(ctx)
 	t := time.NewTicker(3 * time.Second)
 	defer t.Stop()
 	tick := 0

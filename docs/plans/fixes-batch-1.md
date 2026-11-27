@@ -45,6 +45,14 @@ IPv4-only). libvirt's ebtables filters can't express what IPv6 needs, so:
   migration); a failure stops the start (fail closed). Seeded again for
   running VMs when hardyd-priv starts; refreshed every 30 s (prefixes
   change) and reloaded only when the text changes.
+- Review fixes (decision 518): IPv6 from any other VM card is dropped (a
+  missing chain is closed; the qemu hook also refuses it), every refresh
+  reloads the whole table (30 s and on netlink events) and falls back to
+  an emergency drop table; unreadable header chains, ICMPv6 fragments and
+  first UDP fragments without readable ports are dropped; DNS servers,
+  router neighbours and addresses learned from the network's own ports
+  (with their MAC) are protected, DAD included; no IPv6 on a VLAN the
+  server doesn't know; 151/153 dropped.
 - Tests: rendering and validation, the sim (filter defined, table loaded,
   spoofing-allowed cards left out, a failed load refuses the start), a
   namespace test in CI's Cluster (namespaces) job that bridges a "VM" and

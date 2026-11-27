@@ -265,12 +265,14 @@ func (m *Manager) MigrateAccept(ctx context.Context, a MigrateAcceptArgs) (*os.F
 		return nil, err
 	}
 	if st.spec.NeedsFilter() {
-		// The incoming domain references the filter, and its filtered
-		// cards' IPv6 rules are in place before it runs here.
+		// The incoming domain references the filter.
 		if err := m.ensureFilter(ctx); err != nil {
 			return nil, err
 		}
-		if err := m.guardVM(ctx, &st.spec); err != nil {
+	}
+	if st.spec.NeedsBridge() {
+		// Its cards' IPv6 rules are in place before it runs here.
+		if err := m.guardVM(ctx, &st.spec); err != nil && st.spec.NeedsFilter() {
 			return nil, err
 		}
 	}
@@ -410,6 +412,15 @@ func (m *Manager) MigrateCheck(ctx context.Context, a MigrateCheckArgs) error {
 	op := a.Op
 	if op == "" {
 		op = HookMigrate
+	}
+	switch op {
+	case HookMigrate, HookPrepare, HookStart, HookRestore:
+		// Every filtered card has its IPv6 rules before QEMU runs
+		// (decision 518).
+		if err := m.CheckGuardedStart(ctx, a.XML); err != nil {
+			m.log().Warn("vms: refused a domain whose filtered cards have no IPv6 rules", "id", a.VM, "op", op, "err", err)
+			return err
+		}
 	}
 	mg := m.migs()
 	mg.mu.Lock()
