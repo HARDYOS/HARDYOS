@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
@@ -59,6 +60,14 @@ func TestAdminRevokesAppPasswords(t *testing.T) {
 	}
 	if e.server.sftpAnswer(ctx, sftpauth.Request{Op: sftpauth.OpApp, User: `HOME\alice`, RHost: outsideIP, Password: sftpPw.Password}).OK {
 		t.Fatal("a revoked app password still works")
+	}
+	// alice's open SFTP sessions end too (decision 519).
+	deadline := time.Now().Add(5 * time.Second)
+	for len(e.df.ended()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := e.df.ended(); len(got) == 0 || got[0].Account != me.Principal || !got[0].Before.IsZero() {
+		t.Fatalf("SFTP sessions ended: %+v", got)
 	}
 	e.admin.do("GET", base, nil, &list)
 	if len(list) != 1 || list[0].Name != "Phone mail" {

@@ -3,12 +3,15 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/audit"
 	"github.com/hardyos/hardyos/daemon/internal/auth"
+	"github.com/hardyos/hardyos/daemon/internal/priv"
 	"github.com/hardyos/hardyos/daemon/internal/sftpauth"
 	"github.com/hardyos/hardyos/daemon/internal/store"
 )
@@ -78,7 +81,36 @@ func sftpNo(reason string) sftpauth.Answer { return sftpauth.Answer{Reason: reas
 
 var sftpYes = sftpauth.Answer{OK: true}
 
-// sftpAnswer decides one question.
+// sftpIPKey is the address an SFTP sign-in's failures count against: from
+// outside an IPv6 address counts per /64 (one household or one attacker
+// has the whole /64), at home the address itself.
+func sftpIPKey(a netip.Addr, outside bool) string {
+	if !a.IsValid() {
+		return "ip:"
+	}
+	if outside && a.Is6() {
+		p, _ := a.Prefix(64)
+		return "ip:" + p.String()
+	}
+	return "ip:" + a.String()
+}
+
+// sftpAudit writes an SFTP audit entry off the answer path, and refusals
+// at most once a minute per kind, address and name (sshd and scripts can
+// retry fast).
+func (s *Server) sftpAudit(ctx context.Context, u *auth.User, target, ip string, outcome audit.Outcome, detail, throttle string) {
+	if throttle != "" && !s.sftpNotes.first(throttle) {
+		return
+	}
+	ctx = context.WithoutCancel(ctx)
+	s.sftpAudits.Add(1)
+	go func() {
+		defer s.sftpAudits.Done()
+		s.sftpRecord(ctx, u, target, ip, outcome, detail)
+	}()
+}
+
+// sftpAnswer decides one question (decisions 514, 519).
 func (s *Server) sftpAnswer(ctx context.Context, req sftpauth.Request) sftpauth.Answer {
 	if s.signin == nil || s.signin.Domain == nil {
 		return sftpNo("this server has no domain")
@@ -92,46 +124,34 @@ func (s *Server) sftpAnswer(ctx context.Context, req sftpauth.Request) sftpauth.
 	// (even trusted: own passwords stay refused from it), the internet:
 	// outside.
 	outside := !a.IsValid() || !s.insideAddr(a)
-	ipKey := "ip:" + ip
+	ipKey := sftpIPKey(a, outside)
 	userKey := s.signin.LimitKey(ctx, req.User)
-	limited := func() bool {
-		for _, k := range []string{ipKey, userKey} {
-			if ok, _ := s.cfg.Limiter.Allowed(k); !ok {
-				if s.sftpNotes.first(k) {
-					s.sftpRecord(ctx, nil, req.User, ip, audit.Denied, "rate limited")
-				}
-				return true
-			}
-		}
-		return false
-	}
-	row, err := s.signin.DomainUser(ctx, req.User)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return sftpNo("the domain isn't answering")
-	}
+	throttle := func(kind string) string { return kind + "|" + ipKey + "|" + userKey }
 	switch req.Op {
 	case sftpauth.OpApp:
-		if row == nil || limited() {
+		// A right app password always works, whatever the rate limits say
+		// (they count failures); a wrong one is decided by the next step.
+		row, err := s.signin.DomainUser(ctx, req.User)
+		if err != nil || row == nil {
 			return sftpNo("not an app password")
 		}
 		ok, err := s.appPw.Check(ctx, row.ID, req.Password, auth.ScopeSFTP, ip)
 		if err != nil || !ok {
-			// Not counted here: the own-password step decides (refused
-			// from outside, counted against the address).
 			return sftpNo("not an app password with the sftp scope")
 		}
 		if err := s.signin.CheckDomainAccount(ctx, row); err != nil {
 			s.cfg.Limiter.Fail(ipKey)
-			s.sftpRecord(ctx, row, req.User, ip, audit.Failure, "app password: "+err.Error())
+			s.sftpAudit(ctx, row, row.Username, ip, audit.Failure, "app password: "+err.Error(), throttle("account"))
 			return sftpNo(err.Error())
 		}
 		s.cfg.Limiter.Succeed(ipKey)
 		s.cfg.Limiter.Succeed(userKey)
-		s.sftpRecord(ctx, row, row.Username, ip, audit.Success, "sftp, app password"+outsideNote(outside))
+		s.sftpAudit(ctx, row, row.Username, ip, audit.Success, "sftp, app password"+outsideNote(outside), "")
 		return sftpYes
-	case sftpauth.OpOwn, sftpauth.OpAfter:
-		if limited() {
-			return sftpNo("rate limited")
+	case sftpauth.OpOwn:
+		row, err := s.signin.DomainUser(ctx, req.User)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return sftpNo("the domain isn't answering")
 		}
 		allowed := true
 		if s.mfa != nil {
@@ -143,24 +163,65 @@ func (s *Server) sftpAnswer(ctx context.Context, req sftpauth.Request) sftpauth.
 			// The password isn't checked: counted against the address
 			// only, so an old client can't lock its owner out.
 			s.cfg.Limiter.Fail(ipKey)
-			s.sftpRecord(ctx, row, req.User, ip, audit.Failure, errAppPasswordRequired.Error()+outsideNote(outside))
+			s.sftpAudit(ctx, row, req.User, ip, audit.Failure, errAppPasswordRequired.Error()+outsideNote(outside), throttle("app-password"))
 			return sftpNo("use an app password")
 		}
-		if req.Op == sftpauth.OpAfter {
-			s.cfg.Limiter.Succeed(ipKey)
-			s.cfg.Limiter.Succeed(userKey)
-			name := req.User
-			if row != nil {
-				name = row.Username
+		// The password goes to winbind: an attempt is reserved for the
+		// address and the account in one step (counted until it works).
+		for _, k := range []string{ipKey, userKey} {
+			if ok, _ := s.cfg.Limiter.Try(k); !ok {
+				s.sftpAudit(ctx, row, req.User, ip, audit.Denied, "rate limited", throttle("limited"))
+				return sftpNo("rate limited")
 			}
-			s.sftpRecord(ctx, row, name, ip, audit.Success, "sftp")
 		}
 		return sftpYes
+	case sftpauth.OpAfter:
+		// winbind said yes: the row is made or brought up to date from the
+		// directory like a desktop sign-in, and the rule checked on it.
+		u, err := s.signin.SyncDomainAccount(ctx, req.User)
+		if err != nil {
+			s.sftpAudit(ctx, nil, req.User, ip, audit.Failure, "sftp: "+err.Error(), throttle("account"))
+			return sftpNo(err.Error())
+		}
+		if s.mfa != nil {
+			allowed, err := s.mfa.PasswordAllowed(ctx, u, outside)
+			if err != nil {
+				return sftpNo("two-factor state unreadable")
+			}
+			if !allowed {
+				s.sftpAudit(ctx, u, u.Username, ip, audit.Failure, errAppPasswordRequired.Error()+outsideNote(outside), throttle("app-password"))
+				return sftpNo("use an app password")
+			}
+		}
+		s.cfg.Limiter.Succeed(ipKey)
+		s.cfg.Limiter.Succeed(userKey)
+		s.sftpAudit(ctx, u, u.Username, ip, audit.Success, "sftp", "")
+		return sftpYes
 	case sftpauth.OpFail:
-		s.cfg.Limiter.Fail(ipKey)
-		s.cfg.Limiter.Fail(userKey)
-		s.sftpRecord(ctx, nil, req.User, ip, audit.Failure, "sftp: wrong password"+outsideNote(outside))
+		// Counted when the own-password step reserved the attempt.
+		s.sftpAudit(ctx, nil, req.User, ip, audit.Failure, "sftp: wrong password"+outsideNote(outside), throttle("wrong"))
 		return sftpYes
 	}
 	return sftpNo("unknown op")
+}
+
+// endSFTPSessions ends a domain account's SFTP sessions that started
+// before before (all when zero), off the request path (decision 519).
+func (s *Server) endSFTPSessions(ctx context.Context, u *auth.User, before time.Time, why string) {
+	if u == nil || u.Source != auth.SourceDomain || u.Principal == "" || s.cfg.Priv == nil {
+		return
+	}
+	ctx = context.WithoutCancel(ctx)
+	go func() {
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		var res priv.SFTPEndResult
+		if err := s.cfg.Priv.Call(ctx, priv.OpFilesSFTPEnd, priv.SFTPEndArgs{Account: u.Principal, Before: before}, &res); err != nil {
+			s.log.Debug("sftp: ending sessions", "user", u.Username, "err", err)
+			return
+		}
+		if res.Ended > 0 {
+			s.recordSystem(ctx, "sftp.session.end", u.Username, fmt.Sprintf("%s; %d SFTP sessions ended", why, res.Ended))
+		}
+	}()
 }

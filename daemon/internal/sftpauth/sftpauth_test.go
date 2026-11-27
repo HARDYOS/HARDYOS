@@ -9,7 +9,9 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type fakeHardyd struct {
@@ -149,5 +151,38 @@ func TestPeerUID(t *testing.T) {
 	uid, err := PeerUID(c)
 	if err != nil || uid != uint32(os.Getuid()) {
 		t.Fatalf("%d %v", uid, err)
+	}
+}
+
+// More questions at once than answering slots: the extra ones wait for a
+// turn instead of being turned away (review L4).
+func TestBusySocketWaits(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "b.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = Serve(ctx, ln, func(context.Context, Request) Answer {
+			time.Sleep(200 * time.Millisecond)
+			return Answer{OK: true}
+		}, func(net.Conn) (uint32, error) { return 0, nil })
+	}()
+	var wg sync.WaitGroup
+	var oks atomic.Int32
+	for range 30 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if a, err := Ask(ctx, sock, Request{Op: OpOwn, User: "alice", RHost: "192.168.1.2"}); err == nil && a.OK {
+				oks.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if oks.Load() != 30 {
+		t.Fatalf("%d of 30 answered", oks.Load())
 	}
 }

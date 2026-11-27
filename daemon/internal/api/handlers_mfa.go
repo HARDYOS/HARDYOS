@@ -800,8 +800,12 @@ func (s *Server) appPasswordDelete(w http.ResponseWriter, r *http.Request, actor
 		internalError(s, w, err)
 		return
 	}
-	// WebDAV remembers a working password for a short while.
+	// WebDAV remembers a working password for a short while; SFTP
+	// sessions that may have used it end (decision 519).
 	s.dav.dropUser(uid)
+	if owner, err := s.users.Get(r.Context(), uid); err == nil {
+		s.endSFTPSessions(r.Context(), owner, time.Time{}, "an app password was revoked")
+	}
 	s.record(r, actor, "auth.app_password.delete", strconv.FormatInt(uid, 10)+"/"+rawID, audit.Success, detail)
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -42,7 +42,10 @@ type Manager struct {
 	Root, DropIn, PAMPath, CommonAuth string
 	// Helper replaces PAMHelper in sshd's PAM block (tests).
 	Helper string
-	Unit   string
+	// ProcRoot replaces /proc and Kill sending SIGTERM (tests).
+	ProcRoot string
+	Kill     func(pid int) error
+	Unit     string
 	// Mounter; nil means SysMounter.
 	Mounter Mounter
 	// NoChown skips making the views root's (tests without root).

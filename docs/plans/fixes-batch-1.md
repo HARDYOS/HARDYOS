@@ -77,6 +77,12 @@ IPv4-only). libvirt's ebtables filters can't express what IPv6 needs, so:
   (`sftp.login`); a refused own password counts against the address only.
 - SSH keys of local accounts are untouched (the block only runs for
   domain accounts' password sign-ins).
+- Review fixes (decision 519): `after` syncs the row from the directory
+  and applies MustEnroll; right app passwords bypass the limiter, own
+  passwords reserve attempts atomically, outside IPv6 per /64; audit off
+  the answer path and throttled; the socket queues briefly; revoking,
+  signing out everywhere and password changes end open SFTP sessions
+  (root op `files.sftp.end_sessions`).
 
 ## 4. Revoking other people's app passwords (decision 517)
 

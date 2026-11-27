@@ -1192,7 +1192,12 @@ them on (`settings.json`: `sftpEnabled`, `webdavEnabled`) and per folder
   `/run/hardyos-sftp-auth.sock` (`hardyd-sftp-auth.socket`, owner hardyd,
   0600), one JSON line each way, and hardyd answers root alone
   (SO_PEERCRED; `internal/sftpauth`, `api/sftpauth.go`). Without hardyd
-  nobody signs in to SFTP. winbind still decides the domain password
+  nobody signs in to SFTP. After winbind's yes hardyd syncs the account's
+  row from the directory (`SyncDomainAccount`) and checks the rule on it.
+  Revoking an app password, signing an account out everywhere and a
+  password change end its SFTP sessions through `files.sftp.end_sessions`
+  (`sftp.Manager.EndSessions`: sshd/sshd-session processes whose user IDs
+  are all the account's; decision 519). winbind still decides the domain password
   (wrong password, turned off, expired, must-change all refused); the
   account block has the same
   membership check. A third block before `@include common-session` gives

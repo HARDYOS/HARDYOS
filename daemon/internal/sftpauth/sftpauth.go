@@ -62,6 +62,10 @@ const maxRequest = 4096
 // sign-in for long.
 const Timeout = 10 * time.Second
 
+// slotWait is how long a question waits for one of the answering slots
+// before it is closed (a no).
+const slotWait = 3 * time.Second
+
 var userRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._$\\-]{0,127}$`)
 
 // Check validates a request before it is sent or answered.
@@ -136,7 +140,8 @@ func Serve(ctx context.Context, ln net.Listener, h Handler, peerUID func(net.Con
 		<-ctx.Done()
 		_ = ln.Close()
 	}()
-	sem := make(chan struct{}, 16) // sshd's MaxStartups is about this
+	sem := make(chan struct{}, 16)     // answered at once (sshd's MaxStartups is about this)
+	waiting := make(chan struct{}, 64) // and these wait up to slotWait for a turn
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -150,12 +155,26 @@ func Serve(ctx context.Context, ln net.Listener, h Handler, peerUID func(net.Con
 			return err
 		}
 		select {
-		case sem <- struct{}{}:
+		case waiting <- struct{}{}:
 		default:
-			_ = c.Close()
+			_ = c.Close() // far more than sshd ever asks at once
 			continue
 		}
 		go func() {
+			t := time.NewTimer(slotWait)
+			defer t.Stop()
+			select {
+			case sem <- struct{}{}:
+				<-waiting
+			case <-t.C:
+				<-waiting
+				_ = c.Close()
+				return
+			case <-ctx.Done():
+				<-waiting
+				_ = c.Close()
+				return
+			}
 			defer func() { <-sem }()
 			serveConn(ctx, c, h, peerUID)
 		}()
@@ -169,12 +188,14 @@ func serveConn(ctx context.Context, c net.Conn, h Handler, peerUID func(net.Conn
 		b, _ := json.Marshal(a)
 		_, _ = c.Write(append(b, '\n'))
 	}
-	uid, err := peerUID(c)
-	if err != nil || uid != 0 {
+	uid, uerr := peerUID(c)
+	// The request is read either way (so the asker gets its answer, not a
+	// broken pipe), and looked at only from root.
+	line, err := bufio.NewReader(io.LimitReader(c, maxRequest)).ReadBytes('\n')
+	if uerr != nil || uid != 0 {
 		reply(Answer{Reason: "only root (sshd's PAM) may ask"})
 		return
 	}
-	line, err := bufio.NewReader(io.LimitReader(c, maxRequest)).ReadBytes('\n')
 	if err != nil {
 		reply(Answer{Reason: "no request"})
 		return

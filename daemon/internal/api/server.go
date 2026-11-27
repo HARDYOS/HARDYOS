@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/appstore"
@@ -178,6 +179,11 @@ type Server struct {
 	pubLimiter *auth.DelayLimiter
 	// sftpNotes keeps "rate limited" SFTP sign-ins from filling the audit log.
 	sftpNotes sftpLimited
+	// sftpAudits are SFTP audit writes in flight (tests wait for them).
+	sftpAudits sync.WaitGroup
+	// sftpPwSeen: when each account's password was last known to be set
+	// (its older SFTP sessions were ended then).
+	sftpPwSeen sync.Map
 	// waits hands a job's in-memory outcome (a new client secret) back to
 	// the request that started it.
 	waits jobWaits

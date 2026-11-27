@@ -7,9 +7,11 @@ package smb
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/fileworker"
 	"github.com/hardyos/hardyos/daemon/internal/sftp"
@@ -34,6 +36,23 @@ func (m *Manager) accounts(ctx context.Context, force bool) ([]string, error) {
 	}
 	m.users, m.usersAt = l, m.now()
 	return l, nil
+}
+
+// EndSFTPSessions ends a domain account's SFTP sessions that started
+// before before (all when zero) and says how many (decision 519). account
+// is HOME\name; its user ID comes from winbind.
+func (m *Manager) EndSFTPSessions(ctx context.Context, account string, before time.Time) (int, error) {
+	if m.SFTP == nil {
+		return 0, nil
+	}
+	if !sftp.ValidNSSName(account) {
+		return 0, &ValidationError{fmt.Sprintf("%q isn't a domain account's name", account)}
+	}
+	id, err := m.lookupUser(ctx, account)
+	if err != nil {
+		return 0, nil // not known to winbind: it has no sessions either
+	}
+	return m.SFTP.EndSessions(id.UID, before)
 }
 
 func (m *Manager) lookupUser(ctx context.Context, name string) (*fileworker.Identity, error) {

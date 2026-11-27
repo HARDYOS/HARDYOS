@@ -30,6 +30,14 @@ type davFiles struct {
 	mu      sync.Mutex
 	enabled bool
 	on      map[string]bool
+	// sftpEnded are the SFTP session ends asked for (decision 519).
+	sftpEnded []priv.SFTPEndArgs
+}
+
+func (d *davFiles) ended() []priv.SFTPEndArgs {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]priv.SFTPEndArgs{}, d.sftpEnded...)
 }
 
 func (d *davFiles) register(ps *priv.Server) {
@@ -41,6 +49,14 @@ func (d *davFiles) register(ps *priv.Server) {
 			st.Shares = append(st.Shares, smb.ShareStatus{ID: id, Name: id, WebDAV: d.on[id]})
 		}
 		return st, nil
+	})
+	ps.Handle(priv.OpFilesSFTPEnd, func(_ context.Context, raw json.RawMessage) (any, error) {
+		var a priv.SFTPEndArgs
+		_ = json.Unmarshal(raw, &a)
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		d.sftpEnded = append(d.sftpEnded, a)
+		return priv.SFTPEndResult{Ended: 1}, nil
 	})
 }
 

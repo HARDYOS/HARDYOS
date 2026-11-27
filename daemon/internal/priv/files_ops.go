@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/smb"
 )
@@ -18,7 +19,22 @@ const (
 	OpFilesSettings = "files.settings"
 	// OpFilesApply regenerates smb.conf from the shared folders and reloads.
 	OpFilesApply = "files.apply"
+	// OpFilesSFTPEnd ends a domain account's SFTP sessions started before a
+	// time (SFTPEndArgs -> SFTPEndResult; decision 519).
+	OpFilesSFTPEnd = "files.sftp.end_sessions"
 )
+
+// SFTPEndArgs names the account (HOME\name) and the time: sessions that
+// started before it end (zero: all of them).
+type SFTPEndArgs struct {
+	Account string    `json:"account"`
+	Before  time.Time `json:"before"`
+}
+
+// SFTPEndResult says how many sessions ended.
+type SFTPEndResult struct {
+	Ended int `json:"ended"`
+}
 
 // RegisterFiles adds the SMB file server operations and returns the hook
 // that keeps smb.conf in step with shared folder changes (pass it to
@@ -54,6 +70,10 @@ func registerFilesOps(s *Server, m *smb.Manager) {
 	s.Handle(OpFilesSettings, typed(func(ctx context.Context, a smb.SettingsArgs) (any, error) {
 		st, err := m.SetSettings(ctx, a)
 		return st, filesErr(err)
+	}))
+	s.Handle(OpFilesSFTPEnd, typed(func(ctx context.Context, a SFTPEndArgs) (any, error) {
+		n, err := m.EndSFTPSessions(ctx, a.Account, a.Before)
+		return SFTPEndResult{Ended: n}, filesErr(err)
 	}))
 	s.Handle(OpFilesApply, func(ctx context.Context, _ json.RawMessage) (any, error) {
 		st, err := m.Apply(ctx)

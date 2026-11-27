@@ -200,6 +200,12 @@ func (s *Server) endUserEverywhere(ctx context.Context, id int64) {
 	s.proxy.endUser(id)
 	s.endOIDCUser(ctx, id)
 	s.office.dropUser(id, "the account's sessions were ended")
+	// And its SFTP sessions (decision 519).
+	if s.users != nil {
+		if u, err := s.users.Get(ctx, id); err == nil {
+			s.endSFTPSessions(ctx, u, time.Time{}, "the account was signed out everywhere")
+		}
+	}
 }
 
 // record writes an audit entry, logging (not failing) if the write fails.

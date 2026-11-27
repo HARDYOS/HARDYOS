@@ -330,6 +330,37 @@ func TestSFTPMemberIntegration(t *testing.T) {
 	}
 	fake.setOwn(true)
 	_ = exec.Command("faillock", "--user", `HOME\alice`, "--reset").Run()
+	// Ending alice's sessions (an app password revoked, decision 519)
+	// closes an open one, and only hers.
+	if c, err := dial("alice", fake.appPassword); err != nil {
+		t.Errorf("alice before her sessions end: %v", err)
+	} else {
+		sc, err := newSFTPClient(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command("id", "-u", `HOME\alice`).Output()
+		if err != nil {
+			t.Fatalf("id -u: %v", err)
+		}
+		uid, _ := strconv.Atoi(strings.TrimSpace(string(out)))
+		if n, err := sm.EndSessions(uid, time.Time{}); err != nil || n < 1 {
+			t.Errorf("ending alice's sessions: %d %v", n, err)
+		}
+		gone := false
+		for i := 0; i < 50 && !gone; i++ {
+			_, err := sc.list("/")
+			gone = err != nil
+			time.Sleep(100 * time.Millisecond)
+		}
+		if !gone {
+			t.Error("alice's SFTP session outlived the end of her sessions")
+		}
+		c.Close()
+		if names, err := bs.list("/"); err != nil || !has(names, "Family Docs") {
+			t.Errorf("bob's session ended with alice's: %v %v", names, err)
+		}
+	}
 	if _, err := dial("carol", users["carol"]); err == nil {
 		t.Error("carol, with nothing to see, got in")
 	}
