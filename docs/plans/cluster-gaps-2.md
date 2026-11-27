@@ -167,6 +167,34 @@ migration range.
 - The panel shows the address to add in Moonlight: the NetBird address,
   with `:<base>` when it isn't the standard set.
 
+## Security review fixes (decisions 507-509)
+
+- H1 (507): the storage server's copy is received read-only, unmounted and
+  held (`zfs receive -o`); one `zfs set` after the rename sets the mark and
+  the hold before any settings; root never sets `canmount=on` for a shared
+  folder while adopting. An adopt asked again re-holds it unless the
+  `org.hardyos:ha-released` mark (set by the storage server's release
+  before the hold ends) names this conversion. The storage-side release
+  refuses a folder this conversion doesn't hold, unless that mark says it
+  released it already. Test: an adopt cut short between the settings and
+  the hold, then asked again.
+- M1 (508): aside parks with `Since` = the final snapshot and `Expect`;
+  root reports the copy changed when this conversion no longer holds it or
+  it was written after that snapshot, and refuses an expiry then; the
+  conversion keeps it until deleted.
+- M2: Undo checks that this server's copies are there first and changes
+  nothing otherwise.
+- M3: a failed put-back after a failed park stops the conversion at the
+  park; Abandon refused while a folder is parked here; this server's parked
+  copy and the storage server's kept copy are recorded apart.
+- M4: adopt settings are always read fresh from the held folder.
+- L1, L2: the folder checks run again before the hold; share paths are
+  checked (`shares/<id>`).
+- L3 (509): the running state is taken again every attempt; Abandon starts
+  the app only when it isn't a cluster workload.
+- L4: one lock around choosing and saving a port set; a set an app holds a
+  host port of is never given to a VM nor forwarded (the VM panel says so).
+
 ## Tests
 
 Go unit tests with fakes: root's share rules (ids, sides, park only held

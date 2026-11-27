@@ -582,6 +582,9 @@ func (m *Manager) StreamingInfo(ctx context.Context, id string) (*StreamingInfo,
 	m.streamMu.Lock()
 	info.Forwarding = m.streamActive[id] && m.streamApplied != ""
 	m.streamMu.Unlock()
+	if p := slotAppPort(sp.Slot, m.appHostPorts(ctx)); info.Problem == "" && sp.Remote && p != "" {
+		info.Problem = "an app of this server uses " + p + ", one of this VM's streaming ports, so it isn't forwarded; turn publishing off and on again to give it other ports"
+	}
 	if info.Problem == "" && sp.Remote && m.state(ctx, id) == "running" && !info.Forwarding {
 		// Another published VM running here has the same port set (an HA
 		// VM that came here, decision 506): neither is forwarded.
@@ -606,14 +609,22 @@ func (m *Manager) StreamingInfo(ctx context.Context, id string) (*StreamingInfo,
 
 // pickStreamingSlot is the port set a VM gets when it is published
 // (decision 506): its own when no other published VM this server knows
-// has it, else the lowest free one. A VM set up before HardyOS had port
-// sets (its firewall rule covers only the standard web UI port) gets the
-// standard set only.
-func pickStreamingSlot(st *stored, all []*stored) (int, error) {
+// has it, else the lowest free one. A set an app of this server holds a
+// host port of is never given (decision 509). A VM set up before HardyOS
+// had port sets (its firewall rule covers only the standard web UI port)
+// gets the standard set only.
+func pickStreamingSlot(st *stored, all []*stored, appPorts map[string]bool) (int, error) {
 	used := map[int]string{}
 	for _, o := range all {
 		if o.spec.ID != st.spec.ID && o.spec.StreamingSetUp() && o.spec.Streaming.Remote {
 			used[o.spec.Streaming.Slot] = o.spec.Name
+		}
+	}
+	for s := 0; s < ports.StreamingSlots; s++ {
+		if _, taken := used[s]; !taken {
+			if p := slotAppPort(s, appPorts); p != "" {
+				used[s] = "an app (its port " + p + ")"
+			}
 		}
 	}
 	cur := st.spec.Streaming.Slot
@@ -621,14 +632,40 @@ func pickStreamingSlot(st *stored, all []*stored) (int, error) {
 		return cur, nil
 	}
 	if !st.spec.Streaming.AllSlots {
-		return 0, Problems{fmt.Sprintf("%s uses the standard streaming ports, and %s's game streaming was set up before HardyOS could give a VM other ports, so it can only use those (turn %s's publishing off first)", used[0], st.spec.Name, used[0])}
+		return 0, Problems{fmt.Sprintf("%s uses the standard streaming ports, and %s's game streaming was set up before HardyOS could give a VM other ports, so it can only use those (turn that off first)", used[0], st.spec.Name)}
 	}
 	for s := 0; s < ports.StreamingSlots; s++ {
 		if _, taken := used[s]; !taken {
 			return s, nil
 		}
 	}
-	return 0, Problems{fmt.Sprintf("at most %d VMs of one server are published for game streaming; turn another one off first", ports.StreamingSlots)}
+	return 0, Problems{fmt.Sprintf("at most %d VMs of one server are published for game streaming, and apps may hold some of their ports; turn another one off first", ports.StreamingSlots)}
+}
+
+// slotAppPort is a port of slot s an app holds ("" none).
+func slotAppPort(s int, appPorts map[string]bool) string {
+	if len(appPorts) == 0 {
+		return ""
+	}
+	set := ports.StreamingSlot(s)
+	for _, p := range set.TCP {
+		if k := fmt.Sprintf("%d/tcp", p); appPorts[k] {
+			return k
+		}
+	}
+	for _, p := range set.UDP {
+		if k := fmt.Sprintf("%d/udp", p); appPorts[k] {
+			return k
+		}
+	}
+	return ""
+}
+
+func (m *Manager) appHostPorts(ctx context.Context) map[string]bool {
+	if m.AppHostPorts == nil {
+		return nil
+	}
+	return m.AppHostPorts(ctx)
 }
 
 // SetStreamingRemote turns publishing a VM's streaming ports to NetBird
@@ -637,10 +674,14 @@ func pickStreamingSlot(st *stored, all []*stored) (int, error) {
 // now, in its NetBird network (hardyd also leaves out NetBird's reverse
 // proxy peers).
 func (m *Manager) SetStreamingRemote(ctx context.Context, a StreamingPublishArgs) (*VM, error) {
-	unlock, err := m.lockValid(a.ID)
+	vmUnlock, err := m.lockValid(a.ID)
 	if err != nil {
 		return nil, err
 	}
+	// One choice of a port set at a time, until it is saved (two VMs
+	// published at once never get the same set, decision 509).
+	m.streamPick.Lock()
+	unlock := func() { m.streamPick.Unlock(); vmUnlock() }
 	st, err := m.find(ctx, a.ID)
 	if err != nil {
 		unlock()
@@ -685,7 +726,7 @@ func (m *Manager) SetStreamingRemote(ctx context.Context, a StreamingPublishArgs
 			unlock()
 			return nil, err
 		}
-		if slot, err = pickStreamingSlot(st, all); err != nil {
+		if slot, err = pickStreamingSlot(st, all, m.appHostPorts(ctx)); err != nil {
 			unlock()
 			return nil, err
 		}
@@ -755,10 +796,17 @@ func (m *Manager) desiredForwards(ctx context.Context) ([]StreamForward, error) 
 		slots[f.Slot]++
 		addrs[f.VMIP]++
 	}
+	appPorts := m.appHostPorts(ctx)
 	out := fs[:0]
 	for _, f := range fs {
 		if slots[f.Slot] > 1 || addrs[f.VMIP] > 1 {
 			errs = append(errs, fmt.Errorf("not forwarding game streaming to %s: another published VM here has the same ports or address", f.VM))
+			continue
+		}
+		if p := slotAppPort(f.Slot, appPorts); p != "" {
+			// An app installed before the sets were reserved holds one of
+			// its ports (decision 509): publish it again for another set.
+			errs = append(errs, fmt.Errorf("not forwarding game streaming to %s: an app of this server uses its port %s", f.VM, p))
 			continue
 		}
 		out = append(out, f)

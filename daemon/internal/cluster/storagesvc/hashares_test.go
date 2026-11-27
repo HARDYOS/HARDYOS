@@ -46,7 +46,7 @@ func TestHAShareRules(t *testing.T) {
 			got = c.args.(shares.HAHoldArgs)
 		}
 	}
-	if got.ID != "media" || got.Conv != "abcdefgh12s0" || !got.Release {
+	if got.ID != "media" || got.Conv != "abcdefgh12s0" || !got.Release || !got.Adopted {
 		t.Fatalf("root was asked %+v", got)
 	}
 	if w := post(t, mux, "storage/ha/adopt", HARequest{Workload: media, Pool: "tank", Conv: "abcdefgh12s0"}, c1, alice); w.Code != http.StatusForbidden {

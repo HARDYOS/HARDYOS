@@ -280,6 +280,8 @@ func main() {
 		clusterStorage := wireClusterB(ctx, s, log, am.PreBackup)
 		wireHACopy(s, clusterStorage, vmm, am, shm, shareHooks, log)
 		vmm.Backend = clusterStorage.VMs
+		// Streaming port sets stay off apps' host ports (decision 509).
+		vmm.AppHostPorts = am.AppHostPorts
 		am.Backend = clusterStorage.Apps
 		am.ClusterShares = clusterStorage.Shares
 		go am.OnStart(ctx) // after its cluster backend is set

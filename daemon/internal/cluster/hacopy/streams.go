@@ -413,8 +413,13 @@ func (r *Root) Recv(ctx context.Context, a RecvArgs) (*StreamStart, *os.File, er
 			return nil, nil, err
 		}
 	}
+	return r.recvStart(a, ds, pol, recvArgs(a, ds, pol.Objset == replica.ObjsetVolume))
+}
+
+// recvArgs are zfs receive's arguments for one dataset of a.
+func recvArgs(a RecvArgs, ds string, volume bool) []string {
 	args := []string{"receive", "-u", "-s"}
-	if pol.Objset == replica.ObjsetVolume {
+	if volume {
 		args = append(args, "-o", "volmode=none")
 	} else {
 		args = append(args, "-o", "canmount=noauto", "-x", "mountpoint", "-x", "sharenfs", "-x", "sharesmb")
@@ -425,12 +430,20 @@ func (r *Root) Recv(ctx context.Context, a RecvArgs) (*StreamStart, *os.File, er
 			// A shared folder's permissions are POSIX ACLs in its files'
 			// extended attributes, which the stream carries.
 			args = append(args, "-o", "acltype=posixacl", "-o", "xattr=sa", "-o", "aclinherit=passthrough")
+			// It arrives held: read-only, not mounted at boot, its
+			// conversion's hold mark, before it is ever a shared folder
+			// (decision 507).
+			args = append(args, "-o", "readonly=on", "-o", propHAHold+"="+a.Conv)
 		}
 		if a.Kind == cluster.KindVM {
 			args = append(args, "-o", "exec=off")
 		}
 	}
-	args = append(args, ds)
+	return append(args, ds)
+}
+
+// Recv's own part after the receive's arguments.
+func (r *Root) recvStart(a RecvArgs, ds string, pol replica.Policy, args []string) (*StreamStart, *os.File, error) {
 	s, err := r.streams.add(ds)
 	if err != nil {
 		return nil, nil, err

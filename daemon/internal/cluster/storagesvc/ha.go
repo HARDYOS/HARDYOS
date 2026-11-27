@@ -737,7 +737,7 @@ func (s *Service) registerHAPeer(h func(path string, fn func(r *http.Request, c 
 		}
 		// Root lets go only of the hold this very conversion took when it
 		// adopted the folder (shares.HAHold checks the mark).
-		err := s.Priv.Call(r.Context(), "shares.ha.hold", shares.HAHoldArgs{ID: p.Workload.ID, Conv: p.Conv, Release: true}, nil)
+		err := s.Priv.Call(r.Context(), "shares.ha.hold", shares.HAHoldArgs{ID: p.Workload.ID, Conv: p.Conv, Release: true, Adopted: true}, nil)
 		s.audit(r.Context(), q.Actor, "cluster.ha.share.release", p.Workload.ID, err)
 		return ok(err)
 	}))

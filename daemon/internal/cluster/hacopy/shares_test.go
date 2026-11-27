@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hardyos/hardyos/daemon/internal/shares"
 )
@@ -119,6 +120,88 @@ func TestShareParkRules(t *testing.T) {
 // A shared folder is adopted on the storage server only, with settings
 // checked like a person's, never over one of that server's shared
 // folders, and held (read-only, unmounted) until the conversion lets go.
+// An adopt cut short (decision 507): whatever step fails, the copy on
+// the storage server is held from the rename on (the mark and the hold
+// in one zfs set), never made mountable or mounted, and an adopt asked
+// again holds it again; only one its conversion let go of is mounted.
+func TestShareAdoptCutShort(t *testing.T) {
+	f := newFake()
+	f.add("nas", "filesystem")
+	f.add("nas/hardyos-ha-incoming", "filesystem")
+	f.add("nas/hardyos-ha-incoming/abcdefgh12s0", "filesystem", PropIncoming, "share:media")
+	f.add("nas/hardyos-ha-incoming/abcdefgh12s0/share-media", "filesystem")
+	r := &Root{Runner: f, ShareTaken: func(context.Context, string, string) error { return nil }, ShareChanged: func(context.Context) {}}
+	ctx := context.Background()
+	ref := Ref{Kind: KindShare, ID: "media", Pool: "nas", Side: SideCluster}
+	set := &shares.Settings{Name: "Media", Services: shares.DefaultServices()}
+	mounted := func() bool {
+		for _, c := range f.cmds {
+			if c == "zfs mount nas/shares/media" {
+				return true
+			}
+		}
+		return false
+	}
+	held := func(why string) {
+		t.Helper()
+		p := f.ds["nas/shares/media"]
+		if p == nil || p[propHAHold] != "abcdefgh12s0" || p["readonly"] != "on" || p["canmount"] != "noauto" || mounted() {
+			t.Fatalf("%s: not held: %v (mounted %v)", why, p, mounted())
+		}
+	}
+	// The settings' zfs set fails (a crash between them and the hold).
+	f.failSet = shares.PropName
+	if _, err := r.Adopt(ctx, AdoptArgs{Ref: ref, Conv: "abcdefgh12s0", Share: set}); err == nil {
+		t.Fatal("adopted though its settings weren't written")
+	}
+	held("cut short after the rename")
+	f.failSet = ""
+	// Someone made it mountable meanwhile: asked again, it is held again.
+	f.ds["nas/shares/media"]["canmount"] = "on"
+	f.ds["nas/shares/media"]["readonly"] = "off"
+	if _, err := r.Adopt(ctx, AdoptArgs{Ref: ref, Conv: "abcdefgh12s0", Share: set}); err != nil {
+		t.Fatal(err)
+	}
+	held("adopted again")
+	if f.ds["nas/shares/media"][shares.PropName] != "Media" {
+		t.Fatal("the settings weren't written on the retry")
+	}
+	// Let go of by its conversion: asked again, it stays shared (mounted).
+	f.ds["nas/shares/media"][propHAReleased] = "abcdefgh12s0"
+	delete(f.ds["nas/shares/media"], propHAHold)
+	if _, err := r.Adopt(ctx, AdoptArgs{Ref: ref, Conv: "abcdefgh12s0", Share: set}); err != nil || !mounted() || f.ds["nas/shares/media"]["canmount"] != "on" {
+		t.Fatalf("a released folder: %v %v", err, f.ds["nas/shares/media"])
+	}
+	// Received held: read-only and with the hold mark from the stream on.
+	args := strings.Join(recvArgs(RecvArgs{Ref: Ref{Kind: KindShare, ID: "photos", Pool: "nas", Side: SideCluster}, Conv: "abcdefgh12s1", Label: "s1"}, "x", false), " ")
+	for _, want := range []string{"-o canmount=noauto", "-o readonly=on", "-o " + propHAHold + "=abcdefgh12s1"} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("received without %q: %s", want, args)
+		}
+	}
+}
+
+// A storage copy its conversion let go of (or no longer holds) is never
+// given an expiry and counts as changed (decision 508).
+func TestShareAsideOnlyHeldExpires(t *testing.T) {
+	f := newFake()
+	f.add("nas", "filesystem")
+	f.add("nas/shares", "filesystem")
+	f.add("nas/shares/media", "filesystem", shares.PropShare, "1", PropParkedConv, "abcdefgh12s0", propHAHold, "abcdefgh12s0", "written", "0")
+	r := &Root{Runner: f, ShareBusy: func(context.Context, string, string) (bool, error) { return false, nil }}
+	ctx := context.Background()
+	ref := Ref{Kind: KindShare, ID: "media", Pool: "nas", Side: SideCluster}
+	soon := time.Now().Add(2 * time.Hour).Unix()
+	delete(f.ds["nas/shares/media"], propHAHold) // let go of: shared
+	if _, err := r.Park(ctx, ParkArgs{Ref: ref, Confirm: "media", Conv: "abcdefgh12s0x1", Expect: "abcdefgh12s0", KeepUntil: soon}); err == nil {
+		t.Fatal("a shared copy was given an expiry")
+	}
+	res, err := r.Park(ctx, ParkArgs{Ref: ref, Confirm: "media", Conv: "abcdefgh12s0x1", Expect: "abcdefgh12s0"})
+	if err != nil || !res.Changed {
+		t.Fatalf("a shared copy put aside: %+v %v", res, err)
+	}
+}
+
 func TestShareAdopt(t *testing.T) {
 	f := newFake()
 	f.add("nas", "filesystem")

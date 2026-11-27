@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -59,11 +60,15 @@ type ShareMove struct {
 	Adopted   bool `json:"adopted,omitempty"`
 	Released  bool `json:"released,omitempty"`
 	InCluster bool `json:"inCluster,omitempty"`
-	// ParkedPool and ParkedName name this server's parked copy, or (after
-	// an undo) the storage server's.
-	ParkedPool string `json:"parkedPool,omitempty"`
-	ParkedName string `json:"parkedName,omitempty"`
-	ParkedSide string `json:"parkedSide,omitempty"`
+	// ParkedPool and ParkedName name this server's parked copy
+	// (ParkedSide "local"); ClusterPool and ClusterName the storage
+	// server's copy put aside without an expiry (decision 508: kept apart,
+	// so neither is ever taken for the other).
+	ParkedPool  string `json:"parkedPool,omitempty"`
+	ParkedName  string `json:"parkedName,omitempty"`
+	ParkedSide  string `json:"parkedSide,omitempty"`
+	ClusterPool string `json:"clusterPool,omitempty"`
+	ClusterName string `json:"clusterName,omitempty"`
 	// UntilDeleted: the storage server's copy, put aside, may be newer
 	// than this server's (it was shared from there): kept until an
 	// administrator deletes it, never given a grace period.
@@ -192,6 +197,9 @@ func (c *Converter) shareProblems(ctx context.Context, w cluster.WorkloadRef, li
 			continue
 		}
 		name := sh.Name
+		if p := s.Path; !filepath.IsAbs(p) || filepath.Clean(p) != p || filepath.Base(p) != s.ID || filepath.Base(filepath.Dir(p)) != "shares" {
+			problems = append(problems, fmt.Sprintf("%s's folder (%q) isn't where a shared folder is", name, p))
+		}
 		ready = append(ready, ReadyShare{ID: sh.ID, Name: name, SizeBytes: int64(sh.UsedBytes), Write: s.Write})
 		total += sh.UsedBytes
 		if sh.ID == LibraryShare {
@@ -345,6 +353,30 @@ func (c *Converter) copyShares(ctx context.Context, r *Record, what string, atte
 // holdShares holds each moving shared folder (file sharing lets go of
 // it, read-only, unmounted); on a failure the ones held are let go of.
 func (c *Converter) holdShares(ctx context.Context, r *Record) error {
+	if len(r.Options.Shares) == 0 {
+		return nil
+	}
+	// The copy may have taken hours: what could have changed meanwhile is
+	// checked again just before the hold (decision 508).
+	l, err := c.localShares(ctx)
+	if err != nil {
+		return err
+	}
+	tasks := c.tasksUsingShares(ctx)
+	for _, s := range r.Options.Shares {
+		sh := findShare(l, s.ID)
+		if sh == nil {
+			return fmt.Errorf("shared folder %s isn't on this server any more", s.Name)
+		}
+		for _, g := range sh.Apps {
+			if g.App != r.Workload {
+				return fmt.Errorf("%s is used by %s on this server now; a shared folder moves with one app only", s.Name, g.App)
+			}
+		}
+		if t := tasks[s.ID]; len(t) > 0 {
+			return fmt.Errorf("%s is in the %s on this server now; take it out of that task first", s.Name, t[0])
+		}
+	}
 	for i := range r.Options.Shares {
 		s := &r.Options.Shares[i]
 		if err := c.Priv.Call(ctx, priv.OpSharesHAHold, shares.HAHoldArgs{ID: s.ID, Conv: s.Conv}, nil); err != nil {
@@ -382,13 +414,13 @@ func (c *Converter) adoptShares(ctx context.Context, r *Record, actor cluster.Ac
 	}
 	for i := range r.Options.Shares {
 		s := &r.Options.Shares[i]
-		if s.Settings == nil {
-			sh := findShare(l, s.ID)
-			if sh == nil {
-				return fmt.Errorf("shared folder %s isn't on this server any more", s.Name)
-			}
+		// Read now, from the folder as it is held (nothing changes it
+		// since): never an earlier attempt's (decision 508).
+		if sh := findShare(l, s.ID); sh != nil {
 			set := shares.SettingsOf(sh)
 			s.Settings = &set
+		} else {
+			return fmt.Errorf("shared folder %s isn't on this server any more", s.Name)
 		}
 		if _, err := c.Storage.HAAdopt(ctx, storagesvc.HARequest{Workload: s.workload(), Pool: r.StoragePool, Conv: s.Conv, Share: s.Settings, Actor: actor}); err != nil {
 			return fmt.Errorf("setting up %s on the storage server: %w", s.Name, err)
@@ -400,36 +432,18 @@ func (c *Converter) adoptShares(ctx context.Context, r *Record, actor cluster.Ac
 }
 
 // asideShares puts aside the shared folders the storage server adopted
-// for this conversion and never let go of (never shared, never used in
-// the cluster): for an hour when this server's copy is seen to be there,
-// otherwise until an administrator deletes them. One the storage server
-// let go of (it may have been written) is taken out of the cluster and
-// kept with no expiry. abort also destroys what the storage server was
-// still receiving of the others (Abandon; otherwise it stays to resume).
+// for this conversion: one it still holds for the conversion (never
+// shared) for an hour when this server's copy is seen to be there; any
+// other, and one the storage server reports as shared from there or
+// written after its final snapshot, kept until an administrator deletes
+// it (UntilDeleted: the storage server's own state decides, not the
+// record, decision 508). One still used in the cluster is taken out of it
+// first. abort also destroys what the storage server was still receiving
+// of the others (Abandon; otherwise it stays to resume).
 func (c *Converter) asideShares(ctx context.Context, r *Record, actor cluster.Actor, abort bool) error {
 	var errs []error
 	for i := range r.Options.Shares {
 		s := &r.Options.Shares[i]
-		if !s.Adopted {
-			// One the storage server adopted whose answer was lost: put aside
-			// only if it carries this conversion's mark (refused otherwise,
-			// and there's nothing to put aside then).
-			lost := storagesvc.HARequest{Workload: s.workload(), Pool: r.StoragePool, Confirm: s.ID, Conv: s.Conv + "x" + strconv.Itoa(r.Options.Attempt),
-				Expect: s.Conv, Actor: actor}
-			if c.localShareThere(ctx, s) {
-				lost.KeepUntil = c.now().Add(time.Hour).Unix()
-			}
-			if pr, err := c.Storage.HAPark(ctx, lost); err == nil && lost.KeepUntil == 0 {
-				s.ParkedPool, s.ParkedName, s.ParkedSide = pr.Pool, pr.Name, string(hacopy.SideCluster)
-				_ = c.save(ctx, r)
-			}
-			if abort {
-				if err := c.Storage.HAAbort(ctx, storagesvc.HARequest{Workload: s.workload(), Pool: r.StoragePool, Conv: s.Conv, Actor: actor}); err != nil {
-					errs = append(errs, fmt.Errorf("dropping what was copied of %s: %w", s.Name, err))
-				}
-			}
-			continue
-		}
 		if s.InCluster {
 			if err := c.Storage.SetShareCluster(ctx, storagesvc.ShareRequest{Pool: r.StoragePool, ID: s.ID, In: false, Actor: actor}); err != nil {
 				errs = append(errs, fmt.Errorf("taking %s out of the cluster: %w", s.Name, err))
@@ -439,28 +453,67 @@ func (c *Converter) asideShares(ctx context.Context, r *Record, actor cluster.Ac
 			_ = c.save(ctx, r)
 		}
 		req := storagesvc.HARequest{Workload: s.workload(), Pool: r.StoragePool, Confirm: s.ID, Conv: s.Conv + "x" + strconv.Itoa(r.Options.Attempt),
-			Expect: s.Conv, Actor: actor}
-		if !s.Released && c.localShareThere(ctx, s) {
-			req.KeepUntil = c.now().Add(time.Hour).Unix()
+			Expect: s.Conv, Since: snapName(s.Conv, "final", r.Options.Attempt), Actor: actor}
+		hour := !s.Released && c.localShareThere(ctx, s)
+		park := func() (*hacopy.ParkResult, error) {
+			if hour {
+				req.KeepUntil = c.now().Add(time.Hour).Unix()
+				if pr, err := c.Storage.HAPark(ctx, req); err == nil {
+					return pr, nil
+				}
+				// Refused an expiry (the storage server let go of it: shared
+				// from there), or not there: kept until deleted, if there.
+			}
+			req.KeepUntil = 0
+			return c.Storage.HAPark(ctx, req)
 		}
 		var pr *hacopy.ParkResult
-		err := c.waitFor(ctx, 3*time.Minute, "the storage server letting go of "+s.Name, func(*cluster.Snapshot) (bool, error) {
-			var err error
-			pr, err = c.Storage.HAPark(ctx, req)
-			return err == nil, nil
-		})
-		if err != nil {
-			errs = append(errs, fmt.Errorf("putting %s aside on the storage server: %w", s.Name, err))
-			continue
+		var err error
+		if !s.Adopted {
+			// One the storage server adopted whose answer was lost: put
+			// aside only if it carries this conversion's mark (refused
+			// otherwise, and there's nothing to put aside then).
+			pr, err = park()
+			if err != nil {
+				pr = nil
+			}
+			if abort {
+				if aerr := c.Storage.HAAbort(ctx, storagesvc.HARequest{Workload: s.workload(), Pool: r.StoragePool, Conv: s.Conv, Actor: actor}); aerr != nil {
+					errs = append(errs, fmt.Errorf("dropping what was copied of %s: %w", s.Name, aerr))
+				}
+			}
+		} else {
+			err = c.waitFor(ctx, 3*time.Minute, "the storage server letting go of "+s.Name, func(*cluster.Snapshot) (bool, error) {
+				var perr error
+				pr, perr = park()
+				return perr == nil, nil
+			})
+			if err != nil {
+				errs = append(errs, fmt.Errorf("putting %s aside on the storage server: %w", s.Name, err))
+				continue
+			}
 		}
-		if req.KeepUntil == 0 {
-			s.ParkedPool, s.ParkedName, s.ParkedSide = pr.Pool, pr.Name, string(hacopy.SideCluster)
-			s.UntilDeleted = s.Released
+		if pr != nil {
+			if req.KeepUntil == 0 {
+				s.ClusterPool, s.ClusterName = pr.Pool, pr.Name
+				s.UntilDeleted = s.UntilDeleted || s.Released || pr.Changed
+			}
+			s.Adopted, s.Released = false, false
 		}
-		s.Adopted, s.Released = false, false
 		_ = c.save(ctx, r)
 	}
 	return errors.Join(errs...)
+}
+
+// clusterChanged: a storage server's copy put aside may be newer than
+// this server's (kept until an administrator deletes it).
+func clusterChanged(r *Record) bool {
+	for _, s := range r.Options.Shares {
+		if s.UntilDeleted {
+			return true
+		}
+	}
+	return false
 }
 
 // localShareThere: this server has the shared folder as its own.
@@ -469,9 +522,19 @@ func (c *Converter) localShareThere(ctx context.Context, s *ShareMove) bool {
 	return err == nil && findShare(l, s.ID) != nil
 }
 
+// localParkedThere: this server's parked copy of a shared folder is
+// there (its pool imported: root lists only those), by the record or by
+// the conversion's mark.
+func (c *Converter) localParkedThere(ctx context.Context, s *ShareMove) bool {
+	found, ok := c.parkedShareHere(ctx, s)
+	return ok && (s.ParkedName == "" || found.Name == s.ParkedName)
+}
+
 // parkShares puts this server's held shared folders aside (refused when
 // written after their final snapshot); on a failure the ones parked are
-// put back, still held, so the caller goes back before the park.
+// put back, still held, so the caller goes back before the park. A
+// failure to put one back is reported with it (that folder stays parked:
+// Undo, or a resume, puts it back).
 func (c *Converter) parkShares(ctx context.Context, r *Record, refs []hacopy.Ref) error {
 	for i, ref := range refs {
 		s := &r.Options.Shares[i]
@@ -485,13 +548,35 @@ func (c *Converter) parkShares(ctx context.Context, r *Record, refs []hacopy.Ref
 			err = errors.New("root didn't name the parked copy")
 		}
 		if err != nil {
-			c.unparkShares(context.WithoutCancel(ctx), r)
-			return fmt.Errorf("putting %s aside: %w", s.Name, err)
+			err = fmt.Errorf("putting %s aside: %w", s.Name, err)
+			if uerr := c.unparkShares(context.WithoutCancel(ctx), r); uerr != nil {
+				return errors.Join(err, &stuckParked{uerr})
+			}
+			return err
 		}
 		s.ParkedPool, s.ParkedName, s.ParkedSide = pr.Pool, pr.Name, string(hacopy.SideLocal)
 		_ = c.save(ctx, r)
 	}
 	return nil
+}
+
+// stuckParked: a shared folder parked here couldn't be put back.
+type stuckParked struct{ err error }
+
+func (e *stuckParked) Error() string { return e.err.Error() }
+func (e *stuckParked) Unwrap() error { return e.err }
+
+// sharesParkedHere: a shared folder of r is parked on this server (by
+// the record, or found by its conversion's mark).
+func (c *Converter) sharesParkedHere(ctx context.Context, r *Record) []string {
+	var out []string
+	for i := range r.Options.Shares {
+		s := &r.Options.Shares[i]
+		if (s.ParkedName != "" && s.ParkedSide == string(hacopy.SideLocal)) || c.localParkedThere(ctx, s) {
+			out = append(out, s.Name)
+		}
+	}
+	return out
 }
 
 // unparkShares puts this server's parked shared folders back (file
@@ -589,11 +674,15 @@ func sharePaths(r *Record) map[string]string {
 // period.
 func (c *Converter) keepShares(ctx context.Context, r *Record, actor cluster.Actor) {
 	for _, s := range r.Options.Shares {
-		if s.ParkedName == "" || s.UntilDeleted {
-			continue
+		if s.ParkedName != "" && s.ParkedSide == string(hacopy.SideLocal) {
+			if err := c.keepFor(ctx, hacopy.SideLocal, s.ParkedPool, s.ParkedName, c.grace(), actor); err != nil {
+				c.log().Warn("convert: a shared folder's kept copy's grace period", "share", s.ID, "err", err)
+			}
 		}
-		if err := c.keepFor(ctx, hacopy.Side(s.ParkedSide), s.ParkedPool, s.ParkedName, c.grace(), actor); err != nil {
-			c.log().Warn("convert: a shared folder's kept copy's grace period", "share", s.ID, "err", err)
+		if s.ClusterName != "" && !s.UntilDeleted {
+			if err := c.keepFor(ctx, hacopy.SideCluster, s.ClusterPool, s.ClusterName, c.grace(), actor); err != nil {
+				c.log().Warn("convert: a shared folder's kept copy's grace period", "share", s.ID, "err", err)
+			}
 		}
 	}
 }

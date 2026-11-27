@@ -20,6 +20,12 @@ import (
 // apps.PropHAHold marks an app.
 const PropHAHold = "org.hardyos:ha-hold"
 
+// PropHAReleased marks a shared folder the storage server adopted that
+// its conversion let go of (its id): shared from there since, so it may
+// have been written (decision 507). An adopt asked again leaves such a
+// folder as it is; one without it is held again.
+const PropHAReleased = "org.hardyos:ha-released"
+
 var holdConvRE = regexp.MustCompile(`^[a-z0-9]{8,32}$`)
 
 // Settings are a shared folder's own settings: what moves with it.
@@ -118,6 +124,10 @@ type HAHoldArgs struct {
 	Conv string `json:"conv"`
 	// Release ends the hold (its own conversion's only).
 	Release bool `json:"release,omitempty"`
+	// Adopted: the storage server lets go of a folder it adopted for the
+	// conversion: refused when that conversion doesn't hold it (unless it
+	// let go of it already), and marked released (PropHAReleased).
+	Adopted bool `json:"adopted,omitempty"`
 }
 
 // HAHold holds a shared folder for a conversion: marked, read-only and
@@ -147,10 +157,19 @@ func (m *Manager) HAHold(ctx context.Context, a HAHoldArgs) error {
 	cur := m.heldBy(ctx, ds)
 	if a.Release {
 		if cur == "" {
+			if a.Adopted && m.localValue(ctx, ds, PropHAReleased) != a.Conv {
+				return invalid("that shared folder isn't held by this conversion")
+			}
 			return nil
 		}
 		if cur != a.Conv {
 			return invalid("another conversion holds that shared folder")
+		}
+		if a.Adopted {
+			// Marked first: from here on it may be written, and stays so.
+			if _, err := m.zfs(ctx, "set", PropHAReleased+"="+a.Conv, ds); err != nil {
+				return err
+			}
 		}
 		for _, p := range []string{"readonly", PropHAHold} {
 			if _, err := m.zfs(ctx, "inherit", p, ds); err != nil {
@@ -199,7 +218,12 @@ func (m *Manager) listOrNil(ctx context.Context) []Share {
 // heldBy is the conversion holding a shared folder's dataset ("" none:
 // only a conversion id is a hold).
 func (m *Manager) heldBy(ctx context.Context, ds string) string {
-	out, err := m.zfs(ctx, "get", "-H", "-p", "-s", "local", "-o", "value", PropHAHold, ds)
+	return m.localValue(ctx, ds, PropHAHold)
+}
+
+// localValue is a conversion id set on the dataset itself ("" none).
+func (m *Manager) localValue(ctx context.Context, ds, prop string) string {
+	out, err := m.zfs(ctx, "get", "-H", "-p", "-s", "local", "-o", "value", prop, ds)
 	if err != nil {
 		return ""
 	}

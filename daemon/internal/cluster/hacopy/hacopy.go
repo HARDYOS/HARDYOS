@@ -79,9 +79,12 @@ const (
 	// propHAHoldRunning the state it recorded (apps.PropHAHoldRunning).
 	propHAHold        = "org.hardyos:ha-hold"
 	propHAHoldRunning = "org.hardyos:ha-hold-running"
-	propVM            = san.PropVM
-	propApp           = san.PropApp
-	propRole          = san.PropRole
+	// propHAReleased marks a shared folder adopted on the storage server
+	// that its conversion let go of (shares.PropHAReleased, decision 507).
+	propHAReleased = shares.PropHAReleased
+	propVM         = san.PropVM
+	propApp        = san.PropApp
+	propRole       = san.PropRole
 )
 
 // Side says whose datasets an operation works on.
@@ -678,18 +681,32 @@ func (r *Root) Adopt(ctx context.Context, a AdoptArgs) (*AdoptResult, error) {
 			if err != nil {
 				return nil, err
 			}
+			if set != nil && r.localProp(ctx, top, propHAReleased) != a.Conv {
+				// A shared folder its conversion hasn't let go of is held,
+				// whatever an adopt cut short left (decision 507): held
+				// first, then its marks and settings, never mounted here.
+				if err := r.holdShare(ctx, top, a.Conv); err != nil {
+					return nil, err
+				}
+				if err := r.applyProps(ctx, a.Ref, top, kids); err != nil {
+					return nil, err
+				}
+				if err := r.applyShare(ctx, top, set); err != nil {
+					return nil, err
+				}
+				return r.describe(ctx, a.Ref, top, kids, a.Cluster)
+			}
 			if err := r.applyProps(ctx, a.Ref, top, kids); err != nil {
 				return nil, err
 			}
 			if err := r.applyShare(ctx, top, set); err != nil {
 				return nil, err
 			}
-			if set != nil && r.localProp(ctx, top, propHAHold) != "" {
-				// Still held for this conversion (see below).
-				if err := r.holdShare(ctx, top, a.Conv); err != nil {
+			if set != nil {
+				// Let go of by its conversion: shared from here already.
+				if _, err := r.zfs(ctx, "set", "canmount=on", top); err != nil {
 					return nil, err
 				}
-				return r.describe(ctx, a.Ref, top, kids, a.Cluster)
 			}
 			if err := r.mount(ctx, top); err != nil {
 				return nil, err
@@ -734,8 +751,14 @@ func (r *Root) Adopt(ctx context.Context, a AdoptArgs) (*AdoptResult, error) {
 		return nil, err
 	}
 	// The conversion's mark first: a retry finishes what this started,
-	// and Abandon finds it.
-	if _, err := r.zfs(ctx, "set", PropParkedConv+"="+a.Conv, top); err != nil {
+	// and Abandon finds it. A shared folder arrived held already (Recv);
+	// its hold is set again in the same zfs set as the mark, before
+	// anything makes it a shared folder (decision 507).
+	mark := []string{"set", PropParkedConv + "=" + a.Conv}
+	if set != nil {
+		mark = append(mark, propHAHold+"="+a.Conv, "readonly=on", "canmount=noauto")
+	}
+	if _, err := r.zfs(ctx, append(mark, top)...); err != nil {
 		return nil, err
 	}
 	if err := r.applyProps(ctx, a.Ref, top, kids); err != nil {
@@ -806,7 +829,9 @@ func (r *Root) applyProps(ctx context.Context, ref Ref, top string, kids map[str
 	if ref.Kind == KindShare {
 		// As shares.Manager makes a shared folder (POSIX ACLs kept with
 		// the files, which the stream carries).
-		return set(top, "canmount=on", "devices=off", "setuid=off", "acltype=posixacl", "xattr=sa", "aclinherit=passthrough")
+		// canmount is left as it is: a held folder (either side) is never
+		// made mountable by this; Unpark and a release do that.
+		return set(top, "devices=off", "setuid=off", "acltype=posixacl", "xattr=sa", "aclinherit=passthrough")
 	}
 	// As the engines make them: a VM's state folder as vms.Manager does
 	// (canmount, no devices, setuid or exec), a local app's folder as
@@ -1101,6 +1126,12 @@ func (r *Root) Park(ctx context.Context, a ParkArgs) (*ParkResult, error) {
 		if a.Expect == "" {
 			return nil, invalid("only a shared folder a conversion moved here is put aside")
 		}
+		// One its conversion let go of (or no longer holds) was shared from
+		// here and may have been written: never given an expiry, whatever
+		// the conversion's record says (decision 508).
+		if a.KeepUntil > 0 && r.localProp(ctx, a.Dataset(), propHAHold) != a.Expect {
+			return nil, invalid("%s was shared from this server; it is kept until an administrator deletes it", a.ID)
+		}
 		if r.ShareBusy == nil {
 			return nil, invalid("the storage server's state isn't known")
 		}
@@ -1136,6 +1167,10 @@ func (r *Root) Park(ctx context.Context, a ParkArgs) (*ParkResult, error) {
 			return nil, &ErrInvalid{fmt.Errorf("%w (%s); it wasn't put aside", ErrChanged, a.Since)}
 		}
 	}
+	if a.Kind == KindShare && a.Side == SideCluster && r.localProp(ctx, top, propHAHold) != a.Expect {
+		// Shared from here (its conversion let go of it): counts as changed.
+		res.Changed = true
+	}
 	parent := a.Pool + "/" + ParkedDir
 	if _, ok := r.exists(ctx, parent); !ok {
 		if _, err := r.zfs(ctx, "create", "-o", "canmount=off", "-o", propRole+"="+RoleParked, parent); err != nil {
@@ -1152,24 +1187,39 @@ func (r *Root) Park(ctx context.Context, a ParkArgs) (*ParkResult, error) {
 			defer done()
 		}
 	}
+	// A held shared folder stays held (unmounted, not mountable) whatever
+	// becomes of the park (decision 507).
+	heldShare := a.Kind == KindShare && r.localProp(ctx, top, propHAHold) != ""
+	prevConv := r.localProp(ctx, top, PropParkedConv)
+	restore := func() {
+		if heldShare {
+			return
+		}
+		_, _ = r.zfs(context.WithoutCancel(ctx), "set", "canmount=on", top)
+		_ = r.mount(context.WithoutCancel(ctx), top)
+	}
 	if _, err := r.zfs(ctx, "set", "canmount=noauto", top); err != nil {
 		return nil, err
 	}
 	if p, _ := r.props(ctx, top, "mounted"); p["mounted"] == "yes" {
 		if _, err := r.zfs(ctx, "unmount", top); err != nil {
-			_, _ = r.zfs(context.WithoutCancel(ctx), "set", "canmount=on", top)
+			restore()
 			return nil, fmt.Errorf("unmounting %s: %w", top, err)
 		}
 	}
 	dst := parent + "/" + name
 	if _, err := r.zfs(ctx, "rename", top, dst); err != nil {
-		_, _ = r.zfs(context.WithoutCancel(ctx), "set", "canmount=on", top)
-		_ = r.mount(context.WithoutCancel(ctx), top)
+		restore()
 		return nil, err
 	}
 	if err := r.parkMarks(ctx, a, dst, kids); err != nil {
-		// Back where it was, as it was: the caller still has its workload.
-		r.unpark(context.WithoutCancel(ctx), a.Ref, dst, top, kids)
+		// Back where it was, as it was: the caller still has its workload
+		// (with the mark of the conversion that adopted it, if any).
+		back := context.WithoutCancel(ctx)
+		r.unpark(back, a.Ref, dst, top, kids)
+		if prevConv != "" {
+			_, _ = r.zfs(back, "set", PropParkedConv+"="+prevConv, top)
+		}
 		return nil, err
 	}
 	r.log().Warn("ha: parked", "from", top, "to", dst)
@@ -1222,6 +1272,13 @@ func (r *Root) unpark(ctx context.Context, ref Ref, src, top string, kids map[st
 	}
 	if err := r.applyProps(ctx, ref, top, kids); err != nil {
 		r.log().Error("ha: marking a copy put back after a failed park", "dataset", top, "err", err)
+	}
+	if ref.Kind == KindShare {
+		if r.localProp(ctx, top, propHAHold) != "" {
+			r.log().Warn("ha: park failed; put back, still held", "dataset", top)
+			return // still held: never mounted here
+		}
+		_, _ = r.zfs(ctx, "set", "canmount=on", top)
 	}
 	if err := r.mount(ctx, top); err != nil {
 		r.log().Error("ha: mounting a copy put back after a failed park", "dataset", top, "err", err)
@@ -1289,6 +1346,12 @@ func (r *Root) UnparkState(ctx context.Context, a UnparkArgs) (*UnparkResult, er
 	}
 	if err := r.applyProps(ctx, a.Ref, top, kids); err != nil {
 		return nil, err
+	}
+	if a.Kind == KindShare {
+		// Its hold ended above: mountable again (applyProps leaves it).
+		if _, err := r.zfs(ctx, "set", "canmount=on", top); err != nil {
+			return nil, err
+		}
 	}
 	r.log().Warn("ha: put back", "from", src, "to", top)
 	if err := r.mount(ctx, top); err != nil {

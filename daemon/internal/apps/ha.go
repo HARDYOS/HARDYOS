@@ -43,6 +43,8 @@ type HACheckResult struct {
 	// storage server with it (decision 500). Path is where this server
 	// has each now (what its compose file names).
 	Shares []HAShare `json:"shares"`
+	// HeldBy is the conversion holding the app ("" none).
+	HeldBy string `json:"heldBy,omitempty"`
 }
 
 // HAShare is one shared folder an app uses.
@@ -89,6 +91,9 @@ func (m *Manager) HACheck(ctx context.Context, id string) (*HACheckResult, error
 			continue
 		}
 		sh.Path = filepath.Clean(p)
+		if err := validSharePath(sh.Path, sh.ID); err != nil {
+			res.Problems = append(res.Problems, fmt.Sprintf("shared folder %s: %v", sh.ID, err))
+		}
 	}
 	for name, ch := range ia.state.Shares {
 		if ch.Share != "" && ch.Path != "" {
@@ -118,6 +123,7 @@ func (m *Manager) HACheck(ctx context.Context, id string) (*HACheckResult, error
 	} else {
 		res.Problems = append(res.Problems, "its compose file doesn't pass the checks now: "+err.Error())
 	}
+	res.HeldBy = m.heldBy(ctx, c.Pool+"/apps/"+id)
 	if res.Hash, err = m.clusterHash(ia); err != nil {
 		return nil, err
 	}

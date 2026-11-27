@@ -140,7 +140,7 @@ func TestShareProblems(t *testing.T) {
 		store.Now(), store.Now()); err != nil {
 		t.Fatal(err)
 	}
-	li := &localInfo{name: "Notes", shares: []apps.HAShare{{ID: "media", Write: true}, {ID: "photos"}, {ID: "isos"}, {ID: "docs"}}}
+	li := &localInfo{name: "Notes", shares: []apps.HAShare{{ID: "media", Path: "/mnt/tank/shares/media", Write: true}, {ID: "photos", Path: "/mnt/tank/shares/photos"}, {ID: "isos", Path: "/mnt/tank/shares/isos"}, {ID: "docs", Path: "/mnt/tank/shares/docs"}}}
 	probs, notes, ready := r.c.shareProblems(ctx, appNotes, li)
 	all := strings.Join(probs, "\n")
 	for _, want := range []string{"also used by plex", "Media's permissions name accounts of HOME.LAN", "called photos already", "ISO library",
@@ -204,7 +204,7 @@ func TestAsideShares(t *testing.T) {
 		t.Fatal(err)
 	}
 	last = r.stor.parks[len(r.stor.parks)-1]
-	if last.KeepUntil != 0 || !rec.Options.Shares[0].UntilDeleted || rec.Options.Shares[0].ParkedName == "" {
+	if last.KeepUntil != 0 || !rec.Options.Shares[0].UntilDeleted || rec.Options.Shares[0].ClusterName == "" {
 		t.Fatalf("a shared copy got an expiry: %+v %+v", last, rec.Options.Shares[0])
 	}
 	// keepShares never gives that one a grace period.

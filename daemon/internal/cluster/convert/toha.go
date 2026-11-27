@@ -88,6 +88,7 @@ type localInfo struct {
 	cpuModel  string
 	problems  []string
 	shares    []apps.HAShare
+	held      string // the conversion holding an app ("" none)
 }
 
 func (c *Converter) localCheck(ctx context.Context, w cluster.WorkloadRef, storagePool string, setCPU bool, cpuModel string) (*localInfo, error) {
@@ -105,7 +106,7 @@ func (c *Converter) localCheck(ctx context.Context, w cluster.WorkloadRef, stora
 			return nil, err
 		}
 		return &localInfo{name: res.Name, localPool: res.Pool, running: res.Running, hash: res.Hash, memoryMB: res.MemoryMB, dir: res.Dir,
-			mode: res.Mode, reason: res.ModeReason, uid: res.UID, problems: res.Problems, shares: res.Shares}, nil
+			mode: res.Mode, reason: res.ModeReason, uid: res.UID, problems: res.Problems, shares: res.Shares, held: res.HeldBy}, nil
 	}
 	return nil, fmt.Errorf("unknown kind %q", w.Kind)
 }
@@ -363,8 +364,14 @@ func (c *Converter) toHA(jc *jobs.Context, self cluster.Node, snap *cluster.Snap
 			return nil, err
 		}
 		r.Name, r.LocalPool, r.Options.Hash, r.Options.Dir, r.Options.Mode, r.Options.UID = li.name, li.localPool, li.hash, li.dir, li.mode, li.uid
-		if at <= phaseAt(haPhases, PhaseCopy) {
+		// Every attempt, before its hold (decision 509): running now counts;
+		// stopped counts unless this conversion stopped it (it still holds
+		// the app, or, a VM, an earlier attempt of it got past the copy).
+		switch {
+		case li.running || at <= phaseAt(haPhases, PhaseCopy):
 			r.WasRunning = li.running
+		case w.Kind == cluster.KindApp && li.held != r.ID:
+			r.WasRunning = false // let go of since, and off: it stays off
 		}
 		local.Pool = r.LocalPool
 		if w.Kind == cluster.KindApp {
@@ -530,9 +537,19 @@ func (c *Converter) parkLocal(jc *jobs.Context, r *Record, local hacopy.Ref, act
 		if err != nil {
 			// The shared folders parked above come back (still held).
 			if uerr := c.unparkShares(context.WithoutCancel(jc), r); uerr != nil {
-				c.log().Warn("convert: putting a shared folder back after a failed park", "err", uerr)
+				err = errors.Join(err, &stuckParked{uerr})
 			}
 		}
+	}
+	var stuck *stuckParked
+	if errors.As(err, &stuck) {
+		// A shared folder parked here couldn't be put back: nothing goes
+		// back before the park (the app stays held, the copies there stay
+		// as they are), so the folder is never parked on both servers;
+		// Resume carries on, Undo puts everything back (decision 508).
+		r.Phase = PhasePark
+		_ = c.save(context.WithoutCancel(jc), r)
+		return fmt.Errorf("putting this server's copy aside (a shared folder couldn't be put back: resume or undo): %w", err)
 	}
 	if err != nil {
 		ctx := context.WithoutCancel(jc)

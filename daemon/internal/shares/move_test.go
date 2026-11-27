@@ -65,6 +65,40 @@ func TestHAHold(t *testing.T) {
 	}
 }
 
+// The storage server lets go of a folder it adopted only for the
+// conversion holding it, marks it released first, and a release asked
+// again (its answer lost) is fine only when that conversion released it
+// (decision 507).
+func TestHAHoldAdoptedRelease(t *testing.T) {
+	m, f, _, _ := newManager(t)
+	ctx := context.Background()
+	onList(f, "", row{ds: "nas/shares/media", name: "Media"}.String()+"\n")
+	f.On("zfs get -H -p -s local -o value "+PropHAHold+" nas/shares/media", "-\n")
+	f.On("zfs get -H -p -s local -o value "+PropHAReleased+" nas/shares/media", "-\n")
+	f.OnPrefix("zfs set ", sysexec.Result{})
+	f.OnPrefix("zfs inherit ", sysexec.Result{})
+	f.OnPrefix("zfs mount ", sysexec.Result{})
+	f.On("zfs get -H -o value mounted nas/shares/media", "no\n")
+	rel := HAHoldArgs{ID: "media", Conv: "abcdefgh12s0", Release: true, Adopted: true}
+	if err := m.HAHold(ctx, rel); err == nil {
+		t.Fatal("let go of a folder nobody held")
+	}
+	f.On("zfs get -H -p -s local -o value "+PropHAHold+" nas/shares/media", "abcdefgh12s0\n")
+	if err := m.HAHold(ctx, rel); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Join(f.Lines(), "\n")
+	mark, inh := strings.Index(lines, "zfs set "+PropHAReleased+"=abcdefgh12s0 nas/shares/media"), strings.Index(lines, "zfs inherit "+PropHAHold)
+	if mark < 0 || inh < mark {
+		t.Fatalf("not marked released before the hold ended:\n%s", lines)
+	}
+	f.On("zfs get -H -p -s local -o value "+PropHAHold+" nas/shares/media", "-\n")
+	f.On("zfs get -H -p -s local -o value "+PropHAReleased+" nas/shares/media", "abcdefgh12s0\n")
+	if err := m.HAHold(ctx, rel); err != nil {
+		t.Fatalf("asked again: %v", err)
+	}
+}
+
 // What moves with a shared folder is checked like a person's input.
 func TestSettingsCheck(t *testing.T) {
 	ok := Settings{Name: "Media", Access: []Rule{{Kind: KindEveryone, Level: LevelRead}}, Apps: []AppGrant{{App: "jellyfin", UID: 30001, Level: LevelRead}},
